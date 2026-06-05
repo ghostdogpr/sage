@@ -15,6 +15,14 @@ The pure, effect-free protocol layer: RESP encoding/decoding, the command model,
 The effectful layer written once against kyo-compat: sockets, connection lifecycle, pipelining, pub/sub dispatch, cluster handling.
 _Avoid_: backend (see above), engine
 
+**Bytes**:
+The Core's opaque, immutable byte container, used at every protocol and codec boundary. Content equality is explicit (`sameBytes`) — universal `==` on Bytes is unreliable by design.
+_Avoid_: byte string, blob, buffer
+
+**Frame**:
+A single RESP3 protocol value as read from or written to the wire — the unit the Core's parser produces and its writer consumes. The Frame model enumerates all RESP3 types, even those no command uses yet.
+_Avoid_: message, packet, token
+
 **Multiplexed Connection**:
 The single auto-pipelined connection per node that carries ordinary commands from all fibers, replies matched in FIFO order.
 _Avoid_: shared connection, main connection
