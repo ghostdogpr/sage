@@ -26,6 +26,11 @@ class CommandSpec extends munit.FunSuite {
     )
   }
 
+  test("multi-word command names encode one bulk string per word") {
+    val command = Command[Unit]("CONFIG GET", Vector.empty, Vector(Bytes.utf8("maxmemory")), _ => Right(()))
+    assertEquals(command.encode.asUtf8String, "*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$9\r\nmaxmemory\r\n")
+  }
+
   test("a command's encoded bytes parse back as an array of bulk strings") {
     val parser   = new RespParser
     val expected =

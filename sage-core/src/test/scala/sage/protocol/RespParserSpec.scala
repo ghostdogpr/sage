@@ -69,6 +69,18 @@ class RespParserSpec extends munit.FunSuite {
   test("RESP2-compat null forms parse as Null") {
     assertEquals(parseOne("$-1\r\n"), Frame.Null)
     assertEquals(parseOne("*-1\r\n"), Frame.Null)
+    assertEquals(parseOne("*1\r\n*-1\r\n"), Frame.Array(Vector(Frame.Null)))
+  }
+
+  test("rejects negative and signed lengths") {
+    assert(parseError("$-2\r\n").message.contains("invalid bulk string length"))
+    assert(parseError("$+5\r\n").message.contains("invalid bulk string length"))
+    assert(parseError("!-1\r\n").message.contains("invalid bulk error length"))
+  }
+
+  test("a near-Int.MaxValue declared length stays incomplete instead of crashing") {
+    val parser = new RespParser
+    assertEquals(parser.feed(Bytes.utf8("$2147483647\r\nabc")), Right(Vector.empty))
   }
 
   test("parses multiple frames from one feed") {

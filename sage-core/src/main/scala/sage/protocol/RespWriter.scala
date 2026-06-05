@@ -10,19 +10,28 @@ import sage.Bytes
 private[sage] object RespWriter {
 
   def writeCommand(name: String, args: Vector[Bytes]): Bytes = {
-    val words = name.split(' ')
-    val sink  = new Sink(64)
-    sink.writeByte('*')
-    sink.writeLong(words.length.toLong + args.length)
-    sink.writeCrlf()
-    var i     = 0
-    while (i < words.length) {
-      writeBulk(Bytes.utf8(words(i)), sink)
+    val sink = new Sink(64)
+    if (name.indexOf(' ') < 0) { // single-word fast path: no split allocation
+      sink.writeByte('*')
+      sink.writeLong(1L + args.length)
+      sink.writeCrlf()
+      writeBulk(Bytes.utf8(name), sink)
+    } else {
+      val words = name.split(' ').filter(_.nonEmpty)
+      sink.writeByte('*')
+      sink.writeLong(words.length.toLong + args.length)
+      sink.writeCrlf()
+      var w     = 0
+      while (w < words.length) {
+        writeBulk(Bytes.utf8(words(w)), sink)
+        w += 1
+      }
+    }
+    var i    = 0
+    while (i < args.length) {
+      writeBulk(args(i), sink)
       i += 1
     }
-    val it    = args.iterator
-    while (it.hasNext)
-      writeBulk(it.next(), sink)
     sink.result()
   }
 

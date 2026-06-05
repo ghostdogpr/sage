@@ -30,54 +30,62 @@ final class RespParser {
     */
   def feed(bytes: Bytes): Either[ProtocolError, Vector[Frame]] =
     if (failure != null) Left(failure)
+    else if (!append(bytes)) poison("input exceeds the maximum buffer size")
     else {
-      append(bytes)
-      var frames = Vector.empty[Frame]
+      val frames = Vector.newBuilder[Frame]
       var done   = false
       while (!done) {
         val frame = parseFrame(readPos)
         if (frame == null) done = true
         else {
-          frames :+= frame
+          frames += frame
           readPos = cursor
         }
       }
-      if (failMessage != null) {
-        val error = ProtocolError(failMessage)
-        failure = error
-        buf = Array.emptyByteArray
-        readPos = 0
-        writePos = 0
-        Left(error)
-      } else {
+      if (failMessage != null) poison(failMessage)
+      else {
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
         }
-        Right(frames)
+        Right(frames.result())
       }
     }
 
-  // compacts in place when the consumed front frees enough room, grows geometrically otherwise
-  private def append(bytes: Bytes): Unit = {
+  private def poison(message: String): Left[ProtocolError, Nothing] = {
+    val error = ProtocolError(message)
+    failure = error
+    buf = Array.emptyByteArray
+    readPos = 0
+    writePos = 0
+    Left(error)
+  }
+
+  // compacts in place when the consumed front frees enough room, grows geometrically otherwise; Long arithmetic so capacity
+  // computations cannot overflow, false when the unconsumed input would exceed the maximum array size
+  private def append(bytes: Bytes): Boolean = {
     val incoming = bytes.unsafeArray
     val unparsed = writePos - readPos
-    if (buf.length - writePos < incoming.length) {
-      val needed = unparsed + incoming.length
-      if (buf.length >= needed) {
-        System.arraycopy(buf, readPos, buf, 0, unparsed)
-      } else {
-        var capacity = math.max(buf.length * 2, 256)
-        while (capacity < needed) capacity *= 2
-        val grown    = new Array[Byte](capacity)
-        System.arraycopy(buf, readPos, grown, 0, unparsed)
-        buf = grown
+    val needed   = unparsed.toLong + incoming.length
+    if (needed > MaxBuffer) false
+    else {
+      if (buf.length - writePos < incoming.length) {
+        if (buf.length >= needed) {
+          System.arraycopy(buf, readPos, buf, 0, unparsed)
+        } else {
+          var capacity = math.max(buf.length.toLong * 2, 256L)
+          while (capacity < needed) capacity *= 2
+          val grown    = new Array[Byte](math.min(capacity, MaxBuffer).toInt)
+          System.arraycopy(buf, readPos, grown, 0, unparsed)
+          buf = grown
+        }
+        readPos = 0
+        writePos = unparsed
       }
-      readPos = 0
-      writePos = unparsed
+      System.arraycopy(incoming, 0, buf, writePos, incoming.length)
+      writePos += incoming.length
+      true
     }
-    System.arraycopy(incoming, 0, buf, writePos, incoming.length)
-    writePos += incoming.length
   }
 
   private def parseFrame(pos: Int): Frame =
@@ -166,10 +174,10 @@ final class RespParser {
           else if (length == -1) Frame.Null
           else {
             val start = cursor
-            if (writePos < start + length + 2) null
-            else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
+            val end   = payloadEnd(start, length)
+            if (end < 0) null
             else {
-              cursor = start + length + 2
+              cursor = end
               Frame.BulkString(bytesAt(start, start + length))
             }
           }
@@ -179,81 +187,47 @@ final class RespParser {
           else if (length == Invalid) fail(s"invalid bulk error length: '${headerText(pos + 1)}'")
           else {
             val start = cursor
-            if (writePos < start + length + 2) null
-            else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
+            val end   = payloadEnd(start, length)
+            if (end < 0) null
             else {
-              cursor = start + length + 2
+              cursor = end
               Frame.BulkError(bytesAt(start, start + length))
             }
           }
         case '='   =>
           val length = readLength(pos + 1, allowNull = false)
           if (length == Incomplete) null
-          else if (length == Invalid || length < 4) fail(s"invalid verbatim string length: '${headerText(pos + 1)}'")
+          else if (length < 4) fail(s"invalid verbatim string length: '${headerText(pos + 1)}'")
           else {
             val start = cursor
-            if (writePos < start + length + 2) null
-            else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
+            val end   = payloadEnd(start, length)
+            if (end < 0) null
             else if (buf(start + 3) != ':') fail("verbatim string missing ':' separator")
             else {
-              cursor = start + length + 2
+              cursor = end
               Frame.VerbatimString(stringAt(start, start + 3), bytesAt(start + 4, start + length))
             }
           }
-        case '*'   =>
-          val count = readLength(pos + 1, allowNull = true)
-          if (count == Incomplete) null
-          else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
-          else if (count == -1) Frame.Null
-          else {
-            val elements = parseElements(cursor, count)
-            if (elements == null) null else Frame.Array(elements)
-          }
-        case '~'   =>
-          val count = readLength(pos + 1, allowNull = false)
-          if (count == Incomplete) null
-          else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
-          else {
-            val elements = parseElements(cursor, count)
-            if (elements == null) null else Frame.Set(elements)
-          }
-        case '>'   =>
-          val count = readLength(pos + 1, allowNull = false)
-          if (count == Incomplete) null
-          else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
-          else {
-            val elements = parseElements(cursor, count)
-            if (elements == null) null else Frame.Push(elements)
-          }
-        case '%'   =>
-          val count = readLength(pos + 1, allowNull = false)
-          if (count == Incomplete) null
-          else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
-          else {
-            val entries = parsePairs(cursor, count)
-            if (entries == null) null else Frame.Map(entries)
-          }
-        case '|'   =>
-          val count = readLength(pos + 1, allowNull = false)
-          if (count == Incomplete) null
-          else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
-          else {
-            val entries = parsePairs(cursor, count)
-            if (entries == null) null else Frame.Attribute(entries)
-          }
+        case '*'   => parseAggregate(pos + 1, allowNull = true, Frame.Array.apply)
+        case '~'   => parseAggregate(pos + 1, allowNull = false, Frame.Set.apply)
+        case '>'   => parseAggregate(pos + 1, allowNull = false, Frame.Push.apply)
+        case '%'   => parsePairAggregate(pos + 1, Frame.Map.apply)
+        case '|'   => parsePairAggregate(pos + 1, Frame.Attribute.apply)
         case other =>
           fail(f"unknown frame type byte 0x${other.toByte}%02x")
       }
     }
 
-  // readLength sentinels
+  // readLength/payloadEnd sentinels
   private inline def Incomplete: Int = Int.MinValue
   private inline def Invalid: Int    = Int.MinValue + 1
 
-  // reads a length header up to its CRLF, setting `cursor` past it; -1 is the RESP2 null marker
+  // reads a length header up to its CRLF, setting `cursor` past it; -1 is the RESP2 null marker; '+' is signed-integer
+  // syntax that the length grammar does not permit
   private def readLength(pos: Int, allowNull: Boolean): Int = {
     val cr = findCrlf(pos)
     if (cr < 0) Incomplete
+    else if (buf(pos) == '+') Invalid
     else {
       val value = readLong(pos, cr)
       if (!numberOk || value > Int.MaxValue || value < -1 || (value == -1 && !allowNull)) Invalid
@@ -264,25 +238,55 @@ final class RespParser {
     }
   }
 
+  // bounds-checks a length-prefixed payload (Long arithmetic: `start + length + 2` can overflow Int); returns the position
+  // past its trailing CRLF, Incomplete, or Invalid with `failMessage` set
+  private def payloadEnd(start: Int, length: Int): Int =
+    if ((writePos - start).toLong < length.toLong + 2) Incomplete
+    else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') {
+      failMessage = "missing CRLF after bulk payload"
+      Invalid
+    } else start + length + 2
+
   private def headerText(pos: Int): String = stringAt(pos, findCrlf(pos))
 
+  private def parseAggregate(pos: Int, allowNull: Boolean, make: Vector[Frame] => Frame): Frame = {
+    val count = readLength(pos, allowNull)
+    if (count == Incomplete) null
+    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
+    else if (count == -1) Frame.Null
+    else {
+      val elements = parseElements(cursor, count)
+      if (elements == null) null else make(elements)
+    }
+  }
+
+  private def parsePairAggregate(pos: Int, make: Vector[(Frame, Frame)] => Frame): Frame = {
+    val count = readLength(pos, allowNull = false)
+    if (count == Incomplete) null
+    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
+    else {
+      val entries = parsePairs(cursor, count)
+      if (entries == null) null else make(entries)
+    }
+  }
+
   private def parseElements(start: Int, count: Int): Vector[Frame] = {
-    var elements = Vector.empty[Frame]
+    val elements = Vector.newBuilder[Frame]
     var pos      = start
     var i        = 0
     while (i < count) {
       val frame = parseFrame(pos)
       if (frame == null) return null
-      elements :+= frame
+      elements += frame
       pos = cursor
       i += 1
     }
     cursor = pos
-    elements
+    elements.result()
   }
 
   private def parsePairs(start: Int, count: Int): Vector[(Frame, Frame)] = {
-    var entries = Vector.empty[(Frame, Frame)]
+    val entries = Vector.newBuilder[(Frame, Frame)]
     var pos     = start
     var i       = 0
     while (i < count) {
@@ -290,12 +294,12 @@ final class RespParser {
       if (key == null) return null
       val value = parseFrame(cursor)
       if (value == null) return null
-      entries :+= ((key, value))
+      entries += ((key, value))
       pos = cursor
       i += 1
     }
     cursor = pos
-    entries
+    entries.result()
   }
 
   // index of the next CRLF's '\r', or -1 if the input ends first
@@ -349,4 +353,7 @@ final class RespParser {
     failMessage = message
     null
   }
+
+  // largest unconsumed input the parser will buffer (the JVM's max array size)
+  private inline def MaxBuffer: Long = Int.MaxValue - 8
 }
