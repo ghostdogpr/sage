@@ -4,14 +4,8 @@ import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
-/**
-  * String-family commands.
-  */
 object Strings {
 
-  /**
-    * `GET key`: the value, or `None` if the key does not exist.
-    */
   def get[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] = {
     val encodedKey = keyCodec.encode(key)
     Command(
@@ -26,9 +20,6 @@ object Strings {
     )
   }
 
-  /**
-    * `SET key value` (the plain two-argument form; options come with later slices).
-    */
   def set[K, V](key: K, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Unit] = {
     val encodedKey = keyCodec.encode(key)
     Command(

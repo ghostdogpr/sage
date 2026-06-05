@@ -3,13 +3,8 @@ package sage.protocol
 import sage.Bytes
 
 /**
-  * A single RESP3 protocol value as read from or written to the wire — the unit the parser produces and the writer consumes.
-  *
-  * The model enumerates all RESP3 types, even those no command uses yet. Aggregates carry wire-faithful ordered sequences (order and
-  * duplicate keys preserved) so parse → write round-trips are byte-exact; reply decoders convert to native collections where the reply's
-  * semantics are known. Byte-carrying cases define content equality, so `==` is structural on every Frame.
-  *
-  * A sealed trait rather than an enum: enum cases cannot have bodies, and the byte-carrying cases must override `equals`/`hashCode`.
+  * A single RESP3 protocol value. Aggregates preserve wire order and duplicate keys; byte-carrying cases define content equality, so `==`
+  * is structural on every Frame. A sealed trait rather than an enum because those cases must override `equals`/`hashCode`.
   */
 sealed trait Frame
 
@@ -78,9 +73,6 @@ object Frame {
 
   final case class Push(elements: Vector[Frame]) extends Frame
 
-  /**
-    * A concise human-readable description of a frame, for error messages ("what was expected and what arrived").
-    */
   def describe(frame: Frame): String =
     frame match {
       case SimpleString(value)           => s"simple string '$value'"

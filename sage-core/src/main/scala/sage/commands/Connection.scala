@@ -4,14 +4,8 @@ import sage.Bytes
 import sage.SageException.DecodeError
 import sage.protocol.Frame
 
-/**
-  * Connection-family commands.
-  */
 object Connection {
 
-  /**
-    * `PING` (replies `PONG`) or `PING message` (echoes the message).
-    */
   def ping(message: Option[String] = None): Command[String] =
     Command(
       "PING",
@@ -25,8 +19,7 @@ object Connection {
     )
 
   /**
-    * `HELLO 3`, optionally with `AUTH username password` (the protocol handshake, ADR-0002). Decodes only the fields the handshake and
-    * telemetry need; unknown reply entries are ignored for forward compatibility.
+    * The protocol handshake. Unknown reply entries are ignored for forward compatibility.
     */
   def hello(auth: Option[(String, String)] = None): Command[HelloReply] =
     Command(

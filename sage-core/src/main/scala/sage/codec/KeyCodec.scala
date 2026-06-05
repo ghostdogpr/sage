@@ -4,10 +4,7 @@ import sage.Bytes
 import sage.SageException.DecodeError
 
 /**
-  * Converts one user type to/from its wire bytes at a key position.
-  *
-  * Deliberately unrelated to [[ValueCodec]]: using a type as a key is an explicit opt-in, and the absence of subtyping keeps given
-  * resolution unambiguous. A boundary converter, not a serialization framework.
+  * Encodes/decodes a user type at a key position. Deliberately unrelated to [[ValueCodec]] so given resolution stays unambiguous.
   */
 trait KeyCodec[A] {
 

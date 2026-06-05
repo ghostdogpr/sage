@@ -3,9 +3,6 @@ package sage.commands
 import sage.SageException.DecodeError
 import sage.protocol.Frame
 
-/**
-  * The decoded `HELLO` reply: only the fields the handshake and telemetry need.
-  */
 final case class HelloReply(server: String, version: String, proto: Int, role: String)
 
 object HelloReply {

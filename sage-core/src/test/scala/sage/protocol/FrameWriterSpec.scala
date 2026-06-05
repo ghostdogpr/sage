@@ -2,9 +2,9 @@ package sage.protocol
 
 import sage.Bytes
 
-class RespWriterSpec extends munit.FunSuite {
+class FrameWriterSpec extends munit.FunSuite {
 
-  private def written(frame: Frame): String = RespWriter.write(frame).asUtf8String
+  private def written(frame: Frame): String = FrameWriter.write(frame).asUtf8String
 
   test("writes simple frames") {
     assertEquals(written(Frame.SimpleString("OK")), "+OK\r\n")
@@ -66,7 +66,7 @@ class RespWriterSpec extends munit.FunSuite {
     )
     frames.foreach { frame =>
       val parser = new RespParser
-      assertEquals(parser.feed(RespWriter.write(frame)), Right(Vector(frame)), s"round-tripping $frame")
+      assertEquals(parser.feed(FrameWriter.write(frame)), Right(Vector(frame)), s"round-tripping $frame")
     }
   }
 }

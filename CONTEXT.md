@@ -20,7 +20,7 @@ The Core's opaque, immutable byte container, used at every protocol and codec bo
 _Avoid_: byte string, blob, buffer
 
 **Frame**:
-A single RESP3 protocol value as read from or written to the wire — the unit the Core's parser produces and its writer consumes. The Frame model enumerates all RESP3 types, even those no command uses yet.
+A single RESP3 protocol value as read from the wire — the unit the Core's parser produces and reply decoders consume. The Frame model enumerates all RESP3 types, even those no command uses yet.
 _Avoid_: message, packet, token
 
 **Multiplexed Connection**:

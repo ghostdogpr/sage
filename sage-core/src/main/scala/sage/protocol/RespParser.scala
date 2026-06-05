@@ -6,18 +6,9 @@ import sage.Bytes
 import sage.SageException.ProtocolError
 
 /**
-  * Incremental RESP3 parser: feed it bytes as they arrive, get back every frame completed so far.
-  *
-  * One instance per connection; not thread-safe. Tolerates input split at arbitrary byte boundaries across feeds — incomplete trailing
-  * input is retained and resumed on the next feed. After a `ProtocolError` the parser is poisoned (RESP3 has no resynchronization point)
-  * and the connection must be discarded (ADR-0006).
-  *
-  * This sits on every reply's hot path, so it avoids allocation beyond the frames themselves: a single compacting buffer (no copy per
-  * feed), integers and length headers parsed directly from bytes, and parse outcomes signalled through fields (`cursor`, `failMessage`)
-  * rather than wrapper objects.
-  *
-  * RESP2-compat null forms (`$-1`, `*-1`) are tolerated and parsed as [[Frame.Null]]. Streamed types (`?` lengths, `;` chunks) are not
-  * supported: no server sends them.
+  * Incremental RESP3 parser: feed it bytes as they arrive, get back every frame completed so far. One instance per connection; not
+  * thread-safe. After a `ProtocolError` the parser is poisoned — RESP3 has no resynchronization point — and the connection must be
+  * discarded. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]; streamed types are not supported (no server sends them).
   */
 final class RespParser {
 
@@ -26,17 +17,16 @@ final class RespParser {
   private var writePos: Int          = 0 // end of valid input
   private var failure: ProtocolError = null
 
-  // out-fields for parseFrame, avoiding a result-wrapper allocation per frame:
-  // on success, `cursor` is the position right after the parsed frame; on failure, `failMessage` is set and null is returned;
-  // a null return with no failMessage means the input is incomplete.
+  // parseFrame out-fields, avoiding a result-wrapper allocation per frame: frame returned + `cursor` past it = parsed;
+  // null + `failMessage` = invalid; null without = incomplete
   private var cursor: Int         = 0
   private var failMessage: String = null
 
-  // out-field for readLong, avoiding an Option allocation per number
+  // readLong validity out-field
   private var numberOk: Boolean = false
 
   /**
-    * Appends `bytes` to the unconsumed input and returns every frame completed by them, in order.
+    * Returns every frame completed by `bytes`, in order.
     */
   def feed(bytes: Bytes): Either[ProtocolError, Vector[Frame]] =
     if (failure != null) Left(failure)
@@ -60,7 +50,7 @@ final class RespParser {
         writePos = 0
         Left(error)
       } else {
-        if (readPos == writePos) { // everything consumed: reset the window so the buffer never needs compacting
+        if (readPos == writePos) {
           readPos = 0
           writePos = 0
         }
@@ -68,11 +58,9 @@ final class RespParser {
       }
     }
 
-  /**
-    * Appends into the single reusable buffer: compacts in place when the front has been consumed, grows geometrically when full.
-    */
+  // compacts in place when the consumed front frees enough room, grows geometrically otherwise
   private def append(bytes: Bytes): Unit = {
-    val incoming = bytes.unsafeArray // read-only view, never mutated
+    val incoming = bytes.unsafeArray
     val unparsed = writePos - readPos
     if (buf.length - writePos < incoming.length) {
       val needed = unparsed + incoming.length
@@ -92,9 +80,6 @@ final class RespParser {
     writePos += incoming.length
   }
 
-  /**
-    * Parses one frame at `pos`. Returns null when the input is incomplete (no `failMessage`) or invalid (`failMessage` set).
-    */
   private def parseFrame(pos: Int): Frame =
     if (pos >= writePos) null
     else {
@@ -178,10 +163,8 @@ final class RespParser {
           val length = readLength(pos + 1, allowNull = true)
           if (length == Incomplete) null
           else if (length == Invalid) fail(s"invalid bulk string length: '${headerText(pos + 1)}'")
-          else if (length == -1) {
-            // cursor was set by readLength
-            Frame.Null
-          } else {
+          else if (length == -1) Frame.Null
+          else {
             val start = cursor
             if (writePos < start + length + 2) null
             else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
@@ -263,20 +246,11 @@ final class RespParser {
       }
     }
 
-  /**
-    * Sentinel returned by readLength when the header's CRLF has not arrived yet.
-    */
+  // readLength sentinels
   private inline def Incomplete: Int = Int.MinValue
+  private inline def Invalid: Int    = Int.MinValue + 1
 
-  /**
-    * Sentinel returned by readLength when the header is not a valid length.
-    */
-  private inline def Invalid: Int = Int.MinValue + 1
-
-  /**
-    * Reads a length header at `pos` up to its CRLF and sets `cursor` past it. Returns the length, -1 for the RESP2 null marker (only if
-    * `allowNull`), or a sentinel.
-    */
+  // reads a length header up to its CRLF, setting `cursor` past it; -1 is the RESP2 null marker
   private def readLength(pos: Int, allowNull: Boolean): Int = {
     val cr = findCrlf(pos)
     if (cr < 0) Incomplete
@@ -324,9 +298,7 @@ final class RespParser {
     entries
   }
 
-  /**
-    * Index of the next CRLF's '\r' at or after `from`, or -1 if the input ends first.
-    */
+  // index of the next CRLF's '\r', or -1 if the input ends first
   private def findCrlf(from: Int): Int = {
     var i     = from
     val limit = writePos - 1
@@ -335,10 +307,8 @@ final class RespParser {
     if (i < limit) i else -1
   }
 
-  /**
-    * Parses a decimal long directly from the buffer, signalling validity through `numberOk` — no String or Option allocation on the fast
-    * path. Falls back to String parsing past 18 digits, where overflow becomes possible.
-    */
+  // parses a decimal long from the buffer, signalling validity via `numberOk`; falls back to String parsing past 18 digits,
+  // where overflow becomes possible
   private def readLong(from: Int, until: Int): Long = {
     numberOk = false
     var i        = from
