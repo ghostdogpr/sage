@@ -17,3 +17,4 @@ project/project/
 .idea/
 project/metals.sbt
 .cursor/mcp.json
+.claude
