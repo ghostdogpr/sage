@@ -1,0 +1,7 @@
+-J-Xms4G
+-J-Xmx8G
+-J-Xss4M
+-J-XX:MaxMetaspaceSize=4G
+-J-XX:+UseG1GC
+-Dsbt.log.noformat=false
+-Dsbt.color=true

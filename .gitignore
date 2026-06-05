@@ -4,3 +4,16 @@
 
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
+
+# sbt
+target/
+project/project/
+.bsp/
+
+# IDE / tooling
+.metals/
+.bloop/
+.vscode/
+.idea/
+project/metals.sbt
+.cursor/mcp.json

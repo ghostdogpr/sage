@@ -78,7 +78,7 @@ All decisions below were settled during design (see ADRs); the PRD restates them
 - Protocol handshake via `HELLO 3` with optional `AUTH user pass`; servers below RESP3 are rejected (ADR-0002).
 - Redis and Valkey are co-equal targets; command metadata tracks per-server availability as the specs diverge.
 - The server command specs (`commands.json`) are a test fixture, never a codegen source: a coverage spec diffs implemented commands against them with an allowlist for deliberate skips (ADR-0005).
-- Group coordinates `com.github.ghostdogpr`, Apache-2.0, sbt build, Scala 3.3 LTS, JDK 21 floor (runtime only).
+- Group coordinates `com.github.ghostdogpr`, Apache-2.0, sbt build, Scala 3.3 LTS, JDK 21 floor.
 
 ## Testing Decisions
 
