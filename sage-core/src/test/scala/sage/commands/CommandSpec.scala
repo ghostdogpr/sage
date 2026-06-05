@@ -26,10 +26,11 @@ class CommandSpec extends munit.FunSuite {
     )
   }
 
-  test("a command's encoded bytes parse back to its frame") {
-    val command = Strings.set("key", "value")
-    val parser  = new RespParser
-    assertEquals(parser.feed(command.encode), Right(Vector(command.toFrame)))
+  test("a command's encoded bytes parse back as an array of bulk strings") {
+    val parser   = new RespParser
+    val expected =
+      Frame.Array(Vector(Frame.BulkString(Bytes.utf8("SET")), Frame.BulkString(Bytes.utf8("key")), Frame.BulkString(Bytes.utf8("value"))))
+    assertEquals(parser.feed(Strings.set("key", "value").encode), Right(Vector(expected)))
   }
 
   test("keys carries the encoded key for the slot engine") {

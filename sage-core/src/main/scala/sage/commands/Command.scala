@@ -22,13 +22,8 @@ final case class Command[+Out](
   def map[B](f: Out => B): Command[B] = Command(name, keys, args, frame => decode(frame).map(f))
 
   /**
-    * The command as a RESP3 array of bulk strings, as sent on the wire. Multi-word names (`CONFIG GET`) become one bulk string per word.
-    */
-  def toFrame: Frame =
-    Frame.Array(name.split(' ').toVector.map(part => Frame.BulkString(Bytes.utf8(part))) ++ args.map(Frame.BulkString.apply))
-
-  /**
-    * The command's wire bytes. Encoded directly, without building the intermediate frames — this runs once per command sent.
+    * The command's wire bytes: a RESP3 array of bulk strings, multi-word names (`CONFIG GET`) one bulk string per word. Encoded directly,
+    * without building intermediate frames — this runs once per command sent.
     */
   def encode: Bytes = RespWriter.writeCommand(name, args)
 }
