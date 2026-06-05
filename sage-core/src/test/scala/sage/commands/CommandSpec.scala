@@ -38,11 +38,12 @@ class CommandSpec extends munit.FunSuite {
     assertEquals(parser.feed(Strings.set("key", "value").encode), Right(Vector(expected)))
   }
 
-  test("keys carries the encoded key for the slot engine") {
+  test("keyIndices marks the key positions in args for the slot engine") {
     val command = Strings.get[String, String]("foo")
-    assertEquals(command.keys.length, 1)
-    assert(command.keys.head.sameBytes(Bytes.utf8("foo")))
-    assertEquals(Connection.ping().keys, Vector.empty[Bytes])
+    assertEquals(command.keyIndices, Vector(0))
+    assert(command.args(command.keyIndices.head).sameBytes(Bytes.utf8("foo")))
+    assertEquals(Strings.set("foo", "bar").keyIndices, Vector(0))
+    assertEquals(Connection.ping().keyIndices, Vector.empty[Int])
   }
 
   test("GET decodes a missing key as None") {

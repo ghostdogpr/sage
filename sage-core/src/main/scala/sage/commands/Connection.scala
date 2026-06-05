@@ -9,7 +9,7 @@ object Connection {
   def ping(message: Option[String] = None): Command[String] =
     Command(
       "PING",
-      keys = Vector.empty,
+      keyIndices = Command.NoKeys,
       args = message.map(Bytes.utf8).toVector,
       decode = {
         case Frame.SimpleString(value) => Right(value)
@@ -24,7 +24,7 @@ object Connection {
   def hello(auth: Option[(String, String)] = None): Command[HelloReply] =
     Command(
       "HELLO",
-      keys = Vector.empty,
+      keyIndices = Command.NoKeys,
       args = Bytes.utf8("3") +: auth.toVector.flatMap { case (username, password) => Vector("AUTH", username, password).map(Bytes.utf8) },
       decode = HelloReply.decode
     )
