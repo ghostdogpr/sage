@@ -37,36 +37,4 @@ class FrameWriterSpec extends munit.FunSuite {
     assertEquals(written(Frame.Attribute(Vector(Frame.SimpleString("ttl") -> Frame.Integer(3600)))), "|1\r\n+ttl\r\n:3600\r\n")
     assertEquals(written(Frame.Push(Vector(Frame.SimpleString("message")))), ">1\r\n+message\r\n")
   }
-
-  test("parse(write(frame)) round-trips every frame type") {
-    val frames = Vector[Frame](
-      Frame.SimpleString("OK"),
-      Frame.SimpleError("ERR oops"),
-      Frame.Integer(-42),
-      Frame.Integer(Long.MaxValue),
-      Frame.Integer(Long.MinValue), // 19 digits + sign: exercises both slow paths (parse fallback and MinValue write)
-      Frame.BulkString(Bytes.utf8("a\r\nb")),
-      Frame.Null,
-      Frame.Bool(true),
-      Frame.Double(2.5),
-      Frame.Double(Double.PositiveInfinity),
-      Frame.BigNumber(BigInt("-9999999999999999999999")),
-      Frame.BulkError(Bytes.utf8("WRONGTYPE")),
-      Frame.VerbatimString("mkd", Bytes.utf8("# hi")),
-      Frame.Set(Vector(Frame.Integer(1), Frame.Integer(2))),
-      Frame.Attribute(Vector(Frame.SimpleString("ttl") -> Frame.Integer(3600))),
-      Frame.Push(Vector(Frame.SimpleString("message"), Frame.BulkString(Bytes.utf8("hello")))),
-      // deep nesting with duplicate map keys, which a native Map would collapse
-      Frame.Map(
-        Vector(
-          Frame.SimpleString("k") -> Frame.Array(Vector(Frame.Map(Vector(Frame.Integer(1) -> Frame.Null)))),
-          Frame.SimpleString("k") -> Frame.Integer(2)
-        )
-      )
-    )
-    frames.foreach { frame =>
-      val parser = new RespParser
-      assertEquals(parser.feed(FrameWriter.write(frame)), Right(Vector(frame)), s"round-tripping $frame")
-    }
-  }
 }

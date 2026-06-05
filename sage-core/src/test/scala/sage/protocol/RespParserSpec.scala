@@ -1,5 +1,7 @@
 package sage.protocol
 
+import scala.util.Random
+
 import sage.Bytes
 import sage.SageException.ProtocolError
 
@@ -134,4 +136,93 @@ class RespParserSpec extends munit.FunSuite {
     val error  = parser.feed(Bytes.utf8("?oops\r\n")).fold(identity, frames => fail(s"expected a protocol error, got $frames"))
     assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Left(error))
   }
+
+  test("parse(write(frame)) round-trips every frame type") {
+    val frames = Vector[Frame](
+      Frame.SimpleString("OK"),
+      Frame.SimpleError("ERR oops"),
+      Frame.Integer(-42),
+      Frame.Integer(Long.MaxValue),
+      Frame.Integer(Long.MinValue),
+      Frame.BulkString(Bytes.utf8("a\r\nb")),
+      Frame.Null,
+      Frame.Bool(true),
+      Frame.Double(2.5),
+      Frame.Double(Double.PositiveInfinity),
+      Frame.BigNumber(BigInt("-9999999999999999999999")),
+      Frame.BulkError(Bytes.utf8("WRONGTYPE")),
+      Frame.VerbatimString("mkd", Bytes.utf8("# hi")),
+      Frame.Set(Vector(Frame.Integer(1), Frame.Integer(2))),
+      Frame.Attribute(Vector(Frame.SimpleString("ttl") -> Frame.Integer(3600))),
+      Frame.Push(Vector(Frame.SimpleString("message"), Frame.BulkString(Bytes.utf8("hello")))),
+      // duplicate map keys, which a native Map would collapse
+      Frame.Map(
+        Vector(
+          Frame.SimpleString("k") -> Frame.Array(Vector(Frame.Map(Vector(Frame.Integer(1) -> Frame.Null)))),
+          Frame.SimpleString("k") -> Frame.Integer(2)
+        )
+      )
+    )
+    frames.foreach { frame =>
+      val parser = new RespParser
+      assertEquals(parser.feed(FrameWriter.write(frame)), Right(Vector(frame)), s"round-tripping $frame")
+    }
+  }
+
+  test("round-trips arbitrary frame trees fed in arbitrary chunks") {
+    val rnd = new Random(0)
+    for (_ <- 1 to 200) {
+      val frame  = genFrame(rnd, 3)
+      val wire   = FrameWriter.write(frame).toArray
+      val parser = new RespParser
+      var frames = Vector.empty[Frame]
+      var pos    = 0
+      while (pos < wire.length) {
+        val next = math.min(pos + 1 + rnd.nextInt(7), wire.length)
+        frames ++= parser.feed(Bytes.fromArray(wire.slice(pos, next))).fold(error => fail(s"$error parsing $frame"), identity)
+        pos = next
+      }
+      assertEquals(frames, Vector(frame))
+    }
+  }
+
+  private def genFrame(rnd: Random, depth: Int): Frame =
+    rnd.nextInt(if (depth == 0) 10 else 15) match {
+      case 0  => Frame.SimpleString(genText(rnd))
+      case 1  => Frame.SimpleError(genText(rnd))
+      case 2  => Frame.Integer(rnd.nextLong())
+      case 3  => Frame.BulkString(genBytes(rnd))
+      case 4  => Frame.Null
+      case 5  => Frame.Bool(rnd.nextBoolean())
+      case 6  => Frame.Double(genDouble(rnd))
+      case 7  => Frame.BigNumber(BigInt(rnd.nextLong()) * BigInt(rnd.nextLong()))
+      case 8  => Frame.BulkError(genBytes(rnd))
+      case 9  => Frame.VerbatimString(if (rnd.nextBoolean()) "txt" else "mkd", genBytes(rnd))
+      case 10 => Frame.Array(genElements(rnd, depth))
+      case 11 => Frame.Map(genPairs(rnd, depth))
+      case 12 => Frame.Set(genElements(rnd, depth))
+      case 13 => Frame.Attribute(genPairs(rnd, depth))
+      case _  => Frame.Push(genElements(rnd, depth))
+    }
+
+  private def genElements(rnd: Random, depth: Int): Vector[Frame] = Vector.fill(rnd.nextInt(4))(genFrame(rnd, depth - 1))
+
+  private def genPairs(rnd: Random, depth: Int): Vector[(Frame, Frame)] =
+    Vector.fill(rnd.nextInt(3))((genFrame(rnd, depth - 1), genFrame(rnd, depth - 1)))
+
+  private def genText(rnd: Random): String = rnd.alphanumeric.take(rnd.nextInt(12)).mkString
+
+  private def genBytes(rnd: Random): Bytes = {
+    val array = new Array[Byte](rnd.nextInt(16))
+    rnd.nextBytes(array)
+    Bytes.fromArray(array)
+  }
+
+  // no NaN: it breaks equality, and the parser's nan handling is covered by a dedicated test
+  private def genDouble(rnd: Random): Double =
+    rnd.nextInt(10) match {
+      case 0 => Double.PositiveInfinity
+      case 1 => Double.NegativeInfinity
+      case _ => rnd.nextDouble() * rnd.nextLong()
+    }
 }
