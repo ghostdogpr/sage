@@ -5,9 +5,8 @@ import sage.SageException.DecodeError
 import sage.protocol.{Frame, RespWriter}
 
 /**
-  * A pure value describing one server command. `keyIndices` marks which `args` positions are keys — the routing view for the cluster slot
-  * engine; defining keys as positions makes a key missing from the wire unrepresentable, and matches the positional key_specs in the
-  * server's commands.json. `decode` never sees top-level error frames — [[Reply.run]] intercepts them.
+  * A pure value describing one server command. `keyIndices` marks which `args` positions are keys, for cluster routing. `decode` never
+  * sees top-level error frames — [[Reply.run]] intercepts them.
   */
 final case class Command[+Out](
   name: String,
@@ -23,7 +22,6 @@ final case class Command[+Out](
 
 object Command {
 
-  // shared by fixed-arity command constructors so no index vector is allocated per call
   val NoKeys: Vector[Int]   = Vector.empty
   val FirstKey: Vector[Int] = Vector(0)
 }
