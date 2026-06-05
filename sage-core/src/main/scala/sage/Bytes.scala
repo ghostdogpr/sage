@@ -58,6 +58,11 @@ object Bytes {
       * Returns the underlying immutable array. Zero-copy.
       */
     def toIArray: IArray[Byte] = self
+
+    /**
+      * The underlying array without copying, for sage's own hot paths (parser, writer). Callers must never mutate it.
+      */
+    private[sage] def unsafeArray: Array[Byte] = arr(self)
   }
 
   private def arr(self: Bytes): Array[Byte] = self.asInstanceOf[Array[Byte]]

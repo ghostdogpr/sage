@@ -5,6 +5,10 @@ package sage
   *
   * All cases live here in the core — including the connection-level ones only the runtime raises — because `sealed` confines a hierarchy to
   * one file (ADR-0009). Every case is pure data; defining them requires no I/O.
+  *
+  * A sealed class hierarchy rather than an enum: case types appear standalone in signatures (`Either[DecodeError, Out]`,
+  * `Either[ProtocolError, ...]`), and enum case constructors widen to the enum type, which would force `new` at every construction site —
+  * including in user-written decoders.
   */
 sealed abstract class SageException(message: String) extends Exception(message)
 

@@ -8,6 +8,8 @@ import sage.Bytes
   * The model enumerates all RESP3 types, even those no command uses yet. Aggregates carry wire-faithful ordered sequences (order and
   * duplicate keys preserved) so parse → write round-trips are byte-exact; reply decoders convert to native collections where the reply's
   * semantics are known. Byte-carrying cases define content equality, so `==` is structural on every Frame.
+  *
+  * A sealed trait rather than an enum: enum cases cannot have bodies, and the byte-carrying cases must override `equals`/`hashCode`.
   */
 sealed trait Frame
 

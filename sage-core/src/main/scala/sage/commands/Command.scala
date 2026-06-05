@@ -28,7 +28,7 @@ final case class Command[+Out](
     Frame.Array(name.split(' ').toVector.map(part => Frame.BulkString(Bytes.utf8(part))) ++ args.map(Frame.BulkString.apply))
 
   /**
-    * The command's wire bytes.
+    * The command's wire bytes. Encoded directly, without building the intermediate frames — this runs once per command sent.
     */
-  def encode: Bytes = RespWriter.write(toFrame)
+  def encode: Bytes = RespWriter.writeCommand(name, args)
 }

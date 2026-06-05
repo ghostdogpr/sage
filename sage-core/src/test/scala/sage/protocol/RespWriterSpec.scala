@@ -43,6 +43,8 @@ class RespWriterSpec extends munit.FunSuite {
       Frame.SimpleString("OK"),
       Frame.SimpleError("ERR oops"),
       Frame.Integer(-42),
+      Frame.Integer(Long.MaxValue),
+      Frame.Integer(Long.MinValue), // 19 digits + sign: exercises both slow paths (parse fallback and MinValue write)
       Frame.BulkString(Bytes.utf8("a\r\nb")),
       Frame.Null,
       Frame.Bool(true),
