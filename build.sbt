@@ -3,8 +3,9 @@ import sbt.VirtualAxis
 val scala3Version     = "3.3.7"
 val scala3NextVersion = "3.8.3" // Kyo requires Scala 3.8.x (Next)
 
-val kyoCompatVersion = "1.0.0-RC2+64-9487771b-SNAPSHOT"
-val munitVersion     = "1.3.2"
+val kyoCompatVersion      = "1.0.0-RC2+64-9487771b-SNAPSHOT"
+val munitVersion          = "1.3.2"
+val testcontainersVersion = "0.44.1"
 
 inThisBuild(
   List(
@@ -28,6 +29,7 @@ lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
   .aggregate(core.projectRefs ++ client.projectRefs: _*)
+  .aggregate(integrationTests)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
 // Built for both Scala LTS (published) and Scala Next (compile-only, so the kyo client cell can depend on it).
@@ -58,6 +60,17 @@ lazy val client = (projectMatrix in file("sage-client"))
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+
+// testcontainers matrix against the ZIO cell only: the runtime is shared, per-backend repetition adds little
+lazy val integrationTests = project
+  .in(file("integration-tests"))
+  .dependsOn(client.zio.jvm)
+  .settings(commonSettings)
+  .settings(
+    name                                  := "integration-tests",
+    publish / skip                        := true,
+    libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test
+  )
 
 lazy val commonSettings = Def.settings(
   scalacOptions ++= {

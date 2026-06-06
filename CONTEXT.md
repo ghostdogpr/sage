@@ -23,6 +23,10 @@ _Avoid_: byte string, blob, buffer
 A single RESP3 protocol value as read from the wire — the unit the Core's parser produces and reply decoders consume. The Frame model enumerates all RESP3 types, even those no command uses yet.
 _Avoid_: message, packet, token
 
+**Client**:
+The user-facing handle (`SageClient`) owning all connections to one server or cluster. Constructed with `connect`, released with `close`; per-command methods are concrete sugar that must delegate to `run`, so a fake implementing `run` gets the whole command surface.
+_Avoid_: connection (a Client holds several)
+
 **Multiplexed Connection**:
 The single auto-pipelined connection per node that carries ordinary commands from all fibers, replies matched in FIFO order.
 _Avoid_: shared connection, main connection
