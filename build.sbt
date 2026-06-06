@@ -79,7 +79,6 @@ lazy val commonSettings = Def.settings(
       "-no-indent",
       "-release",
       "21",
-      // no `nowarn` check: @nowarn annotations inlined from kyo-compat can be JDK-dependent and are not ours to fix
       "-Wunused:imports,params,privates,implicits,explicits",
       "-Wvalue-discard"
     )
