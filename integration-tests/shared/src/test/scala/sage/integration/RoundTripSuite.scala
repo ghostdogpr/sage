@@ -9,7 +9,8 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.client.{SageClient, SageConfig}
+import sage.client.SageConfig
+import sage.client.internal.Client
 import sage.commands.Command
 import sage.protocol.Frame
 
@@ -23,9 +24,16 @@ abstract class RoundTripSuite(image: String) extends munit.FunSuite with TestCon
   private def configOf(server: GenericContainer): SageConfig =
     SageConfig(host = server.host, port = server.mappedPort(6379))
 
-  private def withClient[A](body: SageClient => CIO[A]): Future[A] =
-    withContainers { server =>
-      CIO.acquireReleaseWith(SageClient.connect(configOf(server)))(_.close)(body).unsafeRun
+  private def withClient[A](body: Client[CIO] => CIO[A]): Future[A] =
+    withContainers(server => connectAndUse(configOf(server))(body).unsafeRun)
+
+  // CIO.acquireReleaseWith fails to compile on the Ox/Future cells when its type argument nests CIO (Client[CIO]); fold instead
+  private def connectAndUse[A](config: SageConfig)(body: Client[CIO] => CIO[A]): CIO[A] =
+    Client.connect(config).flatMap { client =>
+      body(client).fold(
+        result => client.close.map(_ => result),
+        error => client.close.flatMap(_ => CIO.fail(error))
+      )
     }
 
   test("ping round-trips") {
@@ -57,14 +65,12 @@ abstract class RoundTripSuite(image: String) extends munit.FunSuite with TestCon
 
   test("closing the client releases its server connection") {
     withContainers { server =>
-      CIO
-        .acquireReleaseWith(SageClient.connect(configOf(server)))(_.close) { observer =>
-          SageClient
-            .connect(configOf(server))
-            .flatMap(subject => connectionCount(observer).flatMap(before => subject.close.map(_ => before)))
-            .flatMap(before => awaitConnectionCount(observer, before - 1, attempts = 50))
-        }
-        .unsafeRun
+      connectAndUse(configOf(server)) { observer =>
+        Client
+          .connect(configOf(server))
+          .flatMap(subject => connectionCount(observer).flatMap(before => subject.close.map(_ => before)))
+          .flatMap(before => awaitConnectionCount(observer, before - 1, attempts = 50))
+      }.unsafeRun
     }
   }
 
@@ -80,10 +86,10 @@ abstract class RoundTripSuite(image: String) extends munit.FunSuite with TestCon
       }
     )
 
-  private def connectionCount(client: SageClient): CIO[Int] =
+  private def connectionCount(client: Client[CIO]): CIO[Int] =
     client.run(clientList).map(_.linesIterator.count(_.nonEmpty))
 
-  private def awaitConnectionCount(client: SageClient, expected: Int, attempts: Int): CIO[Unit] =
+  private def awaitConnectionCount(client: Client[CIO], expected: Int, attempts: Int): CIO[Unit] =
     connectionCount(client).flatMap { count =>
       if (count == expected) CIO.value(())
       else if (attempts <= 1) CIO.fail(new AssertionError(s"expected $expected connections, still $count"))

@@ -6,7 +6,7 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.UnsupportedServer
-import sage.client.internal.{FakeTransport, Multiplexer}
+import sage.client.internal.{Client, FakeTransport, Multiplexer}
 import sage.protocol.Frame
 
 class ConnectSpec extends munit.FunSuite {
@@ -37,14 +37,14 @@ class ConnectSpec extends munit.FunSuite {
 
   test("connect performs the HELLO 3 handshake and yields a working client") {
     val (factory, _) = scripted(helloThenPong)
-    SageClient.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map { result =>
+    Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map { result =>
       assertEquals(result, "PONG")
     }
   }
 
   test("a server without RESP3 is rejected with UnsupportedServer and the connection is released") {
     val (factory, transport) = scripted(_ => Seq(Frame.SimpleError("ERR unknown command 'HELLO'")))
-    SageClient.connectWith(factory).unsafeRun.failed.map { error =>
+    Client.connectWith(factory).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
       assertEquals(transport().closeCount, 1)
     }
@@ -52,14 +52,14 @@ class ConnectSpec extends munit.FunSuite {
 
   test("a NOPROTO rejection maps to UnsupportedServer") {
     val (factory, _) = scripted(_ => Seq(Frame.SimpleError("NOPROTO unsupported protocol version")))
-    SageClient.connectWith(factory).unsafeRun.failed.map { error =>
+    Client.connectWith(factory).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
     }
   }
 
   test("the ZIO artifact lowers to a native ZIO") {
     val (factory, _)                            = scripted(helloThenPong)
-    val native: zio.ZIO[Any, Throwable, String] = SageClient.connectWith(factory).flatMap(client => client.ping()).lower
+    val native: zio.ZIO[Any, Throwable, String] = Client.connectWith(factory).flatMap(client => client.ping()).lower
     CIO.lift(native).unsafeRun.map(result => assertEquals(result, "PONG"))
   }
 }

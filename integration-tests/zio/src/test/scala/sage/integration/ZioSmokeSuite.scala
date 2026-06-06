@@ -2,10 +2,10 @@ package sage.integration
 
 import com.dimafeng.testcontainers.GenericContainer
 import com.dimafeng.testcontainers.munit.TestContainerForAll
-import kyo.compat.*
 import zio.*
 
-import sage.client.{SageClient, SageConfig}
+import sage.client.SageConfig
+import sage.zio.SageClient
 
 class ZioSmokeSuite extends munit.FunSuite with TestContainerForAll {
 
@@ -16,11 +16,11 @@ class ZioSmokeSuite extends munit.FunSuite with TestContainerForAll {
       val config = SageConfig(host = server.host, port = server.mappedPort(6379))
 
       val program: Task[Unit] =
-        ZIO.acquireReleaseWith(SageClient.connect(config).lower)(client => client.close.lower.orDie) { client =>
+        ZIO.acquireReleaseWith(SageClient.connect(config))(client => client.close.orDie) { client =>
           for {
-            pong   <- client.ping().lower
-            _      <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"key-$i", s"value-$i").lower)
-            values <- ZIO.foreachPar((1 to 50).toList)(i => client.get[String, String](s"key-$i").lower)
+            pong   <- client.ping()
+            _      <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"key-$i", s"value-$i"))
+            values <- ZIO.foreachPar((1 to 50).toList)(i => client.get[String, String](s"key-$i"))
           } yield {
             assertEquals(pong, "PONG")
             assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
