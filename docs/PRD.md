@@ -88,7 +88,7 @@ Selected test scope (per design review):
 
 - **All pure Core components** — RESP3 codec (golden wire frames, property tests over arbitrary frame trees and arbitrary chunk-boundary splits of the byte stream), command model (argument encoding goldens, reply decoders fed synthetic frames), codec round-trips, slot engine (known CRC16 vectors, hash-tag cases, routing and split-plan decisions against synthetic topologies).
 - **Multiplexer and client-side cache state machines** — driven through a fake connection: FIFO matching under concurrency, fail-in-flight on connection loss, fail-fast while disconnected, reconnect/resubscribe sequencing; cache hit/miss/TTL/invalidation-eviction behavior fed synthetic invalidation events.
-- **Integration suite** — testcontainers matrix {Redis 6/7/8, Valkey} × {standalone, cluster}, run against one Backend only (the Runtime is shared; per-Backend repetition adds little), covering commands-against-real-server behavior, transactions, pub/sub, sharded pub/sub, cluster redirects mid-test, TLS, and auth.
+- **Integration suite** — testcontainers matrix {Redis 6/7/8, Valkey} × {standalone, cluster}, written once against kyo-compat and run per Backend cell (the shared suite is cheap to repeat and catches backend-specific lowering bugs), covering commands-against-real-server behavior, transactions, pub/sub, sharded pub/sub, cluster redirects mid-test, TLS, and auth.
 - **Per-Backend smoke tests** — thin suites per published artifact proving the lowered API compiles, connects, and runs a representative slice.
 
 Prior art: none in-repo (greenfield); the golden-frame and fake-connection patterns follow the conventions of comparable protocol libraries.

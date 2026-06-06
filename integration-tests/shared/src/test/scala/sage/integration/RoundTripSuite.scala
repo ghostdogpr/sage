@@ -1,6 +1,6 @@
 package sage.integration
 
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 
 import com.dimafeng.testcontainers.GenericContainer
@@ -14,6 +14,9 @@ import sage.commands.Command
 import sage.protocol.Frame
 
 abstract class RoundTripSuite(image: String) extends munit.FunSuite with TestContainerForAll {
+
+  // not private: only the Ox cell's unsafeRun consumes it, and a private given would be flagged unused on the other cells
+  given ExecutionContext = munitExecutionContext
 
   override val containerDef: GenericContainer.Def[GenericContainer] = GenericContainer.Def(image, exposedPorts = Seq(6379))
 

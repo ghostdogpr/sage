@@ -28,8 +28,7 @@ addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck"
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
-  .aggregate(core.projectRefs ++ client.projectRefs: _*)
-  .aggregate(integrationTests)
+  .aggregate(core.projectRefs ++ client.projectRefs ++ integrationTests.projectRefs: _*)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
 // Built for both Scala LTS (published) and Scala Next (compile-only, so the kyo client cell can depend on it).
@@ -61,16 +60,17 @@ lazy val client = (projectMatrix in file("sage-client"))
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
-// testcontainers matrix against the ZIO cell only: the runtime is shared, per-backend repetition adds little
-lazy val integrationTests = project
-  .in(file("integration-tests"))
-  .dependsOn(client.zio.jvm)
+// the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers
+lazy val integrationTests = (projectMatrix in file("integration-tests"))
+  .dependsOn(client)
+  .settings(name := "integration-tests")
   .settings(commonSettings)
   .settings(
-    name                                  := "integration-tests",
     publish / skip                        := true,
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test
   )
+  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
+  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
 lazy val commonSettings = Def.settings(
   scalacOptions ++= {
