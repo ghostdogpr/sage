@@ -67,7 +67,12 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .settings(commonSettings)
   .settings(
     publish / skip                        := true,
-    libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test
+    libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test,
+    // the Future anchor rows compile but don't boot containers
+    Test / testOptions += {
+      val isAnchor = moduleName.value.endsWith("-future")
+      Tests.Filter(_ => !isAnchor)
+    }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))

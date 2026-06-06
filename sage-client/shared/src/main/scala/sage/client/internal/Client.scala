@@ -30,7 +30,7 @@ object Client {
     connectWith((onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, onFrame, onClosed))
 
   private[client] def connectWith(factory: Multiplexer.TransportFactory): CIO[Client[CIO]] =
-    CIO.blocking[Client[CIO]](new Live(new Multiplexer(factory))).flatMap { client =>
+    CIO.blocking(new Live(new Multiplexer(factory))).flatMap { client =>
       client
         .run(Connection.hello())
         .fold(
