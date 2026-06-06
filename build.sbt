@@ -79,7 +79,8 @@ lazy val commonSettings = Def.settings(
       "-no-indent",
       "-release",
       "21",
-      "-Wunused:imports,params,privates,implicits,explicits,nowarn",
+      // no `nowarn` check: @nowarn annotations inlined from kyo-compat can be JDK-dependent and are not ours to fix
+      "-Wunused:imports,params,privates,implicits,explicits",
       "-Wvalue-discard"
     )
     if (scalaVersion.value.startsWith("3.8")) base :+ "-Xkind-projector"
