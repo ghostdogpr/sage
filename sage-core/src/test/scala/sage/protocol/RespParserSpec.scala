@@ -23,8 +23,8 @@ class RespParserSpec extends munit.FunSuite {
     parser.feed(Bytes.utf8(input)).fold(identity, frames => fail(s"expected a protocol error, got $frames"))
   }
 
-  // golden frames, one per RESP3 type, reused by the chunk-split tests
-  private val goldens: Vector[(String, Frame)] = Vector(
+  // golden frames, one per RESP3 type, reused by the chunk-split tests; the writer emits exactly these bytes
+  private val canonicalGoldens: Vector[(String, Frame)] = Vector(
     "+OK\r\n"                                          -> Frame.SimpleString("OK"),
     "-ERR something went wrong\r\n"                    -> Frame.SimpleError("ERR something went wrong"),
     ":1234\r\n"                                        -> Frame.Integer(1234L),
@@ -36,9 +36,9 @@ class RespParserSpec extends munit.FunSuite {
     "#t\r\n"                                           -> Frame.Bool(true),
     "#f\r\n"                                           -> Frame.Bool(false),
     ",3.14\r\n"                                        -> Frame.Double(3.14),
-    ",10\r\n"                                          -> Frame.Double(10.0),
     ",inf\r\n"                                         -> Frame.Double(Double.PositiveInfinity),
     ",-inf\r\n"                                        -> Frame.Double(Double.NegativeInfinity),
+    ",nan\r\n"                                         -> Frame.Double(Double.NaN),
     "(3492890328409238509324850943850943825024385\r\n" -> Frame.BigNumber(BigInt("3492890328409238509324850943850943825024385")),
     "!21\r\nSYNTAX invalid syntax\r\n"                 -> Frame.BulkError(Bytes.utf8("SYNTAX invalid syntax")),
     "=15\r\ntxt:Some string\r\n"                       -> Frame.VerbatimString("txt", Bytes.utf8("Some string")),
@@ -53,14 +53,23 @@ class RespParserSpec extends munit.FunSuite {
     ">2\r\n+message\r\n$5\r\nhello\r\n"                -> Frame.Push(Vector(Frame.SimpleString("message"), Frame.BulkString(Bytes.utf8("hello"))))
   )
 
+  // wire forms the parser accepts but the writer never emits
+  private val parseOnlyGoldens: Vector[(String, Frame)] = Vector(
+    ",10\r\n" -> Frame.Double(10.0)
+  )
+
+  private val goldens = canonicalGoldens ++ parseOnlyGoldens
+
   goldens.foreach { case (wire, expected) =>
     test(s"parses ${expected.getClass.getSimpleName}: ${wire.replace("\r\n", "\\r\\n")}") {
       assertEquals(parseOne(wire), expected)
     }
   }
 
-  test("parses nan as a NaN double") {
-    assertEquals(parseOne(",nan\r\n"), Frame.Double(Double.NaN))
+  canonicalGoldens.foreach { case (wire, frame) =>
+    test(s"writes ${frame.getClass.getSimpleName} as: ${wire.replace("\r\n", "\\r\\n")}") {
+      assertEquals(FrameWriter.write(frame).asUtf8String, wire)
+    }
   }
 
   test("Frame.Double equality treats NaNs as equal and keeps 0.0 == -0.0, with matching hashes") {

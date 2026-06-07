@@ -55,7 +55,7 @@ A Pipeline executed atomically via `MULTI`/`EXEC` on a Dedicated Connection, opt
 _Avoid_: batch (that's a Pipeline)
 
 **Codec**:
-A typeclass converting one user type to/from its wire bytes at a command boundary. A boundary converter, not a serialization framework; keys and values have separate codec typeclasses (keys must also be hashable to cluster slots).
+A typeclass converting one user type to/from its wire bytes at a command boundary. A boundary converter, not a serialization framework; keys and values have separate codec typeclasses (keys must also be hashable to cluster slots). The RESP3 parser/writer is not a Codec — that layer converts wire bytes to/from Frames, not user types.
 _Avoid_: serializer, schema
 
 ## Example dialogue
