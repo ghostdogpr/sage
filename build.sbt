@@ -60,9 +60,10 @@ lazy val client = (projectMatrix in file("sage-client"))
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
-// the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers
+// the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers;
+// command-behavior suites (sage.integration.commands) run on one designated cell only — per-command behavior cannot differ per backend
 lazy val integrationTests = (projectMatrix in file("integration-tests"))
-  .dependsOn(client)
+  .dependsOn(client, core % "test->test")
   .settings(name := "integration-tests")
   .settings(commonSettings)
   .settings(
@@ -70,8 +71,9 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test,
     // the Future anchor rows compile but don't boot containers
     Test / testOptions += {
-      val isAnchor = moduleName.value.endsWith("-future")
-      Tests.Filter(_ => !isAnchor)
+      val isAnchor     = moduleName.value.endsWith("-future")
+      val isDesignated = moduleName.value.endsWith("-zio")
+      Tests.Filter(name => !isAnchor && (isDesignated || !name.startsWith("sage.integration.commands.")))
     }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))

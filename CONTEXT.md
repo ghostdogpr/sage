@@ -58,6 +58,14 @@ An applicative composition of Commands sent in one round-trip, yielding a typed 
 A Pipeline executed atomically via `MULTI`/`EXEC` on a Dedicated Connection, optionally guarded by `WATCH`.
 _Avoid_: batch (that's a Pipeline)
 
+**Family**:
+A group of Commands mirroring one of the server's documented command groups (strings, keys, hashes, …): one Core object of command builders plus matching Client sugar, built and reviewed as a unit.
+_Avoid_: command group, category, module
+
+**Coverage Spec**:
+The test diffing sage's implemented commands against the command list each supported server reports live, partitioned exactly into implemented, skipped (deliberate, with reasons), and todo (acknowledged gaps). Gaps are reported, never gating; unacknowledged drift fails.
+_Avoid_: coverage report, gap test
+
 **Codec**:
 A typeclass converting one user type to/from its wire bytes at a command boundary. A boundary converter, not a serialization framework; keys and values have separate codec typeclasses (keys must also be hashable to cluster slots). Built-in codecs decode strictly: bytes that are not the type's canonical wire form fail with a decode error rather than being coerced. The RESP3 parser/writer is not a Codec — that layer converts wire bytes to/from Frames, not user types.
 _Avoid_: serializer, schema

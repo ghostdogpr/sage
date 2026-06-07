@@ -1,16 +1,37 @@
 package sage.kyo
 
-import _root_.kyo.{<, Abort, Async, Scope}
+import _root_.kyo.{<, Abort, Async, Scope, Stream, Tag}
 import _root_.kyo.compat.*
 
 import sage.client.SageConfig
 import sage.client.internal.Client
-import sage.commands.Command
+import sage.codec.KeyCodec
+import sage.commands.{Command, Keys, RedisType, ScanCursor}
 
 /**
   * The Kyo-native surface: the same client, with every method returning a Kyo pending computation.
   */
 type SageClient = Client[[A] =>> A < (Abort[Throwable] & Async)]
+
+extension (client: SageClient) {
+
+  /**
+    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once.
+    */
+  def scanAll[K: KeyCodec](
+    pattern: Option[String] = None,
+    count: Option[Long] = None,
+    ofType: Option[RedisType] = None
+  )(using Tag[K]): Stream[K, Abort[Throwable] & Async] =
+    CStream
+      .unfold[Option[ScanCursor], Vector[K]](Some(ScanCursor.start)) {
+        case None         => CIO.value(None)
+        case Some(cursor) =>
+          CIO.lift(client.run(Keys.scan[K](cursor, pattern, count, ofType))).map(page => Some((page.keys, page.next)))
+      }
+      .flatMap(keys => CStream.init(keys))
+      .lower
+}
 
 object SageClient {
 
