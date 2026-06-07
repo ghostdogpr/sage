@@ -31,6 +31,10 @@ _Avoid_: connection (a Client holds several)
 The single auto-pipelined connection per node that carries ordinary commands from all fibers, replies matched in FIFO order.
 _Avoid_: shared connection, main connection
 
+**Auto-pipelining**:
+The Multiplexed Connection's transparent behavior: commands from concurrent fibers are written without waiting for prior replies, coalesced into fewer socket writes. Invisible to users — a Pipeline, by contrast, is a value the user builds.
+_Avoid_: batching, implicit pipelining
+
 **Dedicated Connection**:
 A connection exclusively held for commands with per-connection state or blocking behavior (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, …), acquired transparently from an on-demand pool.
 _Avoid_: exclusive connection, pooled connection

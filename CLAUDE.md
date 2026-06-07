@@ -1,5 +1,9 @@
 # Working on sage
 
+## Formatting
+
+Run `sbt scalafmtAll` before committing Scala changes.
+
 ## Comments
 
 Default to zero comments; when unsure, omit. Comment only what is non-obvious and cannot be expressed in code: contracts (copy vs zero-copy, mutation rules, poisoning), surprising design decisions, and protocol subtleties. One or two lines, not paragraphs.

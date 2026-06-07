@@ -20,6 +20,8 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
   private val queue  = new LinkedBlockingQueue[Transport.Item]()
   private val closed = new AtomicBoolean(false)
 
+  @volatile private[internal] var writeCount: Long = 0
+
   private val id                       = SocketTransport.ids.incrementAndGet()
   private[internal] val reader: Thread = Thread.ofVirtual().name(s"sage-reader-$id").unstarted(() => readLoop())
   private[internal] val writer: Thread = Thread.ofVirtual().name(s"sage-writer-$id").unstarted(() => writeLoop())
@@ -62,18 +64,70 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     } finally terminate()
   }
 
-  private def writeLoop(): Unit =
+  // Auto-pipelining: queued items are coalesced up to MaxBatchBytes per concat buffer; an item that would overflow the cap is
+  // carried into the next batch. Items past `attempted` (and a carried item) never reached a write and are dropped on unwind.
+  private def writeLoop(): Unit = {
+    val batch                 = new java.util.ArrayList[Transport.Item]()
+    var carry: Transport.Item = null
+    var attempted             = 0
+    var scratch: Array[Byte]  = null
     try {
       val out = socket.getOutputStream
       while (true) {
-        val item = queue.take()
-        item.writeAttempted()
-        out.write(item.payload.unsafeArray)
+        // consuming a carried item bypasses take(), the writer's only interruption point: re-check for close first
+        if (carry != null && closed.get()) throw new InterruptedException
+        val first      = if (carry != null) carry else queue.take()
+        carry = null
+        batch.add(first)
+        var size: Long = first.payload.length
+        var draining   = size < SocketTransport.MaxBatchBytes
+        while (draining) {
+          val item = queue.poll()
+          if (item == null) draining = false
+          else if (size + item.payload.length > SocketTransport.MaxBatchBytes) {
+            carry = item
+            draining = false
+          } else {
+            batch.add(item)
+            size += item.payload.length
+          }
+        }
+        if (batch.size == 1) {
+          first.writeAttempted()
+          attempted = 1
+          out.write(first.payload.unsafeArray)
+        } else {
+          if (scratch == null) scratch = new Array[Byte](SocketTransport.MaxBatchBytes.toInt)
+          var offset = 0
+          batch.forEach { item =>
+            val bytes = item.payload.unsafeArray
+            System.arraycopy(bytes, 0, scratch, offset, bytes.length)
+            offset += bytes.length
+          }
+          batch.forEach { item =>
+            item.writeAttempted()
+            attempted += 1
+          }
+          out.write(scratch, 0, offset)
+        }
+        writeCount += 1
+        // clear before resetting: the finally's drop range must stay empty if anything is ever inserted here
+        batch.clear()
+        attempted = 0
       }
     } catch {
       case _: InterruptedException => ()
       case NonFatal(_)             => ()
-    } finally terminate()
+    } finally {
+      var i = attempted
+      while (i < batch.size) {
+        batch.get(i).dropped()
+        i += 1
+      }
+      if (carry != null) carry.dropped()
+      terminate()
+    }
+  }
 
   private def terminate(): Unit =
     if (closed.compareAndSet(false, true)) {
@@ -99,6 +153,9 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
 private[client] object SocketTransport {
 
   private val ids = new AtomicLong(0)
+
+  // strict bound on multi-item concat buffers; a single over-sized payload is always a batch of one, written zero-copy
+  private val MaxBatchBytes: Long = 512 * 1024
 
   /**
     * Blocking connect; the returned transport is not started.

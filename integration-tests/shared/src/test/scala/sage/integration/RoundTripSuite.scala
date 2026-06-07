@@ -73,6 +73,19 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("no reply misattribution under high fiber concurrency") {
+    def pingLoop(client: Client[CIO], fiber: Int, i: Int): CIO[Unit] =
+      if (i > 100) CIO.value(())
+      else {
+        val token = s"$fiber-$i"
+        client.ping(Some(token)).flatMap { reply =>
+          assertEquals(reply, token)
+          pingLoop(client, fiber, i + 1)
+        }
+      }
+    withClient(client => CIO.foreachDiscard(1 to 500)(fiber => pingLoop(client, fiber, 1)))
+  }
+
   test("closing the client releases its server connection") {
     withContainers { server =>
       connectAndUse(configOf(server)) { observer =>
