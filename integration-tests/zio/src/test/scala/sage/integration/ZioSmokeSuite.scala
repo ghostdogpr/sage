@@ -4,7 +4,7 @@ import zio.*
 
 import sage.zio.*
 
-class ZioSmokeSuite extends ServerSuite("redis:8") {
+class ZioSmokeSuite extends ServerSuite(Images.redis) {
 
   test("an end user connects and round-trips with native ZIO") {
     withContainers { server =>

@@ -6,7 +6,7 @@ import cats.syntax.all.*
 
 import sage.ce.*
 
-class CeSmokeSuite extends ServerSuite("redis:8") {
+class CeSmokeSuite extends ServerSuite(Images.redis) {
 
   test("an end user connects and round-trips with native cats-effect") {
     withContainers { server =>

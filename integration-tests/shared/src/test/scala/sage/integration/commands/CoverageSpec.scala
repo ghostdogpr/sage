@@ -12,6 +12,7 @@ import sage.SageException.DecodeError
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.commands.{Command, CommandSamples}
+import sage.integration.Images
 import sage.protocol.Frame
 
 /**
@@ -23,8 +24,8 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
   override type Containers = GenericContainer and GenericContainer
 
   override def startContainers(): Containers =
-    GenericContainer.Def("redis:8", exposedPorts = Seq(6379)).start() and
-      GenericContainer.Def("valkey/valkey:8", exposedPorts = Seq(6379)).start()
+    GenericContainer.Def(Images.redis, exposedPorts = Seq(6379)).start() and
+      GenericContainer.Def(Images.valkey, exposedPorts = Seq(6379)).start()
 
   given ExecutionContext = munitExecutionContext
 

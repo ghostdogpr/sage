@@ -7,7 +7,7 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.commands.{GetExpiry, SetCondition, SetExpiry, Ttl}
-import sage.integration.ServerSuite
+import sage.integration.{Images, ServerSuite}
 
 abstract class StringsSuite(image: String) extends ServerSuite(image) {
 
@@ -192,6 +192,6 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     }
 }
 
-class RedisStringsSuite extends StringsSuite("redis:8")
+class RedisStringsSuite extends StringsSuite(Images.redis)
 
-class ValkeyStringsSuite extends StringsSuite("valkey/valkey:8")
+class ValkeyStringsSuite extends StringsSuite(Images.valkey)

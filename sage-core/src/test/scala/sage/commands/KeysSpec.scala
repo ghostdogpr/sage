@@ -107,4 +107,12 @@ class KeysSpec extends munit.FunSuite {
     assertEquals(Keys.expireAt("k", Instant.ofEpochSecond(2000000000L)).name, "EXPIREAT")
     assertEquals(Keys.expireAt("k", Instant.ofEpochMilli(2000000000123L)).name, "PEXPIREAT")
   }
+
+  test("a positive sub-millisecond expiry rounds up to one millisecond rather than truncating to zero") {
+    assertEquals(Keys.expire("k", 500.micros).args(1).asUtf8String, "1")
+    assertEquals(Keys.expire("k", 1.nano).args(1).asUtf8String, "1")
+    assertEquals(Strings.set("k", "v", expiry = SetExpiry.In(500.micros)).args.last.asUtf8String, "1")
+    assertEquals(Strings.getEx[String, String]("k", GetExpiry.In(500.micros)).args.last.asUtf8String, "1")
+    assertEquals(Keys.expireAt("k", Instant.ofEpochSecond(2000000000L, 1)).args(1).asUtf8String, "2000000000001")
+  }
 }

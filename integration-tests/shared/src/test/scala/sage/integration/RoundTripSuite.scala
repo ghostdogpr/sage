@@ -105,6 +105,6 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     }
 }
 
-class RedisRoundTripSuite extends RoundTripSuite("redis:8")
+class RedisRoundTripSuite extends RoundTripSuite(Images.redis)
 
-class ValkeyRoundTripSuite extends RoundTripSuite("valkey/valkey:8")
+class ValkeyRoundTripSuite extends RoundTripSuite(Images.valkey)

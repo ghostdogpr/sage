@@ -128,7 +128,7 @@ object Strings {
     Command(
       "SET",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(value)) ++ conditionArgs(condition) :+ Bytes.utf8("GET") :++ setExpiryArgs(expiry),
+      Vector(keyCodec.encode(key), valueCodec.encode(value)) ++ conditionArgs(condition) :+ Get :++ setExpiryArgs(expiry),
       Decode.optionalValue
     )
 
@@ -146,8 +146,8 @@ object Strings {
   private def conditionArgs(condition: SetCondition): Vector[Bytes] =
     condition match {
       case SetCondition.Always      => Vector.empty
-      case SetCondition.IfExists    => Vector(Bytes.utf8("XX"))
-      case SetCondition.IfNotExists => Vector(Bytes.utf8("NX"))
+      case SetCondition.IfExists    => Vector(Xx)
+      case SetCondition.IfNotExists => Vector(Nx)
     }
 
   private def setExpiryArgs(expiry: SetExpiry): Vector[Bytes] =
@@ -155,7 +155,7 @@ object Strings {
       case SetExpiry.Clear         => Vector.empty
       case SetExpiry.In(duration)  => TimeArgs.relative(duration)
       case SetExpiry.At(timestamp) => TimeArgs.absolute(timestamp)
-      case SetExpiry.KeepTtl       => Vector(Bytes.utf8("KEEPTTL"))
+      case SetExpiry.KeepTtl       => Vector(KeepTtl)
     }
 
   private def getExpiryArgs(expiry: GetExpiry): Vector[Bytes] =
@@ -163,11 +163,16 @@ object Strings {
       case GetExpiry.Keep          => Vector.empty
       case GetExpiry.In(duration)  => TimeArgs.relative(duration)
       case GetExpiry.At(timestamp) => TimeArgs.absolute(timestamp)
-      case GetExpiry.Persist       => Vector(Bytes.utf8("PERSIST"))
+      case GetExpiry.Persist       => Vector(Persist)
     }
 
   private def msetArgs[K, V](pairs: Vector[(K, V)])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Vector[Bytes] =
     pairs.flatMap { case (key, value) => Vector(keyCodec.encode(key), valueCodec.encode(value)) }
 
   private def msetKeyIndices(pairs: Int): Vector[Int] = Vector.tabulate(pairs)(_ * 2)
+  private val Get     = Bytes.utf8("GET")
+  private val Nx      = Bytes.utf8("NX")
+  private val Xx      = Bytes.utf8("XX")
+  private val KeepTtl = Bytes.utf8("KEEPTTL")
+  private val Persist = Bytes.utf8("PERSIST")
 }

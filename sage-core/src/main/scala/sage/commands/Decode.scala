@@ -43,6 +43,12 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
   }
 
+  def optionalKey[K](using codec: KeyCodec[K]): Frame => Either[DecodeError, Option[K]] = {
+    case Frame.Null              => Right(None)
+    case Frame.BulkString(bytes) => codec.decode(bytes).map(Some(_))
+    case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
+  }
+
   def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
     case Frame.Array(elements) =>
       elements.foldLeft[Either[DecodeError, Vector[A]]](Right(Vector.empty)) { (acc, frame) =>
@@ -58,12 +64,23 @@ private[commands] object TimeArgs {
 
   def wholeSeconds(timestamp: Instant): Boolean = timestamp.getNano == 0
 
-  // whole seconds keep the second-precision wire form; anything finer truncates to milliseconds
+  // whole seconds keep the second-precision wire form; anything finer rounds up to the next millisecond —
+  // an expiry must never land earlier than asked, and truncation would turn a sub-millisecond expiry into 0 (immediate)
+  def millis(duration: FiniteDuration): Long = Math.ceilDiv(duration.toNanos, 1000000L)
+
+  def millis(timestamp: Instant): Long =
+    Math.addExact(Math.multiplyExact(timestamp.getEpochSecond, 1000L), Math.ceilDiv(timestamp.getNano.toLong, 1000000L))
+
   def relative(duration: FiniteDuration): Vector[Bytes] =
-    if (wholeSeconds(duration)) Vector(Bytes.utf8("EX"), Bytes.utf8(duration.toSeconds.toString))
-    else Vector(Bytes.utf8("PX"), Bytes.utf8(duration.toMillis.toString))
+    if (wholeSeconds(duration)) Vector(Ex, Bytes.utf8(duration.toSeconds.toString))
+    else Vector(Px, Bytes.utf8(millis(duration).toString))
 
   def absolute(timestamp: Instant): Vector[Bytes] =
-    if (wholeSeconds(timestamp)) Vector(Bytes.utf8("EXAT"), Bytes.utf8(timestamp.getEpochSecond.toString))
-    else Vector(Bytes.utf8("PXAT"), Bytes.utf8(timestamp.toEpochMilli.toString))
+    if (wholeSeconds(timestamp)) Vector(ExAt, Bytes.utf8(timestamp.getEpochSecond.toString))
+    else Vector(PxAt, Bytes.utf8(millis(timestamp).toString))
+
+  private val Ex   = Bytes.utf8("EX")
+  private val Px   = Bytes.utf8("PX")
+  private val ExAt = Bytes.utf8("EXAT")
+  private val PxAt = Bytes.utf8("PXAT")
 }

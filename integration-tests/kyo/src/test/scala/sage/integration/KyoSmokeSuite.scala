@@ -4,7 +4,7 @@ import kyo.*
 
 import sage.kyo.*
 
-class KyoSmokeSuite extends ServerSuite("redis:8") {
+class KyoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("an end user connects and round-trips with native Kyo") {
     withContainers { server =>

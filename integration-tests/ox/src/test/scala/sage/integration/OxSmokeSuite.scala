@@ -4,7 +4,7 @@ import ox.{fork, supervised}
 
 import sage.ox.*
 
-class OxSmokeSuite extends ServerSuite("redis:8") {
+class OxSmokeSuite extends ServerSuite(Images.redis) {
 
   test("an end user connects and round-trips with direct-style Ox") {
     withContainers { server =>

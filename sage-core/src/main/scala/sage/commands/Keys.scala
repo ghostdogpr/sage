@@ -74,7 +74,7 @@ object Keys {
     Command(
       "COPY",
       keyIndices = Vector(0, 1),
-      args = Vector(keyCodec.encode(source), keyCodec.encode(destination)) ++ (if (replace) Vector(Bytes.utf8("REPLACE")) else Vector.empty),
+      args = Vector(keyCodec.encode(source), keyCodec.encode(destination)) ++ (if (replace) Vector(Replace) else Vector.empty),
       Decode.flag
     )
 
@@ -87,14 +87,14 @@ object Keys {
   def expire[K](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(using
     keyCodec: KeyCodec[K]
   ): Command[Boolean] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(in)) ("EXPIRE", in.toSeconds) else ("PEXPIRE", in.toMillis)
+    val (name, amount) = if (TimeArgs.wholeSeconds(in)) ("EXPIRE", in.toSeconds) else ("PEXPIRE", TimeArgs.millis(in))
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
 
   def expireAt[K](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(using
     keyCodec: KeyCodec[K]
   ): Command[Boolean] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(at)) ("EXPIREAT", at.getEpochSecond) else ("PEXPIREAT", at.toEpochMilli)
+    val (name, amount) = if (TimeArgs.wholeSeconds(at)) ("EXPIREAT", at.getEpochSecond) else ("PEXPIREAT", TimeArgs.millis(at))
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
 
@@ -114,16 +114,7 @@ object Keys {
     Command("PTTL", Command.FirstKey, Vector(keyCodec.encode(key)), ttlDecode(MILLISECONDS))
 
   def randomKey[K](using keyCodec: KeyCodec[K]): Command[Option[K]] =
-    Command(
-      "RANDOMKEY",
-      Command.NoKeys,
-      Vector.empty,
-      decode = {
-        case Frame.Null              => Right(None)
-        case Frame.BulkString(bytes) => keyCodec.decode(bytes).map(Some(_))
-        case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
-      }
-    )
+    Command("RANDOMKEY", Command.NoKeys, Vector.empty, Decode.optionalKey)
 
   def rename[K](source: K, destination: K)(using keyCodec: KeyCodec[K]): Command[Unit] =
     Command("RENAME", Vector(0, 1), Vector(keyCodec.encode(source), keyCodec.encode(destination)), Decode.ok)
@@ -141,9 +132,9 @@ object Keys {
       "SCAN",
       Command.NoKeys,
       ScanCursor.bytes(cursor) +:
-        (pattern.toVector.flatMap(p => Vector(Bytes.utf8("MATCH"), Bytes.utf8(p))) ++
-          count.toVector.flatMap(n => Vector(Bytes.utf8("COUNT"), Bytes.utf8(n.toString))) ++
-          ofType.toVector.flatMap(t => Vector(Bytes.utf8("TYPE"), Bytes.utf8(RedisType.wireName(t))))),
+        (pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++
+          count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString))) ++
+          ofType.toVector.flatMap(t => Vector(Type, Bytes.utf8(RedisType.wireName(t))))),
       decode = {
         case Frame.Array(Vector(cursorFrame, keysFrame)) =>
           for {
@@ -190,10 +181,10 @@ object Keys {
   private def conditionArgs(condition: ExpireCondition): Vector[Bytes] =
     condition match {
       case ExpireCondition.Always      => Vector.empty
-      case ExpireCondition.IfNoExpiry  => Vector(Bytes.utf8("NX"))
-      case ExpireCondition.IfHasExpiry => Vector(Bytes.utf8("XX"))
-      case ExpireCondition.IfGreater   => Vector(Bytes.utf8("GT"))
-      case ExpireCondition.IfLess      => Vector(Bytes.utf8("LT"))
+      case ExpireCondition.IfNoExpiry  => Vector(Nx)
+      case ExpireCondition.IfHasExpiry => Vector(Xx)
+      case ExpireCondition.IfGreater   => Vector(Gt)
+      case ExpireCondition.IfLess      => Vector(Lt)
     }
 
   private def ttlDecode(unit: scala.concurrent.duration.TimeUnit): Frame => Either[DecodeError, Ttl] = {
@@ -209,4 +200,12 @@ object Keys {
     case Frame.Integer(amount) if amount >= 0 => Right(ExpiryTime.At(toInstant(amount)))
     case other                                => Left(DecodeError("expiry time integer", Frame.describe(other)))
   }
+  private val Replace = Bytes.utf8("REPLACE")
+  private val Match   = Bytes.utf8("MATCH")
+  private val Count   = Bytes.utf8("COUNT")
+  private val Type    = Bytes.utf8("TYPE")
+  private val Nx      = Bytes.utf8("NX")
+  private val Xx      = Bytes.utf8("XX")
+  private val Gt      = Bytes.utf8("GT")
+  private val Lt      = Bytes.utf8("LT")
 }

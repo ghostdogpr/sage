@@ -10,7 +10,7 @@ import sage.Bytes
 import sage.SageException.DecodeError
 import sage.client.internal.Client
 import sage.commands.*
-import sage.integration.ServerSuite
+import sage.integration.{Images, ServerSuite}
 import sage.protocol.Frame
 
 abstract class KeysSuite(image: String) extends ServerSuite(image) {
@@ -241,6 +241,6 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     }
 }
 
-class RedisKeysSuite extends KeysSuite("redis:8")
+class RedisKeysSuite extends KeysSuite(Images.redis)
 
-class ValkeyKeysSuite extends KeysSuite("valkey/valkey:8")
+class ValkeyKeysSuite extends KeysSuite(Images.valkey)
