@@ -1,7 +1,7 @@
 package sage
 
 /**
-  * Every sage failure, in one sealed hierarchy so users can match exhaustively (ADR-0009). Not an enum: case types appear standalone in
+  * Every sage failure, in one sealed hierarchy so users can match exhaustively. Not an enum: case types appear standalone in
   * signatures, and enum case constructors widen to the enum type.
   */
 sealed abstract class SageException(message: String) extends Exception(message)
@@ -24,6 +24,11 @@ object SageException {
     )
 
   final case class NotConnected() extends SageException("not connected")
+
+  /**
+    * The server rejected `HELLO 3`: it predates RESP3 (Redis < 6.0) or is a RESP2-only proxy.
+    */
+  final case class UnsupportedServer(message: String) extends SageException(message)
 
   final case class CrossSlot(message: String) extends SageException(message)
 

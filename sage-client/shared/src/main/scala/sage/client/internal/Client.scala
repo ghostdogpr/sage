@@ -1,0 +1,56 @@
+package sage.client.internal
+
+import kyo.compat.*
+
+import sage.SageException.{ServerError, UnsupportedServer}
+import sage.client.SageConfig
+import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.{Command, Connection, Strings}
+
+/**
+  * The user-facing handle owning all connections to one server. Per-command methods are concrete sugar delegating to [[run]], so anything
+  * implementing `run` — a fake, or a backend adapter lowering `F` to its native effect — gets the whole command surface.
+  */
+trait Client[F[_]] {
+
+  def run[A](command: Command[A]): F[A]
+
+  def close: F[Unit]
+
+  final def ping(message: Option[String] = None): F[String] = run(Connection.ping(message))
+
+  final def get[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Strings.get(key))
+
+  final def set[K: KeyCodec, V: ValueCodec](key: K, value: V): F[Unit] = run(Strings.set(key, value))
+}
+
+object Client {
+
+  def connect(config: SageConfig): CIO[Client[CIO]] =
+    connectWith((onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, onFrame, onClosed))
+
+  private[client] def connectWith(factory: Multiplexer.TransportFactory): CIO[Client[CIO]] =
+    CIO.blocking(new Live(new Multiplexer(factory))).flatMap { client =>
+      client
+        .run(Connection.hello())
+        .fold(
+          _ => CIO.value(client),
+          error => client.close.flatMap(_ => CIO.fail(translateHandshake(error)))
+        )
+    }
+
+  // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO
+  private def translateHandshake(error: Throwable): Throwable =
+    error match {
+      case ServerError(message) if message.startsWith("NOPROTO") || message.toLowerCase.contains("unknown command") =>
+        UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: $message")
+      case other                                                                                                    => other
+    }
+
+  final private class Live(multiplexer: Multiplexer) extends Client[CIO] {
+
+    def run[A](command: Command[A]): CIO[A] = CIO.async(callback => multiplexer.submit(command, callback))
+
+    def close: CIO[Unit] = CIO.blocking(multiplexer.close())
+  }
+}

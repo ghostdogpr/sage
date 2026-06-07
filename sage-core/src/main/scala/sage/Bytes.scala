@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 /**
-  * An opaque, immutable byte container. Universal `==` on Bytes compares references and is unreliable — use `sameBytes` (ADR-0004).
+  * An opaque, immutable byte container. Universal `==` on Bytes compares references and is unreliable — use `sameBytes`.
   */
 opaque type Bytes = IArray[Byte]
 
