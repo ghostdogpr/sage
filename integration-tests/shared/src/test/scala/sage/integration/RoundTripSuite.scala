@@ -35,7 +35,24 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
 
   test("set then get returns the value") {
     withClient { client =>
-      client.set("greeting", "hello").flatMap(_ => client.get[String, String]("greeting")).map(value => assertEquals(value, Some("hello")))
+      for {
+        _     <- client.set("greeting", "hello")
+        value <- client.get[String, String]("greeting")
+      } yield assertEquals(value, Some("hello"))
+    }
+  }
+
+  test("heterogeneous value types coexist on one client") {
+    withClient { client =>
+      for {
+        _     <- client.set("count", 42)
+        _     <- client.set("flag", true)
+        count <- client.get[String, Int]("count")
+        flag  <- client.get[String, Boolean]("flag")
+      } yield {
+        assertEquals(count, Some(42))
+        assertEquals(flag, Some(true))
+      }
     }
   }
 
@@ -47,10 +64,10 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       CIO
         .foreach(1 to 200) { i =>
-          client
-            .set(s"key-$i", s"value-$i")
-            .flatMap(_ => client.get[String, String](s"key-$i"))
-            .map(value => assertEquals(value, Some(s"value-$i")))
+          for {
+            _     <- client.set(s"key-$i", s"value-$i")
+            value <- client.get[String, String](s"key-$i")
+          } yield assertEquals(value, Some(s"value-$i"))
         }
         .unit
     }
@@ -59,10 +76,12 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
   test("closing the client releases its server connection") {
     withContainers { server =>
       connectAndUse(configOf(server)) { observer =>
-        Client
-          .connect(configOf(server))
-          .flatMap(subject => connectionCount(observer).flatMap(before => subject.close.map(_ => before)))
-          .flatMap(before => awaitConnectionCount(observer, before - 1, attempts = 50))
+        for {
+          subject <- Client.connect(configOf(server))
+          before  <- connectionCount(observer)
+          _       <- subject.close
+          _       <- awaitConnectionCount(observer, before - 1, attempts = 50)
+        } yield ()
       }.unsafeRun
     }
   }
