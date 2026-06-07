@@ -1,33 +1,16 @@
 package sage.integration
 
-import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 
 import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.commands.Command
 import sage.protocol.Frame
 
 abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
-
-  // not private: only the Ox cell's unsafeRun consumes it, and a private given would be flagged unused on the other cells
-  given ExecutionContext = munitExecutionContext
-
-  private def withClient[A](body: Client[CIO] => CIO[A]): Future[A] =
-    withContainers(server => connectAndUse(configOf(server))(body).unsafeRun)
-
-  // CIO.acquireReleaseWith fails to compile on the Ox/Future cells when its type argument nests CIO (Client[CIO]); fold instead
-  private def connectAndUse[A](config: SageConfig)(body: Client[CIO] => CIO[A]): CIO[A] =
-    Client.connect(config).flatMap { client =>
-      body(client).fold(
-        result => client.close.map(_ => result),
-        error => client.close.flatMap(_ => CIO.fail(error))
-      )
-    }
 
   test("ping round-trips") {
     withClient(client => client.ping().map(reply => assertEquals(reply, "PONG")))
@@ -122,6 +105,6 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     }
 }
 
-class RedisRoundTripSuite extends RoundTripSuite("redis:8")
+class RedisRoundTripSuite extends RoundTripSuite(Images.redis)
 
-class ValkeyRoundTripSuite extends RoundTripSuite("valkey/valkey:8")
+class ValkeyRoundTripSuite extends RoundTripSuite(Images.valkey)

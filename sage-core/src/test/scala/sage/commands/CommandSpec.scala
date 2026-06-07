@@ -54,8 +54,8 @@ class CommandSpec extends munit.FunSuite {
     assertEquals(Reply.run(Strings.get[String, String]("foo"), Frame.BulkString(Bytes.utf8("bar"))), Right(Some("bar")))
   }
 
-  test("SET decodes +OK as unit") {
-    assertEquals(Reply.run(Strings.set("foo", "bar"), Frame.SimpleString("OK")), Right(()))
+  test("SET decodes +OK as true") {
+    assertEquals(Reply.run(Strings.set("foo", "bar"), Frame.SimpleString("OK")), Right(true))
   }
 
   test("PING decodes PONG and an echoed message") {
@@ -75,7 +75,7 @@ class CommandSpec extends munit.FunSuite {
   }
 
   test("an unexpected frame shape becomes a DecodeError naming expected and actual") {
-    Reply.run(Strings.set("foo", "bar"), Frame.Integer(1)) match {
+    Reply.run(Strings.mSet(("foo", "bar")), Frame.Integer(1)) match {
       case Left(error: SageException.DecodeError) =>
         assertEquals(error.expected, "simple string 'OK'")
         assertEquals(error.actual, "integer 1")

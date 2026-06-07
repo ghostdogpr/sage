@@ -2,15 +2,37 @@ package sage.zio
 
 import kyo.compat.*
 import zio.*
+import zio.stream.ZStream
 
 import sage.client.SageConfig
 import sage.client.internal.Client
-import sage.commands.Command
+import sage.codec.KeyCodec
+import sage.commands.{Command, Keys, RedisType, ScanCursor}
 
 /**
   * The ZIO-native surface: the same client, with every method returning `Task`.
   */
 type SageClient = Client[Task]
+
+extension (client: SageClient) {
+
+  /**
+    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once.
+    */
+  def scanAll[K: KeyCodec](
+    pattern: Option[String] = None,
+    count: Option[Long] = None,
+    ofType: Option[RedisType] = None
+  ): ZStream[Any, Throwable, K] =
+    CStream
+      .unfold[Option[ScanCursor], Vector[K]](Some(ScanCursor.start)) {
+        case None         => CIO.value(None)
+        case Some(cursor) =>
+          CIO.lift(client.run(Keys.scan[K](cursor, pattern, count, ofType))).map(page => Some((page.keys, page.next)))
+      }
+      .flatMap(keys => CStream.init(keys))
+      .lower
+}
 
 object SageClient {
 
