@@ -78,7 +78,7 @@ class SocketTransportSpec extends munit.FunSuite {
     val items = (1 to 10).map(i => new RecordingItem(s"PING $i\r\n"))
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
       assertAllArrive(peer, items)
-      assertEquals(transport.writeCount, 1L)
+      awaitWriteCount(transport, 1L)
       items.foreach(item => assertEquals(item.writeAttempts, 1))
       transport.close()
     }
@@ -90,7 +90,7 @@ class SocketTransportSpec extends munit.FunSuite {
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
       // [1,2] coalesce under the cap; 3 would overflow it and goes alone; 4 follows alone
       assertAllArrive(peer, items)
-      assertEquals(transport.writeCount, 3L)
+      awaitWriteCount(transport, 3L)
       items.foreach(item => assertEquals(item.writeAttempts, 1))
       transport.close()
     }
@@ -100,9 +100,15 @@ class SocketTransportSpec extends munit.FunSuite {
     val items = (1 to 2).map(i => new RecordingItem(i.toString * (256 * 1024)))
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
       assertAllArrive(peer, items)
-      assertEquals(transport.writeCount, 1L)
+      awaitWriteCount(transport, 1L)
       transport.close()
     }
+  }
+
+  // the counter is bumped after the socket write, so the bytes can reach the peer before the writer thread increments it
+  private def awaitWriteCount(transport: SocketTransport, expected: Long): Unit = {
+    awaitUntil(transport.writeCount >= expected, s"writeCount to reach $expected")
+    assertEquals(transport.writeCount, expected)
   }
 
   test("connection loss after a batched write leaves every item with exactly one hook fired") {
