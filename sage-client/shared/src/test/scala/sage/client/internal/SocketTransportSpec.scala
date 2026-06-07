@@ -80,6 +80,17 @@ class SocketTransportSpec extends munit.FunSuite {
     }
   }
 
+  test("a batch stops coalescing at the byte cap and continues in the next write") {
+    val items = (1 to 3).map(i => new RecordingItem(i.toString * (300 * 1024)))
+    withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
+      val expected = items.map(item => item.payload.asUtf8String).mkString
+      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      assertEquals(transport.writeCount, 2L)
+      items.foreach(item => assertEquals(item.writeAttempts, 1))
+      transport.close()
+    }
+  }
+
   test("connection loss after a batched write leaves every item with exactly one hook fired") {
     @volatile var closedCount = 0
     val items                 = (1 to 3).map(i => new RecordingItem(s"PING $i\r\n"))
