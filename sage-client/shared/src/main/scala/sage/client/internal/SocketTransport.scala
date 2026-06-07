@@ -73,6 +73,8 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     try {
       val out = socket.getOutputStream
       while (true) {
+        // consuming a carried item bypasses take(), the writer's only interruption point: re-check for close first
+        if (carry != null && closed.get()) throw new InterruptedException
         val first      = if (carry != null) carry else queue.take()
         carry = null
         batch.add(first)
