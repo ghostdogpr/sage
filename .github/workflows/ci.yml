@@ -45,8 +45,28 @@ jobs:
           apps: sbt
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
+      - name: Restore server images
+        id: images
+        uses: actions/cache@v4
+        with:
+          path: ~/.docker-images
+          key: docker-images-v1-redis8-valkey8
+      - name: Pull and save server images
+        if: steps.images.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.docker-images
+          for img in redis:8 valkey/valkey:8; do
+            docker pull "$img"
+            docker save "$img" -o ~/.docker-images/"${img//[\/:]/_}".tar
+          done
+      - name: Load server images
+        if: steps.images.outputs.cache-hit == 'true'
+        run: for f in ~/.docker-images/*.tar; do docker load -i "$f"; done
       - name: Run tests
         run: sbt test
+        env:
+          # ryuk adds a mandatory Docker Hub pull per run (rate-limit exposure) and ephemeral runners need no reaper
+          TESTCONTAINERS_RYUK_DISABLED: "true"
   # re-enable when publishing is set up (requires PGP/Sonatype secrets)
   # publish:
   #   runs-on: ubuntu-24.04
