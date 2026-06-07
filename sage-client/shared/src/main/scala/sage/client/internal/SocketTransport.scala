@@ -73,7 +73,7 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     try {
       val out = socket.getOutputStream
       while (true) {
-        val first = if (carry != null) carry else queue.take()
+        val first      = if (carry != null) carry else queue.take()
         carry = null
         batch.add(first)
         var size: Long = first.payload.length
