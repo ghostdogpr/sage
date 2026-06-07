@@ -30,6 +30,69 @@ class MultiplexerSpec extends munit.FunSuite {
     assertEquals(second, Some(Success(Some("value"))))
   }
 
+  test("replies interleaved with new submissions stay matched") {
+    val (multiplexer, transport)    = make()
+    var first: Option[Try[String]]  = None
+    var second: Option[Try[String]] = None
+    var third: Option[Try[String]]  = None
+    multiplexer.submit(Connection.ping(Some("a")), r => first = Some(r))
+    multiplexer.submit(Connection.ping(Some("b")), r => second = Some(r))
+    transport.emit(Frame.SimpleString("a"))
+    multiplexer.submit(Connection.ping(Some("c")), r => third = Some(r))
+    transport.emit(Frame.SimpleString("b"))
+    transport.emit(Frame.SimpleString("c"))
+    assertEquals(first, Some(Success("a")))
+    assertEquals(second, Some(Success("b")))
+    assertEquals(third, Some(Success("c")))
+  }
+
+  test("a reply arriving while a later command is unwritten matches the written one") {
+    val (multiplexer, transport)    = make(autoWrite = false)
+    var first: Option[Try[String]]  = None
+    var second: Option[Try[String]] = None
+    multiplexer.submit(Connection.ping(Some("a")), r => first = Some(r))
+    multiplexer.submit(Connection.ping(Some("b")), r => second = Some(r))
+    transport.writeNext()
+    transport.emit(Frame.SimpleString("a"))
+    assertEquals(first, Some(Success("a")))
+    assertEquals(second, None)
+    transport.writeNext()
+    transport.emit(Frame.SimpleString("b"))
+    assertEquals(second, Some(Success("b")))
+  }
+
+  test("push frames between writes do not consume pending replies") {
+    val (multiplexer, transport)    = make(autoWrite = false)
+    var first: Option[Try[String]]  = None
+    var second: Option[Try[String]] = None
+    multiplexer.submit(Connection.ping(Some("a")), r => first = Some(r))
+    multiplexer.submit(Connection.ping(Some("b")), r => second = Some(r))
+    transport.writeNext()
+    transport.emit(Frame.Push(Vector(Frame.SimpleString("message"))))
+    transport.writeNext()
+    transport.emit(Frame.SimpleString("a"))
+    transport.emit(Frame.SimpleString("b"))
+    assertEquals(first, Some(Success("a")))
+    assertEquals(second, Some(Success("b")))
+  }
+
+  test("loss mid-interleave: replied commands keep their results, written and unwritten fail apart") {
+    val (multiplexer, transport)    = make(autoWrite = false)
+    var first: Option[Try[String]]  = None
+    var second: Option[Try[String]] = None
+    var third: Option[Try[String]]  = None
+    multiplexer.submit(Connection.ping(Some("a")), r => first = Some(r))
+    multiplexer.submit(Connection.ping(Some("b")), r => second = Some(r))
+    multiplexer.submit(Connection.ping(Some("c")), r => third = Some(r))
+    transport.writeNext()
+    transport.emit(Frame.SimpleString("a"))
+    transport.writeNext()
+    multiplexer.close()
+    assertEquals(first, Some(Success("a")))
+    assertEquals(second, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    assertEquals(third, Some(Failure(ConnectionLost(mayHaveExecuted = false))))
+  }
+
   test("a server error fails only that command") {
     val (multiplexer, transport)    = make()
     var first: Option[Try[String]]  = None

@@ -20,6 +20,8 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
   private val queue  = new LinkedBlockingQueue[Transport.Item]()
   private val closed = new AtomicBoolean(false)
 
+  @volatile private[internal] var writeCount: Long = 0
+
   private val id                       = SocketTransport.ids.incrementAndGet()
   private[internal] val reader: Thread = Thread.ofVirtual().name(s"sage-reader-$id").unstarted(() => readLoop())
   private[internal] val writer: Thread = Thread.ofVirtual().name(s"sage-writer-$id").unstarted(() => writeLoop())
@@ -62,13 +64,29 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     } finally terminate()
   }
 
+  // Auto-pipelining: everything queued while the previous write was in flight goes out as one socket write.
   private def writeLoop(): Unit =
     try {
-      val out = socket.getOutputStream
+      val out   = socket.getOutputStream
+      val batch = new java.util.ArrayList[Transport.Item]()
       while (true) {
-        val item = queue.take()
-        item.writeAttempted()
-        out.write(item.payload.unsafeArray)
+        batch.add(queue.take())
+        queue.drainTo(batch)
+        var size = 0
+        batch.forEach { item =>
+          item.writeAttempted()
+          size += item.payload.length
+        }
+        val payload = new Array[Byte](size)
+        var offset  = 0
+        batch.forEach { item =>
+          val bytes = item.payload.unsafeArray
+          System.arraycopy(bytes, 0, payload, offset, bytes.length)
+          offset += bytes.length
+        }
+        out.write(payload)
+        writeCount += 1
+        batch.clear()
       }
     } catch {
       case _: InterruptedException => ()

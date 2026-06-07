@@ -67,6 +67,25 @@ class SocketTransportSpec extends munit.FunSuite {
     }
   }
 
+  test("items queued together are batched into a single socket write") {
+    val server = new ServerSocket(0)
+    try {
+      val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, _ => (), () => ())
+      try {
+        val items = (1 to 10).map(i => new RecordingItem(s"PING $i\r\n"))
+        items.foreach(transport.send)
+        transport.start()
+        val peer = server.accept()
+        try {
+          val expected = items.map(item => item.payload.asUtf8String).mkString
+          assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+          assertEquals(transport.writeCount, 1L)
+          items.foreach(item => assertEquals(item.writeAttempts, 1))
+        } finally peer.close()
+      } finally transport.close()
+    } finally server.close()
+  }
+
   test("a malformed frame poisons the connection") {
     @volatile var closedCount = 0
     withTransport(onClosed = () => closedCount += 1) { (transport, peer) =>
