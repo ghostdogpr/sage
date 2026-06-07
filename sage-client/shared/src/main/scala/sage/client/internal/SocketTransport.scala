@@ -72,20 +72,27 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
       while (true) {
         batch.add(queue.take())
         queue.drainTo(batch)
-        var size = 0
+        var size = 0L
         batch.forEach { item =>
           item.writeAttempted()
           size += item.payload.length
         }
-        val payload = new Array[Byte](size)
-        var offset  = 0
-        batch.forEach { item =>
-          val bytes = item.payload.unsafeArray
-          System.arraycopy(bytes, 0, payload, offset, bytes.length)
-          offset += bytes.length
-        }
-        out.write(payload)
-        writeCount += 1
+        // a batch too large for one array degrades to per-item writes rather than poisoning the connection
+        if (size <= SocketTransport.MaxSingleWrite) {
+          val payload = new Array[Byte](size.toInt)
+          var offset  = 0
+          batch.forEach { item =>
+            val bytes = item.payload.unsafeArray
+            System.arraycopy(bytes, 0, payload, offset, bytes.length)
+            offset += bytes.length
+          }
+          out.write(payload)
+          writeCount += 1
+        } else
+          batch.forEach { item =>
+            out.write(item.payload.unsafeArray)
+            writeCount += 1
+          }
         batch.clear()
       }
     } catch {
@@ -117,6 +124,8 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
 private[client] object SocketTransport {
 
   private val ids = new AtomicLong(0)
+
+  private val MaxSingleWrite: Long = Int.MaxValue - 8
 
   /**
     * Blocking connect; the returned transport is not started.

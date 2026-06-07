@@ -21,11 +21,13 @@ class SocketTransportSpec extends munit.FunSuite {
 
   private def withTransport(
     onClosed: () => Unit,
-    onFrame: Frame => Unit = _ => ()
+    onFrame: Frame => Unit = _ => (),
+    beforeStart: SocketTransport => Unit = _ => ()
   )(body: (SocketTransport, Socket) => Unit): Unit = {
     val server = new ServerSocket(0)
     try {
       val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, onFrame, onClosed)
+      beforeStart(transport)
       transport.start()
       val peer      = server.accept()
       try body(transport, peer)
@@ -68,22 +70,30 @@ class SocketTransportSpec extends munit.FunSuite {
   }
 
   test("items queued together are batched into a single socket write") {
-    val server = new ServerSocket(0)
-    try {
-      val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, _ => (), () => ())
-      try {
-        val items = (1 to 10).map(i => new RecordingItem(s"PING $i\r\n"))
-        items.foreach(transport.send)
-        transport.start()
-        val peer = server.accept()
-        try {
-          val expected = items.map(item => item.payload.asUtf8String).mkString
-          assertEquals(readExactly(peer.getInputStream, expected.length), expected)
-          assertEquals(transport.writeCount, 1L)
-          items.foreach(item => assertEquals(item.writeAttempts, 1))
-        } finally peer.close()
-      } finally transport.close()
-    } finally server.close()
+    val items = (1 to 10).map(i => new RecordingItem(s"PING $i\r\n"))
+    withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
+      val expected = items.map(item => item.payload.asUtf8String).mkString
+      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      assertEquals(transport.writeCount, 1L)
+      items.foreach(item => assertEquals(item.writeAttempts, 1))
+      transport.close()
+    }
+  }
+
+  test("connection loss after a batched write leaves every item with exactly one hook fired") {
+    @volatile var closedCount = 0
+    val items                 = (1 to 3).map(i => new RecordingItem(s"PING $i\r\n"))
+    withTransport(onClosed = () => closedCount += 1, beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
+      val expected = items.map(item => item.payload.asUtf8String).mkString
+      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      peer.close()
+      awaitUntil(closedCount == 1, "the transport to observe the disconnect")
+      items.foreach { item =>
+        assertEquals(item.writeAttempts, 1)
+        assertEquals(item.drops, 0)
+      }
+      transport.close()
+    }
   }
 
   test("a malformed frame poisons the connection") {
