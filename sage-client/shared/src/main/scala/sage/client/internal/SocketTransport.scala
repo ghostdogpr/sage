@@ -70,6 +70,7 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     val batch                 = new java.util.ArrayList[Transport.Item]()
     var carry: Transport.Item = null
     var attempted             = 0
+    var scratch: Array[Byte]  = null
     try {
       val out = socket.getOutputStream
       while (true) {
@@ -96,22 +97,23 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
           attempted = 1
           out.write(first.payload.unsafeArray)
         } else {
-          val payload = new Array[Byte](size.toInt)
-          var offset  = 0
+          if (scratch == null) scratch = new Array[Byte](SocketTransport.MaxBatchBytes.toInt)
+          var offset = 0
           batch.forEach { item =>
             val bytes = item.payload.unsafeArray
-            System.arraycopy(bytes, 0, payload, offset, bytes.length)
+            System.arraycopy(bytes, 0, scratch, offset, bytes.length)
             offset += bytes.length
           }
           batch.forEach { item =>
             item.writeAttempted()
             attempted += 1
           }
-          out.write(payload)
+          out.write(scratch, 0, offset)
         }
         writeCount += 1
-        attempted = 0
+        // clear before resetting: the finally's drop range must stay empty if anything is ever inserted here
         batch.clear()
+        attempted = 0
       }
     } catch {
       case _: InterruptedException => ()

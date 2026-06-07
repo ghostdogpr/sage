@@ -13,8 +13,8 @@ import sage.protocol.Frame
 
 /**
   * FIFO reply matching over a [[Transport]]. Wire order equals `pending` order because only the writer thread appends to `pending` (via
-  * `writeAttempted`, just before each write) — `submit` never touches it, so racing fibers cannot misalign the two. No reconnect: once the
-  * connection is gone this Multiplexer is permanently dead.
+  * `writeAttempted`, in batch order just before each batch's write) — `submit` never touches it, so racing fibers cannot misalign the two.
+  * No reconnect: once the connection is gone this Multiplexer is permanently dead.
   */
 final private[client] class Multiplexer(factory: Multiplexer.TransportFactory) {
 

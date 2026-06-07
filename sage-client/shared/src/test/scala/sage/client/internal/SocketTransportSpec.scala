@@ -49,6 +49,11 @@ class SocketTransportSpec extends munit.FunSuite {
     assert(condition, s"timed out waiting for: $label")
   }
 
+  private def assertAllArrive(peer: Socket, items: Seq[RecordingItem]): Unit = {
+    val expected = items.map(item => item.payload.asUtf8String).mkString
+    assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+  }
+
   test("writes payloads, delivers parsed frames, and joins its threads on close") {
     @volatile var frames      = Vector.empty[Frame]
     @volatile var closedCount = 0
@@ -72,8 +77,7 @@ class SocketTransportSpec extends munit.FunSuite {
   test("items queued together are batched into a single socket write") {
     val items = (1 to 10).map(i => new RecordingItem(s"PING $i\r\n"))
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
-      val expected = items.map(item => item.payload.asUtf8String).mkString
-      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      assertAllArrive(peer, items)
       assertEquals(transport.writeCount, 1L)
       items.foreach(item => assertEquals(item.writeAttempts, 1))
       transport.close()
@@ -84,11 +88,19 @@ class SocketTransportSpec extends munit.FunSuite {
     val sizes = Vector(200, 200, 600, 200).map(_ * 1024)
     val items = sizes.zipWithIndex.map { case (size, i) => new RecordingItem((i + 1).toString * size) }
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
-      val expected = items.map(item => item.payload.asUtf8String).mkString
       // [1,2] coalesce under the cap; 3 would overflow it and goes alone; 4 follows alone
-      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      assertAllArrive(peer, items)
       assertEquals(transport.writeCount, 3L)
       items.foreach(item => assertEquals(item.writeAttempts, 1))
+      transport.close()
+    }
+  }
+
+  test("items summing exactly to the byte cap coalesce into one write") {
+    val items = (1 to 2).map(i => new RecordingItem(i.toString * (256 * 1024)))
+    withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
+      assertAllArrive(peer, items)
+      assertEquals(transport.writeCount, 1L)
       transport.close()
     }
   }
@@ -97,8 +109,7 @@ class SocketTransportSpec extends munit.FunSuite {
     @volatile var closedCount = 0
     val items                 = (1 to 3).map(i => new RecordingItem(s"PING $i\r\n"))
     withTransport(onClosed = () => closedCount += 1, beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
-      val expected = items.map(item => item.payload.asUtf8String).mkString
-      assertEquals(readExactly(peer.getInputStream, expected.length), expected)
+      assertAllArrive(peer, items)
       peer.close()
       awaitUntil(closedCount == 1, "the transport to observe the disconnect")
       items.foreach { item =>
