@@ -3,8 +3,6 @@ package sage.integration
 import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 
-import com.dimafeng.testcontainers.GenericContainer
-import com.dimafeng.testcontainers.munit.TestContainerForAll
 import kyo.compat.*
 
 import sage.Bytes
@@ -14,15 +12,10 @@ import sage.client.internal.Client
 import sage.commands.Command
 import sage.protocol.Frame
 
-abstract class RoundTripSuite(image: String) extends munit.FunSuite with TestContainerForAll {
+abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
 
   // not private: only the Ox cell's unsafeRun consumes it, and a private given would be flagged unused on the other cells
   given ExecutionContext = munitExecutionContext
-
-  override val containerDef: GenericContainer.Def[GenericContainer] = GenericContainer.Def(image, exposedPorts = Seq(6379))
-
-  private def configOf(server: GenericContainer): SageConfig =
-    SageConfig(host = server.host, port = server.mappedPort(6379))
 
   private def withClient[A](body: Client[CIO] => CIO[A]): Future[A] =
     withContainers(server => connectAndUse(configOf(server))(body).unsafeRun)

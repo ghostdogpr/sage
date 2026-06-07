@@ -24,7 +24,7 @@ A single RESP3 protocol value as read from the wire — the unit the Core's pars
 _Avoid_: message, packet, token
 
 **Client**:
-The user-facing handle (`SageClient`) owning all connections to one server or cluster. Constructed with `connect`, released with `close`; per-command methods are concrete sugar that must delegate to `run`, so a fake implementing `run` gets the whole command surface.
+The user-facing handle (`SageClient`) owning all connections to one server or cluster. Constructed with `connect`, released with `close`; each Backend also offers a scope-tied construction form (`scoped`, plus `layer` for ZIO and `resource` for cats-effect) whose release swallows a failing `close`. Per-command methods are concrete sugar that must delegate to `run`, so a fake implementing `run` gets the whole command surface.
 _Avoid_: connection (a Client holds several)
 
 **Multiplexed Connection**:

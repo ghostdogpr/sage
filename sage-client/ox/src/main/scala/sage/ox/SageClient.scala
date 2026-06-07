@@ -1,6 +1,8 @@
 package sage.ox
 
-import _root_.ox.Ox
+import scala.util.control.NonFatal
+
+import _root_.ox.{useInScope, Ox}
 import kyo.compat.*
 
 import sage.client.SageConfig
@@ -15,6 +17,12 @@ type SageClient = Client[[A] =>> Ox ?=> A]
 object SageClient {
 
   def connect(config: SageConfig): Ox ?=> SageClient = new Lowered(Client.connect(config).lower)
+
+  def scoped(config: SageConfig): Ox ?=> SageClient =
+    useInScope(connect(config)) { client =>
+      try client.close
+      catch { case NonFatal(_) => () }
+    }
 
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> Ox ?=> A] {
 
