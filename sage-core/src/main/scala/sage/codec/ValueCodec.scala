@@ -15,10 +15,27 @@ trait ValueCodec[A] {
 
 object ValueCodec {
 
-  given string: ValueCodec[String] = new ValueCodec[String] {
+  given string: ValueCodec[String] = instance(Bytes.utf8, Primitives.decodeUtf8)
 
-    def encode(value: String): Bytes = Bytes.utf8(value)
+  given int: ValueCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", _.toIntOption))
 
-    def decode(bytes: Bytes): Either[DecodeError, String] = Right(bytes.asUtf8String)
-  }
+  given long: ValueCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
+
+  given double: ValueCodec[Double] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Double", _.toDoubleOption))
+
+  given float: ValueCodec[Float] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Float", _.toFloatOption))
+
+  given boolean: ValueCodec[Boolean] = instance(Primitives.encodeBoolean, Primitives.decodeBoolean)
+
+  given bytes: ValueCodec[Bytes] = instance(identity, Right(_))
+
+  given byteArray: ValueCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
+
+  private def instance[A](enc: A => Bytes, dec: Bytes => Either[DecodeError, A]): ValueCodec[A] =
+    new ValueCodec[A] {
+
+      def encode(value: A): Bytes = enc(value)
+
+      def decode(bytes: Bytes): Either[DecodeError, A] = dec(bytes)
+    }
 }

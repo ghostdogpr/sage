@@ -15,10 +15,23 @@ trait KeyCodec[A] {
 
 object KeyCodec {
 
-  given string: KeyCodec[String] = new KeyCodec[String] {
+  // no Double/Float/Boolean keys: float formatting is representation-sensitive, so two writers can silently address different keys
 
-    def encode(value: String): Bytes = Bytes.utf8(value)
+  given string: KeyCodec[String] = instance(Bytes.utf8, Primitives.decodeUtf8)
 
-    def decode(bytes: Bytes): Either[DecodeError, String] = Right(bytes.asUtf8String)
-  }
+  given int: KeyCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", _.toIntOption))
+
+  given long: KeyCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
+
+  given bytes: KeyCodec[Bytes] = instance(identity, Right(_))
+
+  given byteArray: KeyCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
+
+  private def instance[A](enc: A => Bytes, dec: Bytes => Either[DecodeError, A]): KeyCodec[A] =
+    new KeyCodec[A] {
+
+      def encode(value: A): Bytes = enc(value)
+
+      def decode(bytes: Bytes): Either[DecodeError, A] = dec(bytes)
+    }
 }
