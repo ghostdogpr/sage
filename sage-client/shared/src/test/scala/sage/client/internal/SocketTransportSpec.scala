@@ -80,12 +80,14 @@ class SocketTransportSpec extends munit.FunSuite {
     }
   }
 
-  test("a batch stops coalescing at the byte cap and continues in the next write") {
-    val items = (1 to 3).map(i => new RecordingItem(i.toString * (300 * 1024)))
+  test("coalescing never exceeds the byte cap and an over-sized item is written alone") {
+    val sizes = Vector(200, 200, 600, 200).map(_ * 1024)
+    val items = sizes.zipWithIndex.map { case (size, i) => new RecordingItem((i + 1).toString * size) }
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
       val expected = items.map(item => item.payload.asUtf8String).mkString
+      // [1,2] coalesce under the cap; 3 would overflow it and goes alone; 4 follows alone
       assertEquals(readExactly(peer.getInputStream, expected.length), expected)
-      assertEquals(transport.writeCount, 2L)
+      assertEquals(transport.writeCount, 3L)
       items.foreach(item => assertEquals(item.writeAttempts, 1))
       transport.close()
     }

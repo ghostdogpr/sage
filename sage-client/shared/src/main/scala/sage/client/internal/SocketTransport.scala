@@ -64,29 +64,36 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
     } finally terminate()
   }
 
-  // Auto-pipelining: items queued while the previous write was in flight are coalesced, up to MaxBatchBytes per socket write.
-  // `attempted` tracks how many batch items have had writeAttempted: anything past it never reached a write and is dropped on unwind.
+  // Auto-pipelining: queued items are coalesced up to MaxBatchBytes per concat buffer; an item that would overflow the cap is
+  // carried into the next batch. Items past `attempted` (and a carried item) never reached a write and are dropped on unwind.
   private def writeLoop(): Unit = {
-    val batch     = new java.util.ArrayList[Transport.Item]()
-    var attempted = 0
+    val batch                 = new java.util.ArrayList[Transport.Item]()
+    var carry: Transport.Item = null
+    var attempted             = 0
     try {
       val out = socket.getOutputStream
       while (true) {
-        val first = queue.take()
+        val first = if (carry != null) carry else queue.take()
+        carry = null
         batch.add(first)
         var size: Long = first.payload.length
-        var next       = if (size < SocketTransport.MaxBatchBytes) queue.poll() else null
-        while (next != null) {
-          batch.add(next)
-          size += next.payload.length
-          next = if (size < SocketTransport.MaxBatchBytes) queue.poll() else null
+        var draining   = size < SocketTransport.MaxBatchBytes
+        while (draining) {
+          val item = queue.poll()
+          if (item == null) draining = false
+          else if (size + item.payload.length > SocketTransport.MaxBatchBytes) {
+            carry = item
+            draining = false
+          } else {
+            batch.add(item)
+            size += item.payload.length
+          }
         }
         if (batch.size == 1) {
           first.writeAttempted()
           attempted = 1
           out.write(first.payload.unsafeArray)
-          writeCount += 1
-        } else if (size <= SocketTransport.MaxSingleWrite) {
+        } else {
           val payload = new Array[Byte](size.toInt)
           var offset  = 0
           batch.forEach { item =>
@@ -99,18 +106,8 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
             attempted += 1
           }
           out.write(payload)
-          writeCount += 1
-        } else {
-          var i = 0
-          while (i < batch.size) {
-            val item = batch.get(i)
-            item.writeAttempted()
-            attempted = i + 1
-            out.write(item.payload.unsafeArray)
-            writeCount += 1
-            i += 1
-          }
         }
+        writeCount += 1
         attempted = 0
         batch.clear()
       }
@@ -123,6 +120,7 @@ final private[client] class SocketTransport private (socket: Socket, onFrame: Fr
         batch.get(i).dropped()
         i += 1
       }
+      if (carry != null) carry.dropped()
       terminate()
     }
   }
@@ -152,9 +150,8 @@ private[client] object SocketTransport {
 
   private val ids = new AtomicLong(0)
 
-  // bounds the coalescing drain (and so the concat buffer); one over-sized item may still exceed it, hence the per-item fallback
-  private val MaxBatchBytes: Long  = 512 * 1024
-  private val MaxSingleWrite: Long = Int.MaxValue - 8
+  // strict bound on multi-item concat buffers; a single over-sized payload is always a batch of one, written zero-copy
+  private val MaxBatchBytes: Long = 512 * 1024
 
   /**
     * Blocking connect; the returned transport is not started.
