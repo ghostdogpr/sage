@@ -84,16 +84,12 @@ object Keys {
   def exists[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
     allKeys("EXISTS", first +: rest.toVector, Decode.long)
 
-  def expire[K](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(using
-    keyCodec: KeyCodec[K]
-  ): Command[Boolean] = {
+  def expire[K](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(using keyCodec: KeyCodec[K]): Command[Boolean] = {
     val (name, amount) = if (TimeArgs.wholeSeconds(in)) ("EXPIRE", in.toSeconds) else ("PEXPIRE", TimeArgs.millis(in))
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
 
-  def expireAt[K](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(using
-    keyCodec: KeyCodec[K]
-  ): Command[Boolean] = {
+  def expireAt[K](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(using keyCodec: KeyCodec[K]): Command[Boolean] = {
     val (name, amount) = if (TimeArgs.wholeSeconds(at)) ("EXPIREAT", at.getEpochSecond) else ("PEXPIREAT", TimeArgs.millis(at))
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
@@ -171,9 +167,7 @@ object Keys {
   def unlink[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
     allKeys("UNLINK", first +: rest.toVector, Decode.long)
 
-  private def allKeys[K, Out](name: String, keys: Vector[K], decode: Frame => Either[DecodeError, Out])(using
-    keyCodec: KeyCodec[K]
-  ): Command[Out] = {
+  private def allKeys[K, Out](name: String, keys: Vector[K], decode: Frame => Either[DecodeError, Out])(using keyCodec: KeyCodec[K]): Command[Out] = {
     val args = keys.map(keyCodec.encode)
     Command(name, args.indices.toVector, args, decode)
   }
@@ -188,10 +182,10 @@ object Keys {
     }
 
   private def ttlDecode(unit: scala.concurrent.duration.TimeUnit): Frame => Either[DecodeError, Ttl] = {
-    case Frame.Integer(-2)                       => Right(Ttl.NoKey)
-    case Frame.Integer(-1)                       => Right(Ttl.NoExpiry)
-    case Frame.Integer(amount) if amount >= 0    => Right(Ttl.Expires(FiniteDuration(amount, unit)))
-    case other                                   => Left(DecodeError("ttl integer", Frame.describe(other)))
+    case Frame.Integer(-2)                    => Right(Ttl.NoKey)
+    case Frame.Integer(-1)                    => Right(Ttl.NoExpiry)
+    case Frame.Integer(amount) if amount >= 0 => Right(Ttl.Expires(FiniteDuration(amount, unit)))
+    case other                                => Left(DecodeError("ttl integer", Frame.describe(other)))
   }
 
   private def expiryTimeDecode(toInstant: Long => Instant): Frame => Either[DecodeError, ExpiryTime] = {
@@ -200,12 +194,12 @@ object Keys {
     case Frame.Integer(amount) if amount >= 0 => Right(ExpiryTime.At(toInstant(amount)))
     case other                                => Left(DecodeError("expiry time integer", Frame.describe(other)))
   }
-  private val Replace = Bytes.utf8("REPLACE")
-  private val Match   = Bytes.utf8("MATCH")
-  private val Count   = Bytes.utf8("COUNT")
-  private val Type    = Bytes.utf8("TYPE")
-  private val Nx      = Bytes.utf8("NX")
-  private val Xx      = Bytes.utf8("XX")
-  private val Gt      = Bytes.utf8("GT")
-  private val Lt      = Bytes.utf8("LT")
+  private val Replace                                                                                = Bytes.utf8("REPLACE")
+  private val Match                                                                                  = Bytes.utf8("MATCH")
+  private val Count                                                                                  = Bytes.utf8("COUNT")
+  private val Type                                                                                   = Bytes.utf8("TYPE")
+  private val Nx                                                                                     = Bytes.utf8("NX")
+  private val Xx                                                                                     = Bytes.utf8("XX")
+  private val Gt                                                                                     = Bytes.utf8("GT")
+  private val Lt                                                                                     = Bytes.utf8("LT")
 }

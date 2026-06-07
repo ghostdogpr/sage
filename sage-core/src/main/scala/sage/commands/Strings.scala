@@ -52,10 +52,7 @@ object Strings {
   def getDel[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command("GETDEL", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
-  def getEx[K, V](key: K, expiry: GetExpiry = GetExpiry.Keep)(using
-    keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Option[V]] =
+  def getEx[K, V](key: K, expiry: GetExpiry = GetExpiry.Keep)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command("GETEX", Command.FirstKey, keyCodec.encode(key) +: getExpiryArgs(expiry), Decode.optionalValue)
 
   def getRange[K, V](key: K, start: Long, end: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[V] =
@@ -170,9 +167,9 @@ object Strings {
     pairs.flatMap { case (key, value) => Vector(keyCodec.encode(key), valueCodec.encode(value)) }
 
   private def msetKeyIndices(pairs: Int): Vector[Int] = Vector.tabulate(pairs)(_ * 2)
-  private val Get     = Bytes.utf8("GET")
-  private val Nx      = Bytes.utf8("NX")
-  private val Xx      = Bytes.utf8("XX")
-  private val KeepTtl = Bytes.utf8("KEEPTTL")
-  private val Persist = Bytes.utf8("PERSIST")
+  private val Get                                     = Bytes.utf8("GET")
+  private val Nx                                      = Bytes.utf8("NX")
+  private val Xx                                      = Bytes.utf8("XX")
+  private val KeepTtl                                 = Bytes.utf8("KEEPTTL")
+  private val Persist                                 = Bytes.utf8("PERSIST")
 }

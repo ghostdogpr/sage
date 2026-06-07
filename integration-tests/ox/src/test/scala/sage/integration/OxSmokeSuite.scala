@@ -29,8 +29,10 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       supervised {
         val client = SageClient.scoped(configOf(server))
-        (1 to 50).foreach(i => { val _ = client.set(s"scan-$i", "v") })
-        val keys = client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).runToList()
+        (1 to 50).foreach { i =>
+          val _ = client.set(s"scan-$i", "v")
+        }
+        val keys   = client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).runToList()
         assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
       }
     }

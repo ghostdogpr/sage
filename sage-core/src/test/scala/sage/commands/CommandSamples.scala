@@ -12,8 +12,8 @@ object CommandSamples {
 
   final case class Sample(command: Command[?], wire: Vector[String])
 
-  private val wholeSecond     = Instant.ofEpochSecond(2000000000L)
-  private val withMillis      = Instant.ofEpochMilli(2000000000123L)
+  private val wholeSecond = Instant.ofEpochSecond(2000000000L)
+  private val withMillis  = Instant.ofEpochMilli(2000000000123L)
 
   val all: Vector[Sample] = Vector(
     Sample(Connection.ping(), Vector("PING")),
