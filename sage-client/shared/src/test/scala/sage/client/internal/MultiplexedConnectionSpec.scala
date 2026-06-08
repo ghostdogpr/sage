@@ -158,6 +158,60 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
   }
 
+  test("a batch reaches the socket as a single write and matches replies per position") {
+    val (connection, _, transports) = make()
+    val commands                    = Vector(Connection.ping(Some("a")), Connection.ping(Some("b")), Connection.ping(Some("c")))
+    val results                     = new Array[Try[Any]](3)
+    val callbacks                   = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
+    val submitted                   = connection.submitAll(commands, callbacks)
+    assert(submitted)
+    assertEquals(transports.head.written.length, 1) // one round-trip: the whole pipeline is one write, not three
+    transports.head.emit(Frame.SimpleString("a"))
+    transports.head.emit(Frame.SimpleString("b"))
+    transports.head.emit(Frame.SimpleString("c"))
+    assertEquals(results.toVector, Vector[Try[Any]](Success("a"), Success("b"), Success("c")))
+  }
+
+  test("a batch's single write concatenates every command's encoding") {
+    val (connection, _, transports) = make(autoWrite = false)
+    val commands                    = Vector(Connection.ping(Some("a")), Connection.ping(Some("b")))
+    val _                           = connection.submitAll(commands, Vector.fill(2)((_: Try[Any]) => ()))
+    transports.head.writeNext()
+    val expected                    = Bytes.concat(commands.map(_.encode))
+    assertEquals(transports.head.written.length, 1)
+    assert(transports.head.written.head.sameBytes(expected))
+  }
+
+  test("a batch returns false when not connected, submitting nothing") {
+    val (connection, _, _) = make()
+    connection.close()
+    val callbacks          = Vector((_: Try[Any]) => ())
+    assertEquals(connection.submitAll(Vector(Connection.ping()), callbacks), false)
+  }
+
+  test("a written batch losing the connection fails every in-flight position as possibly executed") {
+    val (connection, _, transports) = make(autoWrite = false)
+    val commands                    = Vector(Connection.ping(Some("a")), Connection.ping(Some("b")), Connection.ping(Some("c")))
+    val results                     = new Array[Try[Any]](3)
+    val callbacks                   = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
+    val _                           = connection.submitAll(commands, callbacks)
+    transports.head.writeNext() // the whole batch is one write
+    transports.head.emit(Frame.SimpleString("a"))
+    connection.close()
+    assertEquals(results(0), Success("a"))
+    assertEquals(results(1), Failure(ConnectionLost(mayHaveExecuted = true)))
+    assertEquals(results(2), Failure(ConnectionLost(mayHaveExecuted = true)))
+  }
+
+  test("a batch dropped before any write fails every position as never sent") {
+    val (connection, _, _) = make(autoWrite = false)
+    val results            = new Array[Try[Any]](3)
+    val callbacks          = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
+    val _                  = connection.submitAll(Vector.fill(3)(Connection.ping()), callbacks)
+    connection.close()
+    assertEquals(results.toVector, Vector.fill[Try[Any]](3)(Failure(ConnectionLost(mayHaveExecuted = false))))
+  }
+
   test("attribute frames do not consume pending replies") {
     val (connection, _, transports) = make()
     var result: Option[Try[String]] = None

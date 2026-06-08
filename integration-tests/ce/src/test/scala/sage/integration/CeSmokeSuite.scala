@@ -5,6 +5,8 @@ import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 
 import sage.ce.*
+import sage.commands.Pipeline.pipeline
+import sage.commands.Strings
 
 class CeSmokeSuite extends ServerSuite(Images.redis) {
 
@@ -21,6 +23,27 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
           } yield {
             assertEquals(pong, "PONG")
             assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
+          }
+        }
+
+      program.unsafeRunSync()
+    }
+  }
+
+  test("a pipeline returns a typed tuple natively, surfacing failures per position") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            _       <- client.set("pipe:a", "x")
+            _       <- client.set("pipe:n", 10)
+            out     <- client.pipeline((Strings.get[String, String]("pipe:a"), Strings.incrBy[String]("pipe:n", 5)).pipeline)
+            _       <- client.set("pipe:str", "hello")
+            attempt <- client.pipelineAttempt((Strings.get[String, String]("pipe:str"), Strings.incr[String]("pipe:str")).pipeline)
+          } yield {
+            assertEquals(out, (Some("x"), 15L))
+            assert(attempt._1 == Right(Some("hello")), attempt._1)
+            assert(attempt._2.isLeft, attempt._2)
           }
         }
 

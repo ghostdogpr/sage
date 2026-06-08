@@ -7,6 +7,7 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.UnsupportedServer
 import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
+import sage.commands.{Command, Execution, Pipeline}
 import sage.protocol.Frame
 
 class ConnectSpec extends munit.FunSuite {
@@ -61,5 +62,23 @@ class ConnectSpec extends munit.FunSuite {
     val (factory, _)                            = scripted(helloThenPong)
     val native: zio.ZIO[Any, Throwable, String] = Client.connectWith(factory).flatMap(client => client.ping()).lower
     CIO.lift(native).unsafeRun.map(result => assertEquals(result, "PONG"))
+  }
+
+  test("a pipeline carrying a blocking command fails fast without reaching the socket") {
+    val (factory, transport) = scripted(helloThenPong)
+    val blocking             = Pipeline.sequence(Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking)))
+    Client.connectWith(factory).flatMap(_.pipeline(blocking)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assertEquals(transport().written.count(_.asUtf8String.contains("BLPOP")), 0)
+    }
+  }
+
+  test("an empty pipeline succeeds without a round-trip") {
+    val (factory, transport) = scripted(helloThenPong)
+    val empty                = Pipeline.sequence(Vector.empty[Command[Long]])
+    Client.connectWith(factory).flatMap(_.pipeline(empty)).unsafeRun.map { result =>
+      assertEquals(result, Vector.empty[Long])
+      assertEquals(transport().written.count(payload => !payload.asUtf8String.contains("HELLO")), 0)
+    }
   }
 }

@@ -7,7 +7,7 @@ import zio.stream.ZStream
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor, Sets, SortedSets}
+import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
 /**
   * The ZIO-native surface: the same client, with every method returning `Task`.
@@ -99,6 +99,10 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[Task] {
 
     def run[A](command: Command[A]): Task[A] = underlying.run(command).lower
+
+    def pipeline[Out, R](p: Pipeline[Out, R]): Task[Out] = underlying.pipeline(p).lower
+
+    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Task[R] = underlying.pipelineAttempt(p).lower
 
     def close: Task[Unit] = underlying.close.lower
   }

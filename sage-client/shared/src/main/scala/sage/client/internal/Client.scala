@@ -1,12 +1,15 @@
 package sage.client.internal
 
 import java.time.Instant
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
 
 import scala.concurrent.duration.FiniteDuration
+import scala.util.{Failure, Success, Try}
 
 import kyo.compat.*
 
-import sage.SageException.{ServerError, UnsupportedServer}
+import sage.SageException
+import sage.SageException.{NotConnected, ServerError, UnsupportedServer}
 import sage.client.{BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
@@ -18,6 +21,10 @@ import sage.commands.*
 trait Client[F[_]] {
 
   def run[A](command: Command[A]): F[A]
+
+  def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
+
+  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
 
   def close: F[Unit]
 
@@ -465,6 +472,43 @@ object Client {
       command.execution match {
         case Execution.Ordinary => CIO.async(callback => connection.submit(command, callback))
         case Execution.Blocking => CIO.async(callback => pool.use(command, callback))
+      }
+
+    def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
+      submitPipeline(p).flatMap { results =>
+        results.collectFirst { case Left(error) => error } match {
+          case Some(error) => CIO.fail(error)
+          case None        => CIO.value(p.toOut(results.collect { case Right(value) => value }))
+        }
+      }
+
+    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
+      submitPipeline(p).map(p.toResults)
+
+    private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
+      if (p.commands.isEmpty)
+        CIO.value(Vector.empty)
+      else if (p.commands.exists(_.execution != Execution.Ordinary))
+        CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually or in a Transaction"))
+      else
+        CIO.async { complete =>
+          val n         = p.commands.length
+          val slots     = new AtomicReferenceArray[Either[SageException, Any]](n)
+          val remaining = new AtomicInteger(n)
+          val callbacks = Vector.tabulate(n) { i => (result: Try[Any]) =>
+            slots.set(i, toEither(result))
+            if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(slots.get)))
+          }
+          if (!connection.submitAll(p.commands, callbacks)) complete(Failure(NotConnected()))
+        }
+
+    // decoders return Either and never throw; the catch in the connection's reply path is defensive, so a non-SageException here is a
+    // decoder bug surfaced as a decode failure rather than allowed to escape the per-position result model.
+    private def toEither(result: Try[Any]): Either[SageException, Any] =
+      result match {
+        case Success(value)            => Right(value)
+        case Failure(e: SageException) => Left(e)
+        case Failure(other)            => Left(SageException.DecodeError("a decodable reply", s"decoder threw $other"))
       }
 
     def close: CIO[Unit] = CIO.blocking { pool.close(); connection.close() }

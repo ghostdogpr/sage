@@ -6,7 +6,7 @@ import _root_.kyo.compat.*
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor, Sets, SortedSets}
+import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
 /**
   * The Kyo-native surface: the same client, with every method returning a Kyo pending computation.
@@ -95,6 +95,10 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> A < (Abort[Throwable] & Async)] {
 
     def run[A](command: Command[A]): A < (Abort[Throwable] & Async) = underlying.run(command).lower
+
+    def pipeline[Out, R](p: Pipeline[Out, R]): Out < (Abort[Throwable] & Async) = underlying.pipeline(p).lower
+
+    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): R < (Abort[Throwable] & Async) = underlying.pipelineAttempt(p).lower
 
     def close: Unit < (Abort[Throwable] & Async) = underlying.close.lower
   }
