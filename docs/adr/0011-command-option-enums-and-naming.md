@@ -4,6 +4,8 @@ Command options are modeled as small per-command Scala enums passed as defaulted
 
 Naming is mechanical: camelCase per wire word (`pTtl`, `mGet`, `renameNx`), the convention only zio-redis applies consistently; `typeOf` for TYPE (keyword); `setGet` follows the ecosystem-unanimous name. Multi-key commands take `(first: K, rest: K*)` so zero-key calls don't compile. Time is typed — `FiniteDuration`/`Instant` in, ADTs out (`Ttl.NoKey | NoExpiry | Expires`) — and sub-second precision selects the millisecond wire variant (`expire` emits `EXPIRE` or `PEXPIRE`), so the wire form is an encoding detail rather than a method choice.
 
+The one exception to "never shared across commands" is a domain primitive that appears identically in structurally-identical positions: `ListSide` (`LEFT`/`RIGHT`) is shared by `LMOVE` (both ends) and `LMPOP`, because a list end is one concept with one legal space everywhere it occurs, not a per-command option group. Option enums whose legal space differs by command (`SetExpiry` vs `GetExpiry`) stay per-command as before.
+
 ## Consequences
 
 - Every remaining family copies this shape mechanically; deviations need a reason.

@@ -41,4 +41,18 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
       program.unsafeRunSync()
     }
   }
+
+  test("hScanAll streams every field/value pair as a native fs2 Stream") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            _     <- (1 to 50).toList.parTraverse_(i => client.hSet("hscan", (s"f$i", s"v$i")))
+            pairs <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).compile.toVector
+          } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
+        }
+
+      program.unsafeRunSync()
+    }
+  }
 }

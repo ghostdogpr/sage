@@ -39,4 +39,18 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
     }
   }
+
+  test("hScanAll streams every field/value pair as a native Kyo Stream") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client <- SageClient.scoped(configOf(server))
+          _      <- Async.foreachDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
+          pairs  <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).run
+        } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
 }

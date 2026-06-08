@@ -6,12 +6,9 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
-import sage.Bytes
-import sage.SageException.DecodeError
 import sage.client.internal.Client
 import sage.commands.*
 import sage.integration.{Images, ServerSuite}
-import sage.protocol.Frame
 
 abstract class KeysSuite(image: String) extends ServerSuite(image) {
 
@@ -173,7 +170,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.set("keys-type-str", "v")
-        _       <- client.run(lPush("keys-type-list", "v"))
+        _       <- client.lPush("keys-type-list", "v")
         str     <- client.typeOf("keys-type-str")
         list    <- client.typeOf("keys-type-list")
         missing <- client.typeOf("keys-type-missing")
@@ -199,7 +196,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _     <- client.set("keys-scant-str", "v")
-        _     <- client.run(lPush("keys-scant-list", "v"))
+        _     <- client.lPush("keys-scant-list", "v")
         found <- scanAll(client, pattern = Some("keys-scant-*"), count = None, ofType = Some(RedisType.List))
       } yield assertEquals(found, Set("keys-scant-list"))
     }
@@ -213,7 +210,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
   ): CIO[Set[String]] = {
     def loop(cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
       client.scan[String](cursor, pattern, count, ofType).flatMap { page =>
-        val collected = found ++ page.keys
+        val collected = found ++ page.items
         page.next match {
           case Some(next) => loop(next, collected)
           case None       => CIO.value(collected)
@@ -221,18 +218,6 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
       }
     loop(ScanCursor.start, Set.empty)
   }
-
-  // sage has no list family yet; raw command for fixtures only
-  private def lPush(key: String, value: String): Command[Long] =
-    Command(
-      "LPUSH",
-      keyIndices = Command.FirstKey,
-      args = Vector(Bytes.utf8(key), Bytes.utf8(value)),
-      decode = {
-        case Frame.Integer(length) => Right(length)
-        case other                 => Left(DecodeError("integer", Frame.describe(other)))
-      }
-    )
 
   private def remaining(ttl: Ttl): Option[FiniteDuration] =
     ttl match {

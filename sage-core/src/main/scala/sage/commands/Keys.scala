@@ -64,9 +64,10 @@ object ScanCursor {
 }
 
 /**
-  * One SCAN round-trip. `next` is `None` when the iteration is complete; an empty `keys` with a `Some` cursor is normal mid-iteration.
+  * One cursor round-trip, shared by every SCAN-family command (`SCAN` keys, `HSCAN` field/value pairs, …). `next` is `None` when the
+  * iteration is complete; empty `items` with a `Some` cursor is normal mid-iteration.
   */
-final case class ScanPage[K](keys: Vector[K], next: Option[ScanCursor])
+final case class ScanPage[A](items: Vector[A], next: Option[ScanCursor])
 
 object Keys {
 
@@ -131,18 +132,7 @@ object Keys {
         (pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++
           count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString))) ++
           ofType.toVector.flatMap(t => Vector(Type, Bytes.utf8(RedisType.wireName(t))))),
-      decode = {
-        case Frame.Array(Vector(cursorFrame, keysFrame)) =>
-          for {
-            next <- cursorFrame match {
-                      case Frame.BulkString(bytes) =>
-                        Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
-                      case other                   => Left(DecodeError("cursor bulk string", Frame.describe(other)))
-                    }
-            keys <- Decode.vector(Decode.key[K])(keysFrame)
-          } yield ScanPage(keys, next)
-        case other                                       => Left(DecodeError("array of cursor and keys", Frame.describe(other)))
-      }
+      Decode.scanPage(Decode.vector(Decode.key[K]))
     )
 
   def touch[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =

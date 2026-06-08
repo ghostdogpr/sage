@@ -37,4 +37,17 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       }
     }
   }
+
+  test("hScanAll streams every field/value pair as a native Ox Flow") {
+    withContainers { server =>
+      supervised {
+        val client = SageClient.scoped(configOf(server))
+        (1 to 50).foreach { i =>
+          val _ = client.hSet("hscan", (s"f$i", s"v$i"))
+        }
+        val pairs  = client.hScanAll[String, String, String]("hscan", count = Some(10L)).runToList()
+        assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
+      }
+    }
+  }
 }

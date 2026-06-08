@@ -27,6 +27,13 @@ private[commands] object Decode {
     case other                    => Left(DecodeError("simple string 'OK'", Frame.describe(other)))
   }
 
+  val double: Frame => Either[DecodeError, Double] = {
+    case Frame.BulkString(bytes) =>
+      val text = bytes.asUtf8String
+      text.toDoubleOption.toRight(DecodeError("double bulk string", s"bulk string '$text'"))
+    case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
+  }
+
   def value[V](using codec: ValueCodec[V]): Frame => Either[DecodeError, V] = {
     case Frame.BulkString(bytes) => codec.decode(bytes)
     case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
@@ -49,12 +56,79 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
+  val optionalLong: Frame => Either[DecodeError, Option[Long]] = {
+    case Frame.Null           => Right(None)
+    case Frame.Integer(value) => Right(Some(value))
+    case other                => Left(DecodeError("integer or null", Frame.describe(other)))
+  }
+
   def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
     case Frame.Array(elements) =>
       elements.foldLeft[Either[DecodeError, Vector[A]]](Right(Vector.empty)) { (acc, frame) =>
         acc.flatMap(decoded => element(frame).map(decoded :+ _))
       }
     case other                 => Left(DecodeError("array", Frame.describe(other)))
+  }
+
+  // a missing list replies null where a present one replies an array; a stored list is never empty, so null collapses to an empty vector
+  def vectorOrEmpty[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
+    case Frame.Null => Right(Vector.empty)
+    case other      => vector(element)(other)
+  }
+
+  def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
+    case Frame.Map(entries) =>
+      entries.foldLeft[Either[DecodeError, Map[K, V]]](Right(Map.empty)) { case (acc, (fieldFrame, valueFrame)) =>
+        for {
+          decoded <- acc
+          field   <- key(fieldFrame)
+          value   <- this.value(valueFrame)
+        } yield decoded + (field -> value)
+      }
+    case other              => Left(DecodeError("map", Frame.describe(other)))
+  }
+
+  // HSCAN's items are a flat field, value, field, value, … array; HRANDFIELD WITHVALUES nests each pair in its own array.
+  def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
+    case Frame.Array(elements) if elements.length % 2 == 0 =>
+      elements.grouped(2).foldLeft[Either[DecodeError, Vector[(K, V)]]](Right(Vector.empty)) { (acc, pair) =>
+        for {
+          decoded <- acc
+          field   <- key(pair(0))
+          value   <- this.value(pair(1))
+        } yield decoded :+ (field -> value)
+      }
+    case other => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
+  }
+
+  def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
+    case Frame.Array(rows) =>
+      rows.foldLeft[Either[DecodeError, Vector[(K, V)]]](Right(Vector.empty)) { (acc, row) =>
+        acc.flatMap { decoded =>
+          row match {
+            case Frame.Array(Vector(fieldFrame, valueFrame)) =>
+              for {
+                field <- key(fieldFrame)
+                value <- this.value(valueFrame)
+              } yield decoded :+ (field -> value)
+            case other                                       => Left(DecodeError("field/value pair", Frame.describe(other)))
+          }
+        }
+      }
+    case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
+  }
+
+  def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] = {
+    case Frame.Array(Vector(cursorFrame, itemsFrame)) =>
+      for {
+        next    <- cursorFrame match {
+                     case Frame.BulkString(bytes) =>
+                       Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
+                     case other                   => Left(DecodeError("cursor bulk string", Frame.describe(other)))
+                   }
+        decoded <- items(itemsFrame)
+      } yield ScanPage(decoded, next)
+    case other                                        => Left(DecodeError("array of cursor and items", Frame.describe(other)))
   }
 }
 

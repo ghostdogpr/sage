@@ -56,7 +56,7 @@ class KeysSpec extends munit.FunSuite {
     )
     Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
       case Right(page) =>
-        assertEquals(page.keys, Vector("a", "b"))
+        assertEquals(page.items, Vector("a", "b"))
         assert(page.next.isDefined)
       case other       => fail(s"expected a page, got $other")
     }
@@ -66,7 +66,7 @@ class KeysSpec extends munit.FunSuite {
     val reply = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("0")), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("last"))))))
     Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
       case Right(page) =>
-        assertEquals(page.keys, Vector("last"))
+        assertEquals(page.items, Vector("last"))
         assertEquals(page.next, None)
       case other       => fail(s"expected a page, got $other")
     }

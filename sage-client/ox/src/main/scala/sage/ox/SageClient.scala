@@ -8,8 +8,8 @@ import kyo.compat.*
 
 import sage.client.SageConfig
 import sage.client.internal.Client
-import sage.codec.KeyCodec
-import sage.commands.{Command, Keys, RedisType, ScanCursor}
+import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor}
 
 /**
   * The Ox-native surface: direct style, every method usable inside an Ox scope.
@@ -30,9 +30,26 @@ extension (client: SageClient) {
       .unfold[Option[ScanCursor], Vector[K]](Some(ScanCursor.start)) {
         case None         => CIO.value(None)
         case Some(cursor) =>
-          CIO.lift(client.run(Keys.scan[K](cursor, pattern, count, ofType))).map(page => Some((page.keys, page.next)))
+          CIO.lift(client.run(Keys.scan[K](cursor, pattern, count, ofType))).map(page => Some((page.items, page.next)))
       }
       .flatMap(keys => CStream.init(keys))
+      .lower
+
+  /**
+    * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
+    */
+  def hScanAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    key: K,
+    pattern: Option[String] = None,
+    count: Option[Long] = None
+  ): Ox ?=> Flow[(F, V)] =
+    CStream
+      .unfold[Option[ScanCursor], Vector[(F, V)]](Some(ScanCursor.start)) {
+        case None         => CIO.value(None)
+        case Some(cursor) =>
+          CIO.lift(client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
+      }
+      .flatMap(pairs => CStream.init(pairs))
       .lower
 }
 

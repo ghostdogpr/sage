@@ -4,7 +4,10 @@ import sage.Bytes
 import sage.SageException.DecodeError
 
 /**
-  * Encodes/decodes a user type at a key position. Deliberately unrelated to [[ValueCodec]] so given resolution stays unambiguous.
+  * Encodes/decodes a user type at a key or hash-field position — an identifier into the keyspace or a hash, never a payload (use
+  * [[ValueCodec]] for those). Deliberately unrelated to [[ValueCodec]] so given resolution stays unambiguous, and float/boolean types
+  * are excluded because their formatting is representation-sensitive — two writers must not silently address different keys or fields.
+  * Cluster-slot hashing is a property of key positions only ([[sage.commands.Command.keyIndices]]); this typeclass does no hashing itself.
   */
 trait KeyCodec[A] {
 

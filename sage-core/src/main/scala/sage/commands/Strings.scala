@@ -70,17 +70,7 @@ object Strings {
     Command("INCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)), Decode.long)
 
   def incrByFloat[K](key: K, increment: Double)(using keyCodec: KeyCodec[K]): Command[Double] =
-    Command(
-      "INCRBYFLOAT",
-      Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)),
-      decode = {
-        case Frame.BulkString(bytes) =>
-          val text = bytes.asUtf8String
-          text.toDoubleOption.toRight(DecodeError("double bulk string", s"bulk string '$text'"))
-        case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
-      }
-    )
+    Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)), Decode.double)
 
   def mGet[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)

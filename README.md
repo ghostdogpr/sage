@@ -10,7 +10,7 @@ It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs �
 
 ## Highlights (planned for v1)
 
-- **RESP3 only** — typed replies, push frames, Redis 6+ / any Valkey
+- **RESP3 only** — typed replies, push frames; targets modern Redis (8+) and Valkey (8+)
 - **Automatic pipelining** — commands from all fibers multiplexed onto one connection
 - **Typed commands as values** — composable into pipelines and `MULTI`/`EXEC` transactions with typed results
 - **Standalone and cluster** behind one client type — topology is configuration

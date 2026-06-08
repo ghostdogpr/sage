@@ -41,4 +41,19 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
     }
   }
+
+  test("hScanAll streams every field/value pair as a native ZStream") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(configOf(server))
+            _      <- ZIO.foreachParDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
+            pairs  <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).runCollect
+          } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
 }
