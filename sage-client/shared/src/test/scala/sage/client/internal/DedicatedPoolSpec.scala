@@ -167,4 +167,35 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(31.seconds)
     assertEquals(transports.head.closeCount, 1)
   }
+
+  test("a transaction lease returns a reusable connection to the pool") {
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)))
+    val conn                          = pool.acquireForTransaction()
+    assertEquals(transports.size, 1)
+
+    pool.releaseTransaction(conn, reusable = true)
+    val reused = pool.acquireForTransaction()
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1)
+    pool.releaseTransaction(reused, reusable = true)
+  }
+
+  test("a transaction lease discards a non-reusable connection and opens a fresh one next time") {
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)))
+    val conn                          = pool.acquireForTransaction()
+    assertEquals(transports.size, 1)
+
+    pool.releaseTransaction(conn, reusable = false)
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.head.closeCount, 1)
+
+    val _ = pool.acquireForTransaction()
+    assertEquals(transports.size, 2)
+  }
+
+  test("a transaction lease issued while not connected fails fast NotConnected") {
+    val (pool, _, transports) = make(replyWith(Nil), isLive = () => false)
+    intercept[NotConnected](pool.acquireForTransaction())
+    assertEquals(transports.size, 0)
+  }
 }

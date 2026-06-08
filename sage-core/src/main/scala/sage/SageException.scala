@@ -33,4 +33,10 @@ object SageException {
   final case class CrossSlot(message: String) extends SageException(message)
 
   final case class TimedOut(message: String) extends SageException(message)
+
+  /**
+    * A transaction was discarded server-side because a command could not be queued (`EXECABORT`): nothing ran. Distinct from an
+    * execution-phase error, which leaves the other commands committed (Redis does not roll back) and surfaces per-position.
+    */
+  final case class TransactionDiscarded(message: String) extends SageException(message)
 }

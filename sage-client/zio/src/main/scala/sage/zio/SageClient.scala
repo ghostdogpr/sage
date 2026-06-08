@@ -5,7 +5,7 @@ import zio.*
 import zio.stream.ZStream
 
 import sage.client.SageConfig
-import sage.client.internal.Client
+import sage.client.internal.{Client, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
@@ -103,6 +103,18 @@ object SageClient {
     def pipeline[Out, R](p: Pipeline[Out, R]): Task[Out] = underlying.pipeline(p).lower
 
     def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Task[R] = underlying.pipelineAttempt(p).lower
+
+    def transaction[A](body: TransactionScope[Task] => Task[A]): Task[A] =
+      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
+
+    private def lower(scope: TransactionScope[CIO]): TransactionScope[Task] =
+      new TransactionScope[Task] {
+        def watch[K: KeyCodec](key: K, rest: K*): Task[Unit]          = scope.watch(key, rest*).lower
+        def run[A](command: Command[A]): Task[A]                      = scope.run(command).lower
+        def exec[Out, R](p: Pipeline[Out, R]): Task[Option[Out]]      = scope.exec(p).lower
+        def execAttempt[Out, R](p: Pipeline[Out, R]): Task[Option[R]] = scope.execAttempt(p).lower
+        def discard: Task[Unit]                                       = scope.discard.lower
+      }
 
     def close: Task[Unit] = underlying.close.lower
   }

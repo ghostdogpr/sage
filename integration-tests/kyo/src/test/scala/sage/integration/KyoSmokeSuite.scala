@@ -49,6 +49,26 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("a transaction commits atomically with native Kyo, guarded by WATCH") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client <- SageClient.scoped(configOf(server))
+          _      <- client.set("tx:n", 1)
+          out    <- client.transaction { tx =>
+                      for {
+                        _   <- tx.watch("tx:n")
+                        _   <- tx.run(Strings.get[String, Int]("tx:n"))
+                        res <- tx.exec((Strings.incr[String]("tx:n"), Strings.incrBy[String]("tx:n", 4)).pipeline)
+                      } yield res
+                    }
+        } yield assertEquals(out, Some((2L, 6L)))
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
+
   test("scanAll streams every key as a native Kyo Stream") {
     withContainers { server =>
       val program: Unit < (Scope & Abort[Throwable] & Async) =

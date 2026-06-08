@@ -63,8 +63,12 @@ _Avoid_: request, operation
 An applicative composition of Commands sent in one round-trip, yielding a typed tuple of results. Not a transaction — no atomicity.
 
 **Transaction**:
-A Pipeline executed atomically via `MULTI`/`EXEC` on a Dedicated Connection, optionally guarded by `WATCH`.
+A Pipeline executed atomically via `MULTI`/`EXEC` on a Dedicated Connection, optionally guarded by `WATCH`. A watched key changing before `EXEC` aborts it — a normal optimistic-concurrency outcome the caller retries, not a failure. A queueing-phase rejection discards the whole transaction (nothing runs); an execution-phase error leaves the other commands committed (Redis does not roll back), surfaced per-position like a Pipeline.
 _Avoid_: batch (that's a Pipeline)
+
+**Transaction Scope**:
+The handle opened by `transaction { scope => … }`, holding one leased Dedicated Connection for the block. Within it the caller may `watch`, `run` reads, then `exec` a Pipeline (or `discard`) — enough to read, decide, and commit on the one connection that `WATCH` requires. The lease is always released; a scope abandoned with watches still armed discards its connection rather than recycling it.
+_Avoid_: transaction context, session
 
 **Family**:
 A group of Commands mirroring one of the server's documented command groups (strings, keys, hashes, …): one Core object of command builders plus matching Client sugar, built and reviewed as a unit.

@@ -7,7 +7,7 @@ import _root_.ox.flow.Flow
 import kyo.compat.*
 
 import sage.client.SageConfig
-import sage.client.internal.Client
+import sage.client.internal.{Client, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
@@ -104,6 +104,18 @@ object SageClient {
     def pipeline[Out, R](p: Pipeline[Out, R]): Ox ?=> Out = underlying.pipeline(p).lower
 
     def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> R = underlying.pipelineAttempt(p).lower
+
+    def transaction[A](body: TransactionScope[[X] =>> Ox ?=> X] => (Ox ?=> A)): Ox ?=> A =
+      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
+
+    private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> Ox ?=> X] =
+      new TransactionScope[[X] =>> Ox ?=> X] {
+        def watch[K: KeyCodec](key: K, rest: K*): Ox ?=> Unit          = scope.watch(key, rest*).lower
+        def run[A](command: Command[A]): Ox ?=> A                      = scope.run(command).lower
+        def exec[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[Out]      = scope.exec(p).lower
+        def execAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[R] = scope.execAttempt(p).lower
+        def discard: Ox ?=> Unit                                       = scope.discard.lower
+      }
 
     def close: Ox ?=> Unit = underlying.close.lower
   }

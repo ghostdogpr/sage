@@ -113,6 +113,73 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("a transaction commits atomically and returns typed results") {
+    withClient { client =>
+      for {
+        _   <- client.set("t:n", 10)
+        out <- client.transaction(tx => tx.exec((Strings.incr[String]("t:n"), Strings.incrBy[String]("t:n", 5)).pipeline))
+      } yield assertEquals(out, Some((11L, 16L)))
+    }
+  }
+
+  test("a read-modify-write transaction commits when the watched key is unchanged") {
+    withClient { client =>
+      for {
+        _      <- client.set("t:rmw", 5)
+        out    <- client.transaction { tx =>
+                    for {
+                      _   <- tx.watch("t:rmw")
+                      cur <- tx.run(Strings.get[String, Int]("t:rmw"))
+                      res <- tx.exec(Pipeline.sequence(Vector(Strings.set[String, Int]("t:rmw", cur.getOrElse(0) + 1))))
+                    } yield res
+                  }
+        stored <- client.get[String, Int]("t:rmw")
+      } yield {
+        assert(out.isDefined, s"expected a committed transaction, got $out")
+        assertEquals(stored, Some(6))
+      }
+    }
+  }
+
+  test("WATCH aborts the transaction when a watched key is modified concurrently") {
+    withContainers { server =>
+      connectAndUse(configOf(server)) { client =>
+        for {
+          other  <- Client.connect(configOf(server))
+          _      <- client.set("t:w", 1)
+          out    <- client.transaction { tx =>
+                      for {
+                        _   <- tx.watch("t:w")
+                        _   <- tx.run(Strings.get[String, Int]("t:w"))
+                        _   <- other.set("t:w", 99) // a different connection changes the watched key before EXEC
+                        res <- tx.exec(Pipeline.sequence(Vector(Strings.incr[String]("t:w"))))
+                      } yield res
+                    }
+          _      <- other.close
+          stored <- client.get[String, Int]("t:w")
+        } yield {
+          assertEquals(out, None)        // aborted
+          assertEquals(stored, Some(99)) // the INCR never ran
+        }
+      }.unsafeRun
+    }
+  }
+
+  test("an execution-phase error surfaces per-position while the other commands commit") {
+    withClient { client =>
+      for {
+        _   <- client.set("t:str", "x")
+        res <- client.transaction(tx => tx.execAttempt((Strings.incr[String]("t:fresh"), Strings.incr[String]("t:str")).pipeline))
+        ok  <- client.get[String, Int]("t:fresh")
+      } yield {
+        val (a, b) = res.getOrElse(fail("expected a committed transaction"))
+        assertEquals(a, Right(1L))
+        assert(b.isLeft, s"expected the INCR on a string to fail, got $b")
+        assertEquals(ok, Some(1)) // the first INCR committed despite the second erroring — Redis does not roll back
+      }
+    }
+  }
+
   test("closing the client releases its server connection") {
     withContainers { server =>
       connectAndUse(configOf(server)) { observer =>

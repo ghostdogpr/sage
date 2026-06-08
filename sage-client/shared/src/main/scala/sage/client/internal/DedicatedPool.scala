@@ -72,6 +72,28 @@ final private[client] class DedicatedPool(
         }
       }
 
+  /**
+    * Borrows a connection to lease across a transaction's many commands (rather than the single command [[use]] runs). Blocks the calling
+    * fiber while it waits for a slot or opens a socket, so callers must offload it; gated on liveness like [[use]].
+    */
+  def acquireForTransaction(): DedicatedConnection = {
+    if (!isLive()) throw NotConnected()
+    acquire()
+  }
+
+  /**
+    * Returns a leased connection. `reusable` recycles it to the idle set; otherwise (a transaction left with watches armed, or interrupted
+    * mid-command) it is discarded outright rather than handed to the next borrower with residual `WATCH`/`MULTI` state.
+    */
+  def releaseTransaction(connection: DedicatedConnection, reusable: Boolean): Unit =
+    if (reusable) release(connection)
+    else
+      locked {
+        live -= connection
+        scheduleClose(connection)
+        available.signalAll()
+      }
+
   def close(): Unit = {
     val toClose = locked {
       closing = true

@@ -51,6 +51,26 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("a transaction commits atomically with native cats-effect, guarded by WATCH") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            _   <- client.set("tx:n", 1)
+            out <- client.transaction { tx =>
+                     for {
+                       _   <- tx.watch("tx:n")
+                       _   <- tx.run(Strings.get[String, Int]("tx:n"))
+                       res <- tx.exec((Strings.incr[String]("tx:n"), Strings.incrBy[String]("tx:n", 4)).pipeline)
+                     } yield res
+                   }
+          } yield assertEquals(out, Some((2L, 6L)))
+        }
+
+      program.unsafeRunSync()
+    }
+  }
+
   test("scanAll streams every key as a native fs2 Stream") {
     withContainers { server =>
       val program: IO[Unit] =

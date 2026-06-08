@@ -1,18 +1,21 @@
 package sage.client.internal
 
 import java.time.Instant
-import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReferenceArray}
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 
 import kyo.compat.*
 
 import sage.SageException
-import sage.SageException.{NotConnected, ServerError, UnsupportedServer}
+import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TransactionDiscarded, UnsupportedServer}
 import sage.client.{BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
+import sage.protocol.Frame
 
 /**
   * The user-facing handle owning all connections to one server. Per-command methods are concrete sugar delegating to [[run]], so anything
@@ -25,6 +28,8 @@ trait Client[F[_]] {
   def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
 
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
+
+  def transaction[A](body: TransactionScope[F] => F[A]): F[A]
 
   def close: F[Unit]
 
@@ -466,6 +471,17 @@ object Client {
       case other                                                                                                    => other
     }
 
+  // the strict-collapse step shared by `pipeline` and a transaction's `exec`
+  private def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] =
+    results.collectFirst { case Left(error) => error } match {
+      case Some(error) => CIO.fail(error)
+      case None        => CIO.value(toOut(results.collect { case Right(value) => value }))
+    }
+
+  // a programmer error, deliberately outside the sealed hierarchy (like the blocking-command guard): a scope captured past its block
+  private def scopeReleasedError: IllegalStateException =
+    new IllegalStateException("transaction scope used after its block returned")
+
   final private class Live(connection: MultiplexedConnection, pool: DedicatedPool) extends Client[CIO] {
 
     def run[A](command: Command[A]): CIO[A] =
@@ -475,15 +491,29 @@ object Client {
       }
 
     def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
-      submitPipeline(p).flatMap { results =>
-        results.collectFirst { case Left(error) => error } match {
-          case Some(error) => CIO.fail(error)
-          case None        => CIO.value(p.toOut(results.collect { case Right(value) => value }))
-        }
-      }
+      submitPipeline(p).flatMap(collapseStrict(_, p.toOut))
 
     def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
       submitPipeline(p).map(p.toResults)
+
+    // The lease is bracketed: release runs on success, failure, and interruption (IO.bracket). A clean exit (exec/discard cleared the
+    // connection's WATCH/MULTI state, no reply outstanding) recycles the connection; a scope left armed or interrupted mid-command is
+    // discarded rather than handed to the next borrower dirty.
+    def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
+      CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
+
+    private def acquireScope: CIO[TxScope] =
+      CIO.blocking {
+        try new TxScope(pool.acquireForTransaction())
+        catch {
+          case e: NotConnected => throw e
+          case e: TimedOut     => throw e
+          case NonFatal(_)     => throw ConnectionLost(mayHaveExecuted = false)
+        }
+      }
+
+    private def releaseScope(scope: TxScope): CIO[Unit] =
+      CIO.blocking(pool.releaseTransaction(scope.conn, scope.sealAndReusable()))
 
     private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
       if (p.commands.isEmpty)
@@ -512,5 +542,115 @@ object Client {
       }
 
     def close: CIO[Unit] = CIO.blocking { pool.close(); connection.close() }
+  }
+
+  final private class TxScope(val conn: DedicatedConnection) extends TransactionScope[CIO] {
+
+    // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
+    val armed = new AtomicBoolean(false)
+
+    // The lock makes "reject if released, else submit" atomic with the finalizer's seal-and-decide ([[sealAndReusable]]): a command
+    // submitted under it is in-flight before the finalizer reads quiescence, so a handle captured past the block and raced against release
+    // either submits onto a connection the finalizer then declines to recycle, or is rejected outright — never onto a re-borrowed one.
+    private val lock     = new ReentrantLock()
+    private var released = false
+
+    private def submitting[A](complete: Try[A] => Unit)(submit: => Unit): Unit = {
+      lock.lock()
+      try if (released) complete(Failure(scopeReleasedError)) else submit
+      finally lock.unlock()
+    }
+
+    // run once by the lease finalizer: seals the scope against further operations and reports whether the connection may be recycled
+    private[Client] def sealAndReusable(): Boolean = {
+      lock.lock()
+      try {
+        released = true
+        conn.isHealthy && conn.isQuiescent && !armed.get
+      } finally lock.unlock()
+    }
+
+    private def isReleased: Boolean = {
+      lock.lock()
+      try released
+      finally lock.unlock()
+    }
+
+    def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] =
+      CIO.async[Unit] { complete =>
+        submitting(complete) {
+          armed.set(true)
+          conn.submit(Connection.watch(key, rest*), complete)
+        }
+      }
+
+    def run[A](command: Command[A]): CIO[A] =
+      CIO.async[A](complete => submitting(complete)(conn.submit(command, complete)))
+
+    def discard: CIO[Unit] =
+      CIO.async[Unit] { complete =>
+        submitting(complete) {
+          armed.set(false)
+          conn.submit(Connection.unwatch, complete)
+        }
+      }
+
+    def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
+      runExec(p).flatMap {
+        case None          => CIO.value(None)
+        case Some(results) => collapseStrict(results, p.toOut).map(Some(_))
+      }
+
+    def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
+      runExec(p).map(_.map(p.toResults))
+
+    // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).
+    private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
+      if (isReleased)
+        CIO.fail(scopeReleasedError)
+      // a truly empty no-op only when nothing is watched; with watches armed we must still MULTI/EXEC so a concurrent change can abort it
+      else if (p.commands.isEmpty && !armed.get)
+        CIO.value(Some(Vector.empty))
+      else if (p.commands.exists(_.execution != Execution.Ordinary))
+        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them in the read phase instead"))
+      else
+        CIO
+          .async[Vector[Frame]] { complete =>
+            submitting(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, complete))
+          }
+          .flatMap { frames =>
+            armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
+            interpretExec(p.commands, frames)
+          }
+
+    private def interpretExec(
+      commands: Vector[Command[?]],
+      frames: Vector[Frame]
+    ): CIO[Option[Vector[Either[SageException, Any]]]] = {
+      val n          = commands.length
+      // frames: MULTI reply, then one queue reply per command, then the EXEC reply
+      val queueError = (0 to n).iterator.map(i => errorOf(frames(i))).collectFirst { case Some(message) => message }
+      queueError match {
+        case Some(message) => CIO.fail(TransactionDiscarded(message))
+        case None          =>
+          frames(n + 1) match {
+            case Frame.Null         => CIO.value(None)
+            case Frame.Array(elems) =>
+              CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i).asInstanceOf[Command[Any]], elems(i)))))
+            case other              =>
+              errorOf(other) match {
+                case Some(message) => CIO.fail(TransactionDiscarded(message))
+                case None          => CIO.fail(ProtocolError(s"unexpected EXEC reply: ${Frame.describe(other)}"))
+              }
+          }
+      }
+    }
+
+    private def errorOf(frame: Frame): Option[String] =
+      frame match {
+        case Frame.SimpleError(message) => Some(message)
+        case Frame.BulkError(message)   => Some(message.asUtf8String)
+        case _                          => None
+      }
   }
 }

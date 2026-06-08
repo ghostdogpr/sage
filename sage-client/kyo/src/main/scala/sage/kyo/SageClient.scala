@@ -4,7 +4,7 @@ import _root_.kyo.{<, Abort, Async, Scope, Stream, Tag}
 import _root_.kyo.compat.*
 
 import sage.client.SageConfig
-import sage.client.internal.Client
+import sage.client.internal.{Client, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
@@ -99,6 +99,20 @@ object SageClient {
     def pipeline[Out, R](p: Pipeline[Out, R]): Out < (Abort[Throwable] & Async) = underlying.pipeline(p).lower
 
     def pipelineAttempt[Out, R](p: Pipeline[Out, R]): R < (Abort[Throwable] & Async) = underlying.pipelineAttempt(p).lower
+
+    def transaction[A](
+      body: TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] => A < (Abort[Throwable] & Async)
+    ): A < (Abort[Throwable] & Async) =
+      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
+
+    private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] =
+      new TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] {
+        def watch[K: KeyCodec](key: K, rest: K*): Unit < (Abort[Throwable] & Async)          = scope.watch(key, rest*).lower
+        def run[A](command: Command[A]): A < (Abort[Throwable] & Async)                      = scope.run(command).lower
+        def exec[Out, R](p: Pipeline[Out, R]): Option[Out] < (Abort[Throwable] & Async)      = scope.exec(p).lower
+        def execAttempt[Out, R](p: Pipeline[Out, R]): Option[R] < (Abort[Throwable] & Async) = scope.execAttempt(p).lower
+        def discard: Unit < (Abort[Throwable] & Async)                                       = scope.discard.lower
+      }
 
     def close: Unit < (Abort[Throwable] & Async) = underlying.close.lower
   }

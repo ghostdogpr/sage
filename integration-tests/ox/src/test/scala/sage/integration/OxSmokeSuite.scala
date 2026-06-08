@@ -43,6 +43,21 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("a transaction commits atomically with direct-style Ox, guarded by WATCH") {
+    withContainers { server =>
+      supervised {
+        val client = SageClient.scoped(configOf(server))
+        val _      = client.set("tx:n", 1)
+        val out    = client.transaction { tx =>
+          val _ = tx.watch("tx:n")
+          val _ = tx.run(Strings.get[String, Int]("tx:n"))
+          tx.exec((Strings.incr[String]("tx:n"), Strings.incrBy[String]("tx:n", 4)).pipeline)
+        }
+        assertEquals(out, Some((2L, 6L)))
+      }
+    }
+  }
+
   test("scanAll streams every key as a native Ox Flow") {
     withContainers { server =>
       supervised {
