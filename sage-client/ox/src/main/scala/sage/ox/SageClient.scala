@@ -9,7 +9,7 @@ import kyo.compat.*
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor}
+import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor, Sets, SortedSets}
 
 /**
   * The Ox-native surface: direct style, every method usable inside an Ox scope.
@@ -48,6 +48,40 @@ extension (client: SageClient) {
         case None         => CIO.value(None)
         case Some(cursor) =>
           CIO.lift(client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
+      }
+      .flatMap(pairs => CStream.init(pairs))
+      .lower
+
+  /**
+    * The full SSCAN iteration over set members: stops on the server's zero cursor, never on an empty page.
+    */
+  def sScanAll[K: KeyCodec, V: ValueCodec](
+    key: K,
+    pattern: Option[String] = None,
+    count: Option[Long] = None
+  ): Ox ?=> Flow[V] =
+    CStream
+      .unfold[Option[ScanCursor], Vector[V]](Some(ScanCursor.start)) {
+        case None         => CIO.value(None)
+        case Some(cursor) =>
+          CIO.lift(client.run(Sets.sScan[K, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
+      }
+      .flatMap(members => CStream.init(members))
+      .lower
+
+  /**
+    * The full ZSCAN iteration over member/score pairs: stops on the server's zero cursor, never on an empty page.
+    */
+  def zScanAll[K: KeyCodec, V: ValueCodec](
+    key: K,
+    pattern: Option[String] = None,
+    count: Option[Long] = None
+  ): Ox ?=> Flow[(V, Double)] =
+    CStream
+      .unfold[Option[ScanCursor], Vector[(V, Double)]](Some(ScanCursor.start)) {
+        case None         => CIO.value(None)
+        case Some(cursor) =>
+          CIO.lift(client.run(SortedSets.zScan[K, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
       }
       .flatMap(pairs => CStream.init(pairs))
       .lower

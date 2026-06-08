@@ -226,6 +226,184 @@ trait Client[F[_]] {
     timeout: BlockTimeout,
     count: Option[Long] = None
   ): F[Option[(K, Vector[V])]] = run(Lists.blMpop(first, rest*)(side, timeout, count))
+
+  final def sAdd[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sAdd(key, first, rest*))
+
+  final def sRem[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sRem(key, first, rest*))
+
+  final def sCard[K: KeyCodec](key: K): F[Long] = run(Sets.sCard(key))
+
+  final def sIsMember[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Boolean] = run(Sets.sIsMember(key, member))
+
+  final def sMisMember[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Boolean]] =
+    run(Sets.sMisMember(key, first, rest*))
+
+  final def sMembers[K: KeyCodec, V: ValueCodec](key: K): F[Set[V]] = run(Sets.sMembers(key))
+
+  final def sMove[K: KeyCodec, V: ValueCodec](source: K, destination: K, member: V): F[Boolean] =
+    run(Sets.sMove(source, destination, member))
+
+  final def sPop[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Sets.sPop(key))
+
+  final def sPopCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Set[V]] = run(Sets.sPopCount(key, count))
+
+  final def sRandMember[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Sets.sRandMember(key))
+
+  final def sRandMemberCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Sets.sRandMemberCount(key, count))
+
+  final def sDiff[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sDiff(first, rest*))
+
+  final def sDiffStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sDiffStore(destination, first, rest*))
+
+  final def sInter[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sInter(first, rest*))
+
+  final def sInterStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sInterStore(destination, first, rest*))
+
+  final def sInterCard[K: KeyCodec](first: K, rest: K*)(limit: Option[Long] = None): F[Long] = run(Sets.sInterCard(first, rest*)(limit))
+
+  final def sUnion[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sUnion(first, rest*))
+
+  final def sUnionStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sUnionStore(destination, first, rest*))
+
+  final def sScan[K: KeyCodec, V: ValueCodec](
+    key: K,
+    cursor: ScanCursor,
+    pattern: Option[String] = None,
+    count: Option[Long] = None
+  ): F[ScanPage[V]] = run(Sets.sScan(key, cursor, pattern, count))
+
+  final def zAdd[K: KeyCodec, V: ValueCodec](key: K, condition: ZAddCondition = ZAddCondition.Always, changed: Boolean = false)(
+    first: (V, Double),
+    rest: (V, Double)*
+  ): F[Long] = run(SortedSets.zAdd(key, condition, changed)(first, rest*))
+
+  final def zAddIncr[K: KeyCodec, V: ValueCodec](
+    key: K,
+    member: V,
+    score: Double,
+    condition: ZAddCondition = ZAddCondition.Always
+  ): F[Option[Double]] =
+    run(SortedSets.zAddIncr(key, member, score, condition))
+
+  final def zCard[K: KeyCodec](key: K): F[Long] = run(SortedSets.zCard(key))
+
+  final def zScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Double]] = run(SortedSets.zScore(key, member))
+
+  final def zMScore[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[Double]]] =
+    run(SortedSets.zMScore(key, first, rest*))
+
+  final def zIncrBy[K: KeyCodec, V: ValueCodec](key: K, member: V, increment: Double): F[Double] =
+    run(SortedSets.zIncrBy(key, member, increment))
+
+  final def zRank[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRank(key, member))
+
+  final def zRankWithScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
+    run(SortedSets.zRankWithScore(key, member))
+
+  final def zRevRank[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRevRank(key, member))
+
+  final def zRevRankWithScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
+    run(SortedSets.zRevRankWithScore(key, member))
+
+  final def zCount[K: KeyCodec](key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] = run(SortedSets.zCount(key, min, max))
+
+  final def zLexCount[K: KeyCodec, V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
+    run(SortedSets.zLexCount(key, min, max))
+
+  final def zRange[K: KeyCodec, V: ValueCodec](key: K, range: ZRange[V]): F[Vector[V]] = run(SortedSets.zRange(key, range))
+
+  final def zRangeWithScores[K: KeyCodec, V: ValueCodec](key: K, range: ZRange[V]): F[Vector[(V, Double)]] =
+    run(SortedSets.zRangeWithScores(key, range))
+
+  final def zRangeStore[K: KeyCodec, V: ValueCodec](destination: K, source: K, range: ZRange[V]): F[Long] =
+    run(SortedSets.zRangeStore(destination, source, range))
+
+  final def zRem[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(SortedSets.zRem(key, first, rest*))
+
+  final def zRemRangeByRank[K: KeyCodec](key: K, start: Long, stop: Long): F[Long] = run(SortedSets.zRemRangeByRank(key, start, stop))
+
+  final def zRemRangeByScore[K: KeyCodec](key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] =
+    run(SortedSets.zRemRangeByScore(key, min, max))
+
+  final def zRemRangeByLex[K: KeyCodec, V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
+    run(SortedSets.zRemRangeByLex(key, min, max))
+
+  final def zPopMin[K: KeyCodec, V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMin(key))
+
+  final def zPopMax[K: KeyCodec, V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMax(key))
+
+  final def zPopMinCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMinCount(key, count))
+
+  final def zPopMaxCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMaxCount(key, count))
+
+  final def zMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(minMax: MinMax, count: Option[Long] = None): F[Option[(K, Vector[(V, Double)])]] =
+    run(SortedSets.zMpop(first, rest*)(minMax, count))
+
+  final def bzPopMin[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
+    run(SortedSets.bzPopMin(first, rest*)(timeout))
+
+  final def bzPopMax[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
+    run(SortedSets.bzPopMax(first, rest*)(timeout))
+
+  final def bzMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    minMax: MinMax,
+    timeout: BlockTimeout,
+    count: Option[Long] = None
+  ): F[Option[(K, Vector[(V, Double)])]] = run(SortedSets.bzMpop(first, rest*)(minMax, timeout, count))
+
+  final def zRandMember[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(SortedSets.zRandMember(key))
+
+  final def zRandMemberCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(SortedSets.zRandMemberCount(key, count))
+
+  final def zRandMemberWithScores[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] =
+    run(SortedSets.zRandMemberWithScores(key, count))
+
+  final def zUnion[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Vector[V]] = run(SortedSets.zUnion(first, rest*)(weights, aggregate))
+
+  final def zUnionWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Vector[(V, Double)]] = run(SortedSets.zUnionWithScores(first, rest*)(weights, aggregate))
+
+  final def zUnionStore[K: KeyCodec](destination: K, first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Long] = run(SortedSets.zUnionStore(destination, first, rest*)(weights, aggregate))
+
+  final def zInter[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Vector[V]] = run(SortedSets.zInter(first, rest*)(weights, aggregate))
+
+  final def zInterWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Vector[(V, Double)]] = run(SortedSets.zInterWithScores(first, rest*)(weights, aggregate))
+
+  final def zInterStore[K: KeyCodec](destination: K, first: K, rest: K*)(
+    weights: Option[Vector[Double]] = None,
+    aggregate: Aggregate = Aggregate.Sum
+  ): F[Long] = run(SortedSets.zInterStore(destination, first, rest*)(weights, aggregate))
+
+  final def zInterCard[K: KeyCodec](first: K, rest: K*)(limit: Option[Long] = None): F[Long] =
+    run(SortedSets.zInterCard(first, rest*)(limit))
+
+  final def zDiff[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Vector[V]] = run(SortedSets.zDiff(first, rest*))
+
+  final def zDiffWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Vector[(V, Double)]] =
+    run(SortedSets.zDiffWithScores(first, rest*))
+
+  final def zDiffStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(SortedSets.zDiffStore(destination, first, rest*))
+
+  final def zScan[K: KeyCodec, V: ValueCodec](
+    key: K,
+    cursor: ScanCursor,
+    pattern: Option[String] = None,
+    count: Option[Long] = None
+  ): F[ScanPage[(V, Double)]] = run(SortedSets.zScan(key, cursor, pattern, count))
 }
 
 object Client {

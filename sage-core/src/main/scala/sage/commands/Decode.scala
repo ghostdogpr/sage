@@ -130,6 +130,83 @@ private[commands] object Decode {
       } yield ScanPage(decoded, next)
     case other                                        => Left(DecodeError("array of cursor and items", Frame.describe(other)))
   }
+
+  // RESP3 returns set-typed replies (SMEMBERS, SINTER, …) as a Set frame, never an Array
+  def set[V](using ValueCodec[V]): Frame => Either[DecodeError, Set[V]] = {
+    case Frame.Set(elements) =>
+      elements.foldLeft[Either[DecodeError, Set[V]]](Right(Set.empty)) { (acc, frame) =>
+        acc.flatMap(decoded => value(frame).map(decoded + _))
+      }
+    case other               => Left(DecodeError("set", Frame.describe(other)))
+  }
+
+  val score: Frame => Either[DecodeError, Double] = {
+    case Frame.Double(value) => Right(value)
+    case other               => Left(DecodeError("double", Frame.describe(other)))
+  }
+
+  val optionalScore: Frame => Either[DecodeError, Option[Double]] = {
+    case Frame.Null          => Right(None)
+    case Frame.Double(value) => Right(Some(value))
+    case other               => Left(DecodeError("double or null", Frame.describe(other)))
+  }
+
+  // RESP3 nests each member with its Double score in a two-element array (ZRANGE WITHSCORES, ZPOPMIN count, …)
+  def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
+    case Frame.Array(rows) =>
+      rows.foldLeft[Either[DecodeError, Vector[(V, Double)]]](Right(Vector.empty)) { (acc, row) =>
+        acc.flatMap { decoded =>
+          row match {
+            case Frame.Array(Vector(memberFrame, scoreFrame)) =>
+              for {
+                member <- value(memberFrame)
+                s      <- score(scoreFrame)
+              } yield decoded :+ (member -> s)
+            case other                                        => Left(DecodeError("member/score pair", Frame.describe(other)))
+          }
+        }
+      }
+    case other             => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
+  }
+
+  // ZPOPMIN/ZPOPMAX without a count: a flat [member, score], or an empty array when the key is absent
+  def optionalScoredMember[V](using ValueCodec[V]): Frame => Either[DecodeError, Option[(V, Double)]] = {
+    case Frame.Null                                   => Right(None)
+    case Frame.Array(Vector())                        => Right(None)
+    case Frame.Array(Vector(memberFrame, scoreFrame)) =>
+      for {
+        member <- value(memberFrame)
+        s      <- score(scoreFrame)
+      } yield Some(member -> s)
+    case other                                        => Left(DecodeError("member/score pair or empty array", Frame.describe(other)))
+  }
+
+  // ZSCAN's items are a flat member, score, member, score array with scores as bulk strings, not RESP3 doubles
+  def scoredMembersFlat[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
+    case Frame.Array(elements) if elements.length % 2 == 0 =>
+      elements.grouped(2).foldLeft[Either[DecodeError, Vector[(V, Double)]]](Right(Vector.empty)) { (acc, pair) =>
+        for {
+          decoded <- acc
+          member  <- value(pair(0))
+          s       <- scoreText(pair(1))
+        } yield decoded :+ (member -> s)
+      }
+    case other => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
+  }
+
+  private def scoreText(frame: Frame): Either[DecodeError, Double] =
+    frame match {
+      case Frame.BulkString(bytes) => parseScore(bytes.asUtf8String)
+      case other                   => Left(DecodeError("score bulk string", Frame.describe(other)))
+    }
+
+  private def parseScore(text: String): Either[DecodeError, Double] =
+    text match {
+      case "inf" | "+inf" => Right(Double.PositiveInfinity)
+      case "-inf"         => Right(Double.NegativeInfinity)
+      case "nan"          => Right(Double.NaN)
+      case other          => other.toDoubleOption.toRight(DecodeError("double", s"bulk string '$other'"))
+    }
 }
 
 private[commands] object TimeArgs {
