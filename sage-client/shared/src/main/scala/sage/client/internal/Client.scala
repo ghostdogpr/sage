@@ -7,7 +7,7 @@ import scala.concurrent.duration.FiniteDuration
 import kyo.compat.*
 
 import sage.SageException.{ServerError, UnsupportedServer}
-import sage.client.{BackoffConfig, SageConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -211,6 +211,21 @@ trait Client[F[_]] {
 
   final def lMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(side: ListSide, count: Option[Long] = None): F[Option[(K, Vector[V])]] =
     run(Lists.lMpop(first, rest*)(side, count))
+
+  final def blPop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
+    run(Lists.blPop(first, rest*)(timeout))
+
+  final def brPop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
+    run(Lists.brPop(first, rest*)(timeout))
+
+  final def blMove[K: KeyCodec, V: ValueCodec](source: K, destination: K, from: ListSide, to: ListSide, timeout: BlockTimeout): F[Option[V]] =
+    run(Lists.blMove(source, destination, from, to, timeout))
+
+  final def blMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+    side: ListSide,
+    timeout: BlockTimeout,
+    count: Option[Long] = None
+  ): F[Option[(K, Vector[V])]] = run(Lists.blMpop(first, rest*)(side, timeout, count))
 }
 
 object Client {
@@ -224,7 +239,8 @@ object Client {
       config.reconnect,
       config.watchdog,
       config.connectTimeout,
-      config.closeTimeout
+      config.closeTimeout,
+      config.dedicatedPool
     )
 
   // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
@@ -234,14 +250,28 @@ object Client {
     reconnect: BackoffConfig = defaults.reconnect,
     watchdog: WatchdogConfig = defaults.watchdog,
     connectTimeout: FiniteDuration = defaults.connectTimeout,
-    closeTimeout: FiniteDuration = defaults.closeTimeout
-  ): CIO[Client[CIO]] =
+    closeTimeout: FiniteDuration = defaults.closeTimeout,
+    dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool
+  ): CIO[Client[CIO]] = {
+    val bootstrap = Vector(Connection.hello())
     CIO
       .blocking(
-        MultiplexedConnection.connect(factory, scheduler, Vector(Connection.hello()), reconnect, watchdog, connectTimeout, closeTimeout)
+        MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
       )
-      .map(connection => new Live(connection))
+      .map { connection =>
+        val pool = new DedicatedPool(
+          factory,
+          bootstrap,
+          scheduler,
+          () => connection.currentState == MultiplexedConnection.State.Live,
+          () => connection.currentGeneration,
+          dedicatedPool,
+          connectTimeout.toMillis
+        )
+        new Live(connection, pool)
+      }
       .mapError(translateHandshake)
+  }
 
   // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO
   private def translateHandshake(error: Throwable): Throwable =
@@ -251,10 +281,14 @@ object Client {
       case other                                                                                                    => other
     }
 
-  final private class Live(connection: MultiplexedConnection) extends Client[CIO] {
+  final private class Live(connection: MultiplexedConnection, pool: DedicatedPool) extends Client[CIO] {
 
-    def run[A](command: Command[A]): CIO[A] = CIO.async(callback => connection.submit(command, callback))
+    def run[A](command: Command[A]): CIO[A] =
+      command.execution match {
+        case Execution.Ordinary => CIO.async(callback => connection.submit(command, callback))
+        case Execution.Blocking => CIO.async(callback => pool.use(command, callback))
+      }
 
-    def close: CIO[Unit] = CIO.blocking(connection.close())
+    def close: CIO[Unit] = CIO.blocking { pool.close(); connection.close() }
   }
 }

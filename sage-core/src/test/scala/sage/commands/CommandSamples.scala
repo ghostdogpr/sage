@@ -132,6 +132,19 @@ object CommandSamples {
     ),
     Sample(Lists.lMove[String, String]("src", "dst", ListSide.Left, ListSide.Right), Vector("LMOVE", "src", "dst", "LEFT", "RIGHT")),
     Sample(Lists.lMpop[String, String]("a", "b")(ListSide.Left), Vector("LMPOP", "2", "a", "b", "LEFT")),
-    Sample(Lists.lMpop[String, String]("a")(ListSide.Right, count = Some(5L)), Vector("LMPOP", "1", "a", "RIGHT", "COUNT", "5"))
+    Sample(Lists.lMpop[String, String]("a")(ListSide.Right, count = Some(5L)), Vector("LMPOP", "1", "a", "RIGHT", "COUNT", "5")),
+    Sample(Lists.blPop[String, String]("a", "b")(BlockTimeout.After(1.second)), Vector("BLPOP", "a", "b", "1")),
+    Sample(Lists.blPop[String, String]("a")(BlockTimeout.Forever), Vector("BLPOP", "a", "0")),
+    Sample(Lists.blPop[String, String]("a")(BlockTimeout.After(Duration.Zero)), Vector("BLPOP", "a", "0.001")),
+    Sample(Lists.brPop[String, String]("a")(BlockTimeout.After(1500.millis)), Vector("BRPOP", "a", "1.5")),
+    Sample(
+      Lists.blMove[String, String]("src", "dst", ListSide.Left, ListSide.Right, BlockTimeout.After(1.second)),
+      Vector("BLMOVE", "src", "dst", "LEFT", "RIGHT", "1")
+    ),
+    Sample(Lists.blMpop[String, String]("a", "b")(ListSide.Left, BlockTimeout.Forever), Vector("BLMPOP", "0", "2", "a", "b", "LEFT")),
+    Sample(
+      Lists.blMpop[String, String]("a")(ListSide.Right, BlockTimeout.After(1.second), count = Some(5L)),
+      Vector("BLMPOP", "1", "1", "a", "RIGHT", "COUNT", "5")
+    )
   )
 }

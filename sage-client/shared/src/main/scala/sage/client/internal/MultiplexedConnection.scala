@@ -41,6 +41,8 @@ final private[client] class MultiplexedConnection private (
   private var current: Conn                        = null
   private var establishing: Conn                   = null
   private var watchdogHandle: Scheduler.Cancelable = null
+  // bumped when a fresh socket becomes live; the dedicated pool stamps borrowed connections with it to detect ones outliving a reconnect
+  private var generation: Long                     = 0L
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -78,11 +80,14 @@ final private[client] class MultiplexedConnection private (
 
   private[internal] def currentState: State = locked(state)
 
+  private[internal] def currentGeneration: Long = locked(generation)
+
   private def connectInitial(): Unit = {
     val conn = establish() // the first connect propagates a handshake failure; only reconnects retry
     locked {
       current = conn
       state = State.Live
+      generation += 1
       startWatchdog()
     }
   }
@@ -134,6 +139,7 @@ final private[client] class MultiplexedConnection private (
           if (state == State.Reconnecting) {
             current = conn
             state = State.Live
+            generation += 1
             true
           } else false
         }
@@ -228,7 +234,7 @@ final private[client] class MultiplexedConnection private (
             entry.complete(reply)
             if (drainLatch != null && pending.isEmpty) drainLatch.countDown()
           }
-          if (isReadonly(reply)) close()
+          if (Poison.isReadonly(reply)) close()
       }
     }
 
@@ -240,18 +246,6 @@ final private[client] class MultiplexedConnection private (
       }
       if (drainLatch != null) drainLatch.countDown()
       onConnTerminated(this)
-    }
-
-    private def isReadonly(frame: Frame): Boolean =
-      frame match {
-        case Frame.SimpleError(message) => errorCode(message) == "READONLY"
-        case Frame.BulkError(message)   => errorCode(message.asUtf8String) == "READONLY"
-        case _                          => false
-      }
-
-    private def errorCode(message: String): String = {
-      val space = message.indexOf(' ')
-      if (space < 0) message else message.substring(0, space)
     }
 
     final private class Entry[A](command: Command[A], callback: Try[A] => Unit) extends Transport.Item {
