@@ -20,11 +20,22 @@ final case class WatchdogConfig(
   enabled: Boolean = true
 )
 
+/**
+  * The on-demand pool of Dedicated Connections for blocking commands. `acquireTimeout` bounds only the wait for a free slot, never a
+  * command's own block timeout; idle connections are evicted after `idleTimeout` (`Duration.Inf` keeps them forever).
+  */
+final case class DedicatedPoolConfig(
+  maxConnections: Int = 8,
+  acquireTimeout: FiniteDuration = 5.seconds,
+  idleTimeout: Duration = 30.seconds
+)
+
 final case class SageConfig(
   host: String = "localhost",
   port: Int = 6379,
   connectTimeout: FiniteDuration = 10.seconds,
   reconnect: BackoffConfig = BackoffConfig(),
   watchdog: WatchdogConfig = WatchdogConfig(),
-  closeTimeout: FiniteDuration = 5.seconds
+  closeTimeout: FiniteDuration = 5.seconds,
+  dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig()
 )

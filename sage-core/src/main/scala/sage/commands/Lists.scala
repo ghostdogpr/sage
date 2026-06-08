@@ -127,18 +127,76 @@ object Lists {
     Command(
       "LMPOP",
       keyIndices = Vector.tabulate(keys.size)(_ + 1),
-      args = (Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ count.toVector.flatMap(c => Vector(Count, Bytes.utf8(c.toString))),
-      decode = {
-        case Frame.Null                                 => Right(None)
-        case Frame.Array(Vector(keyFrame, valuesFrame)) =>
-          for {
-            key    <- Decode.key[K](keyFrame)
-            values <- Decode.vector(Decode.value[V])(valuesFrame)
-          } yield Some((key, values))
-        case other                                      => Left(DecodeError("array of key and values or null", Frame.describe(other)))
-      }
+      args = (Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ countArg(count),
+      decode = mpopReply[K, V]
     )
   }
+
+  def blPop[K, V](first: K, rest: K*)(timeout: BlockTimeout)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V)]] =
+    blockingPop("BLPOP", first, rest.toVector, timeout)
+
+  def brPop[K, V](first: K, rest: K*)(timeout: BlockTimeout)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V)]] =
+    blockingPop("BRPOP", first, rest.toVector, timeout)
+
+  def blMove[K, V](source: K, destination: K, from: ListSide, to: ListSide, timeout: BlockTimeout)(
+    using keyCodec: KeyCodec[K],
+    valueCodec: ValueCodec[V]
+  ): Command[Option[V]] =
+    Command(
+      "BLMOVE",
+      Vector(0, 1),
+      Vector(keyCodec.encode(source), keyCodec.encode(destination), ListSide.wire(from), ListSide.wire(to), BlockTimeout.wire(timeout)),
+      Decode.optionalValue,
+      Execution.Blocking
+    )
+
+  def blMpop[K, V](first: K, rest: K*)(side: ListSide, timeout: BlockTimeout, count: Option[Long] = None)(
+    using keyCodec: KeyCodec[K],
+    valueCodec: ValueCodec[V]
+  ): Command[Option[(K, Vector[V])]] = {
+    val keys = (first +: rest.toVector).map(keyCodec.encode)
+    Command(
+      "BLMPOP",
+      keyIndices = Vector.tabulate(keys.size)(_ + 2),
+      args = (BlockTimeout.wire(timeout) +: Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ countArg(count),
+      decode = mpopReply[K, V],
+      execution = Execution.Blocking
+    )
+  }
+
+  private def blockingPop[K, V](name: String, first: K, rest: Vector[K], timeout: BlockTimeout)(
+    using keyCodec: KeyCodec[K],
+    valueCodec: ValueCodec[V]
+  ): Command[Option[(K, V)]] = {
+    val keys = (first +: rest).map(keyCodec.encode)
+    Command(
+      name,
+      keyIndices = Vector.tabulate(keys.size)(identity),
+      args = keys :+ BlockTimeout.wire(timeout),
+      decode = {
+        case Frame.Null                                => Right(None)
+        case Frame.Array(Vector(keyFrame, valueFrame)) =>
+          for {
+            key   <- Decode.key[K](keyFrame)
+            value <- Decode.value[V](valueFrame)
+          } yield Some((key, value))
+        case other                                     => Left(DecodeError("array of key and value or null", Frame.describe(other)))
+      },
+      execution = Execution.Blocking
+    )
+  }
+
+  private def mpopReply[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Option[(K, Vector[V])]] = {
+    case Frame.Null                                 => Right(None)
+    case Frame.Array(Vector(keyFrame, valuesFrame)) =>
+      for {
+        key    <- Decode.key[K](keyFrame)
+        values <- Decode.vector(Decode.value[V])(valuesFrame)
+      } yield Some((key, values))
+    case other                                      => Left(DecodeError("array of key and values or null", Frame.describe(other)))
+  }
+
+  private def countArg(count: Option[Long]): Vector[Bytes] = count.toVector.flatMap(c => Vector(Count, Bytes.utf8(c.toString)))
 
   private def push[K, V](name: String, key: K, values: Vector[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command(name, Command.FirstKey, keyCodec.encode(key) +: values.map(valueCodec.encode), Decode.long)

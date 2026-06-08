@@ -1,8 +1,10 @@
 package sage.integration.commands
 
+import scala.concurrent.duration.*
+
 import kyo.compat.*
 
-import sage.commands.{InsertPosition, ListSide}
+import sage.commands.{BlockTimeout, InsertPosition, ListSide}
 import sage.integration.{Images, ServerSuite}
 
 abstract class ListsSuite(image: String) extends ServerSuite(image) {
@@ -109,6 +111,55 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
         assertEquals(popped, Some(("list-src", Vector("b", "c"))))
         assertEquals(emptyOk, None)
       }
+    }
+  }
+
+  test("BLPOP and BRPOP return a present element and time out to None on an empty key") {
+    withClient { client =>
+      for {
+        _     <- client.rPush("blpop-data", "a", "b")
+        head  <- client.blPop[String, String]("blpop-data")(BlockTimeout.After(1.second))
+        tail  <- client.brPop[String, String]("blpop-data")(BlockTimeout.After(1.second))
+        empty <- client.blPop[String, String]("blpop-empty")(BlockTimeout.After(100.millis))
+      } yield {
+        assertEquals(head, Some(("blpop-data", "a")))
+        assertEquals(tail, Some(("blpop-data", "b")))
+        assertEquals(empty, None)
+      }
+    }
+  }
+
+  test("BLMOVE and BLMPOP move and pop, timing out to None when nothing is available") {
+    withClient { client =>
+      for {
+        _      <- client.rPush("blmove-src", "a", "b")
+        moved  <- client.blMove[String, String]("blmove-src", "blmove-dst", ListSide.Left, ListSide.Right, BlockTimeout.After(1.second))
+        dst    <- client.lRange[String, String]("blmove-dst", 0L, -1L)
+        popped <- client.blMpop[String, String]("blmpop-empty", "blmove-src")(ListSide.Left, BlockTimeout.After(1.second), count = Some(2L))
+        none   <- client.blMpop[String, String]("blmpop-empty")(ListSide.Left, BlockTimeout.After(100.millis))
+      } yield {
+        assertEquals(moved, Some("a"))
+        assertEquals(dst, Vector("a"))
+        assertEquals(popped, Some(("blmove-src", Vector("b"))))
+        assertEquals(none, None)
+      }
+    }
+  }
+
+  test("a blocking command does not stall ordinary commands on the multiplexed connection") {
+    withClient { client =>
+      CIO
+        .zip(
+          client.blPop[String, String]("nonstall-queue")(BlockTimeout.After(5.seconds)),
+          for {
+            pong <- client.ping()
+            _    <- client.rPush("nonstall-queue", "payload")
+          } yield pong
+        )
+        .map { case (popped, pong) =>
+          assertEquals(popped, Some(("nonstall-queue", "payload")))
+          assertEquals(pong, "PONG")
+        }
     }
   }
 }
