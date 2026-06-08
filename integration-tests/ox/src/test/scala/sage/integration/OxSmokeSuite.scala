@@ -2,6 +2,8 @@ package sage.integration
 
 import ox.{fork, supervised}
 
+import sage.commands.Pipeline.pipeline
+import sage.commands.Strings
 import sage.ox.*
 
 class OxSmokeSuite extends ServerSuite(Images.redis) {
@@ -21,6 +23,22 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
           )
           .map(_.join())
         assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
+      }
+    }
+  }
+
+  test("a pipeline returns a typed tuple natively, surfacing failures per position") {
+    withContainers { server =>
+      supervised {
+        val client  = SageClient.scoped(configOf(server))
+        val _       = client.set("pipe:a", "x")
+        val _       = client.set("pipe:n", 10)
+        val out     = client.pipeline((Strings.get[String, String]("pipe:a"), Strings.incrBy[String]("pipe:n", 5)).pipeline)
+        assertEquals(out, (Some("x"), 15L))
+        val _       = client.set("pipe:str", "hello")
+        val attempt = client.pipelineAttempt((Strings.get[String, String]("pipe:str"), Strings.incr[String]("pipe:str")).pipeline)
+        assert(attempt._1 == Right(Some("hello")), attempt._1)
+        assert(attempt._2.isLeft, attempt._2)
       }
     }
   }

@@ -56,6 +56,17 @@ final private[client] class MultiplexedConnection private (
     else conn.submit(command, callback)
   }
 
+  // Enqueues a whole pipeline onto a single generation, captured once, so a reconnect mid-batch can never split it across connections.
+  // Returns false when not connected — nothing was submitted, so the caller fails fast rather than fabricating per-position errors.
+  def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean = {
+    val conn = locked(if (state == State.Live) current else null)
+    if (conn == null) false
+    else {
+      conn.submitAll(commands, callbacks)
+      true
+    }
+  }
+
   def close(): Unit = {
     // `aborting`: a reconnect attempt's in-flight connection, closed so its socket is released before close() returns.
     val (draining, aborting) = locked {
@@ -200,6 +211,13 @@ final private[client] class MultiplexedConnection private (
     def submit[A](command: Command[A], callback: Try[A] => Unit): Unit =
       transportRef.get().send(new Entry(command, callback))
 
+    // One Transport.Item, not N: the writer treats a queue element atomically, so concatenating the batch into a single payload is what
+    // guarantees the pipeline is one socket write (one round-trip) rather than racing the writer between sends.
+    def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Unit = {
+      val entries = Vector.tabulate(commands.length)(i => new Entry(commands(i).asInstanceOf[Command[Any]], callbacks(i)))
+      transportRef.get().send(new Batch(entries))
+    }
+
     def close(): Unit = {
       aborted = true
       val transport = transportRef.get()
@@ -276,6 +294,17 @@ final private[client] class MultiplexedConnection private (
       }
 
       def fail(error: SageException): Unit = callback(Failure(error))
+    }
+
+    // A pipeline as one write unit: its payload is the entries concatenated, and its write/drop hooks fan out to every entry so each is
+    // matched and failed individually. A whole batch is therefore written — or dropped — atomically, never split across socket writes.
+    final private class Batch(entries: Vector[Entry[Any]]) extends Transport.Item {
+
+      val payload: Bytes = Bytes.concat(entries.map(_.payload))
+
+      def writeAttempted(): Unit = entries.foreach(_.writeAttempted())
+
+      def dropped(): Unit = entries.foreach(_.dropped())
     }
   }
 }

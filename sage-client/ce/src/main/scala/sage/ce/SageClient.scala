@@ -6,7 +6,7 @@ import kyo.compat.*
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor, Sets, SortedSets}
+import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
 /**
   * The cats-effect-native surface: the same client, with every method returning `IO`.
@@ -95,6 +95,10 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[IO] {
 
     def run[A](command: Command[A]): IO[A] = underlying.run(command).lower
+
+    def pipeline[Out, R](p: Pipeline[Out, R]): IO[Out] = underlying.pipeline(p).lower
+
+    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): IO[R] = underlying.pipelineAttempt(p).lower
 
     def close: IO[Unit] = underlying.close.lower
   }

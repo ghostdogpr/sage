@@ -7,7 +7,8 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.client.internal.Client
-import sage.commands.Command
+import sage.commands.{Command, Pipeline, Strings}
+import sage.commands.Pipeline.pipeline
 import sage.protocol.Frame
 
 abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
@@ -67,6 +68,49 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         }
       }
     withClient(client => CIO.foreachDiscard(1 to 500)(fiber => pingLoop(client, fiber, 1)))
+  }
+
+  test("a pipeline yields one typed result per command in a single round-trip") {
+    withClient { client =>
+      for {
+        _   <- client.set("p:a", "x")
+        _   <- client.set("p:n", 10)
+        out <- client.pipeline((Strings.get[String, String]("p:a"), Strings.incrBy[String]("p:n", 5)).pipeline)
+      } yield assertEquals(out, (Some("x"), 15L))
+    }
+  }
+
+  test("a command failure in a pipeline surfaces per-position without poisoning the rest") {
+    withClient { client =>
+      for {
+        _       <- client.set("p:str", "hello")
+        results <- client.pipelineAttempt(
+                     (
+                       Strings.get[String, String]("p:str"),
+                       Strings.incr[String]("p:str"),
+                       Strings.get[String, String]("p:str")
+                     ).pipeline
+                   )
+      } yield {
+        val (a, b, c) = results
+        assertEquals(a, Right(Some("hello")))
+        assert(b.isLeft, s"expected the INCR on a string to fail, got $b")
+        assertEquals(c, Right(Some("hello")))
+      }
+    }
+  }
+
+  test("a large pipeline runs every command and returns one result per position") {
+    withClient { client =>
+      val n = 200
+      client.pipeline(Pipeline.sequence(Vector.fill(n)(Strings.incr[String]("p:rtt")))).flatMap { results =>
+        client.get[String, Int]("p:rtt").map { stored =>
+          assertEquals(results.length, n)
+          assertEquals(results, (1 to n).map(_.toLong).toVector)
+          assertEquals(stored, Some(n))
+        }
+      }
+    }
   }
 
   test("closing the client releases its server connection") {

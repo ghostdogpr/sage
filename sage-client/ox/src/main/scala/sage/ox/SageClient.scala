@@ -9,7 +9,7 @@ import kyo.compat.*
 import sage.client.SageConfig
 import sage.client.internal.Client
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, RedisType, ScanCursor, Sets, SortedSets}
+import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
 /**
   * The Ox-native surface: direct style, every method usable inside an Ox scope.
@@ -100,6 +100,10 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> Ox ?=> A] {
 
     def run[A](command: Command[A]): Ox ?=> A = underlying.run(command).lower
+
+    def pipeline[Out, R](p: Pipeline[Out, R]): Ox ?=> Out = underlying.pipeline(p).lower
+
+    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> R = underlying.pipelineAttempt(p).lower
 
     def close: Ox ?=> Unit = underlying.close.lower
   }

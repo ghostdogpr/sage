@@ -2,6 +2,8 @@ package sage.integration
 
 import kyo.*
 
+import sage.commands.Pipeline.pipeline
+import sage.commands.Strings
 import sage.kyo.*
 
 class KyoSmokeSuite extends ServerSuite(Images.redis) {
@@ -19,6 +21,27 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
         } yield {
           assertEquals(pong, "PONG")
           assertEquals(values.toList, (1 to 50).toList.map(i => Some(s"value-$i")))
+        }
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
+
+  test("a pipeline returns a typed tuple natively, surfacing failures per position") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client  <- SageClient.scoped(configOf(server))
+          _       <- client.set("pipe:a", "x")
+          _       <- client.set("pipe:n", 10)
+          out     <- client.pipeline((Strings.get[String, String]("pipe:a"), Strings.incrBy[String]("pipe:n", 5)).pipeline)
+          _       <- client.set("pipe:str", "hello")
+          attempt <- client.pipelineAttempt((Strings.get[String, String]("pipe:str"), Strings.incr[String]("pipe:str")).pipeline)
+        } yield {
+          assertEquals(out, (Some("x"), 15L))
+          assert(attempt._1 == Right(Some("hello")), attempt._1)
+          assert(attempt._2.isLeft, attempt._2)
         }
 
       import AllowUnsafe.embrace.danger

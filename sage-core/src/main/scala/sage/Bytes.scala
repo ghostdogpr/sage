@@ -18,6 +18,24 @@ object Bytes {
 
   def fromArray(bytes: Array[Byte]): Bytes = IArray.unsafeFromArray(bytes.clone())
 
+  // One contiguous buffer from many: a Pipeline's commands are concatenated so they reach the socket as a single write.
+  def concat(parts: Seq[Bytes]): Bytes =
+    parts match {
+      case Seq()     => empty
+      case Seq(only) => only
+      case _         =>
+        var total  = 0
+        parts.foreach(part => total += arr(part).length)
+        val out    = new Array[Byte](total)
+        var offset = 0
+        parts.foreach { part =>
+          val bytes = arr(part)
+          System.arraycopy(bytes, 0, out, offset, bytes.length)
+          offset += bytes.length
+        }
+        IArray.unsafeFromArray(out)
+    }
+
   extension (self: Bytes) {
 
     def length: Int = arr(self).length
