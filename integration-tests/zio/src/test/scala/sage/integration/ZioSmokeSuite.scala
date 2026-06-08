@@ -56,4 +56,34 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
     }
   }
+
+  test("sScanAll streams every member as a native ZStream") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client  <- SageClient.scoped(configOf(server))
+            _       <- ZIO.foreachParDiscard(1 to 50)(i => client.sAdd("sscan", s"m$i"))
+            members <- client.sScanAll[String, String]("sscan", count = Some(10L)).runCollect
+          } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
+  test("zScanAll streams every member/score pair as a native ZStream") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(configOf(server))
+            _      <- ZIO.foreachParDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
+            pairs  <- client.zScanAll[String, String]("zscan", count = Some(10L)).runCollect
+          } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
 }

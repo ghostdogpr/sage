@@ -53,4 +53,32 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
     }
   }
+
+  test("sScanAll streams every member as a native Kyo Stream") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client  <- SageClient.scoped(configOf(server))
+          _       <- Async.foreachDiscard(1 to 50)(i => client.sAdd("sscan", s"m$i"))
+          members <- client.sScanAll[String, String]("sscan", count = Some(10L)).run
+        } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
+
+  test("zScanAll streams every member/score pair as a native Kyo Stream") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client <- SageClient.scoped(configOf(server))
+          _      <- Async.foreachDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
+          pairs  <- client.zScanAll[String, String]("zscan", count = Some(10L)).run
+        } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
 }

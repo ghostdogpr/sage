@@ -55,4 +55,32 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
       program.unsafeRunSync()
     }
   }
+
+  test("sScanAll streams every member as a native fs2 Stream") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            _       <- (1 to 50).toList.parTraverse_(i => client.sAdd("sscan", s"m$i"))
+            members <- client.sScanAll[String, String]("sscan", count = Some(10L)).compile.toVector
+          } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
+        }
+
+      program.unsafeRunSync()
+    }
+  }
+
+  test("zScanAll streams every member/score pair as a native fs2 Stream") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            _     <- (1 to 50).toList.parTraverse_(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
+            pairs <- client.zScanAll[String, String]("zscan", count = Some(10L)).compile.toVector
+          } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+        }
+
+      program.unsafeRunSync()
+    }
+  }
 }

@@ -50,4 +50,30 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       }
     }
   }
+
+  test("sScanAll streams every member as a native Ox Flow") {
+    withContainers { server =>
+      supervised {
+        val client  = SageClient.scoped(configOf(server))
+        (1 to 50).foreach { i =>
+          val _ = client.sAdd("sscan", s"m$i")
+        }
+        val members = client.sScanAll[String, String]("sscan", count = Some(10L)).runToList()
+        assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
+      }
+    }
+  }
+
+  test("zScanAll streams every member/score pair as a native Ox Flow") {
+    withContainers { server =>
+      supervised {
+        val client = SageClient.scoped(configOf(server))
+        (1 to 50).foreach { i =>
+          val _ = client.zAdd("zscan")((s"m$i", i.toDouble))
+        }
+        val pairs  = client.zScanAll[String, String]("zscan", count = Some(10L)).runToList()
+        assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+      }
+    }
+  }
 }
