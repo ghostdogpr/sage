@@ -7,7 +7,7 @@ import scala.concurrent.duration.FiniteDuration
 import kyo.compat.*
 
 import sage.SageException.{ServerError, UnsupportedServer}
-import sage.client.SageConfig
+import sage.client.{BackoffConfig, SageConfig, WatchdogConfig}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -215,18 +215,33 @@ trait Client[F[_]] {
 
 object Client {
 
-  def connect(config: SageConfig): CIO[Client[CIO]] =
-    connectWith((onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, onFrame, onClosed))
+  private val defaults = SageConfig()
 
-  private[client] def connectWith(factory: Multiplexer.TransportFactory): CIO[Client[CIO]] =
-    CIO.blocking(new Live(new Multiplexer(factory))).flatMap { client =>
-      client
-        .run(Connection.hello())
-        .fold(
-          _ => CIO.value(client),
-          error => client.close.flatMap(_ => CIO.fail(translateHandshake(error)))
-        )
-    }
+  def connect(config: SageConfig): CIO[Client[CIO]] =
+    connectWith(
+      (onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, onFrame, onClosed),
+      Scheduler.real,
+      config.reconnect,
+      config.watchdog,
+      config.connectTimeout,
+      config.closeTimeout
+    )
+
+  // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
+  private[client] def connectWith(
+    factory: MultiplexedConnection.TransportFactory,
+    scheduler: Scheduler = Scheduler.real,
+    reconnect: BackoffConfig = defaults.reconnect,
+    watchdog: WatchdogConfig = defaults.watchdog,
+    connectTimeout: FiniteDuration = defaults.connectTimeout,
+    closeTimeout: FiniteDuration = defaults.closeTimeout
+  ): CIO[Client[CIO]] =
+    CIO
+      .blocking(
+        MultiplexedConnection.connect(factory, scheduler, Vector(Connection.hello()), reconnect, watchdog, connectTimeout, closeTimeout)
+      )
+      .map(connection => new Live(connection))
+      .mapError(translateHandshake)
 
   // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO
   private def translateHandshake(error: Throwable): Throwable =
@@ -236,10 +251,10 @@ object Client {
       case other                                                                                                    => other
     }
 
-  final private class Live(multiplexer: Multiplexer) extends Client[CIO] {
+  final private class Live(connection: MultiplexedConnection) extends Client[CIO] {
 
-    def run[A](command: Command[A]): CIO[A] = CIO.async(callback => multiplexer.submit(command, callback))
+    def run[A](command: Command[A]): CIO[A] = CIO.async(callback => connection.submit(command, callback))
 
-    def close: CIO[Unit] = CIO.blocking(multiplexer.close())
+    def close: CIO[Unit] = CIO.blocking(connection.close())
   }
 }

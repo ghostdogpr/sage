@@ -6,7 +6,7 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.UnsupportedServer
-import sage.client.internal.{Client, FakeTransport, Multiplexer}
+import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
 import sage.protocol.Frame
 
 class ConnectSpec extends munit.FunSuite {
@@ -26,9 +26,9 @@ class ConnectSpec extends munit.FunSuite {
   private val helloThenPong: Bytes => Seq[Frame] = payload =>
     if (payload.asUtf8String.contains("HELLO")) Seq(helloReply) else Seq(Frame.SimpleString("PONG"))
 
-  private def scripted(reply: Bytes => Seq[Frame]): (Multiplexer.TransportFactory, () => FakeTransport) = {
-    var transport: FakeTransport              = null
-    val factory: Multiplexer.TransportFactory = (onFrame, onClosed) => {
+  private def scripted(reply: Bytes => Seq[Frame]): (MultiplexedConnection.TransportFactory, () => FakeTransport) = {
+    var transport: FakeTransport                        = null
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       transport = new FakeTransport(onFrame, onClosed, reply)
       transport
     }
