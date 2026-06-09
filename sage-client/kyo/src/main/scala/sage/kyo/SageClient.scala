@@ -105,10 +105,10 @@ extension (client: SageClient) {
   private def streamOf[A](
     open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
   )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
-    // acquire the subscription once as a single-element stream (Scope releases it on close), then stream its messages until None
+    // chunkSize = 1: emit each message as it arrives — the default rechunks to 4096, withholding a live stream until that many accumulate
     Stream
       .init(Scope.acquireRelease(open)(_.close).map(Seq(_)))
-      .flatMap(sub => Stream.repeatPresent(sub.next.map(opt => Maybe.fromOption(opt.map(Seq(_))))))
+      .flatMap(sub => Stream.repeatPresent(sub.next.map(opt => Maybe.fromOption(opt.map(Seq(_)))), chunkSize = 1))
 }
 
 object SageClient {

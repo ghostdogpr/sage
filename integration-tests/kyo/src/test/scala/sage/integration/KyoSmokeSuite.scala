@@ -83,8 +83,29 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
-  // pub/sub end-to-end is covered by the shared PubsubSuite (designated zio cell) and the zio/ox smoke tests; a Kyo smoke test that
-  // publishes from one fiber while consuming the subscription stream on another deadlocks this Kyo runtime, so it is omitted here.
+  test("subscribe delivers published messages as a native Kyo Stream") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client    <- SageClient.scoped(configOf(server))
+          publisher <- Fiber.init {
+                         for {
+                           _ <- Async.sleep(300.millis)                                          // let SUBSCRIBE register before publishing
+                           _ <- Kyo.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i")) // sequential: preserves order
+                         } yield ()
+                       }
+          chunk     <- client.subscribe[String]("smoke").take(3).run
+          _         <- publisher.get
+        } yield {
+          val messages = chunk.toList
+          assertEquals(messages.map(_.channel).toSet, Set("smoke"))
+          assertEquals(messages.map(_.payload), List("m1", "m2", "m3"))
+        }
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
 
   test("hScanAll streams every field/value pair as a native Kyo Stream") {
     withContainers { server =>
