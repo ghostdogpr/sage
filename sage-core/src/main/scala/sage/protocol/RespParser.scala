@@ -28,48 +28,59 @@ final class RespParser {
   /**
     * Returns every frame completed by `bytes`, in order.
     */
-  def feed(bytes: Bytes): Either[ProtocolError, Vector[Frame]] =
-    if (failure != null) Left(failure)
-    else if (!append(bytes)) poison("input exceeds the maximum buffer size")
+  def feed(bytes: Bytes): Either[ProtocolError, Vector[Frame]] = {
+    val frames = Vector.newBuilder[Frame]
+    val array  = bytes.unsafeArray
+    feed(array, 0, array.length)(frames += _) match {
+      case Some(error) => Left(error)
+      case None        => Right(frames.result())
+    }
+  }
+
+  /**
+    * Parses every frame completed by `array(offset until offset + length)`, passing each to `onFrame` in order. Avoids the input copy and
+    * frame Vector of the [[feed]] overload: the slice is copied straight into the internal buffer (never retained) and frames stream out.
+    */
+  def feed(array: Array[Byte], offset: Int, length: Int)(onFrame: Frame => Unit): Option[ProtocolError] =
+    if (failure != null) Some(failure)
+    else if (!append(array, offset, length)) Some(poison("input exceeds the maximum buffer size"))
     else {
-      val frames = Vector.newBuilder[Frame]
-      var done   = false
+      var done = false
       while (!done) {
-        val frame = parseFrame(readPos)
+        val frame = parseFrame(readPos, 0)
         if (frame == null) done = true
         else {
-          frames += frame
+          onFrame(frame)
           readPos = cursor
         }
       }
-      if (failMessage != null) poison(failMessage)
+      if (failMessage != null) Some(poison(failMessage))
       else {
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
         }
-        Right(frames.result())
+        None
       }
     }
 
-  private def poison(message: String): Left[ProtocolError, Nothing] = {
+  private def poison(message: String): ProtocolError = {
     val error = ProtocolError(message)
     failure = error
     buf = Array.emptyByteArray
     readPos = 0
     writePos = 0
-    Left(error)
+    error
   }
 
   // compacts in place when the consumed front frees enough room, grows geometrically otherwise; Long arithmetic so capacity
   // computations cannot overflow, false when the unconsumed input would exceed the maximum array size
-  private def append(bytes: Bytes): Boolean = {
-    val incoming = bytes.unsafeArray
+  private def append(incoming: Array[Byte], offset: Int, length: Int): Boolean = {
     val unparsed = writePos - readPos
-    val needed   = unparsed.toLong + incoming.length
+    val needed   = unparsed.toLong + length
     if (needed > MaxBuffer) false
     else {
-      if (buf.length - writePos < incoming.length) {
+      if (buf.length - writePos < length) {
         if (buf.length >= needed) {
           System.arraycopy(buf, readPos, buf, 0, unparsed)
         } else {
@@ -82,14 +93,47 @@ final class RespParser {
         readPos = 0
         writePos = unparsed
       }
-      System.arraycopy(incoming, 0, buf, writePos, incoming.length)
-      writePos += incoming.length
+      System.arraycopy(incoming, offset, buf, writePos, length)
+      writePos += length
       true
     }
   }
 
-  private def parseFrame(pos: Int): Frame =
+  // attributes are out-of-band metadata prefixing a value, valid at any nesting level; skip them iteratively (not recursively, so a long
+  // attribute chain cannot overflow the stack) and return the value they annotate, so an attribute never occupies an aggregate slot
+  private def parseFrame(pos: Int, depth: Int): Frame = {
+    var p = pos
+    while (p < writePos && buf(p) == '|') {
+      val after = skipAttribute(p + 1, depth)
+      if (after < 0) return null // Incomplete, or Invalid with failMessage set
+      p = after
+    }
+    parseValue(p, depth)
+  }
+
+  // consumes a `|` attribute's pairs without materializing them; returns the position past it, or Incomplete / Invalid (failMessage set)
+  private def skipAttribute(pos: Int, depth: Int): Int = {
+    val count = readLength(pos, allowNull = false)
+    if (count == Incomplete) Incomplete
+    else if (count == Invalid) { failMessage = s"invalid attribute length: '${headerText(pos)}'"; Invalid }
+    else {
+      var p = cursor
+      var i = 0
+      while (i < count) {
+        val key   = parseFrame(p, depth + 1)
+        if (key == null) return if (failMessage != null) Invalid else Incomplete
+        val value = parseFrame(cursor, depth + 1)
+        if (value == null) return if (failMessage != null) Invalid else Incomplete
+        p = cursor
+        i += 1
+      }
+      p
+    }
+  }
+
+  private def parseValue(pos: Int, depth: Int): Frame =
     if (pos >= writePos) null
+    else if (depth > MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
     else {
       (buf(pos).toChar: @switch) match {
         case '+'   =>
@@ -208,11 +252,10 @@ final class RespParser {
               Frame.VerbatimString(stringAt(start, start + 3), bytesAt(start + 4, start + length))
             }
           }
-        case '*'   => parseAggregate(pos + 1, allowNull = true, Frame.Array.apply)
-        case '~'   => parseAggregate(pos + 1, allowNull = false, Frame.Set.apply)
-        case '>'   => parseAggregate(pos + 1, allowNull = false, Frame.Push.apply)
-        case '%'   => parsePairAggregate(pos + 1, Frame.Map.apply)
-        case '|'   => parsePairAggregate(pos + 1, Frame.Attribute.apply)
+        case '*'   => parseAggregate(pos + 1, allowNull = true, Frame.Array.apply, depth)
+        case '~'   => parseAggregate(pos + 1, allowNull = false, Frame.Set.apply, depth)
+        case '>'   => parseAggregate(pos + 1, allowNull = false, Frame.Push.apply, depth)
+        case '%'   => parsePairAggregate(pos + 1, Frame.Map.apply, depth)
         case other =>
           fail(f"unknown frame type byte 0x${other.toByte}%02x")
       }
@@ -249,33 +292,33 @@ final class RespParser {
 
   private def headerText(pos: Int): String = stringAt(pos, findCrlf(pos))
 
-  private def parseAggregate(pos: Int, allowNull: Boolean, make: Vector[Frame] => Frame): Frame = {
+  private def parseAggregate(pos: Int, allowNull: Boolean, make: Vector[Frame] => Frame, depth: Int): Frame = {
     val count = readLength(pos, allowNull)
     if (count == Incomplete) null
     else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
     else if (count == -1) Frame.Null
     else {
-      val elements = parseElements(cursor, count)
+      val elements = parseElements(cursor, count, depth)
       if (elements == null) null else make(elements)
     }
   }
 
-  private def parsePairAggregate(pos: Int, make: Vector[(Frame, Frame)] => Frame): Frame = {
+  private def parsePairAggregate(pos: Int, make: Vector[(Frame, Frame)] => Frame, depth: Int): Frame = {
     val count = readLength(pos, allowNull = false)
     if (count == Incomplete) null
     else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
     else {
-      val entries = parsePairs(cursor, count)
+      val entries = parsePairs(cursor, count, depth)
       if (entries == null) null else make(entries)
     }
   }
 
-  private def parseElements(start: Int, count: Int): Vector[Frame] = {
+  private def parseElements(start: Int, count: Int, depth: Int): Vector[Frame] = {
     val elements = Vector.newBuilder[Frame]
     var pos      = start
     var i        = 0
     while (i < count) {
-      val frame = parseFrame(pos)
+      val frame = parseFrame(pos, depth + 1)
       if (frame == null) return null
       elements += frame
       pos = cursor
@@ -285,14 +328,14 @@ final class RespParser {
     elements.result()
   }
 
-  private def parsePairs(start: Int, count: Int): Vector[(Frame, Frame)] = {
+  private def parsePairs(start: Int, count: Int, depth: Int): Vector[(Frame, Frame)] = {
     val entries = Vector.newBuilder[(Frame, Frame)]
     var pos     = start
     var i       = 0
     while (i < count) {
-      val key   = parseFrame(pos)
+      val key   = parseFrame(pos, depth + 1)
       if (key == null) return null
-      val value = parseFrame(cursor)
+      val value = parseFrame(cursor, depth + 1)
       if (value == null) return null
       entries += ((key, value))
       pos = cursor
@@ -356,4 +399,7 @@ final class RespParser {
 
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8
+
+  // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
+  private inline def MaxDepth: Int = 512
 }

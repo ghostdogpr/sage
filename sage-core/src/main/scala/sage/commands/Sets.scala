@@ -85,7 +85,7 @@ private[sage] object Sets {
     Command(
       "SSCAN",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ scanOptions(pattern, count),
+      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
       Decode.scanPage(Decode.vector(Decode.value[V]))
     )
 
@@ -101,10 +101,5 @@ private[sage] object Sets {
     Command(name, args.indices.toVector, args, Decode.long)
   }
 
-  private def scanOptions(pattern: Option[String], count: Option[Long]): Vector[Bytes] =
-    pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++ count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString)))
-
-  private val Match = Bytes.utf8("MATCH")
-  private val Count = Bytes.utf8("COUNT")
   private val Limit = Bytes.utf8("LIMIT")
 }

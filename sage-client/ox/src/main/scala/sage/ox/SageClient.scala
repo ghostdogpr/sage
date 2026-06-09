@@ -1,7 +1,5 @@
 package sage.ox
 
-import scala.util.control.NonFatal
-
 import _root_.ox.{useInScope, Ox}
 import _root_.ox.flow.Flow
 import kyo.compat.*
@@ -93,8 +91,9 @@ object SageClient {
 
   def scoped(config: SageConfig): Ox ?=> SageClient =
     useInScope(connect(config)) { client =>
+      // never fail teardown: swallow unconditionally (incl. InterruptedException), matching the zio/ce/kyo close-on-release policy
       try client.close
-      catch { case NonFatal(_) => () }
+      catch { case _: Throwable => () }
     }
 
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> Ox ?=> A] {

@@ -49,13 +49,14 @@ class RespParserSpec extends munit.FunSuite {
       Vector(Frame.SimpleString("first") -> Frame.Integer(1), Frame.SimpleString("second") -> Frame.Integer(2))
     ),
     "~3\r\n:1\r\n:2\r\n:3\r\n"                         -> Frame.Set(Vector(Frame.Integer(1), Frame.Integer(2), Frame.Integer(3))),
-    "|1\r\n+ttl\r\n:3600\r\n"                          -> Frame.Attribute(Vector(Frame.SimpleString("ttl") -> Frame.Integer(3600))),
     ">2\r\n+message\r\n$5\r\nhello\r\n"                -> Frame.Push(Vector(Frame.SimpleString("message"), Frame.BulkString(Bytes.utf8("hello"))))
   )
 
   // wire forms the parser accepts but the writer never emits
   private val parseOnlyGoldens: Vector[(String, Frame)] = Vector(
-    ",10\r\n" -> Frame.Double(10.0)
+    ",10\r\n"                        -> Frame.Double(10.0),
+    // an attribute is transparent metadata: it is consumed and discarded, and the value it prefixes is returned in its place
+    "|1\r\n+ttl\r\n:3600\r\n:42\r\n" -> Frame.Integer(42)
   )
 
   private val goldens = canonicalGoldens ++ parseOnlyGoldens
@@ -84,6 +85,23 @@ class RespParserSpec extends munit.FunSuite {
     assertEquals(parseOne("$-1\r\n"), Frame.Null)
     assertEquals(parseOne("*-1\r\n"), Frame.Null)
     assertEquals(parseOne("*1\r\n*-1\r\n"), Frame.Array(Vector(Frame.Null)))
+  }
+
+  test("attributes are transparent at every nesting level") {
+    // top level: the value the attribute prefixes is returned, the attribute discarded
+    assertEquals(parseOne("|1\r\n+ttl\r\n:3600\r\n:7\r\n"), Frame.Integer(7))
+    // nested: an attribute on an array element must not inflate the array's arity
+    assertEquals(
+      parseOne("*2\r\n|1\r\n+ttl\r\n:3600\r\n:1\r\n:2\r\n"),
+      Frame.Array(Vector(Frame.Integer(1), Frame.Integer(2)))
+    )
+    // nested in a map value position
+    assertEquals(
+      parseOne("%1\r\n+k\r\n|1\r\n+ttl\r\n:1\r\n:9\r\n"),
+      Frame.Map(Vector(Frame.SimpleString("k") -> Frame.Integer(9)))
+    )
+    // a chain of attributes collapses to the final value
+    assertEquals(parseOne("|0\r\n|0\r\n:5\r\n"), Frame.Integer(5))
   }
 
   test("rejects negative and signed lengths") {
@@ -179,7 +197,6 @@ class RespParserSpec extends munit.FunSuite {
       Frame.BulkError(Bytes.utf8("WRONGTYPE")),
       Frame.VerbatimString("mkd", Bytes.utf8("# hi")),
       Frame.Set(Vector(Frame.Integer(1), Frame.Integer(2))),
-      Frame.Attribute(Vector(Frame.SimpleString("ttl") -> Frame.Integer(3600))),
       Frame.Push(Vector(Frame.SimpleString("message"), Frame.BulkString(Bytes.utf8("hello")))),
       // duplicate map keys, which a native Map would collapse
       Frame.Map(
@@ -213,7 +230,7 @@ class RespParserSpec extends munit.FunSuite {
   }
 
   private def genFrame(rnd: Random, depth: Int): Frame =
-    rnd.nextInt(if (depth == 0) 10 else 15) match {
+    rnd.nextInt(if (depth == 0) 10 else 14) match {
       case 0  => Frame.SimpleString(genText(rnd))
       case 1  => Frame.SimpleError(genText(rnd))
       case 2  => Frame.Integer(rnd.nextLong())
@@ -227,7 +244,6 @@ class RespParserSpec extends munit.FunSuite {
       case 10 => Frame.Array(genElements(rnd, depth))
       case 11 => Frame.Map(genPairs(rnd, depth))
       case 12 => Frame.Set(genElements(rnd, depth))
-      case 13 => Frame.Attribute(genPairs(rnd, depth))
       case _  => Frame.Push(genElements(rnd, depth))
     }
 

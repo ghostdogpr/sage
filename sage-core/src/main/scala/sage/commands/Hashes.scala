@@ -76,7 +76,7 @@ private[sage] object Hashes {
     Command(
       "HSCAN",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ scanOptions(pattern, count),
+      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
       Decode.scanPage(Decode.flatPairs[F, V])
     )
 
@@ -87,18 +87,13 @@ private[sage] object Hashes {
     Command(
       "HSCAN",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ scanOptions(pattern, count)) :+ NoValues,
+      (Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count)) :+ NoValues,
       Decode.scanPage(Decode.vector(Decode.key[F]))
     )
 
   private def fieldValueArgs[F, V](pairs: Vector[(F, V)])(using fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Vector[Bytes] =
     pairs.flatMap { case (field, value) => Vector(fieldCodec.encode(field), valueCodec.encode(value)) }
 
-  private def scanOptions(pattern: Option[String], count: Option[Long]): Vector[Bytes] =
-    pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++ count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString)))
-
-  private val Match      = Bytes.utf8("MATCH")
-  private val Count      = Bytes.utf8("COUNT")
   private val WithValues = Bytes.utf8("WITHVALUES")
   private val NoValues   = Bytes.utf8("NOVALUES")
 }

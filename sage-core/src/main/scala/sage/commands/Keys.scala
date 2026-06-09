@@ -129,8 +129,7 @@ private[sage] object Keys {
       "SCAN",
       Command.NoKeys,
       ScanCursor.bytes(cursor) +:
-        (pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++
-          count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString))) ++
+        (ScanArgs.options(pattern, count) ++
           ofType.toVector.flatMap(t => Vector(Type, Bytes.utf8(RedisType.wireName(t))))),
       Decode.scanPage(Decode.vector(Decode.key[K]))
     )
@@ -185,8 +184,6 @@ private[sage] object Keys {
     case other                                => Left(DecodeError("expiry time integer", Frame.describe(other)))
   }
   private val Replace                                                                                = Bytes.utf8("REPLACE")
-  private val Match                                                                                  = Bytes.utf8("MATCH")
-  private val Count                                                                                  = Bytes.utf8("COUNT")
   private val Type                                                                                   = Bytes.utf8("TYPE")
   private val Nx                                                                                     = Bytes.utf8("NX")
   private val Xx                                                                                     = Bytes.utf8("XX")

@@ -143,11 +143,8 @@ final private[client] class MultiplexedConnection private (
     } finally locked { if (establishing eq conn) establishing = null }
   }
 
-  private def scheduleReconnect(attempt: Int): Unit = {
-    val base    = backoffBaseMillis(attempt)
-    val delayMs = scheduler.jitterMillis(base + 1)
-    scheduler.after(delayMs.millis)(attemptReconnect(attempt))
-  }
+  private def scheduleReconnect(attempt: Int): Unit =
+    scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
 
   private def attemptReconnect(attempt: Int): Unit = {
     val proceed = locked(state == State.Reconnecting)
@@ -166,12 +163,6 @@ final private[client] class MultiplexedConnection private (
       } catch {
         case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1))
       }
-  }
-
-  private def backoffBaseMillis(attempt: Int): Long = {
-    val capped = backoff.maxDelay.toMillis
-    val raw    = backoff.initialDelay.toMillis.toDouble * math.pow(backoff.multiplier, attempt.toDouble)
-    if (raw.isInfinite || raw >= capped.toDouble) capped else math.max(0L, raw.toLong)
   }
 
   // Connections that never became `current` (a failed establish) are ignored here; their caller handles them.
@@ -252,8 +243,8 @@ final private[client] class MultiplexedConnection private (
     private def onFrame(frame: Frame): Unit = {
       lastReplyAtMillis = scheduler.nowMillis
       frame match {
-        case _: Frame.Push | _: Frame.Attribute => ()
-        case reply                              =>
+        case _: Frame.Push => ()
+        case reply         =>
           val entry = pending.poll()
           if (entry == null) close()
           else {
@@ -308,7 +299,7 @@ final private[client] class MultiplexedConnection private (
     // matched and failed individually. A whole batch is therefore written — or dropped — atomically, never split across socket writes.
     final private class Batch(entries: Vector[Entry[Any]]) extends Transport.Item {
 
-      val payload: Bytes = Bytes.concat(entries.map(_.payload))
+      val payload: Bytes = Bytes.concatBy(entries)(_.payload)
 
       def writeAttempted(): Unit = entries.foreach(_.writeAttempted())
 

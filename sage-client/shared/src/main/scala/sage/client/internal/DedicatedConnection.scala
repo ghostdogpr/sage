@@ -87,8 +87,8 @@ final private[client] class DedicatedConnection private (
 
   private def onFrame(frame: Frame): Unit =
     frame match {
-      case _: Frame.Push | _: Frame.Attribute => ()
-      case reply                              =>
+      case _: Frame.Push => ()
+      case reply         =>
         val waiter = pending.poll()
         if (waiter == null) close() // a reply with nothing pending means the stream desynced; discard
         else {

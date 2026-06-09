@@ -284,7 +284,7 @@ private[sage] object SortedSets {
     Command(
       "ZSCAN",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ scanOptions(pattern, count),
+      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
       Decode.scanPage(Decode.scoredMembersFlat[V])
     )
 
@@ -400,9 +400,6 @@ private[sage] object SortedSets {
   private def countArg(count: Option[Long]): Vector[Bytes] =
     count.toVector.flatMap(c => Vector(CountWord, Bytes.utf8(c.toString)))
 
-  private def scanOptions(pattern: Option[String], count: Option[Long]): Vector[Bytes] =
-    pattern.toVector.flatMap(p => Vector(Match, Bytes.utf8(p))) ++ count.toVector.flatMap(n => Vector(CountWord, Bytes.utf8(n.toString)))
-
   private def minMaxArg(minMax: MinMax): Bytes =
     minMax match {
       case MinMax.Min => MinWord
@@ -417,8 +414,13 @@ private[sage] object SortedSets {
     else if (value.isNaN) "nan"
     else value.toString
 
-  private def prefixed(prefix: Char, value: Bytes): Bytes =
-    Bytes.wrap(IArray.unsafeFromArray(prefix.toByte +: value.toArray))
+  private def prefixed(prefix: Char, value: Bytes): Bytes = {
+    val src = value.unsafeArray
+    val out = new Array[Byte](src.length + 1)
+    out(0) = prefix.toByte
+    System.arraycopy(src, 0, out, 1, src.length)
+    Bytes.wrap(IArray.unsafeFromArray(out))
+  }
 
   private val Nx            = Bytes.utf8("NX")
   private val Xx            = Bytes.utf8("XX")
@@ -437,7 +439,6 @@ private[sage] object SortedSets {
   private val MinWord       = Bytes.utf8("MIN")
   private val MaxWord       = Bytes.utf8("MAX")
   private val CountWord     = Bytes.utf8("COUNT")
-  private val Match         = Bytes.utf8("MATCH")
   private val NegInfWord    = Bytes.utf8("-inf")
   private val PosInfWord    = Bytes.utf8("+inf")
   private val LexMin        = Bytes.utf8("-")

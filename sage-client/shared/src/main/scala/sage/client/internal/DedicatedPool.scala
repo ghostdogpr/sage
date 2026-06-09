@@ -34,6 +34,8 @@ final private[client] class DedicatedPool(
   private val lock      = new ReentrantLock()
   private val available = lock.newCondition()
 
+  private val StaleRetryBackoffNanos = 1.milli.toNanos
+
   private val idle                              = mutable.ArrayDeque.empty[DedicatedPool.Idle]
   private val live                              = mutable.Set.empty[DedicatedConnection]
   private var reserved                          = 0
@@ -128,7 +130,9 @@ final private[client] class DedicatedPool(
           val established = establishOutsideLock()
           if (established != null) return established
           // discarded as stale; retry, but bounded by the deadline so generation churn can't spin forever
-          if (System.nanoTime() >= deadlineNanos) throw acquireTimedOut
+          val remaining   = deadlineNanos - System.nanoTime()
+          if (remaining <= 0L) throw acquireTimedOut
+          val _           = available.awaitNanos(math.min(StaleRetryBackoffNanos, remaining)) // pace retries during a churn storm
         } else {
           val remaining = deadlineNanos - System.nanoTime()
           if (remaining <= 0L) throw acquireTimedOut

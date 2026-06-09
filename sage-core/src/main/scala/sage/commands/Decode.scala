@@ -2,6 +2,7 @@ package sage.commands
 
 import java.time.Instant
 
+import scala.collection.mutable
 import scala.concurrent.duration.FiniteDuration
 
 import sage.Bytes
@@ -62,28 +63,42 @@ private[commands] object Decode {
     case other                => Left(DecodeError("integer or null", Frame.describe(other)))
   }
 
-  def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
-    case Frame.Array(elements) =>
-      elements.foldLeft[Either[DecodeError, Vector[A]]](Right(Vector.empty)) { (acc, frame) =>
-        acc.flatMap(decoded => element(frame).map(decoded :+ _))
+  private def buildEach[A, B, C](items: IterableOnce[A], builder: mutable.Builder[B, C])(
+    f: A => Either[DecodeError, B]
+  ): Either[DecodeError, C] = {
+    val known = items.knownSize
+    if (known > 0) builder.sizeHint(known)
+    val it    = items.iterator
+    while (it.hasNext)
+      f(it.next()) match {
+        case Right(value) => builder += value
+        case Left(error)  => return Left(error)
       }
+    Right(builder.result())
+  }
+
+  def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
+    case Frame.Array(elements) => buildEach(elements, Vector.newBuilder[A])(element)
     case other                 => Left(DecodeError("array", Frame.describe(other)))
   }
 
   // a missing list replies null where a present one replies an array; a stored list is never empty, so null collapses to an empty vector
   def vectorOrEmpty[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
-    case Frame.Null => Right(Vector.empty)
-    case other      => vector(element)(other)
+    val decodeVector = vector(element)
+    frame =>
+      frame match {
+        case Frame.Null => Right(Vector.empty)
+        case other      => decodeVector(other)
+      }
   }
 
   def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
     case Frame.Map(entries) =>
-      entries.foldLeft[Either[DecodeError, Map[K, V]]](Right(Map.empty)) { case (acc, (fieldFrame, valueFrame)) =>
+      buildEach(entries, Map.newBuilder[K, V]) { case (fieldFrame, valueFrame) =>
         for {
-          decoded <- acc
-          field   <- key(fieldFrame)
-          value   <- this.value(valueFrame)
-        } yield decoded + (field -> value)
+          field <- key(fieldFrame)
+          value <- this.value(valueFrame)
+        } yield field -> value
       }
     case other              => Left(DecodeError("map", Frame.describe(other)))
   }
@@ -91,29 +106,24 @@ private[commands] object Decode {
   // HSCAN's items are a flat field, value, field, value, … array; HRANDFIELD WITHVALUES nests each pair in its own array.
   def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
     case Frame.Array(elements) if elements.length % 2 == 0 =>
-      elements.grouped(2).foldLeft[Either[DecodeError, Vector[(K, V)]]](Right(Vector.empty)) { (acc, pair) =>
+      buildEach(elements.grouped(2), Vector.newBuilder[(K, V)]) { pair =>
         for {
-          decoded <- acc
-          field   <- key(pair(0))
-          value   <- this.value(pair(1))
-        } yield decoded :+ (field -> value)
+          field <- key(pair(0))
+          value <- this.value(pair(1))
+        } yield field -> value
       }
     case other => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
   }
 
   def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
     case Frame.Array(rows) =>
-      rows.foldLeft[Either[DecodeError, Vector[(K, V)]]](Right(Vector.empty)) { (acc, row) =>
-        acc.flatMap { decoded =>
-          row match {
-            case Frame.Array(Vector(fieldFrame, valueFrame)) =>
-              for {
-                field <- key(fieldFrame)
-                value <- this.value(valueFrame)
-              } yield decoded :+ (field -> value)
-            case other                                       => Left(DecodeError("field/value pair", Frame.describe(other)))
-          }
-        }
+      buildEach(rows, Vector.newBuilder[(K, V)]) {
+        case Frame.Array(Vector(fieldFrame, valueFrame)) =>
+          for {
+            field <- key(fieldFrame)
+            value <- this.value(valueFrame)
+          } yield field -> value
+        case other                                       => Left(DecodeError("field/value pair", Frame.describe(other)))
       }
     case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
   }
@@ -133,10 +143,7 @@ private[commands] object Decode {
 
   // RESP3 returns set-typed replies (SMEMBERS, SINTER, …) as a Set frame, never an Array
   def set[V](using ValueCodec[V]): Frame => Either[DecodeError, Set[V]] = {
-    case Frame.Set(elements) =>
-      elements.foldLeft[Either[DecodeError, Set[V]]](Right(Set.empty)) { (acc, frame) =>
-        acc.flatMap(decoded => value(frame).map(decoded + _))
-      }
+    case Frame.Set(elements) => buildEach(elements, Set.newBuilder[V])(value)
     case other               => Left(DecodeError("set", Frame.describe(other)))
   }
 
@@ -154,17 +161,13 @@ private[commands] object Decode {
   // RESP3 nests each member with its Double score in a two-element array (ZRANGE WITHSCORES, ZPOPMIN count, …)
   def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
     case Frame.Array(rows) =>
-      rows.foldLeft[Either[DecodeError, Vector[(V, Double)]]](Right(Vector.empty)) { (acc, row) =>
-        acc.flatMap { decoded =>
-          row match {
-            case Frame.Array(Vector(memberFrame, scoreFrame)) =>
-              for {
-                member <- value(memberFrame)
-                s      <- score(scoreFrame)
-              } yield decoded :+ (member -> s)
-            case other                                        => Left(DecodeError("member/score pair", Frame.describe(other)))
-          }
-        }
+      buildEach(rows, Vector.newBuilder[(V, Double)]) {
+        case Frame.Array(Vector(memberFrame, scoreFrame)) =>
+          for {
+            member <- value(memberFrame)
+            s      <- score(scoreFrame)
+          } yield member -> s
+        case other                                        => Left(DecodeError("member/score pair", Frame.describe(other)))
       }
     case other             => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
   }
@@ -184,12 +187,11 @@ private[commands] object Decode {
   // ZSCAN's items are a flat member, score, member, score array with scores as bulk strings, not RESP3 doubles
   def scoredMembersFlat[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
     case Frame.Array(elements) if elements.length % 2 == 0 =>
-      elements.grouped(2).foldLeft[Either[DecodeError, Vector[(V, Double)]]](Right(Vector.empty)) { (acc, pair) =>
+      buildEach(elements.grouped(2), Vector.newBuilder[(V, Double)]) { pair =>
         for {
-          decoded <- acc
-          member  <- value(pair(0))
-          s       <- scoreText(pair(1))
-        } yield decoded :+ (member -> s)
+          member <- value(pair(0))
+          s      <- scoreText(pair(1))
+        } yield member -> s
       }
     case other => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
   }

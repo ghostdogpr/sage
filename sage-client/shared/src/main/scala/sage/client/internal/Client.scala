@@ -432,11 +432,51 @@ object Client {
   private val defaults = SageConfig()
 
   def connect(config: SageConfig): CIO[Client[CIO]] =
-    config.topology match {
-      case Topology.Standalone                    => connectStandalone(config)
-      case Topology.Cluster(seeds, clusterConfig) =>
-        ClusterLive.connect(config, seeds.map(e => Node(e.host, e.port)), clusterConfig, Scheduler.real, translateHandshake)
+    validate(config) match {
+      case Some(problem) => CIO.fail(new IllegalArgumentException(problem))
+      case None          =>
+        config.topology match {
+          case Topology.Standalone                    => connectStandalone(config)
+          case Topology.Cluster(seeds, clusterConfig) =>
+            ClusterLive.connect(config, seeds.map(e => Node(e.host, e.port)), clusterConfig, Scheduler.real, translateHandshake)
+        }
     }
+
+  // a misconfigured client is a programmer error, surfaced through the connect effect (never thrown from a constructor) and deliberately
+  // outside the sealed hierarchy, like the other usage guards
+  private def validate(config: SageConfig): Option[String] = {
+    // pingInterval/pingTimeout are inert when the watchdog is disabled, so don't reject them then
+    val watchdog =
+      if (config.watchdog.enabled)
+        Vector(
+          positive(config.watchdog.pingInterval, "watchdog.pingInterval"),
+          positive(config.watchdog.pingTimeout, "watchdog.pingTimeout")
+        )
+      else Vector.empty
+    val checks   = Vector(
+      port(config.port, "port"),
+      positive(config.connectTimeout, "connectTimeout"),
+      positive(config.closeTimeout, "closeTimeout"),
+      positive(config.reconnect.initialDelay, "reconnect.initialDelay"),
+      cond(config.reconnect.maxDelay >= config.reconnect.initialDelay, "reconnect.maxDelay must be >= initialDelay"),
+      cond(config.reconnect.multiplier >= 1.0, "reconnect.multiplier must be >= 1.0"),
+      cond(config.dedicatedPool.maxConnections >= 1, "dedicatedPool.maxConnections must be >= 1"),
+      positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout")
+    ) ++ watchdog ++ (config.topology match {
+      case Topology.Cluster(seeds, cluster) =>
+        Vector(
+          cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
+          cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
+          positive(cluster.minRefreshInterval, "cluster.minRefreshInterval")
+        ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
+      case Topology.Standalone              => Vector.empty
+    })
+    checks.flatten.headOption
+  }
+
+  private def cond(ok: Boolean, problem: String): Option[String]             = if (ok) None else Some(problem)
+  private def port(value: Int, label: String): Option[String]                = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
+  private def positive(value: FiniteDuration, label: String): Option[String] = cond(value.toNanos > 0L, s"$label must be positive")
 
   private def connectStandalone(config: SageConfig): CIO[Client[CIO]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
@@ -611,7 +651,9 @@ object Client {
       }
 
     def run[A](command: Command[A]): CIO[A] =
-      if (command.isBlocking)
+      if (isReleased)
+        CIO.fail(scopeReleasedError)
+      else if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
         CIO.async[A](complete => submitting(complete)(conn.submit(command, complete)))
@@ -663,10 +705,12 @@ object Client {
         case Some(message) => CIO.fail(TransactionDiscarded(message))
         case None          =>
           frames(n + 1) match {
-            case Frame.Null         => CIO.value(None)
-            case Frame.Array(elems) =>
+            case Frame.Null                              => CIO.value(None)
+            case Frame.Array(elems) if elems.length == n =>
               CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i).asInstanceOf[Command[Any]], elems(i)))))
-            case other              =>
+            case Frame.Array(elems)                      =>
+              CIO.fail(ProtocolError(s"EXEC returned ${elems.length} results for $n queued commands"))
+            case other                                   =>
               errorOf(other) match {
                 case Some(message) => CIO.fail(TransactionDiscarded(message))
                 case None          => CIO.fail(ProtocolError(s"unexpected EXEC reply: ${Frame.describe(other)}"))
