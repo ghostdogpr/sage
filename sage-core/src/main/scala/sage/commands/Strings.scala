@@ -35,7 +35,7 @@ enum GetExpiry {
   case Persist
 }
 
-object Strings {
+private[sage] object Strings {
 
   def append[K, V](key: K, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command("APPEND", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(value)), Decode.long)

@@ -7,7 +7,7 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.client.internal.Client
-import sage.commands.{Command, Pipeline, Strings}
+import sage.commands.{Command, Commands, Pipeline}
 import sage.commands.Pipeline.pipeline
 import sage.protocol.Frame
 
@@ -75,7 +75,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
       for {
         _   <- client.set("p:a", "x")
         _   <- client.set("p:n", 10)
-        out <- client.pipeline((Strings.get[String, String]("p:a"), Strings.incrBy[String]("p:n", 5)).pipeline)
+        out <- client.pipeline((Commands.get[String, String]("p:a"), Commands.incrBy[String]("p:n", 5)).pipeline)
       } yield assertEquals(out, (Some("x"), 15L))
     }
   }
@@ -86,9 +86,9 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         _       <- client.set("p:str", "hello")
         results <- client.pipelineAttempt(
                      (
-                       Strings.get[String, String]("p:str"),
-                       Strings.incr[String]("p:str"),
-                       Strings.get[String, String]("p:str")
+                       Commands.get[String, String]("p:str"),
+                       Commands.incr[String]("p:str"),
+                       Commands.get[String, String]("p:str")
                      ).pipeline
                    )
       } yield {
@@ -103,7 +103,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
   test("a large pipeline runs every command and returns one result per position") {
     withClient { client =>
       val n = 200
-      client.pipeline(Pipeline.sequence(Vector.fill(n)(Strings.incr[String]("p:rtt")))).flatMap { results =>
+      client.pipeline(Pipeline.sequence(Vector.fill(n)(Commands.incr[String]("p:rtt")))).flatMap { results =>
         client.get[String, Int]("p:rtt").map { stored =>
           assertEquals(results.length, n)
           assertEquals(results, (1 to n).map(_.toLong).toVector)
@@ -117,7 +117,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _   <- client.set("t:n", 10)
-        out <- client.transaction(tx => tx.exec((Strings.incr[String]("t:n"), Strings.incrBy[String]("t:n", 5)).pipeline))
+        out <- client.transaction(tx => tx.exec((Commands.incr[String]("t:n"), Commands.incrBy[String]("t:n", 5)).pipeline))
       } yield assertEquals(out, Some((11L, 16L)))
     }
   }
@@ -129,8 +129,8 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         out    <- client.transaction { tx =>
                     for {
                       _   <- tx.watch("t:rmw")
-                      cur <- tx.run(Strings.get[String, Int]("t:rmw"))
-                      res <- tx.exec(Pipeline.sequence(Vector(Strings.set[String, Int]("t:rmw", cur.getOrElse(0) + 1))))
+                      cur <- tx.get[String, Int]("t:rmw")
+                      res <- tx.exec(Pipeline.sequence(Vector(Commands.set[String, Int]("t:rmw", cur.getOrElse(0) + 1))))
                     } yield res
                   }
         stored <- client.get[String, Int]("t:rmw")
@@ -150,9 +150,9 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
           out    <- client.transaction { tx =>
                       for {
                         _   <- tx.watch("t:w")
-                        _   <- tx.run(Strings.get[String, Int]("t:w"))
+                        _   <- tx.get[String, Int]("t:w")
                         _   <- other.set("t:w", 99) // a different connection changes the watched key before EXEC
-                        res <- tx.exec(Pipeline.sequence(Vector(Strings.incr[String]("t:w"))))
+                        res <- tx.exec(Pipeline.sequence(Vector(Commands.incr[String]("t:w"))))
                       } yield res
                     }
           _      <- other.close
@@ -169,7 +169,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _   <- client.set("t:str", "x")
-        res <- client.transaction(tx => tx.execAttempt((Strings.incr[String]("t:fresh"), Strings.incr[String]("t:str")).pipeline))
+        res <- client.transaction(tx => tx.execAttempt((Commands.incr[String]("t:fresh"), Commands.incr[String]("t:str")).pipeline))
         ok  <- client.get[String, Int]("t:fresh")
       } yield {
         val (a, b) = res.getOrElse(fail("expected a committed transaction"))

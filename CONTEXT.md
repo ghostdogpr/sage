@@ -59,6 +59,10 @@ _Avoid_: tracked read, local read
 A pure value in the Core describing one server command: its wire encoding and its typed reply decoder (`Command[Out]`). The single source of truth; the client's per-command methods are sugar over it.
 _Avoid_: request, operation
 
+**Commands**:
+The public builder facade (`Commands.get`, `Commands.incr`, …) yielding `Command` values, named one-for-one with the client's methods. The path for `run`, pipelines, transactions, and reuse; the per-family objects behind it are internal.
+_Avoid_: Strings/Keys/Sets/… (internal families), Cmd
+
 **Pipeline**:
 An applicative composition of Commands sent in one round-trip, yielding a typed tuple of results. Not a transaction — no atomicity.
 
@@ -67,7 +71,7 @@ A Pipeline executed atomically via `MULTI`/`EXEC` on a Dedicated Connection, opt
 _Avoid_: batch (that's a Pipeline)
 
 **Transaction Scope**:
-The handle opened by `transaction { scope => … }`, holding one leased Dedicated Connection for the block. Within it the caller may `watch`, `run` reads, then `exec` a Pipeline (or `discard`) — enough to read, decide, and commit on the one connection that `WATCH` requires. The lease is always released; a scope abandoned with watches still armed discards its connection rather than recycling it.
+The handle opened by `transaction { tx => … }`, holding one leased Dedicated Connection for the block. Within it the caller may `watch`, run reads via the shared command surface (`tx.get`, `tx.run`, …), then `exec` a Pipeline (or `discard`) — enough to read, decide, and commit on the one connection that `WATCH` requires. Reads must be ordinary commands; a blocking command is rejected rather than parking the lease. The lease is always released; a scope abandoned with watches still armed discards its connection rather than recycling it.
 _Avoid_: transaction context, session
 
 **Family**:

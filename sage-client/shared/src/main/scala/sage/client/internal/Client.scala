@@ -18,20 +18,12 @@ import sage.commands.*
 import sage.protocol.Frame
 
 /**
-  * The user-facing handle owning all connections to one server. Per-command methods are concrete sugar delegating to [[run]], so anything
-  * implementing `run` — a fake, or a backend adapter lowering `F` to its native effect — gets the whole command surface.
+  * The command surface shared by [[Client]] and [[TransactionScope]]: every command as a concrete method delegating to [[run]], so anything
+  * implementing `run` — a fake, or a backend adapter lowering `F` to its native effect — gets the whole catalogue.
   */
-trait Client[F[_]] {
+trait CommandRunner[F[_]] {
 
   def run[A](command: Command[A]): F[A]
-
-  def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
-
-  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
-
-  def transaction[A](body: TransactionScope[F] => F[A]): F[A]
-
-  def close: F[Unit]
 
   final def ping(message: Option[String] = None): F[String] = run(Connection.ping(message))
 
@@ -418,6 +410,21 @@ trait Client[F[_]] {
   ): F[ScanPage[(V, Double)]] = run(SortedSets.zScan(key, cursor, pattern, count))
 }
 
+/**
+  * The user-facing handle owning all connections to one server: the command surface, plus pipelines and transactions. Commands compose into
+  * a [[Pipeline]] value (built from [[sage.commands.Commands]]) that `pipeline` sends in one round-trip, yielding a typed result per command.
+  */
+trait Client[F[_]] extends CommandRunner[F] {
+
+  def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
+
+  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
+
+  def transaction[A](body: TransactionScope[F] => F[A]): F[A]
+
+  def close: F[Unit]
+}
+
 object Client {
 
   private val defaults = SageConfig()
@@ -518,8 +525,8 @@ object Client {
     private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
       if (p.commands.isEmpty)
         CIO.value(Vector.empty)
-      else if (p.commands.exists(_.execution != Execution.Ordinary))
-        CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually or in a Transaction"))
+      else if (p.commands.exists(_.isBlocking))
+        CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
         CIO.async { complete =>
           val n         = p.commands.length
@@ -585,7 +592,10 @@ object Client {
       }
 
     def run[A](command: Command[A]): CIO[A] =
-      CIO.async[A](complete => submitting(complete)(conn.submit(command, complete)))
+      if (command.isBlocking)
+        CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
+      else
+        CIO.async[A](complete => submitting(complete)(conn.submit(command, complete)))
 
     def discard: CIO[Unit] =
       CIO.async[Unit] { complete =>
@@ -611,8 +621,8 @@ object Client {
       // a truly empty no-op only when nothing is watched; with watches armed we must still MULTI/EXEC so a concurrent change can abort it
       else if (p.commands.isEmpty && !armed.get)
         CIO.value(Some(Vector.empty))
-      else if (p.commands.exists(_.execution != Execution.Ordinary))
-        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them in the read phase instead"))
+      else if (p.commands.exists(_.isBlocking))
+        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
       else
         CIO
           .async[Vector[Frame]] { complete =>
