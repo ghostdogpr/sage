@@ -515,8 +515,9 @@ object Client {
           factory,
           bootstrap,
           scheduler,
-          () => connection.currentState == MultiplexedConnection.State.Live,
-          () => connection.currentGeneration,
+          () => connection.isLive,
+          () => connection.liveGeneration(),
+          connection.isCurrent,
           dedicatedPool,
           connectTimeout.toMillis
         )

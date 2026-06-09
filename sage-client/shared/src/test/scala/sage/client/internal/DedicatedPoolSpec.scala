@@ -31,18 +31,20 @@ class DedicatedPoolSpec extends munit.FunSuite {
   private def make(
     respond: Bytes => Seq[Frame],
     isLive: () => Boolean = () => true,
-    generation: () => Long = () => 0L,
+    liveGeneration: () => Option[MultiplexedConnection.Generation] = () => Some(MultiplexedConnection.Generation.initial),
     config: DedicatedPoolConfig = DedicatedPoolConfig()
   ): (DedicatedPool, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
-    val scheduler                                       = new ManualScheduler
-    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
-    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+    val scheduler                                              = new ManualScheduler
+    val transports                                             = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory        = (onFrame, onClosed) => {
       val transport = new FakeTransport(onFrame, onClosed, respond)
       transports += transport
       transport
     }
-    val pool                                            =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, generation, config, 1000L)
+    // mirrors the real MultiplexedConnection: a stamp is current iff the connection is live and the generation matches
+    val isCurrent: MultiplexedConnection.Generation => Boolean = g => liveGeneration().contains(g)
+    val pool                                                   =
+      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, liveGeneration, isCurrent, config, 1000L)
     (pool, scheduler, transports)
   }
 
@@ -115,33 +117,72 @@ class DedicatedPoolSpec extends munit.FunSuite {
   }
 
   test("an idle connection from a previous generation is discarded rather than reused") {
-    var gen                           = 0L
-    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), generation = () => gen)
+    var live                          = Option(MultiplexedConnection.Generation.initial)
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), liveGeneration = () => live)
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
 
-    gen = 1L // the multiplexed connection reconnected (e.g. failover) under the pool
+    live = Some(MultiplexedConnection.Generation.initial.next) // the multiplexed connection reconnected (e.g. failover) under the pool
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 2)
   }
 
-  test("a connection that races a reconnect during establish is discarded and re-established before use") {
-    var gen                                           = 0L
+  test("a connection built across a reconnect is admitted under the new generation, not discarded") {
+    var live                                          = Option(MultiplexedConnection.Generation.initial)
     var bumped                                        = false
     // the multiplexed connection reconnects (generation bumps) while the first dedicated connection is running its HELLO bootstrap
     val respond: Bytes => Seq[Frame]                  = payload =>
       if (payload.asUtf8String.contains("HELLO")) {
-        if (!bumped) { bumped = true; gen = 1L }
+        if (!bumped) { bumped = true; live = Some(MultiplexedConnection.Generation.initial.next) }
         Seq(helloReply)
       } else Seq(popReply)
-    val (pool, scheduler, transports)                 = make(respond, generation = () => gen)
+    val (pool, scheduler, transports)                 = make(respond, liveGeneration = () => live)
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r))
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Success(Some(("k", "v")))))
-    assertEquals(transports.size, 2)
+    // commit-time stamping records the new epoch; the connection is born current, so there is no born-stale discard and no retry
+    assertEquals(transports.size, 1)
+  }
+
+  test("an idle connection is not reused when the connection leaves Live between lease and acquire") {
+    var live                          = true
+    val gen                           = MultiplexedConnection.Generation.initial
+    val (pool, scheduler, transports) =
+      make(replyWith(Seq(popReply)), isLive = () => live, liveGeneration = () => if (live) Some(gen) else None)
+    pool.use(blPop, _ => ())
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1) // established and returned to idle at generation `gen`
+
+    // the lease gate observes Live, then the multiplexed connection drops into a reconnect window before the offloaded acquire runs:
+    // the idle connection is at the same generation but the connection is no longer live, so it must be refused, not reused
+    var result: Option[Try[Option[(String, String)]]] = None
+    pool.use(blPop, r => result = Some(r))
+    live = false
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, Some(Failure(NotConnected())))
+    assertEquals(transports.size, 1) // and it fails fast without opening a fresh socket during the reconnect window
+  }
+
+  test("an exhausted pool fails fast NotConnected, not TimedOut, when the connection is not live") {
+    var live                          = true
+    val gen                           = MultiplexedConnection.Generation.initial
+    val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 50.millis, idleTimeout = Duration.Inf)
+    val (pool, scheduler, transports) =
+      make(replyWith(Nil), isLive = () => live, liveGeneration = () => if (live) Some(gen) else None, config = config)
+    pool.use(blPop, _ => ()) // the only slot is held by a parked BLPOP that never replies
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1)
+
+    // the lease gate observes Live, then the connection drops before the offloaded acquire runs against the exhausted pool: the waiter
+    // must fail fast rather than park for acquireTimeout — proven by resolving on a zero-delay advance instead of needing the 50ms timeout
+    var result: Option[Try[Option[(String, String)]]] = None
+    pool.use(blPop, r => result = Some(r))
+    live = false
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, Some(Failure(NotConnected())))
   }
 
   test("a READONLY reply poisons the connection so it is not returned to the pool") {

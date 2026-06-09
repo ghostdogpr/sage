@@ -20,9 +20,11 @@ import sage.protocol.Frame
   */
 final private[client] class DedicatedConnection private (
   factory: MultiplexedConnection.TransportFactory,
-  connectTimeoutMillis: Long,
-  val generation: Long
+  connectTimeoutMillis: Long
 ) {
+
+  // stamped once, by the pool, with the Generation live the moment this connection joins it (see [[DedicatedPool.establishOutsideLock]])
+  @volatile private var stampedEpoch: MultiplexedConnection.Generation = MultiplexedConnection.Generation.initial
 
   private val pending                 = new ConcurrentLinkedQueue[DedicatedConnection.Waiter]()
   private val transportRef            = new AtomicReference[Transport]()
@@ -30,6 +32,10 @@ final private[client] class DedicatedConnection private (
   // counts work from submit time, not write time: the transport queues asynchronously, so a command sits here before `writeAttempted`
   // moves it to `pending`. Recycling on `pending.isEmpty` alone could hand back a connection with a queued-but-unwritten batch.
   private val inFlight                = new AtomicInteger(0)
+
+  def epoch: MultiplexedConnection.Generation = stampedEpoch
+
+  def stampEpoch(generation: MultiplexedConnection.Generation): Unit = stampedEpoch = generation
 
   def isHealthy: Boolean = !dead
 
@@ -182,10 +188,9 @@ private[client] object DedicatedConnection {
   def establish(
     factory: MultiplexedConnection.TransportFactory,
     bootstrap: Vector[Command[?]],
-    connectTimeoutMillis: Long,
-    generation: Long
+    connectTimeoutMillis: Long
   ): DedicatedConnection = {
-    val connection = new DedicatedConnection(factory, connectTimeoutMillis, generation)
+    val connection = new DedicatedConnection(factory, connectTimeoutMillis)
     connection.start()
     connection.runBootstrap(bootstrap)
     connection

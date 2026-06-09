@@ -55,6 +55,10 @@ _Avoid_: heartbeat, health checker, keepalive
 Marking a connection (or the parser) unusable so it is discarded and reconnected rather than reused, because continuing would be unsafe: after a protocol error (RESP3 has no resync point) or a `READONLY` reply from a demoted master.
 _Avoid_: invalidate
 
+**Generation**:
+The monotonic epoch of the Multiplexed Connection's current socket, bumped each time a fresh socket becomes live. A Dedicated Connection is stamped with the Generation that was live when it joined the pool and discarded once that Generation is no longer current — so a connection that outlived a reconnect (e.g. a DNS failover to a new master) is never reused. The Multiplexed Connection is the sole authority on its Generation: it answers `liveGeneration` (the epoch to stamp, only while live) and `isCurrent` (whether a stamp is still the live epoch); no caller compares raw epoch numbers.
+_Avoid_: version, era, incarnation
+
 **Cached Read**:
 A read command executed with explicit per-call opt-in to client-side caching: served from the local cache until a server invalidation push or TTL evicts it.
 _Avoid_: tracked read, local read
