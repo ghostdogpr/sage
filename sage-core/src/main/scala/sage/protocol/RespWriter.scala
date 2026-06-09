@@ -1,7 +1,5 @@
 package sage.protocol
 
-import java.nio.charset.StandardCharsets
-
 import sage.Bytes
 
 /**
@@ -10,7 +8,7 @@ import sage.Bytes
 private[sage] object RespWriter {
 
   def writeCommand(name: String, args: Vector[Bytes]): Bytes = {
-    val sink = new Sink(64)
+    val sink = new Sink(256)
     if (name.indexOf(' ') < 0) { // single-word fast path: no split allocation
       sink.writeByte('*')
       sink.writeLong(1L + args.length)
@@ -67,14 +65,8 @@ private[sage] object RespWriter {
     def writeBytes(bytes: Bytes): Unit =
       writeArray(bytes.unsafeArray)
 
-    def writeLong(value: Long): Unit =
-      if (value == Long.MinValue) writeArray(value.toString.getBytes(StandardCharsets.UTF_8)) // -value would overflow
-      else if (value < 0) {
-        writeByte('-')
-        writeDigits(-value)
-      } else {
-        writeDigits(value)
-      }
+    // only ever called with non-negative lengths and element counts
+    def writeLong(value: Long): Unit = writeDigits(value)
 
     def result(): Bytes = Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOf(buf, len)))
 
@@ -102,11 +94,13 @@ private[sage] object RespWriter {
       len += array.length
     }
 
+    // Long arithmetic so the doubling cannot overflow to a negative capacity on a multi-GB command; capped at the max array size
     private def ensure(extra: Int): Unit =
       if (buf.length - len < extra) {
-        var capacity = buf.length * 2
-        while (capacity - len < extra) capacity *= 2
-        buf = java.util.Arrays.copyOf(buf, capacity)
+        val needed   = len.toLong + extra
+        var capacity = buf.length.toLong * 2
+        while (capacity < needed) capacity *= 2
+        buf = java.util.Arrays.copyOf(buf, math.min(capacity, Int.MaxValue - 8).toInt)
       }
   }
 }

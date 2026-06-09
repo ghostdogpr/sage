@@ -80,8 +80,6 @@ object Frame {
 
   final case class Set(elements: Vector[Frame]) extends Frame
 
-  final case class Attribute(entries: Vector[(Frame, Frame)]) extends Frame
-
   final case class Push(elements: Vector[Frame]) extends Frame
 
   def describe(frame: Frame): String =
@@ -99,7 +97,6 @@ object Frame {
       case VerbatimString(format, value) => s"verbatim string '$format' (${value.length} bytes)"
       case Map(entries)                  => s"map (${entries.length} entries)"
       case Set(elements)                 => s"set (${elements.length} elements)"
-      case Attribute(entries)            => s"attribute (${entries.length} entries)"
       case Push(elements)                => s"push (${elements.length} elements)"
     }
 }

@@ -38,7 +38,6 @@ object FrameWriter {
         writeCrlf(out)
       case Frame.Map(entries)                  => writePairs('%', entries, out)
       case Frame.Set(elements)                 => writeAggregate('~', elements, out)
-      case Frame.Attribute(entries)            => writePairs('|', entries, out)
       case Frame.Push(elements)                => writeAggregate('>', elements, out)
     }
 

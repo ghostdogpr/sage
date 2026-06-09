@@ -48,10 +48,10 @@ final private[client] class ClusterLive(
   private val refreshLock   = new ReentrantLock()
   private val refreshDone   = refreshLock.newCondition()
   private var refreshing    = false
-  private var lastRefreshMs = Long.MinValue
-
-  private val retryDelay   = reconnect.initialDelay
-  private val minRefreshMs = cluster.minRefreshInterval.toMillis
+  private val minRefreshMs  = cluster.minRefreshInterval.toMillis
+  // bootstrap's CLUSTER SLOTS does not consume the throttle window: seed so the first redirect/READONLY-driven refresh runs immediately,
+  // and only refreshes within minRefreshInterval of one another are throttled (Long.MinValue here would overflow the elapsed subtraction)
+  private var lastRefreshMs = scheduler.nowMillis - minRefreshMs
 
   private inline def lockedNodes[A](inline body: A): A = {
     nodesLock.lock()
@@ -68,7 +68,7 @@ final private[client] class ClusterLive(
       val node = candidates.next()
       try
         querySlotsVia(getOrEstablish(node)) match {
-          case Some(shards) => adopt(shards); return
+          case Some(shards) => adopt(node, shards); return
           case None         => ()
         }
       catch { case NonFatal(error) => lastError = error }
@@ -156,13 +156,14 @@ final private[client] class ClusterLive(
       }
     }
 
-  // a routed node was unreachable and the command provably never executed: refresh to adopt the promoted master, then re-route. The delay
-  // (and a fresh establish's connect timeout) paces retries so an in-progress failover is not hammered; redirectsLeft bounds the loop.
+  // a routed node was unreachable and the command provably never executed: refresh to adopt the promoted master, then re-route. A growing
+  // jittered backoff (and a fresh establish's connect timeout) paces retries so an in-progress failover is not hammered; redirectsLeft bounds it.
   private def onUnreachable[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     if (redirectsLeft <= 0) complete(Failure(NotConnected()))
     else {
       refresh(force = true)
-      scheduler.after(retryDelay)(dispatch(command, redirectsLeft - 1, complete))
+      val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete))
     }
 
   private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
@@ -233,7 +234,7 @@ final private[client] class ClusterLive(
       finally refreshLock.unlock()
 
     if (iRefresh)
-      try querySlots(refreshCandidates()).foreach(adopt)
+      try querySlots(refreshCandidates()).foreach { case (from, shards) => adopt(from, shards) }
       finally {
         refreshLock.lock()
         try { refreshing = false; lastRefreshMs = scheduler.nowMillis; refreshDone.signalAll() }
@@ -246,11 +247,11 @@ final private[client] class ClusterLive(
     (live.map(_._1) ++ others.map(_._1) ++ seeds).distinct
   }
 
-  private def querySlots(candidates: Vector[Node]): Option[Vector[Shard]] =
+  private def querySlots(candidates: Vector[Node]): Option[(Node, Vector[Shard])] =
     candidates.iterator.flatMap(trySlots).nextOption()
 
-  private def trySlots(node: Node): Option[Vector[Shard]] =
-    try querySlotsVia(getOrEstablish(node))
+  private def trySlots(node: Node): Option[(Node, Vector[Shard])] =
+    try querySlotsVia(getOrEstablish(node)).map(node -> _)
     catch { case NonFatal(_) => None }
 
   private def querySlotsVia(nc: NodeClient): Option[Vector[Shard]] = {
@@ -265,11 +266,13 @@ final private[client] class ClusterLive(
       }
   }
 
-  // installs a fresh topology and prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak
-  private def adopt(shards: Vector[Shard]): Unit = {
-    topologyRef.set(ClusterTopology.from(shards))
-    val masters = shards.map(_.master).toSet
-    val gone    = lockedNodes {
+  // installs a fresh topology and prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak. An empty
+  // announce-IP from CLUSTER SLOTS means "the node I queried", so substitute `from` the same way redirects do
+  private def adopt(from: Node, shards: Vector[Shard]): Unit = {
+    val resolved = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
+    topologyRef.set(ClusterTopology.from(resolved))
+    val masters  = resolved.map(_.master).toSet
+    val gone     = lockedNodes {
       val absent = established.keysIterator.filterNot(masters.contains).toVector
       absent.flatMap(node => established.remove(node))
     }

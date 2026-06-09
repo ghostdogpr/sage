@@ -212,11 +212,11 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(results.toVector, Vector.fill[Try[Any]](3)(Failure(ConnectionLost(mayHaveExecuted = false))))
   }
 
-  test("attribute frames do not consume pending replies") {
+  test("out-of-band push frames do not consume pending replies") {
     val (connection, _, transports) = make()
     var result: Option[Try[String]] = None
     connection.submit(Connection.ping(), r => result = Some(r))
-    transports.head.emit(Frame.Attribute(Vector(Frame.SimpleString("key") -> Frame.SimpleString("value"))))
+    transports.head.emit(Frame.Push(Vector(Frame.SimpleString("message"), Frame.SimpleString("hi"))))
     transports.head.emit(Frame.SimpleString("PONG"))
     assertEquals(result, Some(Success("PONG")))
   }

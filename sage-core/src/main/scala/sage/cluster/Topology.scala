@@ -1,5 +1,7 @@
 package sage.cluster
 
+import scala.collection.mutable
+
 import sage.commands.{Command, Pipeline}
 
 final case class Node(host: String, port: Int)
@@ -21,31 +23,40 @@ final class ClusterTopology private (val shards: Vector[Shard], owners: Array[No
 
   def route(command: Command[?]): Route =
     if (command.keyIndices.exists(index => index < 0 || index >= command.args.length)) Route.Malformed
-    else {
-      val slots = slotsOf(command)
-      if (slots.isEmpty) Route.Keyless
-      else if (slots.sizeIs > 1) Route.CrossSlot(slots)
-      else
-        nodeForSlot(slots.head) match {
-          case Some(node) => Route.ToNode(node, slots.head)
-          case None       => Route.Unowned(slots.head)
-        }
-    }
+    else
+      command.keyIndices.length match {
+        case 0 => Route.Keyless
+        case 1 => routeSlot(Slot.of(command.args(command.keyIndices.head)))
+        case _ =>
+          val slots = slotsOf(command)
+          if (slots.sizeIs > 1) Route.CrossSlot(slots) else routeSlot(slots.head)
+      }
 
   def split(pipeline: Pipeline[?, ?]): SplitPlan = {
-    val routes    = pipeline.commands.zipWithIndex.map { case (command, index) => (index, route(command)) }
-    val nodeOrder = routes.collect { case (_, Route.ToNode(node, _)) => node }.distinct
-    val perNode   = nodeOrder.map { node =>
-      NodeGroup(node, routes.collect { case (index, Route.ToNode(`node`, _)) => index })
+    val perNode  = mutable.LinkedHashMap.empty[Node, mutable.ArrayBuffer[Int]]
+    val keyless  = mutable.ArrayBuffer.empty[Int]
+    val rejected = mutable.ArrayBuffer.empty[(Int, Rejected)]
+    pipeline.commands.iterator.zipWithIndex.foreach { case (command, index) =>
+      route(command) match {
+        case Route.ToNode(node, _)  => perNode.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += index
+        case Route.Keyless          => keyless += index
+        case Route.Unowned(slot)    => rejected += ((index, Rejected.Unowned(slot)))
+        case Route.CrossSlot(slots) => rejected += ((index, Rejected.CrossSlot(slots)))
+        case Route.Malformed        => rejected += ((index, Rejected.Malformed))
+      }
     }
-    val keyless   = routes.collect { case (index, Route.Keyless) => index }
-    val rejected  = routes.collect {
-      case (index, Route.Unowned(slot))    => (index, Rejected.Unowned(slot))
-      case (index, Route.CrossSlot(slots)) => (index, Rejected.CrossSlot(slots))
-      case (index, Route.Malformed)        => (index, Rejected.Malformed)
-    }
-    SplitPlan(perNode, keyless, rejected)
+    SplitPlan(
+      perNode.iterator.map { case (node, indices) => NodeGroup(node, indices.toVector) }.toVector,
+      keyless.toVector,
+      rejected.toVector
+    )
   }
+
+  private def routeSlot(slot: Slot): Route =
+    nodeForSlot(slot) match {
+      case Some(node) => Route.ToNode(node, slot)
+      case None       => Route.Unowned(slot)
+    }
 
   // safe to index args directly: route rejects out-of-range keyIndices as Malformed before calling this
   private def slotsOf(command: Command[?]): Set[Slot] =

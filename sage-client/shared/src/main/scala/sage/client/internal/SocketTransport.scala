@@ -9,7 +9,6 @@ import java.util.concurrent.locks.ReentrantLock
 import scala.concurrent.duration.FiniteDuration
 import scala.util.control.NonFatal
 
-import sage.Bytes
 import sage.protocol.{Frame, RespParser}
 
 /**
@@ -92,12 +91,7 @@ final private[client] class SocketTransport private (
       while (!done) {
         val n = in.read(buffer)
         if (n < 0) done = true
-        else {
-          parser.feed(Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOfRange(buffer, 0, n)))) match {
-            case Right(frames) => frames.foreach(onFrame)
-            case Left(_)       => done = true
-          }
-        }
+        else if (parser.feed(buffer, 0, n)(onFrame).isDefined) done = true
       }
     } catch {
       case NonFatal(_) => ()
@@ -137,7 +131,11 @@ final private[client] class SocketTransport private (
           attempted = 1
           out.write(first.payload.unsafeArray)
         } else {
-          if (scratch == null) scratch = new Array[Byte](SocketTransport.MaxBatchBytes.toInt)
+          if (scratch == null || scratch.length < size) {
+            var capacity = if (scratch == null) 1024L else scratch.length.toLong
+            while (capacity < size) capacity *= 2
+            scratch = new Array[Byte](math.min(capacity, SocketTransport.MaxBatchBytes).toInt)
+          }
           var offset = 0
           batch.forEach { item =>
             val bytes = item.payload.unsafeArray
