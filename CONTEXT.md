@@ -40,8 +40,12 @@ A connection exclusively held for commands with per-connection state or blocking
 _Avoid_: exclusive connection, pooled connection
 
 **Subscription Connection**:
-The lazily-created connection (one per client) that carries all pub/sub subscription state and push frames, isolating slow consumers from the Multiplexed Connection.
+The lazily-created connection (one per client) that carries all pub/sub subscription state and push frames, isolating slow consumers from the Multiplexed Connection. Created on the first subscription and closed when the last one ends; it runs its own reconnect loop and re-issues every active subscription on reconnect. A slow consumer backpressures this connection at the TCP level (lossless), which can stall its peer subscriptions but never the Multiplexed Connection's commands.
 _Avoid_: pub/sub connection
+
+**Message**:
+One pub/sub delivery: a channel and a payload, surfaced on a subscription's effect stream. A pattern subscription yields a **Pattern Message** instead, which also names the glob pattern that matched. The delivery unit of classic pub/sub — distinct from a Frame (the wire value carrying it) and a Stream Entry (a record in a Redis Stream).
+_Avoid_: event, notification; calling a Frame or a Stream Entry a "message"
 
 **Watchdog**:
 The per-connection health check that probes an otherwise-idle Multiplexed Connection and declares it dead — to be reconnected — when replies stop arriving, catching half-open connections a blocking socket read never surfaces.
