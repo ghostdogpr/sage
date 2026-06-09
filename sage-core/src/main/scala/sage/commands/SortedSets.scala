@@ -69,7 +69,7 @@ enum ZRange[+V] {
   case ByLex[V](min: LexBoundary[V], max: LexBoundary[V], limit: Option[Limit] = None, rev: Boolean = false) extends ZRange[V]
 }
 
-object SortedSets {
+private[sage] object SortedSets {
 
   def zAdd[K, V](key: K, condition: ZAddCondition = ZAddCondition.Always, changed: Boolean = false)(
     first: (V, Double),

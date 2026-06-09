@@ -5,7 +5,7 @@ import sage.SageException.DecodeError
 import sage.codec.KeyCodec
 import sage.protocol.Frame
 
-object Connection {
+private[sage] object Connection {
 
   val multi: Command[Unit] = Command("MULTI", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 

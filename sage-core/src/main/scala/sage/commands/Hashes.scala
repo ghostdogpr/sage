@@ -7,7 +7,7 @@ import sage.codec.{KeyCodec, ValueCodec}
   * A hash field is an identifier within the hash, never cluster-routed, so it takes a [[KeyCodec]] (not a [[ValueCodec]]): the same
   * representation-stability guarantee a key needs.
   */
-object Hashes {
+private[sage] object Hashes {
 
   def hSet[K, F, V](key: K, first: (F, V), rest: (F, V)*)(
     using keyCodec: KeyCodec[K],

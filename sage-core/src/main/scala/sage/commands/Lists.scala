@@ -28,7 +28,7 @@ enum InsertPosition {
   case Before, After
 }
 
-object Lists {
+private[sage] object Lists {
 
   def lPush[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     push("LPUSH", key, first +: rest.toVector)

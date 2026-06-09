@@ -69,7 +69,7 @@ object ScanCursor {
   */
 final case class ScanPage[A](items: Vector[A], next: Option[ScanCursor])
 
-object Keys {
+private[sage] object Keys {
 
   def copy[K](source: K, destination: K, replace: Boolean = false)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command(

@@ -27,6 +27,8 @@ final case class Command[+Out](
 
   def map[B](f: Out => B): Command[B] = Command(name, keyIndices, args, frame => decode(frame).map(f), execution)
 
+  def isBlocking: Boolean = execution == Execution.Blocking
+
   def encode: Bytes = RespWriter.writeCommand(name, args)
 }
 

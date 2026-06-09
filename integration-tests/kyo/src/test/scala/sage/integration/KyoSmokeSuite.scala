@@ -2,8 +2,8 @@ package sage.integration
 
 import kyo.*
 
+import sage.commands.Commands
 import sage.commands.Pipeline.pipeline
-import sage.commands.Strings
 import sage.kyo.*
 
 class KyoSmokeSuite extends ServerSuite(Images.redis) {
@@ -35,9 +35,9 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
           client  <- SageClient.scoped(configOf(server))
           _       <- client.set("pipe:a", "x")
           _       <- client.set("pipe:n", 10)
-          out     <- client.pipeline((Strings.get[String, String]("pipe:a"), Strings.incrBy[String]("pipe:n", 5)).pipeline)
+          out     <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)).pipeline)
           _       <- client.set("pipe:str", "hello")
-          attempt <- client.pipelineAttempt((Strings.get[String, String]("pipe:str"), Strings.incr[String]("pipe:str")).pipeline)
+          attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")).pipeline)
         } yield {
           assertEquals(out, (Some("x"), 15L))
           assert(attempt._1 == Right(Some("hello")), attempt._1)
@@ -58,8 +58,8 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
           out    <- client.transaction { tx =>
                       for {
                         _   <- tx.watch("tx:n")
-                        _   <- tx.run(Strings.get[String, Int]("tx:n"))
-                        res <- tx.exec((Strings.incr[String]("tx:n"), Strings.incrBy[String]("tx:n", 4)).pipeline)
+                        _   <- tx.get[String, Int]("tx:n")
+                        res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
                       } yield res
                     }
         } yield assertEquals(out, Some((2L, 6L)))

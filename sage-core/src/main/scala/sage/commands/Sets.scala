@@ -9,7 +9,7 @@ import sage.protocol.Frame
   * Set members are values (a [[ValueCodec]]), like list elements. The set-returning reads decode the RESP3 Set frame into a `Set[V]`;
   * `SRANDMEMBER` with a count decodes an Array instead, because a negative count deliberately yields duplicates a `Set` would collapse.
   */
-object Sets {
+private[sage] object Sets {
 
   def sAdd[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command("SADD", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode), Decode.long)
