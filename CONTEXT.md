@@ -106,9 +106,37 @@ _Avoid_: node group, partition
 The Core's pure snapshot of which Shards own which slots, the input every routing decision reads. Produced by the runtime from `CLUSTER SHARDS`/`SLOTS` and refreshed on redirects; the engine only consumes it.
 _Avoid_: cluster map, slot map, layout
 
+**Seed**:
+A user-supplied address the cluster runtime contacts at startup to discover the Cluster Topology. Seeds bootstrap discovery only — once the topology is known, routing targets are Nodes the cluster reports, and a seed that is not itself a master is dropped. Any one seed answering is enough.
+_Avoid_: bootstrap node, contact point, seed node
+
 **Redirect**:
 A server reply telling the client a slot lives elsewhere. `MOVED` is permanent — the slot's owner changed, refresh the topology — while `ASK` is a one-shot hand-off during a live migration: send the single command (prefixed with `ASKING`) to the named node without touching the topology. The Core parses both into one value; acting on the difference is the runtime's job.
 _Avoid_: move, redirection, MOVED (the umbrella term covers both kinds)
+
+**Stream**:
+A Redis/Valkey stream key: an append-only log of entries, each carrying a Stream Entry ID and an ordered list of field/value pairs. Read by range or by tailing, and consumed cooperatively through Consumer Groups. Always capitalized to distinguish it from an effect stream (`ZStream`/`CStream`), which is the unrelated pagination type the client's `…All` helpers return.
+_Avoid_: log, queue, topic; "stream" lowercase (that's the effect type)
+
+**Stream Entry**:
+One record appended to a Stream (`StreamEntry`): a Stream Entry ID plus an ordered, duplicate-permitting list of field/value pairs. The body is a `Vector`, not a `Map` — a Stream preserves field order and allows repeated field names, which a `Map` would silently drop. Fields are identifiers (a `KeyCodec`, like a Hash field); values take a `ValueCodec`.
+_Avoid_: message, record, event, item
+
+**Stream Entry ID**:
+The `ms-seq` identifier ordering entries within a Stream: a millisecond timestamp and a per-millisecond sequence. A concrete `StreamId(ms, seq)` for replies and explicit writes; each command position that also admits a special token — `*` auto-id, `-`/`+` range extremes, `(` exclusive bound, `$` last-id, `>` new-for-group — carries its own type listing only the tokens legal there, so an illegal form at a position cannot be written.
+_Avoid_: offset, sequence number, timestamp, cursor
+
+**Consumer Group**:
+A named, server-tracked cooperative reader over a Stream, created by `XGROUP CREATE`: it holds a last-delivered ID and a Pending Entries List, so several Consumers can split a Stream's entries between them without overlap. Reading `>` (new-for-group) advances the group and records delivery; reading an explicit ID re-reads a Consumer's own pending history.
+_Avoid_: group, subscriber group, consumer pool
+
+**Consumer**:
+A named member of a Consumer Group. Every delivered-but-unacknowledged entry is owned by exactly one Consumer until acknowledged (`XACK`) or transferred to another (`XCLAIM`/`XAUTOCLAIM`). A Consumer is created implicitly on first read or explicitly via `XGROUP CREATECONSUMER`.
+_Avoid_: worker, reader, client (a Client owns connections, not group membership)
+
+**Pending Entries List (PEL)**:
+The Consumer Group's set of entries delivered to some Consumer but not yet acknowledged, each tracking its owning Consumer, idle time, and delivery count. `XACK` removes an entry from it; `XCLAIM`/`XAUTOCLAIM` reassign ownership within it; `XPENDING` inspects it as either a group-level summary or a per-entry extended form.
+_Avoid_: pending list, ack list, inflight set
 
 ## Example dialogue
 
