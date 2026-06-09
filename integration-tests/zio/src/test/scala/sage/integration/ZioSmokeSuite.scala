@@ -87,6 +87,26 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("subscribe delivers published messages as a native ZStream") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client    <- SageClient.scoped(configOf(server))
+            collected <- client.subscribe[String]("smoke").take(3).runCollect.fork
+            _         <- ZIO.sleep(zio.Duration.fromMillis(300)) // let SUBSCRIBE register before publishing
+            _         <- ZIO.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
+            messages  <- collected.join
+          } yield {
+            assertEquals(messages.map(_.channel).toSet, Set("smoke"))
+            assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
+          }
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
   test("hScanAll streams every field/value pair as a native ZStream") {
     withContainers { server =>
       val program: Task[Unit] =

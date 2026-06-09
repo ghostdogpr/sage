@@ -1,5 +1,7 @@
 package sage.integration
 
+import scala.concurrent.duration.*
+
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
@@ -79,6 +81,25 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
             _    <- (1 to 50).toList.parTraverse_(i => client.set(s"scan-$i", "v"))
             keys <- client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).compile.toVector
           } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
+        }
+
+      program.unsafeRunSync()
+    }
+  }
+
+  test("subscribe delivers published messages as a native fs2 Stream") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          for {
+            collected <- client.subscribe[String]("smoke").take(3).compile.toVector.start
+            _         <- IO.sleep(300.millis) // let SUBSCRIBE register before publishing
+            _         <- (1 to 3).toList.traverse_(i => client.publish("smoke", s"m$i"))
+            messages  <- collected.joinWithNever
+          } yield {
+            assertEquals(messages.map(_.channel).toSet, Set("smoke"))
+            assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
+          }
         }
 
       program.unsafeRunSync()

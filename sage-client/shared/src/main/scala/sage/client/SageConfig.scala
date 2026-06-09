@@ -66,6 +66,12 @@ object TrustSource {
 final case class TlsConfig(trust: TrustSource = TrustSource.System)
 
 /**
+  * Pub/sub tuning. `bufferSize` bounds each subscription's message buffer; when it fills, the reader draining the Subscription Connection
+  * blocks, so TCP backpressures the publisher (lossless). A slow consumer then stalls its peer subscriptions, never command traffic.
+  */
+final case class PubSubConfig(bufferSize: Int = 128)
+
+/**
   * A server address. In cluster mode the seeds are contacted to discover the topology; thereafter the cluster's own reported node
   * addresses are used.
   */
@@ -97,6 +103,7 @@ final case class SageConfig(
   watchdog: WatchdogConfig = WatchdogConfig(),
   closeTimeout: FiniteDuration = 5.seconds,
   dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig(),
+  pubsub: PubSubConfig = PubSubConfig(),
   auth: Option[AuthConfig] = None,
   tls: Option[TlsConfig] = None,
   topology: Topology = Topology.Standalone

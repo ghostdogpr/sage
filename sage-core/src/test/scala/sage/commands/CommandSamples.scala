@@ -259,6 +259,11 @@ object CommandSamples {
     Sample(
       SortedSets.zScan[String, String]("z", ScanCursor.start, pattern = Some("a*"), count = Some(10L)),
       Vector("ZSCAN", "z", "0", "MATCH", "a*", "COUNT", "10")
-    )
+    ),
+    Sample(Pubsub.publish("chan", "msg"), Vector("PUBLISH", "chan", "msg")),
+    Sample(Pubsub.pubsubChannels(), Vector("PUBSUB", "CHANNELS")),
+    Sample(Pubsub.pubsubChannels(Some("news.*")), Vector("PUBSUB", "CHANNELS", "news.*")),
+    Sample(Pubsub.pubsubNumSub("a", "b"), Vector("PUBSUB", "NUMSUB", "a", "b")),
+    Sample(Pubsub.pubsubNumPat, Vector("PUBSUB", "NUMPAT"))
   )
 }

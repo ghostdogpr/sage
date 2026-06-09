@@ -83,6 +83,30 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("subscribe delivers published messages as a native Kyo Stream") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client    <- SageClient.scoped(configOf(server))
+          publisher <- Fiber.init {
+                         for {
+                           _ <- Async.sleep(300.millis) // let SUBSCRIBE register before publishing
+                           _ <- Async.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
+                         } yield ()
+                       }
+          chunk     <- client.subscribe[String]("smoke").take(3).run
+          _         <- publisher.get
+        } yield {
+          val messages = chunk.toList
+          assertEquals(messages.map(_.channel).toSet, Set("smoke"))
+          assertEquals(messages.map(_.payload), List("m1", "m2", "m3"))
+        }
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
+    }
+  }
+
   test("hScanAll streams every field/value pair as a native Kyo Stream") {
     withContainers { server =>
       val program: Unit < (Scope & Abort[Throwable] & Async) =

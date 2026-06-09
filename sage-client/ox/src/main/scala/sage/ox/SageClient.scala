@@ -4,8 +4,9 @@ import _root_.ox.{useInScope, Ox}
 import _root_.ox.flow.Flow
 import kyo.compat.*
 
+import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, TransactionScope}
+import sage.client.internal.{Client, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
@@ -83,6 +84,32 @@ extension (client: SageClient) {
       }
       .flatMap(pairs => CStream.init(pairs))
       .lower
+
+  /**
+    * Subscribes to one or more channels; ending the flow unsubscribes. Survives reconnects via auto-resubscribe, dropping messages
+    * published during the reconnect gap.
+    */
+  def subscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
+    streamOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Subscribes to one or more glob patterns; each delivery names the matching pattern and the concrete channel.
+    */
+  def pSubscribe[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Flow[PatternMessage[V]] =
+    streamOf(client.subscribePatterns[V](pattern, rest*))
+
+  private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] =
+    Flow.usingEmit { emit =>
+      val sub = open
+      try {
+        var continue = true
+        while (continue)
+          sub.next match {
+            case Some(a) => emit(a)
+            case None    => continue = false
+          }
+      } finally sub.close
+    }
 }
 
 object SageClient {
@@ -107,6 +134,12 @@ object SageClient {
     def transaction[A](body: TransactionScope[[X] =>> Ox ?=> X] => (Ox ?=> A)): Ox ?=> A =
       underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
 
+    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, Message[V]] =
+      lower(underlying.subscribeChannels[V](channel, rest*).lower)
+
+    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, PatternMessage[V]] =
+      lower(underlying.subscribePatterns[V](pattern, rest*).lower)
+
     private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> Ox ?=> X] =
       new TransactionScope[[X] =>> Ox ?=> X] {
         def watch[K: KeyCodec](key: K, rest: K*): Ox ?=> Unit          = scope.watch(key, rest*).lower
@@ -114,6 +147,12 @@ object SageClient {
         def exec[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[Out]      = scope.exec(p).lower
         def execAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[R] = scope.execAttempt(p).lower
         def discard: Ox ?=> Unit                                       = scope.discard.lower
+      }
+
+    private def lower[A](sub: Subscription[CIO, A]): Subscription[[X] =>> Ox ?=> X, A] =
+      new Subscription[[X] =>> Ox ?=> X, A] {
+        def next: Ox ?=> Option[A] = sub.next.lower
+        def close: Ox ?=> Unit     = sub.close.lower
       }
 
     def close: Ox ?=> Unit = underlying.close.lower

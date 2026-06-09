@@ -3,8 +3,9 @@ package sage.ce
 import cats.effect.{IO, Resource}
 import kyo.compat.*
 
+import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, TransactionScope}
+import sage.client.internal.{Client, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
 
@@ -82,6 +83,24 @@ extension (client: SageClient) {
       }
       .flatMap(pairs => CStream.init(pairs))
       .lower
+
+  /**
+    * Subscribes to one or more channels; closing the stream's scope unsubscribes. Survives reconnects via auto-resubscribe, dropping
+    * messages published during the reconnect gap.
+    */
+  def subscribe[V: ValueCodec](channel: String, rest: String*): fs2.Stream[IO, Message[V]] =
+    streamOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Subscribes to one or more glob patterns; each delivery names the matching pattern and the concrete channel.
+    */
+  def pSubscribe[V: ValueCodec](pattern: String, rest: String*): fs2.Stream[IO, PatternMessage[V]] =
+    streamOf(client.subscribePatterns[V](pattern, rest*))
+
+  private def streamOf[A](open: IO[Subscription[IO, A]]): fs2.Stream[IO, A] =
+    fs2.Stream
+      .resource(Resource.make(open)(_.close.voidError))
+      .flatMap(sub => fs2.Stream.repeatEval(sub.next).unNoneTerminate)
 }
 
 object SageClient {
@@ -103,6 +122,12 @@ object SageClient {
     def transaction[A](body: TransactionScope[IO] => IO[A]): IO[A] =
       underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
 
+    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): IO[Subscription[IO, Message[V]]] =
+      underlying.subscribeChannels[V](channel, rest*).map(lower).lower
+
+    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): IO[Subscription[IO, PatternMessage[V]]] =
+      underlying.subscribePatterns[V](pattern, rest*).map(lower).lower
+
     private def lower(scope: TransactionScope[CIO]): TransactionScope[IO] =
       new TransactionScope[IO] {
         def watch[K: KeyCodec](key: K, rest: K*): IO[Unit]          = scope.watch(key, rest*).lower
@@ -110,6 +135,12 @@ object SageClient {
         def exec[Out, R](p: Pipeline[Out, R]): IO[Option[Out]]      = scope.exec(p).lower
         def execAttempt[Out, R](p: Pipeline[Out, R]): IO[Option[R]] = scope.execAttempt(p).lower
         def discard: IO[Unit]                                       = scope.discard.lower
+      }
+
+    private def lower[A](sub: Subscription[CIO, A]): Subscription[IO, A] =
+      new Subscription[IO, A] {
+        def next: IO[Option[A]] = sub.next.lower
+        def close: IO[Unit]     = sub.close.lower
       }
 
     def close: IO[Unit] = underlying.close.lower

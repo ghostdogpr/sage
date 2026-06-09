@@ -11,9 +11,9 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.SageException
+import sage.{Message, PatternMessage, SageException}
 import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TlsError, TransactionDiscarded, UnsupportedServer}
-import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, SageConfig, Topology, WatchdogConfig}
+import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
@@ -410,6 +410,14 @@ trait CommandRunner[F[_]] {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): F[ScanPage[(V, Double)]] = run(SortedSets.zScan(key, cursor, pattern, count))
+
+  final def publish[V: ValueCodec](channel: String, message: V): F[Long] = run(Pubsub.publish(channel, message))
+
+  final def pubsubChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubChannels(pattern))
+
+  final def pubsubNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubNumSub(channels*))
+
+  final def pubsubNumPat: F[Long] = run(Pubsub.pubsubNumPat)
 }
 
 /**
@@ -423,6 +431,11 @@ trait Client[F[_]] extends CommandRunner[F] {
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
 
   def transaction[A](body: TransactionScope[F] => F[A]): F[A]
+
+  // the pub/sub seam: returns a handle each backend wraps into its native stream; the ergonomic `subscribe`/`pSubscribe` are facade methods
+  def subscribeChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
+
+  def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): F[Subscription[F, PatternMessage[V]]]
 
   def close: F[Unit]
 }
@@ -461,7 +474,8 @@ object Client {
       cond(config.reconnect.maxDelay >= config.reconnect.initialDelay, "reconnect.maxDelay must be >= initialDelay"),
       cond(config.reconnect.multiplier >= 1.0, "reconnect.multiplier must be >= 1.0"),
       cond(config.dedicatedPool.maxConnections >= 1, "dedicatedPool.maxConnections must be >= 1"),
-      positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout")
+      positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout"),
+      cond(config.pubsub.bufferSize >= 1, "pubsub.bufferSize must be >= 1")
     ) ++ watchdog ++ (config.topology match {
       case Topology.Cluster(seeds, cluster) =>
         Vector(
@@ -490,6 +504,7 @@ object Client {
         config.connectTimeout,
         config.closeTimeout,
         config.dedicatedPool,
+        config.pubsub,
         config.auth
       )
     }
@@ -503,6 +518,7 @@ object Client {
     connectTimeout: FiniteDuration = defaults.connectTimeout,
     closeTimeout: FiniteDuration = defaults.closeTimeout,
     dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool,
+    pubsub: PubSubConfig = defaults.pubsub,
     auth: Option[AuthConfig] = None
   ): CIO[Client[CIO]] = {
     val bootstrap = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
@@ -511,7 +527,7 @@ object Client {
         MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
       )
       .map { connection =>
-        val pool = new DedicatedPool(
+        val pool          = new DedicatedPool(
           factory,
           bootstrap,
           scheduler,
@@ -521,7 +537,18 @@ object Client {
           dedicatedPool,
           connectTimeout.toMillis
         )
-        new Live(connection, pool)
+        // lazy: no socket is opened until the first subscription, and it is gated on the Multiplexed Connection being live
+        val subscriptions = new SubscriptionConnection(
+          factory,
+          bootstrap,
+          scheduler,
+          reconnect,
+          watchdog,
+          connectTimeout.toMillis,
+          pubsub.bufferSize,
+          () => connection.isLive
+        )
+        new Live(connection, pool, subscriptions)
       }
       .mapError(translateHandshake)
   }
@@ -549,7 +576,7 @@ object Client {
   private def scopeReleasedError: IllegalStateException =
     new IllegalStateException("transaction scope used after its block returned")
 
-  final private class Live(connection: MultiplexedConnection, pool: DedicatedPool) extends Client[CIO] {
+  final private class Live(connection: MultiplexedConnection, pool: DedicatedPool, subscriptions: SubscriptionConnection) extends Client[CIO] {
 
     def run[A](command: Command[A]): CIO[A] =
       command.execution match {
@@ -608,8 +635,43 @@ object Client {
         case Failure(other)            => Left(SageException.DecodeError("a decodable reply", s"decoder threw $other"))
       }
 
-    def close: CIO[Unit] = CIO.blocking { pool.close(); connection.close() }
+    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
+      CIO.blocking {
+        val raw = subscriptions.subscribeChannels(channel +: rest.toVector)
+        new Subscription[CIO, Message[V]] {
+          def next: CIO[Option[Message[V]]] = CIO.blocking {
+            raw.next() match {
+              case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => Some(Message(ch, decodeOrThrow[V](payload)))
+              case _                                                          => None
+            }
+          }
+          def close: CIO[Unit]              = CIO.blocking(raw.close())
+        }
+      }
+
+    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
+      CIO.blocking {
+        val raw = subscriptions.subscribePatterns(pattern +: rest.toVector)
+        new Subscription[CIO, PatternMessage[V]] {
+          def next: CIO[Option[PatternMessage[V]]] = CIO.blocking {
+            raw.next() match {
+              case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) => Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))
+              case _                                                               => None
+            }
+          }
+          def close: CIO[Unit]                     = CIO.blocking(raw.close())
+        }
+      }
+
+    def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close() }
   }
+
+  // an undecodable payload fails the subscription stream rather than being silently dropped
+  private def decodeOrThrow[V](payload: sage.Bytes)(using codec: ValueCodec[V]): V =
+    codec.decode(payload) match {
+      case Right(value) => value
+      case Left(error)  => throw error
+    }
 
   final private class TxScope(val conn: DedicatedConnection) extends TransactionScope[CIO] {
 

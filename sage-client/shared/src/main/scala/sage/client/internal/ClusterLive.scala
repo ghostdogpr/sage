@@ -11,9 +11,11 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
+import sage.{Message, PatternMessage}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, Redirect, RedirectKind, Route, Shard}
+import sage.codec.ValueCodec
 import sage.commands.{Cluster, Command, Connection, Pipeline}
 
 /**
@@ -83,6 +85,13 @@ final private[client] class ClusterLive(
   def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]               = CIO.fail(unsupported("Pipelines"))
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R]          = CIO.fail(unsupported("Pipelines"))
   def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] = CIO.fail(unsupported("Transactions"))
+
+  // classic and sharded pub/sub in cluster mode arrive with the cluster pub/sub work; standalone subscriptions build the machinery first
+  def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
+    CIO.fail(unsupported("Subscriptions"))
+
+  def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
+    CIO.fail(unsupported("Subscriptions"))
 
   def close: CIO[Unit] = CIO.blocking(closeAll())
 
