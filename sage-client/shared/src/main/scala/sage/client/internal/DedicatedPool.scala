@@ -26,15 +26,14 @@ final private[client] class DedicatedPool(
   bootstrap: Vector[Command[?]],
   scheduler: Scheduler,
   isLive: () => Boolean,
-  generation: () => Long,
+  liveGeneration: () => Option[MultiplexedConnection.Generation],
+  isCurrent: MultiplexedConnection.Generation => Boolean,
   config: DedicatedPoolConfig,
   connectTimeoutMillis: Long
 ) {
 
   private val lock      = new ReentrantLock()
   private val available = lock.newCondition()
-
-  private val StaleRetryBackoffNanos = 1.milli.toNanos
 
   private val idle                              = mutable.ArrayDeque.empty[DedicatedPool.Idle]
   private val live                              = mutable.Set.empty[DedicatedConnection]
@@ -123,16 +122,13 @@ final private[client] class DedicatedPool(
     locked {
       while (true) {
         if (closing) throw NotConnected()
+        // fail fast while not live: never reuse, establish, or park during a reconnect window, re-checked on every wakeup
+        if (!isLive()) throw NotConnected()
         val reused = takeIdleLocked()
         if (reused != null) return reused
         if (live.size + reserved < config.maxConnections) {
           reserved += 1
-          val established = establishOutsideLock()
-          if (established != null) return established
-          // discarded as stale; retry, but bounded by the deadline so generation churn can't spin forever
-          val remaining   = deadlineNanos - System.nanoTime()
-          if (remaining <= 0L) throw acquireTimedOut
-          val _           = available.awaitNanos(math.min(StaleRetryBackoffNanos, remaining)) // pace retries during a churn storm
+          return establishOutsideLock()
         } else {
           val remaining = deadlineNanos - System.nanoTime()
           if (remaining <= 0L) throw acquireTimedOut
@@ -144,11 +140,10 @@ final private[client] class DedicatedPool(
   }
 
   // entered holding the lock with `reserved` already incremented; drops the lock for the blocking establish, then re-accounts under it.
-  // Returns null when the connection must be discarded and the caller should retry.
   private def establishOutsideLock(): DedicatedConnection = {
     lock.unlock()
     val connection =
-      try DedicatedConnection.establish(factory, bootstrap, connectTimeoutMillis, generation())
+      try DedicatedConnection.establish(factory, bootstrap, connectTimeoutMillis)
       catch {
         case e: Throwable =>
           locked { reserved -= 1; available.signalAll() }
@@ -157,19 +152,21 @@ final private[client] class DedicatedPool(
       }
     lock.lock()
     reserved -= 1
-    // a close or reconnect during establish makes this freshly built socket stale before first use — never hand it out
-    if (closing || !isLive()) {
+    // stamp with the epoch live the moment it joins the pool, so a connection built across a reconnect is born current, never stale
+    if (closing) {
       available.signalAll()
       scheduleClose(connection)
       throw NotConnected()
     }
-    if (connection.generation != generation()) {
-      available.signalAll()
-      scheduleClose(connection)
-      null
-    } else {
-      live += connection
-      connection
+    liveGeneration() match {
+      case None      =>
+        available.signalAll()
+        scheduleClose(connection)
+        throw NotConnected()
+      case Some(gen) =>
+        connection.stampEpoch(gen)
+        live += connection
+        connection
     }
   }
 
@@ -177,11 +174,10 @@ final private[client] class DedicatedPool(
     TimedOut(s"dedicated pool acquire timed out after ${config.acquireTimeout.toMillis}ms")
 
   private def takeIdleLocked(): DedicatedConnection = {
-    val gen                         = generation()
     var result: DedicatedConnection = null
     while (result == null && idle.nonEmpty) {
       val candidate = idle.removeLast()
-      if (reusable(candidate, gen)) result = candidate.connection
+      if (reusable(candidate)) result = candidate.connection
       else {
         live -= candidate.connection
         scheduleClose(candidate.connection)
@@ -192,7 +188,7 @@ final private[client] class DedicatedPool(
 
   private def release(connection: DedicatedConnection): Unit =
     locked {
-      if (closing || !connection.isHealthy || connection.generation != generation()) {
+      if (closing || !connection.isHealthy || !isCurrent(connection.epoch)) {
         live -= connection
         scheduleClose(connection)
       } else idle.append(DedicatedPool.Idle(connection, scheduler.nowMillis))
@@ -201,10 +197,9 @@ final private[client] class DedicatedPool(
 
   private def sweepExpired(): Unit = {
     val toClose = locked {
-      val gen     = generation()
       val due     = Vector.newBuilder[DedicatedConnection]
       idle.filterInPlace { entry =>
-        val keep = reusable(entry, gen)
+        val keep = reusable(entry)
         if (!keep) { val _ = due += entry.connection }
         keep
       }
@@ -216,8 +211,8 @@ final private[client] class DedicatedPool(
   }
 
   // a connection from an older generation outlived a reconnect (e.g. DNS failover) and now points at the old server
-  private def reusable(entry: DedicatedPool.Idle, gen: Long): Boolean =
-    entry.connection.isHealthy && entry.connection.generation == gen && !expired(entry)
+  private def reusable(entry: DedicatedPool.Idle): Boolean =
+    entry.connection.isHealthy && isCurrent(entry.connection.epoch) && !expired(entry)
 
   private def expired(entry: DedicatedPool.Idle): Boolean =
     config.idleTimeout.isFinite && scheduler.nowMillis - entry.idleSinceMillis >= config.idleTimeout.toMillis

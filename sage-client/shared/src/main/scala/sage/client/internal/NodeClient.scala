@@ -17,7 +17,7 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
     else if (asking) connection.submitAsking(command, callback)
     else connection.submit(command, callback)
 
-  def isLive: Boolean = connection.currentState == MultiplexedConnection.State.Live
+  def isLive: Boolean = connection.isLive
 
   def close(): Unit = {
     pool.close()
@@ -46,8 +46,9 @@ private[client] object NodeClient {
       factory,
       bootstrap,
       scheduler,
-      () => connection.currentState == MultiplexedConnection.State.Live,
-      () => connection.currentGeneration,
+      () => connection.isLive,
+      () => connection.liveGeneration(),
+      connection.isCurrent,
       dedicatedPool,
       connectTimeout.toMillis
     )

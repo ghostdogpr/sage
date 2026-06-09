@@ -33,7 +33,7 @@ final private[client] class MultiplexedConnection private (
   connectTimeout: FiniteDuration,
   closeTimeout: FiniteDuration
 ) {
-  import MultiplexedConnection.State
+  import MultiplexedConnection.{Generation, State}
 
   // ReentrantLock, not `synchronized`: a parking lock never pins a virtual thread's carrier (a monitor does on JDK < 24).
   private val lock                                 = new ReentrantLock()
@@ -42,7 +42,7 @@ final private[client] class MultiplexedConnection private (
   private var establishing: Conn                   = null
   private var watchdogHandle: Scheduler.Cancelable = null
   // bumped when a fresh socket becomes live; the dedicated pool stamps borrowed connections with it to detect ones outliving a reconnect
-  private var generation: Long                     = 0L
+  private var generation: Generation               = Generation.initial
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -99,14 +99,22 @@ final private[client] class MultiplexedConnection private (
 
   private[internal] def currentState: State = locked(state)
 
-  private[internal] def currentGeneration: Long = locked(generation)
+  private[internal] def isLive: Boolean = locked(state == State.Live)
+
+  // the Generation to stamp a fresh Dedicated Connection with, captured atomically and only while live; None means a borrower must fail
+  // fast rather than join a connection to a dead or reconnecting epoch
+  private[internal] def liveGeneration(): Option[Generation] = locked(if (state == State.Live) Some(generation) else None)
+
+  // whether a stamped Generation is still the live one; gated on Live, since the epoch only bumps on the next live socket and would
+  // otherwise still match during a reconnect window
+  private[internal] def isCurrent(g: Generation): Boolean = locked(state == State.Live && generation == g)
 
   private def connectInitial(): Unit = {
     val conn = establish() // the first connect propagates a handshake failure; only reconnects retry
     locked {
       current = conn
       state = State.Live
-      generation += 1
+      generation = generation.next
       startWatchdog()
     }
   }
@@ -155,7 +163,7 @@ final private[client] class MultiplexedConnection private (
           if (state == State.Reconnecting) {
             current = conn
             state = State.Live
-            generation += 1
+            generation = generation.next
             true
           } else false
         }
@@ -314,6 +322,13 @@ private[client] object MultiplexedConnection {
 
   enum State {
     case Live, Reconnecting, Draining, Closed
+  }
+
+  // the monotonic epoch of the current socket; a Dedicated Connection is stamped with the live one and discarded once it is no longer current
+  opaque type Generation = Long
+  object Generation {
+    val initial: Generation                        = 0L
+    extension (g: Generation) def next: Generation = g + 1L
   }
 
   /**

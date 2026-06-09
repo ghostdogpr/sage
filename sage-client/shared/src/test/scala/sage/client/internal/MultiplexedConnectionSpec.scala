@@ -258,6 +258,22 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(afterReconnect, Some(Success("PONG")))
   }
 
+  test("isCurrent gates on liveness: a stamp is current only while Live, never during a reconnect window at the same generation") {
+    val (connection, scheduler, transports) = make()
+    val g                                   = connection.liveGeneration().getOrElse(fail("expected a live generation"))
+    assert(connection.isCurrent(g))
+
+    transports.head.emit(Frame.SimpleString("PONG")) // stray frame -> discarded -> Reconnecting, generation not yet bumped
+    assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
+    assertEquals(connection.liveGeneration(), None)
+    assert(!connection.isCurrent(g), "the stamp must not read as current during a reconnect window, even at the same generation")
+
+    scheduler.advance(1.milli) // reconnects -> Live, generation bumps
+    assertEquals(connection.currentState, MultiplexedConnection.State.Live)
+    assert(!connection.isCurrent(g), "the old stamp stays stale once the generation bumps")
+    assert(connection.isCurrent(connection.liveGeneration().getOrElse(fail("expected a live generation"))))
+  }
+
   test("every reconnect attempt re-resolves the endpoint, honoring a repoint between attempts") {
     val seen                                            = mutable.ArrayBuffer.empty[String]
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
