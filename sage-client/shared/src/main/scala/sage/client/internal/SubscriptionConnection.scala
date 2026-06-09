@@ -98,7 +98,8 @@ final private[client] class SubscriptionConnection(
           sink.terminate()
           throw e
       }
-    awaitActive()
+    try awaitActive()
+    catch { case e: Throwable => closeSubscription(sink); throw e }
     new RawSubscription(this, sink)
   }
 
