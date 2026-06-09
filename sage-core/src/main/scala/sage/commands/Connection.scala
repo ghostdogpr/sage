@@ -14,6 +14,9 @@ private[sage] object Connection {
 
   val unwatch: Command[Unit] = Command("UNWATCH", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
+  // prefixes a single command redirected by `ASK`, telling the target node to serve the key it is importing for this one command
+  val asking: Command[Unit] = Command("ASKING", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
+
   def watch[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Unit] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)
     Command("WATCH", keyIndices = Vector.range(0, keys.length), args = keys, decode = Decode.ok)

@@ -65,6 +65,30 @@ object TrustSource {
 
 final case class TlsConfig(trust: TrustSource = TrustSource.System)
 
+/**
+  * A server address. In cluster mode the seeds are contacted to discover the topology; thereafter the cluster's own reported node
+  * addresses are used.
+  */
+final case class Endpoint(host: String, port: Int = 6379)
+
+/**
+  * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops a single command follows before failing (the same default as
+  * lettuce); `minRefreshInterval` throttles topology refreshes so a redirect storm triggers at most one `CLUSTER SLOTS` per window.
+  */
+final case class ClusterConfig(
+  maxRedirects: Int = 5,
+  minRefreshInterval: FiniteDuration = 5.seconds
+)
+
+/**
+  * Standalone connects to one server (`SageConfig.host`/`port`); cluster discovers its topology from `seeds` and routes every command to
+  * the owning node. The client type is the same either way — only this selects the runtime.
+  */
+enum Topology {
+  case Standalone
+  case Cluster(seeds: Vector[Endpoint], config: ClusterConfig = ClusterConfig())
+}
+
 final case class SageConfig(
   host: String = "localhost",
   port: Int = 6379,
@@ -74,5 +98,6 @@ final case class SageConfig(
   closeTimeout: FiniteDuration = 5.seconds,
   dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig(),
   auth: Option[AuthConfig] = None,
-  tls: Option[TlsConfig] = None
+  tls: Option[TlsConfig] = None,
+  topology: Topology = Topology.Standalone
 )

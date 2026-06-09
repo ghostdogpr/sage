@@ -13,7 +13,8 @@ import kyo.compat.*
 
 import sage.SageException
 import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TlsError, TransactionDiscarded, UnsupportedServer}
-import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
+import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, SageConfig, Topology, WatchdogConfig}
+import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 import sage.protocol.Frame
@@ -431,6 +432,13 @@ object Client {
   private val defaults = SageConfig()
 
   def connect(config: SageConfig): CIO[Client[CIO]] =
+    config.topology match {
+      case Topology.Standalone                    => connectStandalone(config)
+      case Topology.Cluster(seeds, clusterConfig) =>
+        ClusterLive.connect(config, seeds.map(e => Node(e.host, e.port)), clusterConfig, Scheduler.real, translateHandshake)
+    }
+
+  private def connectStandalone(config: SageConfig): CIO[Client[CIO]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
     // multiplexed one and each dedicated one — is upgraded identically
     CIO.blocking(Tls.buildUpgrade(config.tls, config.host, config.port)).flatMap { upgrade =>

@@ -9,7 +9,7 @@ import scala.util.control.NonFatal
 
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.DedicatedPoolConfig
-import sage.commands.Command
+import sage.commands.{Command, Connection}
 
 /**
   * The on-demand pool of Dedicated Connections that carry blocking commands. A connection is created lazily, used by exactly one blocking
@@ -48,7 +48,15 @@ final private[client] class DedicatedPool(
     * Runs a blocking command on a borrowed Dedicated Connection, releasing it when the reply (or a failure) arrives. Returns immediately;
     * the acquire — which may wait for a slot or open a socket — is offloaded so the calling fiber is never blocked.
     */
-  def use[A](command: Command[A], callback: Try[A] => Unit): Unit =
+  def use[A](command: Command[A], callback: Try[A] => Unit): Unit = lease(command, asking = false, callback)
+
+  /**
+    * Runs a blocking command redirected by `ASK`: `ASKING` then the command, back-to-back on one exclusively-leased connection, so their
+    * wire adjacency is automatic. The `ASKING` reply is discarded; the command's reply releases the connection.
+    */
+  def useAsking[A](command: Command[A], callback: Try[A] => Unit): Unit = lease(command, asking = true, callback)
+
+  private def lease[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit): Unit =
     if (!isLive()) callback(scala.util.Failure(NotConnected()))
     else
       scheduler.after(Duration.Zero) {
@@ -62,6 +70,7 @@ final private[client] class DedicatedPool(
         acquired match {
           case Left(error) => callback(scala.util.Failure(error))
           case Right(conn) =>
+            if (asking) conn.submit[Unit](Connection.asking, _ => ())
             conn.submit(
               command,
               result => {

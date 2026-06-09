@@ -56,6 +56,14 @@ final private[client] class MultiplexedConnection private (
     else conn.submit(command, callback)
   }
 
+  // ASKING must immediately precede its command on the wire (it arms the target node for the next command on the connection). Writing the
+  // pair as one batch keeps them adjacent and FIFO-matched even though every fiber shares this connection; the ASKING reply is discarded.
+  def submitAsking[A](command: Command[A], callback: Try[A] => Unit): Unit = {
+    val conn = locked(if (state == State.Live) current else null)
+    if (conn == null) callback(Failure(NotConnected()))
+    else conn.submitAll(Vector(Connection.asking, command), Vector(_ => (), callback.asInstanceOf[Try[Any] => Unit]))
+  }
+
   // Enqueues a whole pipeline onto a single generation, captured once, so a reconnect mid-batch can never split it across connections.
   // Returns false when not connected — nothing was submitted, so the caller fails fast rather than fabricating per-position errors.
   def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean = {
