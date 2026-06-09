@@ -1,5 +1,8 @@
 package sage.client
 
+import java.nio.file.Path
+import javax.net.ssl.SSLContext
+
 import scala.concurrent.duration.*
 
 /**
@@ -30,6 +33,38 @@ final case class DedicatedPoolConfig(
   idleTimeout: Duration = 30.seconds
 )
 
+/**
+  * Credentials sent via `HELLO 3 AUTH`. Legacy `requirepass` is the default user with a password, hence the `"default"` username.
+  */
+final case class AuthConfig(password: String, username: String = "default") {
+  // keep the secret out of logs and error messages that print a SageConfig
+  override def toString: String = s"AuthConfig(username=$username, password=<redacted>)"
+}
+
+/**
+  * Where TLS finds the certificates it trusts. The handshake verifies the server's hostname in every mode except [[TrustSource.Insecure]].
+  */
+sealed trait TrustSource
+object TrustSource {
+
+  case object System extends TrustSource
+
+  final case class TrustStore(path: Path, password: Option[String] = None) extends TrustSource {
+    // keep the keystore password out of logs and error messages that print a SageConfig
+    override def toString: String = s"TrustStore($path, password=${password.fold("None")(_ => "<redacted>")})"
+  }
+
+  final case class Pem(path: Path) extends TrustSource
+
+  // the escape hatch, and the path for mutual TLS via the caller's own key managers
+  final case class Custom(context: SSLContext) extends TrustSource
+
+  // development only: trusts every certificate and skips hostname verification, so it is open to machine-in-the-middle attacks
+  case object Insecure extends TrustSource
+}
+
+final case class TlsConfig(trust: TrustSource = TrustSource.System)
+
 final case class SageConfig(
   host: String = "localhost",
   port: Int = 6379,
@@ -37,5 +72,7 @@ final case class SageConfig(
   reconnect: BackoffConfig = BackoffConfig(),
   watchdog: WatchdogConfig = WatchdogConfig(),
   closeTimeout: FiniteDuration = 5.seconds,
-  dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig()
+  dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig(),
+  auth: Option[AuthConfig] = None,
+  tls: Option[TlsConfig] = None
 )

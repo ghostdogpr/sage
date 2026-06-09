@@ -3,6 +3,7 @@ package sage.client.internal
 import java.time.Instant
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReferenceArray}
 import java.util.concurrent.locks.ReentrantLock
+import javax.net.ssl.SSLException
 
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
@@ -11,8 +12,8 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.SageException
-import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TransactionDiscarded, UnsupportedServer}
-import sage.client.{BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
+import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TlsError, TransactionDiscarded, UnsupportedServer}
+import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 import sage.protocol.Frame
@@ -430,15 +431,20 @@ object Client {
   private val defaults = SageConfig()
 
   def connect(config: SageConfig): CIO[Client[CIO]] =
-    connectWith(
-      (onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, onFrame, onClosed),
-      Scheduler.real,
-      config.reconnect,
-      config.watchdog,
-      config.connectTimeout,
-      config.closeTimeout,
-      config.dedicatedPool
-    )
+    // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
+    // multiplexed one and each dedicated one — is upgraded identically
+    CIO.blocking(Tls.buildUpgrade(config.tls, config.host, config.port)).flatMap { upgrade =>
+      connectWith(
+        (onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, upgrade, onFrame, onClosed),
+        Scheduler.real,
+        config.reconnect,
+        config.watchdog,
+        config.connectTimeout,
+        config.closeTimeout,
+        config.dedicatedPool,
+        config.auth
+      )
+    }
 
   // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
   private[client] def connectWith(
@@ -448,9 +454,10 @@ object Client {
     watchdog: WatchdogConfig = defaults.watchdog,
     connectTimeout: FiniteDuration = defaults.connectTimeout,
     closeTimeout: FiniteDuration = defaults.closeTimeout,
-    dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool
+    dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool,
+    auth: Option[AuthConfig] = None
   ): CIO[Client[CIO]] = {
-    val bootstrap = Vector(Connection.hello())
+    val bootstrap = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
     CIO
       .blocking(
         MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
@@ -470,11 +477,15 @@ object Client {
       .mapError(translateHandshake)
   }
 
-  // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO
+  // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO. A
+  // rejected certificate or hostname mismatch surfaces from the handshake as an SSLException, which would otherwise escape the sealed
+  // hierarchy.
   private def translateHandshake(error: Throwable): Throwable =
     error match {
       case ServerError(message) if message.startsWith("NOPROTO") || message.toLowerCase.contains("unknown command") =>
         UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: $message")
+      case e: SSLException                                                                                          =>
+        TlsError(s"TLS handshake failed: ${e.getMessage}")
       case other                                                                                                    => other
     }
 

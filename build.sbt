@@ -61,7 +61,8 @@ lazy val client = (projectMatrix in file("sage-client"))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
 // the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers;
-// command-behavior suites (sage.integration.commands) run on one designated cell only — per-command behavior cannot differ per backend
+// command-behavior (sage.integration.commands) and security (sage.integration.security) suites run on one designated cell only — neither
+// per-command behavior nor TLS/auth (which live in the shared socket layer) can differ per backend
 lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .dependsOn(client, core % "test->test")
   .settings(name := "integration-tests")
@@ -73,7 +74,8 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
     Test / testOptions += {
       val isAnchor     = moduleName.value.endsWith("-future")
       val isDesignated = moduleName.value.endsWith("-zio")
-      Tests.Filter(name => !isAnchor && (isDesignated || !name.startsWith("sage.integration.commands.")))
+      val onceOnly     = Set("sage.integration.commands.", "sage.integration.security.")
+      Tests.Filter(name => !isAnchor && (isDesignated || !onceOnly.exists(name.startsWith)))
     }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))

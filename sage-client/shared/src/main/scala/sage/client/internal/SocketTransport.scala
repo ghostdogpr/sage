@@ -14,14 +14,16 @@ import sage.protocol.{Frame, RespParser}
 
 /**
   * A plain blocking socket pumped by two virtual threads — a reader feeding the RESP3 parser, a writer draining the send queue.
-  * `start` resolves the hostname and connects; `close` aborts an in-progress connect by closing the socket, and never lets the I/O
-  * threads start once it has run. Caveat: a hung DNS lookup inside `start` cannot be interrupted (a JDK limitation) — it unwinds when the
-  * OS resolver times out; `close` closing the socket then prevents the TCP connect that would have followed.
+  * `start` resolves the hostname, connects, then hands the connected socket to `upgrade` (identity for plaintext, a TLS handshake for
+  * `SSLSocket`); `close` aborts an in-progress connect or handshake by closing the plain socket, and never lets the I/O threads start once
+  * it has run. Caveat: a hung DNS lookup inside `start` cannot be interrupted (a JDK limitation) — it unwinds when the OS resolver times
+  * out; `close` closing the socket then prevents the TCP connect that would have followed.
   */
 final private[client] class SocketTransport private (
   host: String,
   port: Int,
   connectTimeoutMillis: Int,
+  upgrade: Socket => Socket,
   onFrame: Frame => Unit,
   onClosed: () => Unit
 ) extends Transport {
@@ -29,6 +31,11 @@ final private[client] class SocketTransport private (
   private val socket = new Socket()
   private val queue  = new LinkedBlockingQueue[Transport.Item]()
   private val closed = new AtomicBoolean(false)
+
+  // the socket whose streams the I/O threads use: the plain socket for plaintext, the SSLSocket after a TLS handshake. Assigned in `start`
+  // before the threads launch (so a plain `var` is safely published via thread-start); `close` always tears down the plain `socket`, which
+  // closes a layered SSLSocket too (autoClose).
+  private var ioSocket: Socket = socket
 
   // serializes the I/O-thread start against termination so threads are either started-and-joined by close() or never started at all
   private val lifecycle      = new ReentrantLock()
@@ -44,6 +51,9 @@ final private[client] class SocketTransport private (
     try {
       socket.setTcpNoDelay(true)
       socket.connect(new InetSocketAddress(host, port), connectTimeoutMillis) // resolves the hostname here, fresh on every attempt
+      socket.setSoTimeout(connectTimeoutMillis)                               // bound a TLS handshake's reads like the connect
+      ioSocket = upgrade(socket)
+      socket.setSoTimeout(0)                                                  // steady state: blocking reads with no timeout
     } catch {
       case NonFatal(error) =>
         terminate()
@@ -77,7 +87,7 @@ final private[client] class SocketTransport private (
     val parser = new RespParser
     val buffer = new Array[Byte](8192)
     try {
-      val in   = socket.getInputStream
+      val in   = ioSocket.getInputStream
       var done = false
       while (!done) {
         val n = in.read(buffer)
@@ -102,7 +112,7 @@ final private[client] class SocketTransport private (
     var attempted             = 0
     var scratch: Array[Byte]  = null
     try {
-      val out = socket.getOutputStream
+      val out = ioSocket.getOutputStream
       while (true) {
         // consuming a carried item bypasses take(), the writer's only interruption point: re-check for close first
         if (carry != null && closed.get()) throw new InterruptedException
@@ -197,8 +207,16 @@ private[client] object SocketTransport {
 
   /**
     * Builds an unconnected transport; `start()` resolves the host and connects, so the connect happens after the transport is published
-    * and `close()` can reach the socket to abort it.
+    * and `close()` can reach the socket to abort it. `upgrade` turns the connected plain socket into the one the I/O threads use (identity
+    * for plaintext, a TLS handshake otherwise).
     */
-  def connect(host: String, port: Int, connectTimeout: FiniteDuration, onFrame: Frame => Unit, onClosed: () => Unit): SocketTransport =
-    new SocketTransport(host, port, math.min(connectTimeout.toMillis, Int.MaxValue).toInt, onFrame, onClosed)
+  def connect(
+    host: String,
+    port: Int,
+    connectTimeout: FiniteDuration,
+    upgrade: Socket => Socket,
+    onFrame: Frame => Unit,
+    onClosed: () => Unit
+  ): SocketTransport =
+    new SocketTransport(host, port, math.min(connectTimeout.toMillis, Int.MaxValue).toInt, upgrade, onFrame, onClosed)
 }

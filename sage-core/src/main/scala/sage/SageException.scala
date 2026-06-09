@@ -30,6 +30,12 @@ object SageException {
     */
   final case class UnsupportedServer(message: String) extends SageException(message)
 
+  /**
+    * TLS could not be established: the certificate was rejected (wrong trust material or a hostname mismatch), or the configured trust
+    * material itself was unusable.
+    */
+  final case class TlsError(message: String) extends SageException(message)
+
   final case class CrossSlot(message: String) extends SageException(message)
 
   final case class TimedOut(message: String) extends SageException(message)

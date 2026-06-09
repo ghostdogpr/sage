@@ -26,7 +26,7 @@ class SocketTransportSpec extends munit.FunSuite {
   )(body: (SocketTransport, Socket) => Unit): Unit = {
     val server = new ServerSocket(0)
     try {
-      val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, onFrame, onClosed)
+      val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, identity, onFrame, onClosed)
       beforeStart(transport)
       transport.start()
       val peer      = server.accept()
