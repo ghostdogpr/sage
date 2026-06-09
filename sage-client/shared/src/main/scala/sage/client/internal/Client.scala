@@ -639,10 +639,11 @@ object Client {
       CIO.blocking {
         val raw = subscriptions.subscribeChannels(channel +: rest.toVector)
         new Subscription[CIO, Message[V]] {
-          def next: CIO[Option[Message[V]]] = CIO.blocking {
-            raw.next() match {
-              case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => Some(Message(ch, decodeOrThrow[V](payload)))
-              case _                                                          => None
+          // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
+          def next: CIO[Option[Message[V]]] = CIO.async { complete =>
+            raw.next {
+              case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => complete(Try(Some(Message(ch, decodeOrThrow[V](payload)))))
+              case _                                                          => complete(Success(None))
             }
           }
           def close: CIO[Unit]              = CIO.blocking(raw.close())
@@ -653,10 +654,11 @@ object Client {
       CIO.blocking {
         val raw = subscriptions.subscribePatterns(pattern +: rest.toVector)
         new Subscription[CIO, PatternMessage[V]] {
-          def next: CIO[Option[PatternMessage[V]]] = CIO.blocking {
-            raw.next() match {
-              case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) => Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))
-              case _                                                               => None
+          def next: CIO[Option[PatternMessage[V]]] = CIO.async { complete =>
+            raw.next {
+              case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) =>
+                complete(Try(Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))))
+              case _                                                               => complete(Success(None))
             }
           }
           def close: CIO[Unit]                     = CIO.blocking(raw.close())

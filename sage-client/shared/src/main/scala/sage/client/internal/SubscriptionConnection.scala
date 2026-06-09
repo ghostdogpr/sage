@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.{ArrayBlockingQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
@@ -352,12 +352,11 @@ private[client] object SubscriptionConnection {
   }
 
   /**
-    * A raw delivery routed to a subscription's buffer; `End` terminates the subscriber's stream.
+    * A raw delivery routed to a subscription's buffer.
     */
   enum Delivery {
     case Channel(channel: String, payload: Bytes)
     case Pattern(pattern: String, channel: String, payload: Bytes)
-    case End
   }
 
   // pub/sub writes (SUBSCRIBE/UNSUBSCRIBE) are confirmed by push frames, not a per-write reply, so the write hooks are no-ops
@@ -366,34 +365,63 @@ private[client] object SubscriptionConnection {
     def dropped(): Unit        = ()
   }
 
-  // One subscription's bounded buffer. `terminate` clears it to release a blocked reader and enqueues `End` to end a consumer blocked on `take`.
+  /**
+    * One subscription's async mailbox. `next` registers a one-shot callback (never blocks the consumer, so a fiber runtime parks rather than
+    * pinning a worker); `offer` hands a waiting consumer its delivery directly, else buffers, else blocks the reader for TCP backpressure
+    * once the bounded backlog is full and no consumer is pending. A single consumer pulls sequentially, so at most one waiter exists.
+    */
   final private[internal] class Sink(val names: Vector[String], val isPattern: Boolean, capacity: Int) {
 
-    private val buffer           = new ArrayBlockingQueue[Delivery](math.max(1, capacity))
-    @volatile private var closed = false
+    private val cap                              = math.max(1, capacity)
+    private val lock                             = new ReentrantLock()
+    private val notFull                          = lock.newCondition()
+    private val backlog                          = new java.util.ArrayDeque[Delivery](cap)
+    private var waiter: Option[Delivery] => Unit = null
+    private var closed                           = false
 
-    // Poll rather than a plain `put`: a `terminate` racing between an `if (!closed)` check and a blocking put could park the reader on a full
-    // queue no consumer will drain. Re-reading `closed` each poll backpressures while open but exits promptly once terminated.
-    def offer(delivery: Delivery): Unit =
-      while (!closed)
-        if (buffer.offer(delivery, 100L, TimeUnit.MILLISECONDS)) return
+    def next(callback: Option[Delivery] => Unit): Unit = {
+      var ready: Option[Delivery] = null // null = parked on the waiter; non-null = deliver synchronously
+      lock.lock()
+      try {
+        val head = backlog.poll()
+        if (head != null) { notFull.signal(); ready = Some(head) }
+        else if (closed) ready = None
+        else waiter = callback
+      } finally lock.unlock()
+      if (ready != null) callback(ready)
+    }
 
-    def take(): Delivery = buffer.take()
+    def offer(delivery: Delivery): Unit = {
+      var hungry: Option[Delivery] => Unit = null
+      lock.lock()
+      try {
+        var settled = false
+        while (!settled)
+          if (closed) settled = true
+          else if (waiter != null) { hungry = waiter; waiter = null; settled = true }
+          else if (backlog.size < cap) { backlog.add(delivery); settled = true }
+          else notFull.await() // backlog full, no consumer: backpressure the reader
+      } finally lock.unlock()
+      if (hungry != null) hungry(Some(delivery))
+    }
 
     def terminate(): Unit = {
-      closed = true
-      buffer.clear()
-      while (!buffer.offer(Delivery.End)) { buffer.poll(); () }
+      var pending: Option[Delivery] => Unit = null
+      lock.lock()
+      try {
+        closed = true
+        backlog.clear()
+        pending = waiter
+        waiter = null
+        notFull.signalAll() // release a reader blocked on backpressure
+      } finally lock.unlock()
+      if (pending != null) pending(None)
     }
   }
 
   final class RawSubscription private[SubscriptionConnection] (owner: SubscriptionConnection, sink: Sink) {
 
-    def next(): Option[Delivery] =
-      sink.take() match {
-        case Delivery.End => None
-        case delivery     => Some(delivery)
-      }
+    def next(callback: Option[Delivery] => Unit): Unit = sink.next(callback)
 
     def close(): Unit = owner.closeSubscription(sink)
   }

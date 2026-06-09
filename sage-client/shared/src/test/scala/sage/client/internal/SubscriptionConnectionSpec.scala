@@ -1,5 +1,8 @@
 package sage.client.internal
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
+
 import scala.collection.mutable
 import scala.concurrent.duration.*
 
@@ -63,6 +66,15 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       )
     )
 
+  // next is async (callback); block on it for assertions
+  private def nextBlocking(sub: SubscriptionConnection.RawSubscription): Option[SubscriptionConnection.Delivery] = {
+    val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
+    val latch = new CountDownLatch(1)
+    sub.next { delivery => box.set(delivery); latch.countDown() }
+    latch.await()
+    box.get()
+  }
+
   // Bytes has no structural `==` (CONTEXT: compare with sameBytes), so destructure and compare the payload as text
   private def assertChannel(delivery: Option[SubscriptionConnection.Delivery], channel: String, payload: String)(using munit.Location): Unit =
     delivery match {
@@ -86,7 +98,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assert(wrote(transports.head, "SUBSCRIBE"))
 
     transports.head.emit(message("news", "hello"))
-    assertChannel(sub.next(), "news", "hello")
+    assertChannel(nextBlocking(sub), "news", "hello")
   }
 
   test("subscribe is gated on the client being live") {
@@ -103,8 +115,8 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assertEquals(transports.head.written.count(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n")), 1)
 
     transports.head.emit(message("news", "x"))
-    assertChannel(a.next(), "news", "x")
-    assertChannel(b.next(), "news", "x")
+    assertChannel(nextBlocking(a), "news", "x")
+    assertChannel(nextBlocking(b), "news", "x")
   }
 
   test("UNSUBSCRIBE is sent only when the last subscriber of a channel closes, and the connection is torn down") {
@@ -127,7 +139,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assert(wrote(transports.head, "PSUBSCRIBE"))
 
     transports.head.emit(patternMessage("news.*", "news.sports", "goal"))
-    assertPattern(sub.next(), "news.*", "news.sports", "goal")
+    assertPattern(nextBlocking(sub), "news.*", "news.sports", "goal")
   }
 
   test("a dropped connection reconnects and resubscribes every active subscription") {
@@ -141,14 +153,14 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assert(wrote(transports(1), "SUBSCRIBE"), "the new socket re-issues the active subscription")
 
     transports(1).emit(message("news", "after-reconnect"))
-    assertChannel(sub.next(), "news", "after-reconnect")
+    assertChannel(nextBlocking(sub), "news", "after-reconnect")
   }
 
   test("closing the client terminates active subscription streams") {
     val (connection, _, transports) = make()
     val sub                         = connection.subscribeChannels(Vector("news"))
     connection.close()
-    assertEquals(sub.next(), None)
+    assertEquals(nextBlocking(sub), None)
     assertEquals(transports.head.closeCount, 1)
   }
 
@@ -156,8 +168,8 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val (connection, _, transports) = make()
     val sub                         = connection.subscribeChannels(Vector("a", "b"))
     transports.head.emit(message("b", "from-b"))
-    assertChannel(sub.next(), "b", "from-b")
+    assertChannel(nextBlocking(sub), "b", "from-b")
     transports.head.emit(message("a", "from-a"))
-    assertChannel(sub.next(), "a", "from-a")
+    assertChannel(nextBlocking(sub), "a", "from-a")
   }
 }
