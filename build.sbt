@@ -25,6 +25,16 @@ name := "sage"
 addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
 addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck")
 
+addCommandAlias(
+  "testUnit",
+  "core/test; clientZio/test; clientCe/test; clientOx/test; clientKyo3_8_3/test; " +
+    "clientFuture/Test/compile; integrationTestsFuture/Test/compile"
+)
+addCommandAlias("itZio", "integrationTestsZio/test")
+addCommandAlias("itCe", "integrationTestsCe/test")
+addCommandAlias("itOx", "integrationTestsOx/test")
+addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
+
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
@@ -54,8 +64,8 @@ lazy val client = (projectMatrix in file("sage-client"))
   .settings(name := "sage-client")
   .settings(commonSettings)
   .settings(
-    // the Scala Next compatLibrary call adds an implicit Future anchor row; only the LTS one is published
-    publish / skip := scalaVersion.value != scala3Version && moduleName.value.endsWith("-future")
+    // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
+    publish / skip := moduleName.value.endsWith("-future")
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
