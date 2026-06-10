@@ -6,7 +6,7 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
-import sage.commands.{GetExpiry, SetCondition, SetExpiry, Ttl}
+import sage.commands.{GetExpiry, LcsMatch, MatchRange, SetCondition, SetExpiry, Ttl}
 import sage.integration.{Images, ServerSuite}
 
 abstract class StringsSuite(image: String) extends ServerSuite(image) {
@@ -182,6 +182,22 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
         _   <- client.set("str-at", "v", expiry = SetExpiry.At(deadline))
         ttl <- client.ttl("str-at")
       } yield assert(expiresWithin(ttl, 3600.seconds))
+    }
+  }
+
+  test("LCS finds the subsequence, its length, and indexed matches") {
+    withClient { client =>
+      for {
+        _        <- client.mSet(("str-lcs-1", "ohmytext"), ("str-lcs-2", "mynewtext"))
+        sequence <- client.lcs[String, String]("str-lcs-1", "str-lcs-2")
+        length   <- client.lcsLen("str-lcs-1", "str-lcs-2")
+        idx      <- client.lcsIdx("str-lcs-1", "str-lcs-2", minMatchLen = Some(4L), withMatchLen = true)
+      } yield {
+        assertEquals(sequence, "mytext")
+        assertEquals(length, 6L)
+        assertEquals(idx.length, 6L)
+        assertEquals(idx.matches, Vector(LcsMatch(MatchRange(4L, 7L), MatchRange(5L, 8L), Some(4L))))
+      }
     }
   }
 

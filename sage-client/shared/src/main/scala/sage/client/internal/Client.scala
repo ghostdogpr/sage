@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage, SageException}
+import sage.{Bytes, Message, PatternMessage, SageException}
 import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TlsError, TransactionDiscarded, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
@@ -74,6 +74,41 @@ trait CommandRunner[F[_]] {
 
   final def strLen[K: KeyCodec](key: K): F[Long] = run(Strings.strLen(key))
 
+  final def lcs[K: KeyCodec, V: ValueCodec](key1: K, key2: K): F[V] = run(Strings.lcs(key1, key2))
+
+  final def lcsLen[K: KeyCodec](key1: K, key2: K): F[Long] = run(Strings.lcsLen(key1, key2))
+
+  final def lcsIdx[K: KeyCodec](key1: K, key2: K, minMatchLen: Option[Long] = None, withMatchLen: Boolean = false): F[LcsMatches] =
+    run(Strings.lcsIdx(key1, key2, minMatchLen, withMatchLen))
+
+  final def digest[K: KeyCodec](key: K): F[Option[String]] = run(Strings.digest(key))
+
+  final def delex[K: KeyCodec, V: ValueCodec](key: K, condition: DelexCondition[V] = DelexCondition.Always): F[Boolean] =
+    run(Strings.delex(key, condition))
+
+  final def msetEx[K: KeyCodec, V: ValueCodec](
+    condition: SetCondition = SetCondition.Always,
+    expiry: SetExpiry = SetExpiry.Clear
+  )(first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.msetEx(condition, expiry)(first, rest*))
+
+  final def increxBy[K: KeyCodec](
+    key: K,
+    increment: Long = 1,
+    saturate: Boolean = false,
+    lowerBound: Option[Long] = None,
+    upperBound: Option[Long] = None,
+    expiry: IncrExpiry = IncrExpiry.Keep
+  ): F[IncrExResult[Long]] = run(Strings.increxBy(key, increment, saturate, lowerBound, upperBound, expiry))
+
+  final def increxByFloat[K: KeyCodec](
+    key: K,
+    increment: Double,
+    saturate: Boolean = false,
+    lowerBound: Option[Double] = None,
+    upperBound: Option[Double] = None,
+    expiry: IncrExpiry = IncrExpiry.Keep
+  ): F[IncrExResult[Double]] = run(Strings.increxByFloat(key, increment, saturate, lowerBound, upperBound, expiry))
+
   final def copy[K: KeyCodec](source: K, destination: K, replace: Boolean = false): F[Boolean] =
     run(Keys.copy(source, destination, replace))
 
@@ -117,6 +152,65 @@ trait CommandRunner[F[_]] {
   final def typeOf[K: KeyCodec](key: K): F[Option[RedisType]] = run(Keys.typeOf(key))
 
   final def unlink[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.unlink(first, rest*))
+
+  final def sort[K: KeyCodec, V: ValueCodec](
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  ): F[Vector[Option[V]]] = run(Keys.sort(key, by, limit, get, order, alpha))
+
+  final def sortStore[K: KeyCodec](
+    destination: K,
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  ): F[Long] = run(Keys.sortStore(destination, key, by, limit, get, order, alpha))
+
+  final def sortRo[K: KeyCodec, V: ValueCodec](
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  ): F[Vector[Option[V]]] = run(Keys.sortRo(key, by, limit, get, order, alpha))
+
+  final def move[K: KeyCodec](key: K, db: Int): F[Boolean] = run(Keys.move(key, db))
+
+  final def dump[K: KeyCodec](key: K): F[Option[Bytes]] = run(Keys.dump(key))
+
+  final def restore[K: KeyCodec](
+    key: K,
+    payload: Bytes,
+    expiry: RestoreExpiry = RestoreExpiry.NoExpiry,
+    replace: Boolean = false,
+    idleTime: Option[FiniteDuration] = None,
+    freq: Option[Long] = None
+  ): F[Unit] = run(Keys.restore(key, payload, expiry, replace, idleTime, freq))
+
+  final def migrate[K: KeyCodec](
+    host: String,
+    port: Int,
+    destinationDb: Int,
+    timeout: FiniteDuration,
+    copy: Boolean = false,
+    replace: Boolean = false,
+    auth: MigrateAuth = MigrateAuth.None
+  )(first: K, rest: K*): F[MigrateResult] = run(Keys.migrate(host, port, destinationDb, timeout, copy, replace, auth)(first, rest*))
+
+  final def objectEncoding[K: KeyCodec](key: K): F[Option[String]] = run(Keys.objectEncoding(key))
+
+  final def objectRefCount[K: KeyCodec](key: K): F[Option[Long]] = run(Keys.objectRefCount(key))
+
+  final def objectFreq[K: KeyCodec](key: K): F[Option[Long]] = run(Keys.objectFreq(key))
+
+  final def objectIdleTime[K: KeyCodec](key: K): F[Option[FiniteDuration]] = run(Keys.objectIdleTime(key))
 
   final def hSet[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, first: (F0, V), rest: (F0, V)*): F[Long] =
     run(Hashes.hSet(key, first, rest*))
@@ -169,6 +263,45 @@ trait CommandRunner[F[_]] {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): F[ScanPage[F0]] = run(Hashes.hScanNoValues(key, cursor, pattern, count))
+
+  final def hExpire[K: KeyCodec, F0: KeyCodec](key: K, ttl: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(
+    first: F0,
+    rest: F0*
+  ): F[Vector[FieldExpiry]] = run(Hashes.hExpire(key, ttl, condition)(first, rest*))
+
+  final def hExpireAt[K: KeyCodec, F0: KeyCodec](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(
+    first: F0,
+    rest: F0*
+  ): F[Vector[FieldExpiry]] = run(Hashes.hExpireAt(key, at, condition)(first, rest*))
+
+  final def hExpireTime[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
+    run(Hashes.hExpireTime(key)(first, rest*))
+
+  final def hpExpireTime[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
+    run(Hashes.hpExpireTime(key)(first, rest*))
+
+  final def hTtl[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
+    run(Hashes.hTtl(key)(first, rest*))
+
+  final def hpTtl[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
+    run(Hashes.hpTtl(key)(first, rest*))
+
+  final def hPersist[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldPersist]] =
+    run(Hashes.hPersist(key)(first, rest*))
+
+  final def hGetDel[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K)(first: F0, rest: F0*): F[Vector[Option[V]]] =
+    run(Hashes.hGetDel(key)(first, rest*))
+
+  final def hGetEx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, expiry: GetExpiry = GetExpiry.Keep)(
+    first: F0,
+    rest: F0*
+  ): F[Vector[Option[V]]] = run(Hashes.hGetEx(key, expiry)(first, rest*))
+
+  final def hSetEx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    condition: HSetExCondition = HSetExCondition.Always,
+    expiry: SetExpiry = SetExpiry.Clear
+  )(first: (F0, V), rest: (F0, V)*): F[Boolean] = run(Hashes.hSetEx(key, condition, expiry)(first, rest*))
 
   final def lPush[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.lPush(key, first, rest*))
 

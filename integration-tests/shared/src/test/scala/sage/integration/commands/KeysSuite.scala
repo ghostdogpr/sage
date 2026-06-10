@@ -202,6 +202,109 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("SORT orders a list numerically and alphabetically, with LIMIT and DESC") {
+    withClient { client =>
+      for {
+        _       <- client.rPush("keys-sort", "3", "1", "2")
+        numeric <- client.sort[String, String]("keys-sort")
+        desc    <- client.sort[String, String]("keys-sort", order = SortOrder.Desc, limit = Some(Limit(0L, 2L)))
+        alpha   <- client.sort[String, String]("keys-sort", alpha = true, order = SortOrder.Desc)
+      } yield {
+        assertEquals(numeric, Vector(Some("1"), Some("2"), Some("3")))
+        assertEquals(desc, Vector(Some("3"), Some("2")))
+        assertEquals(alpha, Vector(Some("3"), Some("2"), Some("1")))
+      }
+    }
+  }
+
+  test("SORT BY/GET sorts by external weights and projects external values, nil for missing") {
+    withClient { client =>
+      for {
+        _   <- client.rPush("keys-sortby", "1", "2", "3")
+        _   <- client.mSet(("keys-w-1", "30"), ("keys-w-2", "10"), ("keys-w-3", "20"))
+        _   <- client.mSet(("keys-d-1", "A"), ("keys-d-3", "C"))
+        got <- client.sort[String, String]("keys-sortby", by = Some("keys-w-*"), get = Vector("keys-d-*", "#"))
+      } yield assertEquals(got, Vector(None, Some("2"), Some("C"), Some("3"), Some("A"), Some("1")))
+    }
+  }
+
+  test("SORT_RO reads without storing; SORT STORE writes the result and returns the count") {
+    withClient { client =>
+      for {
+        _      <- client.rPush("keys-sortstore", "b", "a", "c")
+        ro     <- client.sortRo[String, String]("keys-sortstore", alpha = true)
+        stored <- client.sortStore("keys-sortstore-dst", "keys-sortstore", alpha = true)
+        dst    <- client.lRange[String, String]("keys-sortstore-dst", 0L, -1L)
+      } yield {
+        assertEquals(ro, Vector(Some("a"), Some("b"), Some("c")))
+        assertEquals(stored, 3L)
+        assertEquals(dst, Vector("a", "b", "c"))
+      }
+    }
+  }
+
+  test("MOVE relocates a key out of the current database") {
+    withClient { client =>
+      for {
+        _     <- client.set("keys-move", "v")
+        moved <- client.move("keys-move", 1)
+        gone  <- client.exists("keys-move")
+        again <- client.move("keys-move", 1)
+      } yield {
+        assertEquals(moved, true)
+        assertEquals(gone, 0L)
+        assertEquals(again, false)
+      }
+    }
+  }
+
+  test("DUMP and RESTORE round-trip a value through its serialized form") {
+    withClient { client =>
+      for {
+        _        <- client.set("keys-dump", "payload")
+        dumped   <- client.dump("keys-dump")
+        restored <- dumped.fold(CIO.value(()))(bytes => client.restore("keys-restore", bytes))
+        value    <- client.get[String, String]("keys-restore")
+        replaced <- dumped.fold(CIO.value(false))(bytes => client.restore("keys-restore", bytes, replace = true).map(_ => true))
+        missing  <- client.dump("keys-dump-missing")
+      } yield {
+        assert(dumped.isDefined)
+        assertEquals(value, Some("payload"))
+        assertEquals(replaced, true)
+        assertEquals(missing, None)
+      }
+    }
+  }
+
+  test("MIGRATE reports NOKEY when the source key is absent") {
+    withClient { client =>
+      for {
+        result <- client.migrate("localhost", 6379, 0, 1.second)("keys-migrate-ghost")
+      } yield assertEquals(result, MigrateResult.NoKey)
+    }
+  }
+
+  test("OBJECT exposes encoding, refcount, and idle time; None for a missing key") {
+    withClient { client =>
+      for {
+        _        <- client.set("keys-object", "12345")
+        encoding <- client.objectEncoding("keys-object")
+        refCount <- client.objectRefCount("keys-object")
+        idle     <- client.objectIdleTime("keys-object")
+        missEnc  <- client.objectEncoding("keys-object-missing")
+        missRef  <- client.objectRefCount("keys-object-missing")
+        missIdle <- client.objectIdleTime("keys-object-missing")
+      } yield {
+        assertEquals(encoding, Some("int"))
+        assert(refCount.exists(_ >= 1L))
+        assert(idle.exists(_ >= Duration.Zero))
+        assertEquals(missEnc, None)
+        assertEquals(missRef, None)
+        assertEquals(missIdle, None)
+      }
+    }
+  }
+
   private def scanAll(
     client: Client[CIO],
     pattern: Option[String],

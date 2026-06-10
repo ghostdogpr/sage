@@ -46,6 +46,28 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
+  val utf8String: Frame => Either[DecodeError, String] = {
+    case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
+    case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
+  }
+
+  val optionalUtf8String: Frame => Either[DecodeError, Option[String]] = {
+    case Frame.Null              => Right(None)
+    case Frame.BulkString(bytes) => Right(Some(bytes.asUtf8String))
+    case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
+  }
+
+  val bytes: Frame => Either[DecodeError, Bytes] = {
+    case Frame.BulkString(value) => Right(value)
+    case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
+  }
+
+  val optionalBytes: Frame => Either[DecodeError, Option[Bytes]] = {
+    case Frame.Null              => Right(None)
+    case Frame.BulkString(value) => Right(Some(value))
+    case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
+  }
+
   def key[K](using codec: KeyCodec[K]): Frame => Either[DecodeError, K] = {
     case Frame.BulkString(bytes) => codec.decode(bytes)
     case other                   => Left(DecodeError("bulk string", Frame.describe(other)))

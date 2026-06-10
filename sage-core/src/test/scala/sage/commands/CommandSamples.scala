@@ -4,6 +4,8 @@ import java.time.Instant
 
 import scala.concurrent.duration.*
 
+import sage.Bytes
+
 /**
   * One constructed Command per builder variant, paired with its expected wire words. The coverage spec derives the implemented-command
   * set from these, so a builder without a sample reports its command as missing — keep every distinct wire name reachable.
@@ -14,6 +16,7 @@ object CommandSamples {
 
   private val wholeSecond = Instant.ofEpochSecond(2000000000L)
   private val withMillis  = Instant.ofEpochMilli(2000000000123L)
+  private val payload     = Bytes.utf8("payload")
 
   val all: Vector[Sample] = Vector(
     Sample(Connection.ping(), Vector("PING")),
@@ -264,6 +267,70 @@ object CommandSamples {
     Sample(Pubsub.pubsubChannels(), Vector("PUBSUB", "CHANNELS")),
     Sample(Pubsub.pubsubChannels(Some("news.*")), Vector("PUBSUB", "CHANNELS", "news.*")),
     Sample(Pubsub.pubsubNumSub("a", "b"), Vector("PUBSUB", "NUMSUB", "a", "b")),
-    Sample(Pubsub.pubsubNumPat, Vector("PUBSUB", "NUMPAT"))
+    Sample(Pubsub.pubsubNumPat, Vector("PUBSUB", "NUMPAT")),
+    Sample(Hashes.hExpire("h", 90.seconds)("f1", "f2"), Vector("HEXPIRE", "h", "90", "FIELDS", "2", "f1", "f2")),
+    Sample(Hashes.hExpire("h", 90500.millis)("f"), Vector("HPEXPIRE", "h", "90500", "FIELDS", "1", "f")),
+    Sample(Hashes.hExpire("h", 90.seconds, ExpireCondition.IfGreater)("f"), Vector("HEXPIRE", "h", "90", "GT", "FIELDS", "1", "f")),
+    Sample(Hashes.hExpireAt("h", wholeSecond)("f"), Vector("HEXPIREAT", "h", "2000000000", "FIELDS", "1", "f")),
+    Sample(Hashes.hExpireAt("h", withMillis)("f"), Vector("HPEXPIREAT", "h", "2000000000123", "FIELDS", "1", "f")),
+    Sample(Hashes.hExpireTime("h")("f"), Vector("HEXPIRETIME", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hpExpireTime("h")("f"), Vector("HPEXPIRETIME", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hTtl("h")("f"), Vector("HTTL", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hpTtl("h")("f"), Vector("HPTTL", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hPersist("h")("f"), Vector("HPERSIST", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hGetDel[String, String, String]("h")("f1", "f2"), Vector("HGETDEL", "h", "FIELDS", "2", "f1", "f2")),
+    Sample(Hashes.hGetEx[String, String, String]("h")("f"), Vector("HGETEX", "h", "FIELDS", "1", "f")),
+    Sample(Hashes.hGetEx[String, String, String]("h", GetExpiry.In(90.seconds))("f"), Vector("HGETEX", "h", "EX", "90", "FIELDS", "1", "f")),
+    Sample(Hashes.hGetEx[String, String, String]("h", GetExpiry.Persist)("f"), Vector("HGETEX", "h", "PERSIST", "FIELDS", "1", "f")),
+    Sample(Hashes.hSetEx("h")(("f", "v")), Vector("HSETEX", "h", "FIELDS", "1", "f", "v")),
+    Sample(
+      Hashes.hSetEx("h", HSetExCondition.IfNoneExist, SetExpiry.In(90.seconds))(("f1", "v1"), ("f2", "v2")),
+      Vector("HSETEX", "h", "FNX", "EX", "90", "FIELDS", "2", "f1", "v1", "f2", "v2")
+    ),
+    Sample(Keys.sort[String, String]("k"), Vector("SORT", "k")),
+    Sample(
+      Keys.sort[String, String]("k", by = Some("w_*"), limit = Some(Limit(0L, 10L)), get = Vector("d_*", "#"), order = SortOrder.Desc, alpha = true),
+      Vector("SORT", "k", "BY", "w_*", "LIMIT", "0", "10", "GET", "d_*", "GET", "#", "DESC", "ALPHA")
+    ),
+    Sample(Keys.sortStore[String]("dst", "k"), Vector("SORT", "k", "STORE", "dst")),
+    Sample(Keys.sortRo[String, String]("k", alpha = true), Vector("SORT_RO", "k", "ALPHA")),
+    Sample(Keys.move("k", 1), Vector("MOVE", "k", "1")),
+    Sample(Keys.dump("k"), Vector("DUMP", "k")),
+    Sample(Keys.restore("k", payload), Vector("RESTORE", "k", "0", "payload")),
+    Sample(
+      Keys.restore("k", payload, RestoreExpiry.In(90.seconds), replace = true, idleTime = Some(5.seconds), freq = Some(10L)),
+      Vector("RESTORE", "k", "90000", "payload", "REPLACE", "IDLETIME", "5", "FREQ", "10")
+    ),
+    Sample(Keys.restore("k", payload, RestoreExpiry.At(withMillis)), Vector("RESTORE", "k", "2000000000123", "payload", "ABSTTL")),
+    Sample(Keys.migrate("localhost", 6380, 0, 5.seconds)("k"), Vector("MIGRATE", "localhost", "6380", "", "0", "5000", "KEYS", "k")),
+    Sample(
+      Keys.migrate("localhost", 6380, 1, 5.seconds, copy = true, replace = true, auth = MigrateAuth.UserPassword("u", "p"))("k1", "k2"),
+      Vector("MIGRATE", "localhost", "6380", "", "1", "5000", "COPY", "REPLACE", "AUTH2", "u", "p", "KEYS", "k1", "k2")
+    ),
+    Sample(Keys.objectEncoding("k"), Vector("OBJECT", "ENCODING", "k")),
+    Sample(Keys.objectRefCount("k"), Vector("OBJECT", "REFCOUNT", "k")),
+    Sample(Keys.objectFreq("k"), Vector("OBJECT", "FREQ", "k")),
+    Sample(Keys.objectIdleTime("k"), Vector("OBJECT", "IDLETIME", "k")),
+    Sample(Strings.lcs[String, String]("k1", "k2"), Vector("LCS", "k1", "k2")),
+    Sample(Strings.lcsLen("k1", "k2"), Vector("LCS", "k1", "k2", "LEN")),
+    Sample(
+      Strings.lcsIdx("k1", "k2", minMatchLen = Some(4L), withMatchLen = true),
+      Vector("LCS", "k1", "k2", "IDX", "MINMATCHLEN", "4", "WITHMATCHLEN")
+    ),
+    Sample(Strings.digest("k"), Vector("DIGEST", "k")),
+    Sample(Strings.delex[String, String]("k"), Vector("DELEX", "k")),
+    Sample(Strings.delex("k", DelexCondition.IfEq("v")), Vector("DELEX", "k", "IFEQ", "v")),
+    Sample(Strings.delex[String, String]("k", DelexCondition.IfDigestNe("abcd")), Vector("DELEX", "k", "IFDNE", "abcd")),
+    Sample(Strings.msetEx()(("a", "1"), ("b", "2")), Vector("MSETEX", "2", "a", "1", "b", "2")),
+    Sample(
+      Strings.msetEx(condition = SetCondition.IfNotExists, expiry = SetExpiry.In(90.seconds))(("a", "1")),
+      Vector("MSETEX", "1", "a", "1", "NX", "EX", "90")
+    ),
+    Sample(Strings.increxBy("k", 5L), Vector("INCREX", "k", "BYINT", "5")),
+    Sample(
+      Strings.increxBy("k", 5L, saturate = true, upperBound = Some(100L), expiry = IncrExpiry.In(90.seconds, onlyIfNoTtl = true)),
+      Vector("INCREX", "k", "BYINT", "5", "SATURATE", "UBOUND", "100", "EX", "90", "ENX")
+    ),
+    Sample(Strings.increxByFloat("k", 1.5), Vector("INCREX", "k", "BYFLOAT", "1.5"))
   )
 }

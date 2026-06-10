@@ -6,7 +6,7 @@ import scala.concurrent.duration.{FiniteDuration, MILLISECONDS, SECONDS}
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.KeyCodec
+import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 enum ExpireCondition {
@@ -68,6 +68,34 @@ object ScanCursor {
   * iteration is complete; empty `items` with a `Some` cursor is normal mid-iteration.
   */
 final case class ScanPage[A](items: Vector[A], next: Option[ScanCursor])
+
+enum SortOrder {
+  case Asc
+  case Desc
+}
+
+/**
+  * RESTORE's TTL. `NoExpiry` is the wire's `0`; `At` sets `ABSTTL` so the duration is read as an absolute timestamp.
+  */
+enum RestoreExpiry {
+  case NoExpiry
+  case In(duration: FiniteDuration)
+  case At(timestamp: Instant)
+}
+
+/**
+  * MIGRATE's authentication: `Password` is the legacy `AUTH password` (default user), `UserPassword` the ACL `AUTH2 username password`.
+  */
+enum MigrateAuth {
+  case None
+  case Password(password: String)
+  case UserPassword(username: String, password: String)
+}
+
+enum MigrateResult {
+  case Ok
+  case NoKey
+}
 
 private[sage] object Keys {
 
@@ -156,12 +184,130 @@ private[sage] object Keys {
   def unlink[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
     allKeys("UNLINK", first +: rest.toVector, Decode.long)
 
+  def sort[K, V](
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] =
+    Command("SORT", Command.FirstKey, keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha), Decode.vector(Decode.optionalValue))
+
+  def sortStore[K](
+    destination: K,
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  )(using keyCodec: KeyCodec[K]): Command[Long] = {
+    val args = ((keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha)) :+ Store) :+ keyCodec.encode(destination)
+    Command("SORT", Vector(0, args.size - 1), args, Decode.long)
+  }
+
+  def sortRo[K, V](
+    key: K,
+    by: Option[String] = None,
+    limit: Option[Limit] = None,
+    get: Vector[String] = Vector.empty,
+    order: SortOrder = SortOrder.Asc,
+    alpha: Boolean = false
+  )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] =
+    Command("SORT_RO", Command.FirstKey, keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha), Decode.vector(Decode.optionalValue))
+
+  def move[K](key: K, db: Int)(using keyCodec: KeyCodec[K]): Command[Boolean] =
+    Command("MOVE", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(db.toString)), Decode.flag)
+
+  def dump[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Bytes]] =
+    Command("DUMP", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalBytes)
+
+  def restore[K](
+    key: K,
+    payload: Bytes,
+    expiry: RestoreExpiry = RestoreExpiry.NoExpiry,
+    replace: Boolean = false,
+    idleTime: Option[FiniteDuration] = None,
+    freq: Option[Long] = None
+  )(using keyCodec: KeyCodec[K]): Command[Unit] = {
+    val (ttl, absTtl) = expiry match {
+      case RestoreExpiry.NoExpiry     => (0L, false)
+      case RestoreExpiry.In(duration) => (TimeArgs.millis(duration), false)
+      case RestoreExpiry.At(at)       => (TimeArgs.millis(at), true)
+    }
+    Command(
+      "RESTORE",
+      Command.FirstKey,
+      Vector(keyCodec.encode(key), Bytes.utf8(ttl.toString), payload) ++
+        (if (replace) Vector(Replace) else Vector.empty) ++
+        (if (absTtl) Vector(AbsTtl) else Vector.empty) ++
+        idleTime.toVector.flatMap(d => Vector(IdleTime, Bytes.utf8(d.toSeconds.toString))) ++
+        freq.toVector.flatMap(f => Vector(Freq, Bytes.utf8(f.toString))),
+      Decode.ok
+    )
+  }
+
+  def migrate[K](
+    host: String,
+    port: Int,
+    destinationDb: Int,
+    timeout: FiniteDuration,
+    copy: Boolean = false,
+    replace: Boolean = false,
+    auth: MigrateAuth = MigrateAuth.None
+  )(first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[MigrateResult] = {
+    val keys = (first +: rest.toVector).map(keyCodec.encode)
+    val args =
+      Vector(Bytes.utf8(host), Bytes.utf8(port.toString), Bytes.empty, Bytes.utf8(destinationDb.toString), Bytes.utf8(timeout.toMillis.toString)) ++
+        (if (copy) Vector(Copy) else Vector.empty) ++
+        (if (replace) Vector(Replace) else Vector.empty) ++
+        authArgs(auth) ++
+        (Keyword +: keys)
+    Command("MIGRATE", Vector.range(args.size - keys.size, args.size), args, migrateResult)
+  }
+
+  def objectEncoding[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[String]] =
+    Command("OBJECT", Vector(1), Vector(Encoding, keyCodec.encode(key)), Decode.optionalUtf8String)
+
+  def objectRefCount[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Long]] =
+    Command("OBJECT", Vector(1), Vector(RefCount, keyCodec.encode(key)), Decode.optionalLong)
+
+  def objectFreq[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Long]] =
+    Command("OBJECT", Vector(1), Vector(Freq, keyCodec.encode(key)), Decode.optionalLong)
+
+  def objectIdleTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[FiniteDuration]] =
+    Command("OBJECT", Vector(1), Vector(IdleTime, keyCodec.encode(key)), Decode.optionalLong).map(_.map(FiniteDuration(_, SECONDS)))
+
   private def allKeys[K, Out](name: String, keys: Vector[K], decode: Frame => Either[DecodeError, Out])(using keyCodec: KeyCodec[K]): Command[Out] = {
     val args = keys.map(keyCodec.encode)
     Command(name, args.indices.toVector, args, decode)
   }
 
-  private def conditionArgs(condition: ExpireCondition): Vector[Bytes] =
+  private def sortOptionArgs(by: Option[String], limit: Option[Limit], get: Vector[String], order: SortOrder, alpha: Boolean): Vector[Bytes] =
+    by.toVector.flatMap(p => Vector(By, Bytes.utf8(p))) ++
+      limit.toVector.flatMap(l => Vector(LimitWord, Bytes.utf8(l.offset.toString), Bytes.utf8(l.count.toString))) ++
+      get.flatMap(p => Vector(Get, Bytes.utf8(p))) ++
+      (order match {
+        case SortOrder.Asc  => Vector.empty
+        case SortOrder.Desc => Vector(Desc)
+      }) ++
+      (if (alpha) Vector(Alpha) else Vector.empty)
+
+  private def authArgs(auth: MigrateAuth): Vector[Bytes] =
+    auth match {
+      case MigrateAuth.None                         => Vector.empty
+      case MigrateAuth.Password(password)           => Vector(Auth, Bytes.utf8(password))
+      case MigrateAuth.UserPassword(user, password) => Vector(Auth2, Bytes.utf8(user), Bytes.utf8(password))
+    }
+
+  private val migrateResult: Frame => Either[DecodeError, MigrateResult] = {
+    case Frame.SimpleString("OK")    => Right(MigrateResult.Ok)
+    case Frame.SimpleString("NOKEY") => Right(MigrateResult.NoKey)
+    case other                       => Left(DecodeError("simple string 'OK' or 'NOKEY'", Frame.describe(other)))
+  }
+
+  private[commands] def conditionArgs(condition: ExpireCondition): Vector[Bytes] =
     condition match {
       case ExpireCondition.Always      => Vector.empty
       case ExpireCondition.IfNoExpiry  => Vector(Nx)
@@ -189,4 +335,19 @@ private[sage] object Keys {
   private val Xx                                                                                     = Bytes.utf8("XX")
   private val Gt                                                                                     = Bytes.utf8("GT")
   private val Lt                                                                                     = Bytes.utf8("LT")
+  private val By                                                                                     = Bytes.utf8("BY")
+  private val Get                                                                                    = Bytes.utf8("GET")
+  private val LimitWord                                                                              = Bytes.utf8("LIMIT")
+  private val Desc                                                                                   = Bytes.utf8("DESC")
+  private val Alpha                                                                                  = Bytes.utf8("ALPHA")
+  private val Store                                                                                  = Bytes.utf8("STORE")
+  private val AbsTtl                                                                                 = Bytes.utf8("ABSTTL")
+  private val IdleTime                                                                               = Bytes.utf8("IDLETIME")
+  private val Freq                                                                                   = Bytes.utf8("FREQ")
+  private val Copy                                                                                   = Bytes.utf8("COPY")
+  private val Auth                                                                                   = Bytes.utf8("AUTH")
+  private val Auth2                                                                                  = Bytes.utf8("AUTH2")
+  private val Keyword                                                                                = Bytes.utf8("KEYS")
+  private val Encoding                                                                               = Bytes.utf8("ENCODING")
+  private val RefCount                                                                               = Bytes.utf8("REFCOUNT")
 }
