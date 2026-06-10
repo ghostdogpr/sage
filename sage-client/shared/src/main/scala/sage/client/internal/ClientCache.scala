@@ -80,7 +80,12 @@ final private[client] class ClientCache(maxBytes: Long) {
     val tracked = new Key(redisKey)
     lock.lock()
     try {
-      reverse.remove(tracked).foreach(_.foreach(ck => Option(entries.get(ck)).foreach(e => removeEntry(ck, e))))
+      reverse.remove(tracked).foreach { keys =>
+        keys.foreach { ck =>
+          val entry = entries.get(ck)
+          if (entry != null) removeEntry(ck, entry)
+        }
+      }
       pending.valuesIterator.foreach(inFlight => if (inFlight.keys.contains(tracked)) inFlight.dirty = true)
     } finally lock.unlock()
   }
@@ -115,13 +120,16 @@ final private[client] class ClientCache(maxBytes: Long) {
     while (bytesUsed > maxBytes && it.hasNext) {
       val evicted = it.next()
       it.remove()
-      bytesUsed -= evicted.getValue.sizeBytes
-      removeReverse(evicted.getKey, evicted.getValue)
+      dropAccounting(evicted.getKey, evicted.getValue)
     }
   }
 
   private def removeEntry(key: Key, entry: Entry): Unit = {
     entries.remove(key)
+    dropAccounting(key, entry)
+  }
+
+  private def dropAccounting(key: Key, entry: Entry): Unit = {
     bytesUsed -= entry.sizeBytes
     removeReverse(key, entry)
   }

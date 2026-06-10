@@ -216,9 +216,6 @@ final private[client] class ClusterLive(
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
-  private def isMalformed(command: Command[?]): Boolean =
-    command.keyIndices.exists(index => index < 0 || index >= command.args.length)
-
   private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
     CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
 
@@ -237,7 +234,7 @@ final private[client] class ClusterLive(
     // blocking commands and malformed key indices are programmer errors: they fail the whole effect up front, never a single position
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
-    else if (p.commands.exists(isMalformed))
+    else if (p.commands.exists(_.hasMalformedKeys))
       CIO.fail(new IllegalArgumentException("a Pipeline command declares key positions that fall outside its arguments"))
     else
       CIO.async(complete => offload(runPipeline(p, complete)))
@@ -459,7 +456,7 @@ final private[client] class ClusterLive(
       }
 
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
-      if (isMalformed(command))
+      if (command.hasMalformedKeys)
         Left(malformedKeys(command.name))
       else if (command.keyIndices.isEmpty)
         Right(None)

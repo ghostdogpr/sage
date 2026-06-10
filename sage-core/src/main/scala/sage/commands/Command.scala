@@ -39,6 +39,8 @@ final case class Command[+Out](
   // the key bytes the server tracks for this command, in arg order — the reverse-index keys a cache invalidation evicts by
   def keys: Vector[Bytes] = keyIndices.map(args)
 
+  def hasMalformedKeys: Boolean = keyIndices.exists(index => index < 0 || index >= args.length)
+
   def encode: Bytes = RespWriter.writeCommand(name, args)
 }
 
