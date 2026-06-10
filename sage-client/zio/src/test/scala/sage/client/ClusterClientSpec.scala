@@ -40,6 +40,9 @@ class ClusterClientSpec extends munit.FunSuite {
       Frame.Array(Vector(Frame.Integer(start.toLong), Frame.Integer(end.toLong), nodeFrame(node)))
     })
 
+  private def subscribed(kind: String, channel: String): Frame =
+    Frame.Push(Vector(Frame.BulkString(Bytes.utf8(kind)), Frame.BulkString(Bytes.utf8(channel)), Frame.Integer(1)))
+
   /**
     * A cluster of fake per-node transports. `behaviour` scripts each node's reply to a written command (HELLO and CLUSTER SLOTS are
     * answered here); `written(node)` exposes what reached that node so routing can be asserted.
@@ -73,6 +76,7 @@ class ClusterClientSpec extends munit.FunSuite {
         Duration.Zero,
         DedicatedPoolConfig(),
         ClusterConfig(),
+        1024,
         seeds
       )
 
@@ -80,6 +84,14 @@ class ClusterClientSpec extends munit.FunSuite {
 
     def written(node: Node): Vector[String] =
       transports.getOrElse(node, mutable.ArrayBuffer.empty).toVector.flatMap(_.written.map(_.asUtf8String))
+
+    // simulate the server dropping a node's Sharded Subscription Connection (the post-migration disconnect): close the transport that
+    // carried the SSUBSCRIBE so its onClosed fires and the manager re-homes
+    def dropShardConn(node: Node): Unit =
+      transports
+        .getOrElse(node, mutable.ArrayBuffer.empty)
+        .find(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE")))
+        .foreach(_.close())
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
@@ -311,5 +323,63 @@ class ClusterClientSpec extends munit.FunSuite {
       .transaction(tx => tx.watch(key).flatMap(_ => tx.exec(Pipeline.sequence(Vector(Strings.get[String, String](key))))))
       .unsafeRun
       .map(result => assertEquals(result, Some(Vector(Some("v")))))
+  }
+
+  test("a sharded subscribe routes SSUBSCRIBE to the channel's slot owner, not other nodes") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (text.contains("SSUBSCRIBE")) Seq(subscribed("ssubscribe", keyB))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.subscribeShardChannels[String](keyB).unsafeRun.map { _ =>
+      assert(fixture.written(nodeB).exists(_.contains("SSUBSCRIBE")), "owner did not receive SSUBSCRIBE")
+      assert(!fixture.written(nodeA).exists(_.contains("SSUBSCRIBE")), "non-owner received SSUBSCRIBE")
+    }
+  }
+
+  test("sPublish routes by slot to the channel's owner") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (text.contains("SPUBLISH")) Seq(Frame.Integer(1))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.sPublish(keyB, "hi").unsafeRun.map { count =>
+      assertEquals(count, 1L)
+      assert(fixture.written(nodeB).exists(_.contains("SPUBLISH")), "owner did not receive SPUBLISH")
+      assert(!fixture.written(nodeA).exists(_.contains("SPUBLISH")), "non-owner received SPUBLISH")
+    }
+  }
+
+  test("a classic subscribe rides one master connection, coexisting with sharded routing") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (text.contains("SUBSCRIBE")) Seq(subscribed("subscribe", "news"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.subscribeChannels[String]("news").unsafeRun.map { _ =>
+      // classic PUBLISH broadcasts cluster-wide, so the subscription pins to one master (the live seed) regardless of any slot
+      assert(fixture.written(nodeA).exists(_.contains("\r\nSUBSCRIBE\r\n")), "classic subscribe did not reach a master")
+    }
+  }
+
+  test("a sharded subscription re-homes to the new owner after its connection drops") {
+    @volatile var migrated = false
+    val behaviour          = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(if (migrated) wholeClusterOn(nodeA) else splitOn(slotB))
+      else if (text.contains("SSUBSCRIBE")) Seq(subscribed("ssubscribe", keyB))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture            = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.subscribeShardChannels[String](keyB).unsafeRun.map { _ =>
+      assert(fixture.written(nodeB).exists(_.contains("SSUBSCRIBE")), "initial subscribe did not reach the owner nodeB")
+      // slotB migrates to nodeA and nodeB drops the subscriber connection (the server's post-migration disconnect)
+      migrated = true
+      fixture.dropShardConn(nodeB)
+      Thread.sleep(300) // re-homing is offloaded: force a refresh, reconcile, and re-SSUBSCRIBE on the new owner
+      assert(fixture.written(nodeA).exists(_.contains("SSUBSCRIBE")), "subscription did not re-home to the new owner nodeA")
+    }
   }
 }

@@ -87,6 +87,13 @@ extension (client: SageClient) {
   def pSubscribe[V: ValueCodec](pattern: String, rest: String*): ZStream[Any, Throwable, PatternMessage[V]] =
     streamOf(client.subscribePatterns[V](pattern, rest*))
 
+  /**
+    * Subscribes to one or more Shard Channels; in a cluster each is routed to the Node owning its Slot, and resubscription follows the Slot
+    * on migration or failover. A sharded delivery is an ordinary [[Message]].
+    */
+  def sSubscribe[V: ValueCodec](channel: String, rest: String*): ZStream[Any, Throwable, Message[V]] =
+    streamOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](open: Task[Subscription[Task, A]]): ZStream[Any, Throwable, A] =
     ZStream.unwrapScoped(
       ZIO.acquireRelease(open)(_.close.ignore).map { sub =>
@@ -127,6 +134,9 @@ object SageClient {
 
     def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Task[Subscription[Task, PatternMessage[V]]] =
       underlying.subscribePatterns[V](pattern, rest*).map(lower).lower
+
+    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Task[Subscription[Task, Message[V]]] =
+      underlying.subscribeShardChannels[V](channel, rest*).map(lower).lower
 
     private def lower(scope: TransactionScope[CIO]): TransactionScope[Task] =
       new TransactionScope[Task] {

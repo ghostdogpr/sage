@@ -81,6 +81,13 @@ extension (client: SageClient) {
   def pSubscribe[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Flow[PatternMessage[V]] =
     streamOf(client.subscribePatterns[V](pattern, rest*))
 
+  /**
+    * Subscribes to one or more Shard Channels; in a cluster each is routed to the Node owning its Slot, and resubscription follows the Slot
+    * on migration or failover. A sharded delivery is an ordinary [[Message]].
+    */
+  def sSubscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
+    streamOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] =
     Flow.usingEmit { emit =>
       val sub = open
@@ -124,6 +131,9 @@ object SageClient {
 
     def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, PatternMessage[V]] =
       lower(underlying.subscribePatterns[V](pattern, rest*).lower)
+
+    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, Message[V]] =
+      lower(underlying.subscribeShardChannels[V](channel, rest*).lower)
 
     private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> Ox ?=> X] =
       new TransactionScope[[X] =>> Ox ?=> X] {

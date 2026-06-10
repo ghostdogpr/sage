@@ -546,9 +546,15 @@ trait CommandRunner[F[_]] {
 
   final def publish[V: ValueCodec](channel: String, message: V): F[Long] = run(Pubsub.publish(channel, message))
 
+  final def sPublish[V: ValueCodec](channel: String, message: V): F[Long] = run(Pubsub.sPublish(channel, message))
+
   final def pubsubChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubChannels(pattern))
 
+  final def pubsubShardChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubShardChannels(pattern))
+
   final def pubsubNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubNumSub(channels*))
+
+  final def pubsubShardNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubShardNumSub(channels*))
 
   final def pubsubNumPat: F[Long] = run(Pubsub.pubsubNumPat)
 }
@@ -574,10 +580,13 @@ trait Client[F[_]] extends CommandRunner[F] {
 
   def transaction[A](body: TransactionScope[F] => F[A]): F[A]
 
-  // the pub/sub seam: returns a handle each backend wraps into its native stream; the ergonomic `subscribe`/`pSubscribe` are facade methods
+  // the pub/sub seam: returns a handle each backend wraps into its native stream; the ergonomic `subscribe`/`pSubscribe`/`sSubscribe` are facades
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
 
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): F[Subscription[F, PatternMessage[V]]]
+
+  // Shard Channel subscriptions: in a cluster each channel is routed to the Node owning its Slot; a sharded delivery is an ordinary Message
+  def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
 
   def close: F[Unit]
 }
@@ -773,37 +782,42 @@ object Client {
         }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
-      CIO.blocking {
-        val raw = subscriptions.subscribeChannels(channel +: rest.toVector)
-        new Subscription[CIO, Message[V]] {
-          // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
-          def next: CIO[Option[Message[V]]] = CIO.async { complete =>
-            raw.next {
-              case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => complete(Try(Some(Message(ch, decodeOrThrow[V](payload)))))
-              case _                                                          => complete(Success(None))
-            }
-          }
-          def close: CIO[Unit]              = CIO.blocking(raw.close())
-        }
-      }
+      CIO.blocking(channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
 
     def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
-      CIO.blocking {
-        val raw = subscriptions.subscribePatterns(pattern +: rest.toVector)
-        new Subscription[CIO, PatternMessage[V]] {
-          def next: CIO[Option[PatternMessage[V]]] = CIO.async { complete =>
-            raw.next {
-              case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) =>
-                complete(Try(Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))))
-              case _                                                               => complete(Success(None))
-            }
-          }
-          def close: CIO[Unit]                     = CIO.blocking(raw.close())
-        }
-      }
+      CIO.blocking(patternMessages(subscriptions.subscribePatterns(pattern +: rest.toVector)))
+
+    // a standalone server has no slots, so every Shard Channel rides the one Subscription Connection in shard mode
+    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
+      CIO.blocking(channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
     def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close() }
   }
+
+  // wrap a raw subscription as the effect-typed seam each backend lowers into its native stream; a channel/shard delivery is a Message
+  private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
+    new Subscription[CIO, Message[V]] {
+      // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
+      def next: CIO[Option[Message[V]]] = CIO.async { complete =>
+        raw.next {
+          case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => complete(Try(Some(Message(ch, decodeOrThrow[V](payload)))))
+          case _                                                          => complete(Success(None))
+        }
+      }
+      def close: CIO[Unit]              = CIO.blocking(raw.close())
+    }
+
+  private[internal] def patternMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, PatternMessage[V]] =
+    new Subscription[CIO, PatternMessage[V]] {
+      def next: CIO[Option[PatternMessage[V]]] = CIO.async { complete =>
+        raw.next {
+          case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) =>
+            complete(Try(Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))))
+          case _                                                               => complete(Success(None))
+        }
+      }
+      def close: CIO[Unit]                     = CIO.blocking(raw.close())
+    }
 
   // an undecodable payload fails the subscription stream rather than being silently dropped
   private def decodeOrThrow[V](payload: sage.Bytes)(using codec: ValueCodec[V]): V =

@@ -50,6 +50,25 @@ abstract class PubsubSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("SSUBSCRIBE delivers a sharded message; SPUBLISH returns the receiver count; PUBSUB SHARDCHANNELS reflects it") {
+    withClient { client =>
+      for {
+        sub      <- client.subscribeShardChannels[String]("orders")
+        _        <- settle
+        channels <- client.pubsubShardChannels()
+        numSub   <- client.pubsubShardNumSub("orders")
+        received <- client.sPublish("orders", "placed")
+        first    <- sub.next
+        _        <- sub.close
+      } yield {
+        assert(channels.contains("orders"), channels)
+        assertEquals(numSub, Map("orders" -> 1L))
+        assertEquals(received, 1L)
+        assertEquals(first, Some(Message("orders", "placed")))
+      }
+    }
+  }
+
   test("closing the last subscriber unsubscribes on the server") {
     withClient { client =>
       for {

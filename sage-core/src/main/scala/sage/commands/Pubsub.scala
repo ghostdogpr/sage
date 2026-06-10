@@ -6,19 +6,31 @@ import sage.codec.ValueCodec
 import sage.protocol.{Frame, RespWriter}
 
 /**
-  * Pub/sub. `PUBLISH` and `PUBSUB` are ordinary request/reply commands. `SUBSCRIBE` and its relatives are not — they deliver open-ended push
-  * frames with no single typed reply — so only their wire encoders live here, written straight onto the Subscription Connection, never run.
+  * Pub/sub. `PUBLISH`, `SPUBLISH`, and `PUBSUB` are ordinary request/reply commands; `SPUBLISH` carries its channel as a routing key so a
+  * cluster sends it to the slot's owner, while `PUBLISH` is keyless and broadcasts across the whole cluster bus. `SUBSCRIBE` and its
+  * relatives (including the sharded `SSUBSCRIBE`/`SUNSUBSCRIBE`) are not ordinary commands — they deliver open-ended push frames with no
+  * single typed reply — so only their wire encoders live here, written straight onto a Subscription Connection, never run.
   */
 private[sage] object Pubsub {
 
   def publish[V](channel: String, message: V)(using codec: ValueCodec[V]): Command[Long] =
     Command("PUBLISH", Command.NoKeys, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 
+  // the channel is a routing key (FirstKey): a cluster hashes it to a slot and sends SPUBLISH to that slot's owner, like a keyed write
+  def sPublish[V](channel: String, message: V)(using codec: ValueCodec[V]): Command[Long] =
+    Command("SPUBLISH", Command.FirstKey, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
+
   def pubsubChannels(pattern: Option[String] = None): Command[Vector[String]] =
     Command("PUBSUB", Command.NoKeys, Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
 
+  def pubsubShardChannels(pattern: Option[String] = None): Command[Vector[String]] =
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
+
   def pubsubNumSub(channels: String*): Command[Map[String, Long]] =
     Command("PUBSUB", Command.NoKeys, Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
+
+  def pubsubShardNumSub(channels: String*): Command[Map[String, Long]] =
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
 
   val pubsubNumPat: Command[Long] =
     Command("PUBSUB", Command.NoKeys, Vector(Bytes.utf8("NUMPAT")), Decode.long)
@@ -27,6 +39,8 @@ private[sage] object Pubsub {
   def unsubscribe(channels: Vector[String]): Bytes  = RespWriter.writeCommand("UNSUBSCRIBE", channels.map(Bytes.utf8))
   def psubscribe(patterns: Vector[String]): Bytes   = RespWriter.writeCommand("PSUBSCRIBE", patterns.map(Bytes.utf8))
   def punsubscribe(patterns: Vector[String]): Bytes = RespWriter.writeCommand("PUNSUBSCRIBE", patterns.map(Bytes.utf8))
+  def ssubscribe(channels: Vector[String]): Bytes   = RespWriter.writeCommand("SSUBSCRIBE", channels.map(Bytes.utf8))
+  def sunsubscribe(channels: Vector[String]): Bytes = RespWriter.writeCommand("SUNSUBSCRIBE", channels.map(Bytes.utf8))
 
   /**
     * A classified pub/sub push frame. Confirmations carry the running subscription count; deliveries carry the raw payload bytes, decoded
@@ -36,6 +50,8 @@ private[sage] object Pubsub {
     case Subscribed(channel: String, count: Long)
     case Unsubscribed(channel: String, count: Long)
     case Message(channel: String, payload: Bytes)
+    // a sharded delivery: shape-identical to Message, kept distinct so a connection carrying both classic and shard sinks routes it correctly
+    case ShardMessage(channel: String, payload: Bytes)
     case PatternMessage(pattern: String, channel: String, payload: Bytes)
   }
 
@@ -47,22 +63,27 @@ private[sage] object Pubsub {
     elements match {
       case Vector(kind, a, b)           =>
         text(kind).flatMap {
-          case "message"                      =>
+          case "message"                                       =>
             for {
               ch <- text(a)
               p  <- bytes(b)
             } yield Event.Message(ch, p)
-          case "subscribe" | "psubscribe"     =>
+          case "smessage"                                      =>
+            for {
+              ch <- text(a)
+              p  <- bytes(b)
+            } yield Event.ShardMessage(ch, p)
+          case "subscribe" | "psubscribe" | "ssubscribe"       =>
             for {
               ch <- text(a)
               c  <- int(b)
             } yield Event.Subscribed(ch, c)
-          case "unsubscribe" | "punsubscribe" =>
+          case "unsubscribe" | "punsubscribe" | "sunsubscribe" =>
             for {
               ch <- text(a)
               c  <- int(b)
             } yield Event.Unsubscribed(ch, c)
-          case _                              => None
+          case _                                               => None
         }
       case Vector(kind, p, ch, payload) =>
         text(kind).flatMap {

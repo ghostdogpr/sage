@@ -40,8 +40,16 @@ A connection exclusively held for commands with per-connection state or blocking
 _Avoid_: exclusive connection, pooled connection
 
 **Subscription Connection**:
-The lazily-created connection (one per client) that carries all pub/sub subscription state and push frames, isolating slow consumers from the Multiplexed Connection. Created on the first subscription and closed when the last one ends; it runs its own reconnect loop and re-issues every active subscription on reconnect. A slow consumer backpressures this connection at the TCP level (lossless), which can stall its peer subscriptions but never the Multiplexed Connection's commands.
+The lazily-created connection carrying classic (channel and pattern) pub/sub subscriptions and their push frames, isolating slow consumers from the Multiplexed Connection. One per client against a standalone server; in a cluster, one per client pinned to an arbitrary Node — classic `PUBLISH` broadcasts across the whole cluster bus, so any Node sees every channel — and moved to another Node on failover. Created on the first subscription and closed when the last one ends; it re-issues every active subscription on reconnect. A slow consumer backpressures this connection at the TCP level (lossless), which can stall its peer subscriptions but never the Multiplexed Connection's commands.
 _Avoid_: pub/sub connection
+
+**Sharded Subscription Connection**:
+A connection carrying the Shard Channel subscriptions for the channels a single Node owns. A client holds one per owning Node, since a Shard Channel's `SSUBSCRIBE` must reach the Slot's owner; each is created on demand and released when its last subscription ends. On Slot migration or failover the affected subscriptions are re-homed to the new owner. Distinct from the Subscription Connection, which carries classic subscriptions; the two never share a connection.
+_Avoid_: per-node pub/sub connection, shard connection
+
+**Shard Channel**:
+A pub/sub channel whose name hashes to a Slot (its Hash Tag, if present), so `SSUBSCRIBE`/`SPUBLISH` target that Slot's owning Node and messages stay within the Shard — unlike a classic channel, whose `PUBLISH` broadcasts across the whole cluster bus. There is no pattern form; a Shard Channel delivery surfaces to the subscriber as an ordinary Message (channel and payload).
+_Avoid_: sharded topic, shard topic
 
 **Message**:
 One pub/sub delivery: a channel and a payload, surfaced on a subscription's effect stream. A pattern subscription yields a **Pattern Message** instead, which also names the glob pattern that matched. The delivery unit of classic pub/sub — distinct from a Frame (the wire value carrying it) and a Stream Entry (a record in a Redis Stream).

@@ -23,6 +23,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     if (s.contains("\r\nPING\r\n")) Seq(Frame.SimpleString("PONG"))
     else if (s.contains("\r\nSUBSCRIBE\r\n")) confirmations("subscribe", s)
     else if (s.contains("\r\nPSUBSCRIBE\r\n")) confirmations("psubscribe", s)
+    else if (s.contains("\r\nSSUBSCRIBE\r\n")) confirmations("ssubscribe", s)
     else Nil
   }
 
@@ -55,6 +56,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
   private def message(channel: String, payload: String): Frame =
     Frame.Push(Vector(Frame.BulkString(Bytes.utf8("message")), Frame.BulkString(Bytes.utf8(channel)), Frame.BulkString(Bytes.utf8(payload))))
+
+  private def shardMessage(channel: String, payload: String): Frame =
+    Frame.Push(Vector(Frame.BulkString(Bytes.utf8("smessage")), Frame.BulkString(Bytes.utf8(channel)), Frame.BulkString(Bytes.utf8(payload))))
 
   private def patternMessage(pattern: String, channel: String, payload: String): Frame =
     Frame.Push(
@@ -140,6 +144,15 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
     transports.head.emit(patternMessage("news.*", "news.sports", "goal"))
     assertPattern(nextBlocking(sub), "news.*", "news.sports", "goal")
+  }
+
+  test("shard subscriptions send SSUBSCRIBE and deliver an smessage as a channel delivery") {
+    val (connection, _, transports) = make()
+    val sub                         = connection.subscribeShard(Vector("orders"))
+    assert(wrote(transports.head, "SSUBSCRIBE"))
+
+    transports.head.emit(shardMessage("orders", "new"))
+    assertChannel(nextBlocking(sub), "orders", "new")
   }
 
   test("a dropped connection reconnects and resubscribes every active subscription") {

@@ -92,6 +92,13 @@ extension (client: SageClient) {
   ): Stream[PatternMessage[V], Abort[Throwable] & Async & Scope] =
     streamOf(client.subscribePatterns[V](pattern, rest*))
 
+  /**
+    * Subscribes to one or more Shard Channels; in a cluster each is routed to the Node owning its Slot, and resubscription follows the Slot
+    * on migration or failover. A sharded delivery is an ordinary [[Message]].
+    */
+  def sSubscribe[V: ValueCodec](channel: String, rest: String*)(using Tag[Message[V]], Frame): Stream[Message[V], Abort[Throwable] & Async & Scope] =
+    streamOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](
     open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
   )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
@@ -129,6 +136,9 @@ object SageClient {
 
     def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Subscription[KyoEff, PatternMessage[V]] < (Abort[Throwable] & Async) =
       underlying.subscribePatterns[V](pattern, rest*).lower.map(lower)
+
+    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Subscription[KyoEff, Message[V]] < (Abort[Throwable] & Async) =
+      underlying.subscribeShardChannels[V](channel, rest*).lower.map(lower)
 
     private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] =
       new TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] {

@@ -264,9 +264,13 @@ object CommandSamples {
       Vector("ZSCAN", "z", "0", "MATCH", "a*", "COUNT", "10")
     ),
     Sample(Pubsub.publish("chan", "msg"), Vector("PUBLISH", "chan", "msg")),
+    Sample(Pubsub.sPublish("chan", "msg"), Vector("SPUBLISH", "chan", "msg")),
     Sample(Pubsub.pubsubChannels(), Vector("PUBSUB", "CHANNELS")),
     Sample(Pubsub.pubsubChannels(Some("news.*")), Vector("PUBSUB", "CHANNELS", "news.*")),
+    Sample(Pubsub.pubsubShardChannels(), Vector("PUBSUB", "SHARDCHANNELS")),
+    Sample(Pubsub.pubsubShardChannels(Some("news.*")), Vector("PUBSUB", "SHARDCHANNELS", "news.*")),
     Sample(Pubsub.pubsubNumSub("a", "b"), Vector("PUBSUB", "NUMSUB", "a", "b")),
+    Sample(Pubsub.pubsubShardNumSub("a", "b"), Vector("PUBSUB", "SHARDNUMSUB", "a", "b")),
     Sample(Pubsub.pubsubNumPat, Vector("PUBSUB", "NUMPAT")),
     Sample(Hashes.hExpire("h", 90.seconds)("f1", "f2"), Vector("HEXPIRE", "h", "90", "FIELDS", "2", "f1", "f2")),
     Sample(Hashes.hExpire("h", 90500.millis)("f"), Vector("HPEXPIRE", "h", "90500", "FIELDS", "1", "f")),

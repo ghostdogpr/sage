@@ -40,10 +40,24 @@ final private[client] class ClusterLive(
   closeTimeout: FiniteDuration,
   dedicatedPool: DedicatedPoolConfig,
   cluster: ClusterConfig,
+  pubsubBufferSize: Int,
   seeds: Vector[Node]
 ) extends Client[CIO] {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
+
+  private val subscriptions = new ClusterSubscriptions(
+    nodeFactory,
+    bootstrap,
+    scheduler,
+    reconnect,
+    watchdog,
+    connectTimeout.toMillis,
+    pubsubBufferSize,
+    () => topologyRef.get(),
+    () => refresh(force = true),
+    () => pickNode(topologyRef.get())
+  )
 
   private val nodesLock        = new ReentrantLock()
   private val established      = mutable.HashMap.empty[Node, NodeClient]
@@ -97,18 +111,18 @@ final private[client] class ClusterLive(
   def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
 
-  // classic and sharded pub/sub in cluster mode arrive with the cluster pub/sub work; standalone subscriptions build the machinery first
+  // classic subscriptions ride one connection pinned to an arbitrary master (classic PUBLISH broadcasts cluster-wide); the manager re-homes it
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
-    CIO.fail(unsupported("Subscriptions"))
+    CIO.blocking(Client.channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
 
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
-    CIO.fail(unsupported("Subscriptions"))
+    CIO.blocking(Client.patternMessages(subscriptions.subscribePatterns(pattern +: rest.toVector)))
+
+  // Shard Channels route per Slot to per-Node Sharded Subscription Connections; resubscription follows ownership on migration/failover
+  def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
+    CIO.blocking(Client.channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
   def close: CIO[Unit] = CIO.blocking(closeAll())
-
-  // a deliberate programmer-facing limitation, outside the sealed hierarchy like the other client guards
-  private def unsupported(what: String): UnsupportedOperationException =
-    new UnsupportedOperationException(s"$what are not yet supported in cluster mode")
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
@@ -592,10 +606,14 @@ final private[client] class ClusterLive(
       absent.flatMap(node => established.remove(node))
     }
     gone.foreach(nc => offload(nc.close()))
+    // re-home Shard Channel subscriptions onto the new slot owners; a classic subscription follows the cluster bus, so it only re-homes when
+    // its pinned master's socket actually drops (handled by the connection's onTerminated), not on every topology change
+    subscriptions.onTopologyChanged()
   }
 
   private def closeAll(): Unit = {
     val all = lockedNodes { closed = true; val snapshot = established.values.toVector; established.clear(); snapshot }
+    subscriptions.close()
     all.foreach(_.close())
   }
 }
@@ -647,6 +665,7 @@ private[client] object ClusterLive {
         config.closeTimeout,
         config.dedicatedPool,
         cluster,
+        config.pubsub.bufferSize,
         seeds
       )
       // discovery's handshake/TLS failures are translated here (a NOPROTO/SSL surfaces like a standalone connect) rather than via mapError,

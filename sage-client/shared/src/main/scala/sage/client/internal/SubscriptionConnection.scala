@@ -15,10 +15,15 @@ import sage.commands.{Command, Connection, Pubsub, Reply}
 import sage.protocol.Frame
 
 /**
-  * The Subscription Connection: one lazily-created connection per client, re-issuing every active subscription on reconnect. Unlike the
-  * Multiplexed Connection, push frames are the product (dispatched to per-subscription buffers) and the only non-push replies are the HELLO
-  * bootstrap and the watchdog's PONG. A slow consumer blocks the reader, so TCP backpressures the publisher — lossless, but it stalls peer
-  * subscriptions on this connection (never commands); the watchdog therefore skips its liveness kill while the reader is so blocked.
+  * A Subscription Connection: a connection whose product is push frames, dispatched to per-subscription buffers; the only non-push replies
+  * are the HELLO bootstrap and the watchdog's PONG. It carries three kinds of subscription — channels, glob patterns, and Shard Channels
+  * (`SSUBSCRIBE`) — and a slow consumer blocks the reader, so TCP backpressures the publisher (lossless), stalling peer subscriptions on this
+  * connection but never commands; the watchdog therefore skips its liveness kill while the reader is so blocked.
+  *
+  * Two lifecycles share this one machinery. Standalone (`cluster = false`): the connection owns its sinks, runs its own reconnect loop, and
+  * re-issues every active subscription on reconnect. Cluster (`cluster = true`): the [[ClusterSubscriptions]] manager owns the sinks and
+  * attaches them per Node; a socket loss is terminal for the connection — it fires `onTerminated` and the manager re-homes the surviving
+  * sinks onto the current owner rather than blindly reconnecting to a node that may no longer own the slot.
   */
 final private[client] class SubscriptionConnection(
   factory: MultiplexedConnection.TransportFactory,
@@ -28,7 +33,9 @@ final private[client] class SubscriptionConnection(
   watchdog: WatchdogConfig,
   connectTimeoutMillis: Long,
   bufferSize: Int,
-  isLive: () => Boolean
+  isLive: () => Boolean,
+  cluster: Boolean = false,
+  onTerminated: () => Unit = () => ()
 ) {
   import SubscriptionConnection.*
 
@@ -39,6 +46,7 @@ final private[client] class SubscriptionConnection(
   private var current: Conn = null
   private val channelSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
   private val patternSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
+  private val shardSinks    = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
 
   // SUBSCRIBE-ack accounting (guarded by `lock`): the server confirms each subscribed name with one push frame in send order, so a subscribe
   // waits until `subscribeConfirmed` catches `subscribeSent` before returning — otherwise `subscribe` then `publish` races across the sockets.
@@ -57,12 +65,38 @@ final private[client] class SubscriptionConnection(
     finally lock.unlock()
   }
 
-  def subscribeChannels(channels: Vector[String]): RawSubscription = add(channels, isPattern = false)
+  private def sinksFor(kind: Kind): mutable.HashMap[String, mutable.LinkedHashSet[Sink]] =
+    kind match {
+      case Kind.Channel => channelSinks
+      case Kind.Pattern => patternSinks
+      case Kind.Shard   => shardSinks
+    }
 
-  def subscribePatterns(patterns: Vector[String]): RawSubscription = add(patterns, isPattern = true)
+  // --- standalone conveniences: the connection owns the sink -------------------------------------------------------------------------------
 
-  private def add(names: Vector[String], isPattern: Boolean): RawSubscription = {
-    val sink        = new Sink(names, isPattern, bufferSize)
+  def subscribeChannels(channels: Vector[String]): RawSubscription = ownedSubscription(channels, Kind.Channel)
+
+  def subscribePatterns(patterns: Vector[String]): RawSubscription = ownedSubscription(patterns, Kind.Pattern)
+
+  def subscribeShard(channels: Vector[String]): RawSubscription = ownedSubscription(channels, Kind.Shard)
+
+  private def ownedSubscription(names: Vector[String], kind: Kind): RawSubscription = {
+    val sink = new Sink(names, kind, bufferSize)
+    // closeOwned, not bare terminate: if attach registered the sink but awaitActive then threw, fully unwind it so no phantom channel is
+    // resubscribed on the next reconnect
+    try attach(sink, names, kind)
+    catch { case e: Throwable => closeOwned(sink); throw e }
+    new RawSubscription(sink, () => closeOwned(sink))
+  }
+
+  // --- manager-driven attach/detach: the caller owns the sink (cluster) --------------------------------------------------------------------
+
+  /**
+    * Registers `sink` under `names` of the given kind and subscribes the names not already subscribed, blocking (bounded by the connect
+    * timeout) until the server confirms. The caller must pass names that hash to a single Slot for the Shard kind in cluster mode, so the
+    * one `SSUBSCRIBE` this emits never spans slots (`CROSSSLOT`).
+    */
+  def attach(sink: Sink, names: Vector[String], kind: Kind): Unit = {
     var doEstablish = false
     lock.lock()
     try {
@@ -72,15 +106,15 @@ final private[client] class SubscriptionConnection(
           case State.Closed       => throw NotConnected()
           case State.Establishing => established.await()
           case State.Live         =>
-            val fresh = register(sink, names, isPattern)
-            if (fresh.nonEmpty) sendSubscribe(current, isPattern, fresh)
+            val fresh = register(sink, names, kind)
+            if (fresh.nonEmpty) sendSubscribe(current, kind, fresh)
             settled = true
           case State.Reconnecting =>
-            register(sink, names, isPattern) // the next successful reconnect resubscribes everything currently registered
+            register(sink, names, kind) // the next successful reconnect resubscribes everything currently registered
             settled = true
           case State.Idle         =>
             if (!isLive()) throw NotConnected()
-            register(sink, names, isPattern)
+            register(sink, names, kind)
             state = State.Establishing
             doEstablish = true
             settled = true
@@ -88,22 +122,35 @@ final private[client] class SubscriptionConnection(
     } finally lock.unlock()
 
     if (doEstablish)
-      try {
-        val conn = establish() // create + start + HELLO, blocking, no lock held
-        goLive(conn)
-      } catch {
+      try goLive(establish())
+      catch {
         case e: Throwable =>
-          // establish failed after the sink was registered; drop it so a later reconnect doesn't resubscribe a phantom channel
-          locked { deregister(sink); state = State.Idle; established.signalAll() }
-          sink.terminate()
+          // establish failed after the sink was registered; drop it so a later reconnect doesn't resubscribe a phantom name
+          locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
           throw e
       }
-    try awaitActive()
-    catch { case e: Throwable => closeSubscription(sink); throw e }
-    new RawSubscription(this, sink)
+    awaitActive()
   }
 
-  // bring a freshly-established socket Live under the lock, resubscribing everything registered (counters reset to this generation)
+  /**
+    * Deregisters `sink` from `names` and unsubscribes the names left with no subscriber. Returns true when the connection now holds no sinks
+    * at all, so the manager can evict and close it.
+    */
+  def detach(sink: Sink, names: Vector[String], kind: Kind): Boolean =
+    locked {
+      val emptied = deregister(sink, names, kind)
+      if (emptied.nonEmpty && state == State.Live) current.send(kind.unsubscribeWire(emptied))
+      isEmptyUnlocked
+    }
+
+  def isEmpty: Boolean = locked(isEmptyUnlocked)
+
+  private def isEmptyUnlocked: Boolean = channelSinks.isEmpty && patternSinks.isEmpty && shardSinks.isEmpty
+
+  // --- shared establish/dispatch machinery -------------------------------------------------------------------------------------------------
+
+  // bring a freshly-established socket Live, resubscribing everything registered (counters reset to this generation). In cluster mode it runs
+  // once per connection with at most one Slot's worth of Shard channels registered, so the single SSUBSCRIBE never spans slots (CROSSSLOT).
   private def goLive(conn: Conn): Unit = locked {
     if (state == State.Establishing || state == State.Reconnecting) {
       current = conn
@@ -111,9 +158,11 @@ final private[client] class SubscriptionConnection(
       subscribeConfirmed = 0L
       val channels = channelSinks.keys.toVector
       val patterns = patternSinks.keys.toVector
-      if (channels.nonEmpty) sendSubscribe(conn, isPattern = false, channels)
-      if (patterns.nonEmpty) sendSubscribe(conn, isPattern = true, patterns)
-      if (channels.isEmpty && patterns.isEmpty) {
+      val shards   = shardSinks.keys.toVector
+      if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
+      if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
+      if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
+      if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
         // everything closed during the establish; tear back down rather than hold an idle socket open
         conn.close()
         current = null
@@ -127,8 +176,8 @@ final private[client] class SubscriptionConnection(
     } else conn.close()
   }
 
-  private def sendSubscribe(conn: Conn, isPattern: Boolean, names: Vector[String]): Unit = {
-    conn.send(wire(isPattern, subscribe = true, names))
+  private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {
+    conn.send(kind.subscribeWire(names))
     subscribeSent += names.size
   }
 
@@ -196,17 +245,31 @@ final private[client] class SubscriptionConnection(
       catch { case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1)) }
   }
 
-  private def onConnClosed(conn: Conn): Unit = {
-    val reconnect = locked {
-      if (conn ne current) false
-      else
-        state match {
-          case State.Live | State.Reconnecting => state = State.Reconnecting; confirmed.signalAll(); true
-          case _                               => false
-        }
+  private def onConnClosed(conn: Conn): Unit =
+    if (cluster) {
+      // a cluster connection never self-reconnects: a socket loss is terminal, and the manager re-homes the surviving sinks onto the current
+      // owner (the server pushes `sunsubscribe` then disconnects on a slot migration, so this drop is the reliable signal)
+      val notify = locked {
+        if (conn ne current) false
+        else
+          state match {
+            case State.Live | State.Establishing =>
+              stopWatchdog(); current = null; state = State.Closed; established.signalAll(); confirmed.signalAll(); true
+            case _                               => false
+          }
+      }
+      if (notify) onTerminated()
+    } else {
+      val reconnect = locked {
+        if (conn ne current) false
+        else
+          state match {
+            case State.Live | State.Reconnecting => state = State.Reconnecting; confirmed.signalAll(); true
+            case _                               => false
+          }
+      }
+      if (reconnect) scheduleReconnect(0)
     }
-    if (reconnect) scheduleReconnect(0)
-  }
 
   private def onFrame(frame: Frame): Unit = {
     lastReplyAtMillis = scheduler.nowMillis
@@ -214,9 +277,10 @@ final private[client] class SubscriptionConnection(
       case Frame.Push(elements) =>
         Pubsub.decode(elements) match {
           case Some(Pubsub.Event.Message(channel, payload))            => dispatch(channelSinks, channel, Delivery.Channel(channel, payload))
+          case Some(Pubsub.Event.ShardMessage(channel, payload))       => dispatch(shardSinks, channel, Delivery.Channel(channel, payload))
           case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) => dispatch(patternSinks, pattern, Delivery.Pattern(pattern, ch, payload))
           case Some(_: Pubsub.Event.Subscribed)                        => locked { subscribeConfirmed += 1; confirmed.signalAll() }
-          case _                                                       => ()
+          case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
       case reply                => // a non-push reply is the bootstrap HELLO or the watchdog's PONG
         val waiter = bootstrapWaiter
@@ -234,12 +298,13 @@ final private[client] class SubscriptionConnection(
     }
   }
 
-  private[internal] def closeSubscription(sink: Sink): Unit = {
+  // standalone: the connection owns the sink, so it both unsubscribes and terminates it; tears the socket down when its last sink closes
+  private def closeOwned(sink: Sink): Unit = {
     var teardown: Conn = null
     locked {
-      val emptied = deregister(sink)
-      if (emptied.nonEmpty && state == State.Live) current.send(wire(sink.isPattern, subscribe = false, emptied))
-      if (channelSinks.isEmpty && patternSinks.isEmpty && (state == State.Live || state == State.Reconnecting)) {
+      val emptied = deregister(sink, sink.names, sink.kind)
+      if (emptied.nonEmpty && state == State.Live) current.send(sink.kind.unsubscribeWire(emptied))
+      if (isEmptyUnlocked && (state == State.Live || state == State.Reconnecting)) {
         stopWatchdog()
         teardown = current
         current = null
@@ -254,23 +319,25 @@ final private[client] class SubscriptionConnection(
     var conn: Conn       = null
     var sinks: Set[Sink] = Set.empty
     locked {
-      sinks = (channelSinks.values.flatten ++ patternSinks.values.flatten).toSet
+      sinks = (channelSinks.values.flatten ++ patternSinks.values.flatten ++ shardSinks.values.flatten).toSet
       conn = current
       state = State.Closed
       stopWatchdog()
       current = null
       channelSinks.clear()
       patternSinks.clear()
+      shardSinks.clear()
       established.signalAll()
       confirmed.signalAll()
     }
-    // terminate before close: conn.close() joins the reader, which only exits Sink.offer once its sink is closed — closing first deadlocks
+    // terminate before close: conn.close() joins the reader, which only exits Sink.offer once its sink is closed — closing first deadlocks.
+    // In cluster mode the manager owns the sinks and terminates them before calling close(), so this set is already empty.
     sinks.foreach(_.terminate())
     if (conn != null) conn.close()
   }
 
-  private def register(sink: Sink, names: Vector[String], isPattern: Boolean): Vector[String] = {
-    val map   = if (isPattern) patternSinks else channelSinks
+  private def register(sink: Sink, names: Vector[String], kind: Kind): Vector[String] = {
+    val map   = sinksFor(kind)
     val fresh = Vector.newBuilder[String]
     names.foreach { name =>
       val set = map.getOrElseUpdate(name, mutable.LinkedHashSet.empty)
@@ -280,10 +347,10 @@ final private[client] class SubscriptionConnection(
     fresh.result()
   }
 
-  private def deregister(sink: Sink): Vector[String] = {
-    val map     = if (sink.isPattern) patternSinks else channelSinks
+  private def deregister(sink: Sink, names: Vector[String], kind: Kind): Vector[String] = {
+    val map     = sinksFor(kind)
     val emptied = Vector.newBuilder[String]
-    sink.names.foreach { name =>
+    names.foreach { name =>
       map.get(name).foreach { set =>
         set -= sink
         if (set.isEmpty) { map -= name; emptied += name }
@@ -291,14 +358,6 @@ final private[client] class SubscriptionConnection(
     }
     emptied.result()
   }
-
-  private def wire(isPattern: Boolean, subscribe: Boolean, names: Vector[String]): Bytes =
-    (isPattern, subscribe) match {
-      case (false, true)  => Pubsub.subscribe(names)
-      case (false, false) => Pubsub.unsubscribe(names)
-      case (true, true)   => Pubsub.psubscribe(names)
-      case (true, false)  => Pubsub.punsubscribe(names)
-    }
 
   private def startWatchdog(): Unit =
     if (watchdog.enabled && watchdogHandle == null)
@@ -353,7 +412,29 @@ private[client] object SubscriptionConnection {
   }
 
   /**
-    * A raw delivery routed to a subscription's buffer.
+    * The three subscription kinds, each with its wire encoders: classic channels (`SUBSCRIBE`), glob patterns (`PSUBSCRIBE`), and Shard
+    * Channels (`SSUBSCRIBE`).
+    */
+  private[internal] enum Kind {
+    case Channel, Pattern, Shard
+
+    def subscribeWire(names: Vector[String]): Bytes =
+      this match {
+        case Channel => Pubsub.subscribe(names)
+        case Pattern => Pubsub.psubscribe(names)
+        case Shard   => Pubsub.ssubscribe(names)
+      }
+
+    def unsubscribeWire(names: Vector[String]): Bytes =
+      this match {
+        case Channel => Pubsub.unsubscribe(names)
+        case Pattern => Pubsub.punsubscribe(names)
+        case Shard   => Pubsub.sunsubscribe(names)
+      }
+  }
+
+  /**
+    * A raw delivery routed to a subscription's buffer. A Shard Channel delivery reuses [[Channel]] — it carries the same channel and payload.
     */
   enum Delivery {
     case Channel(channel: String, payload: Bytes)
@@ -371,7 +452,7 @@ private[client] object SubscriptionConnection {
     * pinning a worker); `offer` hands a waiting consumer its delivery directly, else buffers, else blocks the reader for TCP backpressure
     * once the bounded backlog is full and no consumer is pending. A single consumer pulls sequentially, so at most one waiter exists.
     */
-  final private[internal] class Sink(val names: Vector[String], val isPattern: Boolean, capacity: Int) {
+  final private[internal] class Sink(val names: Vector[String], val kind: Kind, capacity: Int) {
 
     private val cap                              = math.max(1, capacity)
     private val lock                             = new ReentrantLock()
@@ -420,10 +501,10 @@ private[client] object SubscriptionConnection {
     }
   }
 
-  final class RawSubscription private[SubscriptionConnection] (owner: SubscriptionConnection, sink: Sink) {
+  final class RawSubscription private[internal] (sink: Sink, onClose: () => Unit) {
 
     def next(callback: Option[Delivery] => Unit): Unit = sink.next(callback)
 
-    def close(): Unit = owner.closeSubscription(sink)
+    def close(): Unit = onClose()
   }
 }
