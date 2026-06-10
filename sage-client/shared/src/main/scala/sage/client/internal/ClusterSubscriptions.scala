@@ -134,6 +134,12 @@ final private[client] class ClusterSubscriptions(
 
   // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
+  // the per-node connections a placement attaches to: ensure under the manager lock (creating on demand), get without creating, both empty once closed
+  private val conns: Placement.Conns = new Placement.Conns {
+    def ensure(node: Node): Option[Placement.ShardConn] = locked(if (closed) None else Some(ensureShardConn(node)))
+    def get(node: Node): Option[Placement.ShardConn]    = locked(shardConns.get(node))
+  }
+
   def subscribeShard(channels: Vector[String]): RawSubscription = {
     val sink = new Sink(channels, Kind.Shard, bufferSize)
     val sub  = ShardSub(sink, channels)
@@ -147,23 +153,15 @@ final private[client] class ClusterSubscriptions(
     new RawSubscription(sink, () => closeShard(sub))
   }
 
-  // attach per (node, slot) group, recording each success in placedAt as it lands so a mid-way throw is rollback-able; an unowned Slot is
-  // left unplaced and retried, not silently dropped
+  // fail-fast initial placement: an attach failure rolls the whole subscribe back; an unowned Slot is left unplaced and retried, not dropped
   private def place(sub: ShardSub): Unit = {
     if (hasUnownedSlot(sub.channels)) refresh()
-    planFor(sub.channels).foreach { case (node, bySlot) =>
-      val conn = locked(if (closed) null else ensureShardConn(node))
-      if (conn != null)
-        bySlot.foreach { case (_, group) =>
-          conn.attach(sub.sink, group, Kind.Shard)
-          locked(sub.placedAt = sub.placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group)))
-        }
-    }
-    if (locked(sub.placedAt).valuesIterator.flatten.size < sub.channels.distinct.size) scheduleRetry()
+    sub.placement.place(planFor(sub.channels), conns)
+    if (!sub.placement.fullyPlaced) scheduleRetry()
   }
 
-  // pure: group channels by owning Node then Slot; an unowned Slot is dropped (the caller refreshes once per pass, not once per channel)
-  private def planFor(channels: Vector[String]): Map[Node, Map[Slot, Vector[String]]] = {
+  // pure: group channels by owning Node, then by Slot so each group becomes one SSUBSCRIBE; an unowned Slot is dropped (the caller refreshes once per pass)
+  private def planFor(channels: Vector[String]): Placement.Plan = {
     val topo   = topologyOf()
     val byNode = mutable.HashMap.empty[Node, mutable.HashMap[Slot, mutable.ArrayBuffer[String]]]
     channels.foreach { channel =>
@@ -172,7 +170,7 @@ final private[client] class ClusterSubscriptions(
         byNode.getOrElseUpdate(node, mutable.HashMap.empty).getOrElseUpdate(slot, mutable.ArrayBuffer.empty) += channel
       }
     }
-    byNode.iterator.map { case (node, slots) => node -> slots.iterator.map { case (s, cs) => s -> cs.toVector }.toMap }.toMap
+    byNode.iterator.map { case (node, slots) => node -> slots.valuesIterator.map(_.toVector).toVector }.toMap
   }
 
   private def hasUnownedSlot(channels: Vector[String]): Boolean = {
@@ -199,35 +197,13 @@ final private[client] class ClusterSubscriptions(
     if (go) offload { locked { reconcilePending = false }; reconcileShard() }
   }
 
-  // re-home each sub onto its channels' current owners: detach what moved, attach the rest, recording only what actually landed (a failed
-  // attach must not look subscribed). One refresh per pass; an incomplete pass retries so a transient failover failure converges.
+  // re-home each sub onto its channels' current owners. One refresh per pass; an incomplete pass retries so a transient failover failure converges.
   private def reconcileShard(): Unit = {
     val subs = locked(if (closed) Vector.empty else shardSubs.toVector)
     if (subs.nonEmpty) {
       if (subs.exists(sub => hasUnownedSlot(sub.channels))) refresh()
       var incomplete = false
-      subs.foreach { sub =>
-        val plan      = planFor(sub.channels)
-        val desired   = plan.map { case (node, bySlot) => node -> bySlot.valuesIterator.flatten.toSet }
-        val placedWas = locked(sub.placedAt)
-        // detach channels that left a node we still hold a live connection to
-        placedWas.foreach { case (node, had) =>
-          val gone = (had -- desired.getOrElse(node, Set.empty)).toVector
-          if (gone.nonEmpty) locked(shardConns.get(node)).foreach(_.detach(sub.sink, gone, Kind.Shard))
-        }
-        // attach to the current owners (idempotent), recording only what actually lands
-        val actual    = mutable.HashMap.empty[Node, Set[String]]
-        plan.foreach { case (node, bySlot) =>
-          val conn = locked(if (closed) null else ensureShardConn(node))
-          if (conn == null) incomplete = true
-          else
-            bySlot.foreach { case (_, group) =>
-              try { conn.attach(sub.sink, group, Kind.Shard); actual.update(node, actual.getOrElse(node, Set.empty) ++ group) }
-              catch { case NonFatal(_) => incomplete = true } // a transient establish failure: keep placedAt honest and retry below
-            }
-        }
-        locked(sub.placedAt = actual.toMap)
-      }
+      subs.foreach(sub => if (sub.placement.reconcile(planFor(sub.channels), conns)) incomplete = true)
       evictEmptyShardConns()
       if (incomplete) scheduleRetry()
     }
@@ -238,10 +214,8 @@ final private[client] class ClusterSubscriptions(
     if (!locked(closed)) scheduler.after(reconnect.initialDelay)(scheduleReconcile())
 
   private def closeShard(sub: ShardSub): Unit = {
-    val placed = locked { shardSubs -= sub; sub.placedAt }
-    placed.foreach { case (node, names) =>
-      locked(shardConns.get(node)).foreach(_.detach(sub.sink, names.toVector, Kind.Shard))
-    }
+    locked(shardSubs -= sub)
+    sub.placement.reconcile(Map.empty, conns) // detach every placement; the empty plan leaves the ledger empty
     sub.sink.terminate()
     evictEmptyShardConns()
   }
@@ -291,7 +265,6 @@ final private[client] class ClusterSubscriptions(
   final private case class ClassicSub(sink: Sink, names: Vector[String], kind: Kind)
 
   final private class ShardSub(val sink: Sink, val channels: Vector[String]) {
-    // where this sub is currently attached (guarded by the manager lock): node -> the channels subscribed on it
-    var placedAt: Map[Node, Set[String]] = Map.empty
+    val placement = new Placement(sink, channels)
   }
 }
