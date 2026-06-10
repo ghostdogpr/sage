@@ -683,16 +683,7 @@ object Client {
         MultiplexedConnection.connect(factory, scheduler, multiplexedBootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes)
       )
       .map { connection =>
-        val pool          = new DedicatedPool(
-          factory,
-          bootstrap,
-          scheduler,
-          () => connection.isLive,
-          () => connection.liveGeneration(),
-          connection.isCurrent,
-          dedicatedPool,
-          connectTimeout.toMillis
-        )
+        val pool          = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
         // lazy: no socket is opened until the first subscription, and it is gated on the Multiplexed Connection being live
         val subscriptions = new SubscriptionConnection(
           factory,

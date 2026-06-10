@@ -10,7 +10,7 @@ import sage.{Message, PatternMessage}
 import sage.client.SageConfig
 import sage.client.internal.{Client, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Sets, SortedSets}
+import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, ScanPage, Sets, SortedSets}
 
 /**
   * The ZIO-native surface: the same client, with every method returning `Task`.
@@ -33,14 +33,7 @@ extension (client: SageClient) {
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   ): ZStream[Any, Throwable, K] =
-    CStream
-      .unfold[Option[ScanCursor], Vector[K]](Some(ScanCursor.start)) {
-        case None         => CIO.value(None)
-        case Some(cursor) =>
-          CIO.lift(client.run(Keys.scan[K](cursor, pattern, count, ofType))).map(page => Some((page.items, page.next)))
-      }
-      .flatMap(keys => CStream.init(keys))
-      .lower
+    scanStream(cursor => client.run(Keys.scan[K](cursor, pattern, count, ofType)))
 
   /**
     * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
@@ -50,14 +43,7 @@ extension (client: SageClient) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): ZStream[Any, Throwable, (F, V)] =
-    CStream
-      .unfold[Option[ScanCursor], Vector[(F, V)]](Some(ScanCursor.start)) {
-        case None         => CIO.value(None)
-        case Some(cursor) =>
-          CIO.lift(client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
-      }
-      .flatMap(pairs => CStream.init(pairs))
-      .lower
+    scanStream(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
     * The full SSCAN iteration over set members: stops on the server's zero cursor, never on an empty page.
@@ -67,14 +53,7 @@ extension (client: SageClient) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): ZStream[Any, Throwable, V] =
-    CStream
-      .unfold[Option[ScanCursor], Vector[V]](Some(ScanCursor.start)) {
-        case None         => CIO.value(None)
-        case Some(cursor) =>
-          CIO.lift(client.run(Sets.sScan[K, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
-      }
-      .flatMap(members => CStream.init(members))
-      .lower
+    scanStream(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
     * The full ZSCAN iteration over member/score pairs: stops on the server's zero cursor, never on an empty page.
@@ -84,13 +63,15 @@ extension (client: SageClient) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): ZStream[Any, Throwable, (V, Double)] =
+    scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
+
+  private def scanStream[A](fetch: ScanCursor => Task[ScanPage[A]]): ZStream[Any, Throwable, A] =
     CStream
-      .unfold[Option[ScanCursor], Vector[(V, Double)]](Some(ScanCursor.start)) {
+      .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start)) {
         case None         => CIO.value(None)
-        case Some(cursor) =>
-          CIO.lift(client.run(SortedSets.zScan[K, V](key, cursor, pattern, count))).map(page => Some((page.items, page.next)))
+        case Some(cursor) => CIO.lift(fetch(cursor)).map(page => Some((page.items, page.next)))
       }
-      .flatMap(pairs => CStream.init(pairs))
+      .flatMap(items => CStream.init(items))
       .lower
 
   /**

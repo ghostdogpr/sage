@@ -93,7 +93,7 @@ private[sage] object Lists {
     Command.read(
       "LPOS",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ rankArg(rank) ++ maxLenArg(maxLen),
+      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ longArg(Rank, rank) ++ longArg(MaxLen, maxLen),
       Decode.optionalLong
     )
 
@@ -104,7 +104,10 @@ private[sage] object Lists {
     Command.read(
       "LPOS",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ rankArg(rank) ++ Vector(Count, Bytes.utf8(count.toString)) ++ maxLenArg(maxLen),
+      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ longArg(Rank, rank) ++ Vector(Count, Bytes.utf8(count.toString)) ++ longArg(
+        MaxLen,
+        maxLen
+      ),
       Decode.vector(Decode.long)
     )
 
@@ -127,7 +130,7 @@ private[sage] object Lists {
     Command(
       "LMPOP",
       keyIndices = Vector.tabulate(keys.size)(_ + 1),
-      args = (Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ countArg(count),
+      args = (Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ longArg(Count, count),
       decode = mpopReply[K, V]
     )
   }
@@ -158,7 +161,7 @@ private[sage] object Lists {
     Command(
       "BLMPOP",
       keyIndices = Vector.tabulate(keys.size)(_ + 2),
-      args = (BlockTimeout.wire(timeout) +: Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ countArg(count),
+      args = (BlockTimeout.wire(timeout) +: Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ longArg(Count, count),
       decode = mpopReply[K, V],
       execution = Execution.Blocking
     )
@@ -196,7 +199,8 @@ private[sage] object Lists {
     case other                                      => Left(DecodeError("array of key and values or null", Frame.describe(other)))
   }
 
-  private def countArg(count: Option[Long]): Vector[Bytes] = count.toVector.flatMap(c => Vector(Count, Bytes.utf8(c.toString)))
+  private def longArg(keyword: Bytes, value: Option[Long]): Vector[Bytes] =
+    value.toVector.flatMap(v => Vector(keyword, Bytes.utf8(v.toString)))
 
   private def push[K, V](name: String, key: K, values: Vector[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command(name, Command.FirstKey, keyCodec.encode(key) +: values.map(valueCodec.encode), Decode.long)
@@ -206,9 +210,6 @@ private[sage] object Lists {
       case InsertPosition.Before => Before
       case InsertPosition.After  => After
     }
-
-  private def rankArg(rank: Option[Long]): Vector[Bytes]     = rank.toVector.flatMap(r => Vector(Rank, Bytes.utf8(r.toString)))
-  private def maxLenArg(maxLen: Option[Long]): Vector[Bytes] = maxLen.toVector.flatMap(m => Vector(MaxLen, Bytes.utf8(m.toString)))
 
   private val Before = Bytes.utf8("BEFORE")
   private val After  = Bytes.utf8("AFTER")

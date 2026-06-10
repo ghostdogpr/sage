@@ -124,16 +124,15 @@ final private[client] class DedicatedPool(
         if (closing) throw NotConnected()
         // fail fast while not live: never reuse, establish, or park during a reconnect window, re-checked on every wakeup
         if (!isLive()) throw NotConnected()
-        val reused = takeIdleLocked()
+        val reused    = takeIdleLocked()
         if (reused != null) return reused
         if (live.size + reserved < config.maxConnections) {
           reserved += 1
           return establishOutsideLock()
-        } else {
-          val remaining = deadlineNanos - System.nanoTime()
-          if (remaining <= 0L) throw acquireTimedOut
-          val _         = available.awaitNanos(remaining)
         }
+        val remaining = deadlineNanos - System.nanoTime()
+        if (remaining <= 0L) throw acquireTimedOut
+        val _         = available.awaitNanos(remaining)
       }
       throw new IllegalStateException("unreachable")
     }
@@ -229,6 +228,25 @@ final private[client] class DedicatedPool(
 }
 
 private[client] object DedicatedPool {
+
+  def forConnection(
+    factory: MultiplexedConnection.TransportFactory,
+    bootstrap: Vector[Command[?]],
+    scheduler: Scheduler,
+    connection: MultiplexedConnection,
+    config: DedicatedPoolConfig,
+    connectTimeoutMillis: Long
+  ): DedicatedPool =
+    new DedicatedPool(
+      factory,
+      bootstrap,
+      scheduler,
+      () => connection.isLive,
+      () => connection.liveGeneration(),
+      connection.isCurrent,
+      config,
+      connectTimeoutMillis
+    )
 
   final case class Idle(connection: DedicatedConnection, idleSinceMillis: Long)
 }
