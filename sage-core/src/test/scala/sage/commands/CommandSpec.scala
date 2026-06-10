@@ -21,6 +21,13 @@ class CommandSpec extends munit.FunSuite {
     assert(!Sets.sRandMember[String, String]("s").cacheable && Sets.sRandMember[String, String]("s").isReadOnly) // non-deterministic
   }
 
+  test("SORT_RO is cacheable only in its bare form; BY/GET dereference untracked keys") {
+    assert(Keys.sortRo[String, String]("k").cacheable)
+    assert(Keys.sortRo[String, String]("k", alpha = true, order = SortOrder.Desc).cacheable) // limit/order/alpha touch no extra keys
+    assert(!Keys.sortRo[String, String]("k", by = Some("w_*")).cacheable && Keys.sortRo[String, String]("k", by = Some("w_*")).isReadOnly)
+    assert(!Keys.sortRo[String, String]("k", get = Vector("d_*")).cacheable && Keys.sortRo[String, String]("k", get = Vector("d_*")).isReadOnly)
+  }
+
   test("PING encodes against the golden wire frame, with and without a message") {
     assertEquals(Connection.ping().encode.asUtf8String, "*1\r\n$4\r\nPING\r\n")
     assertEquals(Connection.ping(Some("hi")).encode.asUtf8String, "*2\r\n$4\r\nPING\r\n$2\r\nhi\r\n")

@@ -214,13 +214,14 @@ private[sage] object Keys {
     get: Vector[String] = Vector.empty,
     order: SortOrder = SortOrder.Asc,
     alpha: Boolean = false
-  )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] =
-    Command.read(
-      "SORT_RO",
-      Command.FirstKey,
-      keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha),
-      Decode.vector(Decode.optionalValue)
-    )
+  )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
+    val args   = keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha)
+    val decode = Decode.vector(Decode.optionalValue)
+    // BY/GET patterns dereference keys beyond the source key, which the cache's reverse index (built from keyIndices) does
+    // not track, so an invalidation for one would not evict — only the bare form reads the source key alone and is cacheable
+    if (by.isEmpty && get.isEmpty) Command.read("SORT_RO", Command.FirstKey, args, decode)
+    else Command.readUncacheable("SORT_RO", Command.FirstKey, args, decode)
+  }
 
   def move[K](key: K, db: Int)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command("MOVE", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(db.toString)), Decode.flag)
