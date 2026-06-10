@@ -18,13 +18,13 @@ private[sage] object Sets {
     Command("SREM", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode), Decode.long)
 
   def sCard[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("SCARD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
+    Command.read("SCARD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def sIsMember[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] =
-    Command("SISMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.flag)
+    Command.read("SISMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.flag)
 
   def sMisMember[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Boolean]] =
-    Command(
+    Command.read(
       "SMISMEMBER",
       Command.FirstKey,
       keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode),
@@ -32,7 +32,7 @@ private[sage] object Sets {
     )
 
   def sMembers[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Set[V]] =
-    Command("SMEMBERS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.set[V])
+    Command.read("SMEMBERS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.set[V])
 
   def sMove[K, V](source: K, destination: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] =
     Command("SMOVE", Vector(0, 1), Vector(keyCodec.encode(source), keyCodec.encode(destination), valueCodec.encode(member)), Decode.flag)
@@ -44,11 +44,11 @@ private[sage] object Sets {
     Command("SPOP", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.set[V])
 
   def sRandMember[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command("SRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
+    Command.readUncacheable("SRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
   // a negative count may repeat members, so the reply is an ordered Array, not a Set
   def sRandMemberCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("SRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.value[V]))
+    Command.readUncacheable("SRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.value[V]))
 
   def sDiff[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Set[V]] =
     setOp("SDIFF", first +: rest.toVector, Decode.set[V])
@@ -64,7 +64,7 @@ private[sage] object Sets {
 
   def sInterCard[K](first: K, rest: K*)(limit: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Long] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)
-    Command(
+    Command.read(
       "SINTERCARD",
       keyIndices = Vector.tabulate(keys.size)(_ + 1),
       args = (Bytes.utf8(keys.size.toString) +: keys) ++ limit.toVector.flatMap(n => Vector(Limit, Bytes.utf8(n.toString))),
@@ -82,7 +82,7 @@ private[sage] object Sets {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[V]] =
-    Command(
+    Command.read(
       "SSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
@@ -93,7 +93,7 @@ private[sage] object Sets {
     using keyCodec: KeyCodec[K]
   ): Command[Out] = {
     val args = keys.map(keyCodec.encode)
-    Command(name, args.indices.toVector, args, decode)
+    Command.read(name, args.indices.toVector, args, decode)
   }
 
   private def storeOp[K](name: String, destination: K, keys: Vector[K])(using keyCodec: KeyCodec[K]): Command[Long] = {

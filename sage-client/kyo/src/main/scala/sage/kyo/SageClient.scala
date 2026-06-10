@@ -1,6 +1,9 @@
 package sage.kyo
 
-import _root_.kyo.{<, Abort, Async, Frame, Maybe, Scope, Stream, Tag}
+import scala.concurrent.duration.FiniteDuration
+
+import _root_.kyo.{<, Abort, Async, Duration, Frame, Maybe, Scope, Stream, Tag}
+import _root_.kyo.Duration.toMillis
 import _root_.kyo.compat.*
 
 import sage.{Message, PatternMessage}
@@ -17,6 +20,12 @@ type SageClient = Client[[A] =>> A < (Abort[Throwable] & Async)]
 private type KyoEff[A] = A < (Abort[Throwable] & Async)
 
 extension (client: SageClient) {
+
+  /**
+    * Runs a read with client-side caching and a Kyo `Duration` TTL — the Kyo-native form of [[Client.cached]].
+    */
+  def cached[A](command: Command[A], ttl: Duration): A < (Abort[Throwable] & Async) =
+    client.cached(command, FiniteDuration(ttl.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
 
   /**
     * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once.
@@ -122,6 +131,8 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> A < (Abort[Throwable] & Async)] {
 
     def run[A](command: Command[A]): A < (Abort[Throwable] & Async) = underlying.run(command).lower
+
+    def cached[A](command: Command[A], ttl: FiniteDuration): A < (Abort[Throwable] & Async) = underlying.cached(command, ttl).lower
 
     def pipeline[Out, R](p: Pipeline[Out, R]): Out < (Abort[Throwable] & Async) = underlying.pipeline(p).lower
 

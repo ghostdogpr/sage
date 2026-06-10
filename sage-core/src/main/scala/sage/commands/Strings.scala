@@ -87,7 +87,7 @@ private[sage] object Strings {
     Command("DECRBY", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(decrement.toString)), Decode.long)
 
   def get[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command("GET", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
+    Command.read("GET", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
   def getDel[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command("GETDEL", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
@@ -96,7 +96,7 @@ private[sage] object Strings {
     Command("GETEX", Command.FirstKey, keyCodec.encode(key) +: getExpiryArgs(expiry), Decode.optionalValue)
 
   def getRange[K, V](key: K, start: Long, end: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[V] =
-    Command(
+    Command.read(
       "GETRANGE",
       Command.FirstKey,
       Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(end.toString)),
@@ -114,7 +114,7 @@ private[sage] object Strings {
 
   def mGet[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)
-    Command("MGET", keys.indices.toVector, keys, Decode.vector(Decode.optionalValue))
+    Command.read("MGET", keys.indices.toVector, keys, Decode.vector(Decode.optionalValue))
   }
 
   def mSet[K, V](first: (K, V), rest: (K, V)*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Unit] =
@@ -168,18 +168,18 @@ private[sage] object Strings {
     )
 
   def strLen[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("STRLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
+    Command.read("STRLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def lcs[K, V](key1: K, key2: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[V] =
-    Command("LCS", Vector(0, 1), Vector(keyCodec.encode(key1), keyCodec.encode(key2)), Decode.value)
+    Command.read("LCS", Vector(0, 1), Vector(keyCodec.encode(key1), keyCodec.encode(key2)), Decode.value)
 
   def lcsLen[K](key1: K, key2: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("LCS", Vector(0, 1), Vector(keyCodec.encode(key1), keyCodec.encode(key2), Len), Decode.long)
+    Command.read("LCS", Vector(0, 1), Vector(keyCodec.encode(key1), keyCodec.encode(key2), Len), Decode.long)
 
   def lcsIdx[K](key1: K, key2: K, minMatchLen: Option[Long] = None, withMatchLen: Boolean = false)(
     using keyCodec: KeyCodec[K]
   ): Command[LcsMatches] =
-    Command(
+    Command.read(
       "LCS",
       Vector(0, 1),
       Vector(keyCodec.encode(key1), keyCodec.encode(key2), Idx) ++
@@ -189,7 +189,7 @@ private[sage] object Strings {
     )
 
   def digest[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[String]] =
-    Command("DIGEST", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalUtf8String)
+    Command.read("DIGEST", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalUtf8String)
 
   def delex[K, V](key: K, condition: DelexCondition[V] = DelexCondition.Always)(
     using keyCodec: KeyCodec[K],

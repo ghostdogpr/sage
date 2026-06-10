@@ -12,7 +12,7 @@ import sage.Bytes
 import sage.SageException
 import sage.SageException.{ConnectionLost, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
-import sage.commands.{Command, Connection, Reply}
+import sage.commands.{Command, Connection, Invalidation, Reply}
 import sage.protocol.Frame
 
 /**
@@ -31,7 +31,8 @@ final private[client] class MultiplexedConnection private (
   backoff: BackoffConfig,
   watchdog: WatchdogConfig,
   connectTimeout: FiniteDuration,
-  closeTimeout: FiniteDuration
+  closeTimeout: FiniteDuration,
+  cacheMaxBytes: Long
 ) {
   import MultiplexedConnection.{Generation, State}
 
@@ -54,6 +55,13 @@ final private[client] class MultiplexedConnection private (
     val conn = locked(if (state == State.Live) current else null)
     if (conn == null) callback(Failure(NotConnected()))
     else conn.submit(command, callback)
+  }
+
+  // Captures one generation so the cache lookup and the fetch share a connection; a reconnect mid-flight fails the fetch as a normal loss.
+  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit): Unit = {
+    val conn = locked(if (state == State.Live) current else null)
+    if (conn == null) callback(Failure(NotConnected()))
+    else conn.cachedSubmit(command, ttlMillis, callback)
   }
 
   // ASKING must immediately precede its command on the wire (it arms the target node for the next command on the connection). Writing the
@@ -198,10 +206,21 @@ final private[client] class MultiplexedConnection private (
     if (conn != null) conn.checkLiveness(scheduler.nowMillis, watchdog.pingInterval.toMillis, watchdog.pingTimeout.toMillis)
   }
 
+  // mirrors Entry.complete: top-level error frames become a ServerError, and a throwing user decoder fails the call rather than escaping
+  private def decodeFrame[A](command: Command[A], frame: Frame): Try[A] =
+    try
+      Reply.run(command, frame) match {
+        case Right(value) => Success(value)
+        case Left(error)  => Failure(error)
+      }
+    catch { case NonFatal(error) => Failure(error) }
+
   final private class Conn {
 
     private val pending                              = new ConcurrentLinkedQueue[Entry[?]]()
     private val transportRef                         = new AtomicReference[Transport]()
+    // one cache per generation: a reconnect discards this Conn and with it the cache, which is how a reconnect flushes cached reads
+    private val cache                                = new ClientCache(cacheMaxBytes)
     @volatile private var lastReplyAtMillis: Long    = scheduler.nowMillis
     @volatile private var drainLatch: CountDownLatch = null
     @volatile private var aborted: Boolean           = false
@@ -223,6 +242,29 @@ final private[client] class MultiplexedConnection private (
     def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Unit = {
       val entries = Vector.tabulate(commands.length)(i => new Entry(commands(i).asInstanceOf[Command[Any]], callbacks(i)))
       transportRef.get().send(new Batch(entries))
+    }
+
+    // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
+    // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
+    def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit): Unit = {
+      val commandBytes                = command.encode
+      val keys                        = command.keys
+      def deliver(frame: Frame): Unit = callback(decodeFrame(command, frame))
+      val waiter: Try[Frame] => Unit  = {
+        case Success(frame) => deliver(frame)
+        case Failure(error) => callback(Failure(error))
+      }
+      cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
+        case ClientCache.Hit(frame) => deliver(frame)
+        case ClientCache.Wait       => ()
+        case ClientCache.Fetch      =>
+          val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
+          val onReply: Try[Frame] => Unit = {
+            case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
+            case Failure(error) => cache.fail(commandBytes, error)
+          }
+          submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
+      }
     }
 
     def close(): Unit = {
@@ -251,8 +293,13 @@ final private[client] class MultiplexedConnection private (
     private def onFrame(frame: Frame): Unit = {
       lastReplyAtMillis = scheduler.nowMillis
       frame match {
-        case _: Frame.Push => ()
-        case reply         =>
+        case Frame.Push(elements) =>
+          Invalidation.decode(elements) match {
+            case Some(Invalidation.Evict(keys)) => keys.foreach(cache.invalidate)
+            case Some(Invalidation.FlushAll)    => cache.flush()
+            case None                           => ()
+          }
+        case reply                =>
           val entry = pending.poll()
           if (entry == null) close()
           else {
@@ -286,19 +333,8 @@ final private[client] class MultiplexedConnection private (
 
       def dropped(): Unit = callback(Failure(ConnectionLost(mayHaveExecuted = false)))
 
-      // the catch guards against throwing user decoders: an escaped exception here would lose the callback and hang the awaiting fiber
-      def complete(frame: Frame): Unit = {
-        val result =
-          try
-            Reply.run(command, frame) match {
-              case Right(value) => Success(value)
-              case Left(error)  => Failure(error)
-            }
-          catch {
-            case NonFatal(error) => Failure(error)
-          }
-        callback(result)
-      }
+      // decodeFrame guards against throwing user decoders: an escaped exception would otherwise lose the callback and hang the awaiting fiber
+      def complete(frame: Frame): Unit = callback(decodeFrame(command, frame))
 
       def fail(error: SageException): Unit = callback(Failure(error))
     }
@@ -341,9 +377,11 @@ private[client] object MultiplexedConnection {
     backoff: BackoffConfig,
     watchdog: WatchdogConfig,
     connectTimeout: FiniteDuration,
-    closeTimeout: FiniteDuration
+    closeTimeout: FiniteDuration,
+    cacheMaxBytes: Long = 0L
   ): MultiplexedConnection = {
-    val connection = new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout)
+    val connection =
+      new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout, cacheMaxBytes)
     connection.connectInitial()
     connection
   }

@@ -45,4 +45,10 @@ object SageException {
     * execution-phase error, which leaves the other commands committed (Redis does not roll back) and surfaces per-position.
     */
   final case class TransactionDiscarded(message: String) extends SageException(message)
+
+  /**
+    * `cached` was given a command that cannot be safely cached: a write, or a read with no key. A keyless read could never be evicted by
+    * an invalidation push (only by TTL), so it is rejected rather than silently allowed to go stale.
+    */
+  final case class NotCacheable(message: String) extends SageException(message)
 }

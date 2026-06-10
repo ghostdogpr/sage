@@ -65,35 +65,40 @@ private[sage] object Hashes {
     Command("HSETNX", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field), valueCodec.encode(value)), Decode.flag)
 
   def hGet[K, F, V](key: K, field: F)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command("HGET", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.optionalValue)
+    Command.read("HGET", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.optionalValue)
 
   def hmGet[K, F, V](key: K, first: F, rest: F*)(
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Command[Vector[Option[V]]] =
-    Command("HMGET", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(fieldCodec.encode), Decode.vector(Decode.optionalValue))
+    Command.read(
+      "HMGET",
+      Command.FirstKey,
+      keyCodec.encode(key) +: (first +: rest.toVector).map(fieldCodec.encode),
+      Decode.vector(Decode.optionalValue)
+    )
 
   def hDel[K, F](key: K, first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Long] =
     Command("HDEL", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(fieldCodec.encode), Decode.long)
 
   def hExists[K, F](key: K, field: F)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Boolean] =
-    Command("HEXISTS", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.flag)
+    Command.read("HEXISTS", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.flag)
 
   def hLen[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("HLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
+    Command.read("HLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def hStrLen[K, F](key: K, field: F)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Long] =
-    Command("HSTRLEN", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.long)
+    Command.read("HSTRLEN", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field)), Decode.long)
 
   def hKeys[K, F](key: K)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[F]] =
-    Command("HKEYS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.vector(Decode.key[F]))
+    Command.read("HKEYS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.vector(Decode.key[F]))
 
   def hVals[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("HVALS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.vector(Decode.value[V]))
+    Command.read("HVALS", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.vector(Decode.value[V]))
 
   def hGetAll[K, F, V](key: K)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Map[F, V]] =
-    Command("HGETALL", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.map[F, V])
+    Command.read("HGETALL", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.map[F, V])
 
   def hIncrBy[K, F](key: K, field: F, increment: Long)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Long] =
     Command("HINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field), Bytes.utf8(increment.toString)), Decode.long)
@@ -102,23 +107,28 @@ private[sage] object Hashes {
     Command("HINCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field), Bytes.utf8(increment.toString)), Decode.double)
 
   def hRandField[K, F](key: K)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Option[F]] =
-    Command("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalKey[F])
+    Command.readUncacheable("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalKey[F])
 
   def hRandField[K, F](key: K, count: Long)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[F]] =
-    Command("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.key[F]))
+    Command.readUncacheable("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.key[F]))
 
   def hRandFieldWithValues[K, F, V](
     key: K,
     count: Long
   )(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Vector[(F, V)]] =
-    Command("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString), WithValues), Decode.nestedPairs[F, V])
+    Command.readUncacheable(
+      "HRANDFIELD",
+      Command.FirstKey,
+      Vector(keyCodec.encode(key), Bytes.utf8(count.toString), WithValues),
+      Decode.nestedPairs[F, V]
+    )
 
   def hScan[K, F, V](key: K, cursor: ScanCursor, pattern: Option[String] = None, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[(F, V)]] =
-    Command(
+    Command.read(
       "HSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
@@ -129,7 +139,7 @@ private[sage] object Hashes {
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F]
   ): Command[ScanPage[F]] =
-    Command(
+    Command.read(
       "HSCAN",
       Command.FirstKey,
       (Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count)) :+ NoValues,
@@ -163,7 +173,7 @@ private[sage] object Hashes {
   }
 
   def hExpireTime[K, F](key: K)(first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[FieldExpiryTime]] =
-    Command(
+    Command.readUncacheable(
       "HEXPIRETIME",
       Command.FirstKey,
       keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector),
@@ -171,7 +181,7 @@ private[sage] object Hashes {
     )
 
   def hpExpireTime[K, F](key: K)(first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[FieldExpiryTime]] =
-    Command(
+    Command.readUncacheable(
       "HPEXPIRETIME",
       Command.FirstKey,
       keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector),
@@ -179,10 +189,15 @@ private[sage] object Hashes {
     )
 
   def hTtl[K, F](key: K)(first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[FieldTtl]] =
-    Command("HTTL", Command.FirstKey, keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector), Decode.vector(fieldTtl(SECONDS)))
+    Command.readUncacheable("HTTL", Command.FirstKey, keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector), Decode.vector(fieldTtl(SECONDS)))
 
   def hpTtl[K, F](key: K)(first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[FieldTtl]] =
-    Command("HPTTL", Command.FirstKey, keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector), Decode.vector(fieldTtl(MILLISECONDS)))
+    Command.readUncacheable(
+      "HPTTL",
+      Command.FirstKey,
+      keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector),
+      Decode.vector(fieldTtl(MILLISECONDS))
+    )
 
   def hPersist[K, F](key: K)(first: F, rest: F*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Vector[FieldPersist]] =
     Command("HPERSIST", Command.FirstKey, keyCodec.encode(key) +: fieldsArgs(first +: rest.toVector), Decode.vector(fieldPersist))

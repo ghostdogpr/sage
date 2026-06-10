@@ -111,7 +111,7 @@ private[sage] object Keys {
     allKeys("DEL", first +: rest.toVector, Decode.long)
 
   def exists[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
-    allKeys("EXISTS", first +: rest.toVector, Decode.long)
+    allKeys("EXISTS", first +: rest.toVector, Decode.long, readOnly = true)
 
   def expire[K](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(using keyCodec: KeyCodec[K]): Command[Boolean] = {
     val (name, amount) = if (TimeArgs.wholeSeconds(in)) ("EXPIRE", in.toSeconds) else ("PEXPIRE", TimeArgs.millis(in))
@@ -124,22 +124,22 @@ private[sage] object Keys {
   }
 
   def expireTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[ExpiryTime] =
-    Command("EXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochSecond))
+    Command.readUncacheable("EXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochSecond))
 
   def pExpireTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[ExpiryTime] =
-    Command("PEXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochMilli))
+    Command.readUncacheable("PEXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochMilli))
 
   def keys[K](pattern: String)(using keyCodec: KeyCodec[K]): Command[Vector[K]] =
-    Command("KEYS", Command.NoKeys, Vector(Bytes.utf8(pattern)), Decode.vector(Decode.key))
+    Command.read("KEYS", Command.NoKeys, Vector(Bytes.utf8(pattern)), Decode.vector(Decode.key))
 
   def persist[K](key: K)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command("PERSIST", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.flag)
 
   def pTtl[K](key: K)(using keyCodec: KeyCodec[K]): Command[Ttl] =
-    Command("PTTL", Command.FirstKey, Vector(keyCodec.encode(key)), ttlDecode(MILLISECONDS))
+    Command.readUncacheable("PTTL", Command.FirstKey, Vector(keyCodec.encode(key)), ttlDecode(MILLISECONDS))
 
   def randomKey[K](using keyCodec: KeyCodec[K]): Command[Option[K]] =
-    Command("RANDOMKEY", Command.NoKeys, Vector.empty, Decode.optionalKey)
+    Command.readUncacheable("RANDOMKEY", Command.NoKeys, Vector.empty, Decode.optionalKey)
 
   def rename[K](source: K, destination: K)(using keyCodec: KeyCodec[K]): Command[Unit] =
     Command("RENAME", Vector(0, 1), Vector(keyCodec.encode(source), keyCodec.encode(destination)), Decode.ok)
@@ -153,7 +153,7 @@ private[sage] object Keys {
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   )(using keyCodec: KeyCodec[K]): Command[ScanPage[K]] =
-    Command(
+    Command.read(
       "SCAN",
       Command.NoKeys,
       ScanCursor.bytes(cursor) +:
@@ -166,10 +166,10 @@ private[sage] object Keys {
     allKeys("TOUCH", first +: rest.toVector, Decode.long)
 
   def ttl[K](key: K)(using keyCodec: KeyCodec[K]): Command[Ttl] =
-    Command("TTL", Command.FirstKey, Vector(keyCodec.encode(key)), ttlDecode(SECONDS))
+    Command.readUncacheable("TTL", Command.FirstKey, Vector(keyCodec.encode(key)), ttlDecode(SECONDS))
 
   def typeOf[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[RedisType]] =
-    Command(
+    Command.read(
       "TYPE",
       Command.FirstKey,
       Vector(keyCodec.encode(key)),
@@ -215,13 +215,18 @@ private[sage] object Keys {
     order: SortOrder = SortOrder.Asc,
     alpha: Boolean = false
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] =
-    Command("SORT_RO", Command.FirstKey, keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha), Decode.vector(Decode.optionalValue))
+    Command.read(
+      "SORT_RO",
+      Command.FirstKey,
+      keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha),
+      Decode.vector(Decode.optionalValue)
+    )
 
   def move[K](key: K, db: Int)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command("MOVE", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(db.toString)), Decode.flag)
 
   def dump[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Bytes]] =
-    Command("DUMP", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalBytes)
+    Command.read("DUMP", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalBytes)
 
   def restore[K](
     key: K,
@@ -268,20 +273,23 @@ private[sage] object Keys {
   }
 
   def objectEncoding[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[String]] =
-    Command("OBJECT", Vector(1), Vector(Encoding, keyCodec.encode(key)), Decode.optionalUtf8String)
+    Command.read("OBJECT", Vector(1), Vector(Encoding, keyCodec.encode(key)), Decode.optionalUtf8String)
 
   def objectRefCount[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Long]] =
-    Command("OBJECT", Vector(1), Vector(RefCount, keyCodec.encode(key)), Decode.optionalLong)
+    Command.readUncacheable("OBJECT", Vector(1), Vector(RefCount, keyCodec.encode(key)), Decode.optionalLong)
 
   def objectFreq[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[Long]] =
-    Command("OBJECT", Vector(1), Vector(Freq, keyCodec.encode(key)), Decode.optionalLong)
+    Command.readUncacheable("OBJECT", Vector(1), Vector(Freq, keyCodec.encode(key)), Decode.optionalLong)
 
   def objectIdleTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[Option[FiniteDuration]] =
-    Command("OBJECT", Vector(1), Vector(IdleTime, keyCodec.encode(key)), Decode.optionalLong).map(_.map(FiniteDuration(_, SECONDS)))
+    Command.readUncacheable("OBJECT", Vector(1), Vector(IdleTime, keyCodec.encode(key)), Decode.optionalLong).map(_.map(FiniteDuration(_, SECONDS)))
 
-  private def allKeys[K, Out](name: String, keys: Vector[K], decode: Frame => Either[DecodeError, Out])(using keyCodec: KeyCodec[K]): Command[Out] = {
+  private def allKeys[K, Out](name: String, keys: Vector[K], decode: Frame => Either[DecodeError, Out], readOnly: Boolean = false)(
+    using keyCodec: KeyCodec[K]
+  ): Command[Out] = {
     val args = keys.map(keyCodec.encode)
-    Command(name, args.indices.toVector, args, decode)
+    if (readOnly) Command.read(name, args.indices.toVector, args, decode)
+    else Command(name, args.indices.toVector, args, decode)
   }
 
   private def sortOptionArgs(by: Option[String], limit: Option[Limit], get: Vector[String], order: SortOrder, alpha: Boolean): Vector[Bytes] =

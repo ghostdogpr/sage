@@ -13,6 +13,14 @@ class CommandSpec extends munit.FunSuite {
     assertEquals(Strings.set("foo", "bar").encode.asUtf8String, "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n")
   }
 
+  test("cacheable marks deterministic key-state reads, not writes, time-varying, or non-deterministic reads") {
+    assert(Strings.get[String, String]("foo").cacheable)
+    assert(Hashes.hGet[String, String, String]("h", "f").cacheable)
+    assert(!Strings.set("foo", "bar").cacheable)                                                                 // a write is never cacheable
+    assert(!Keys.ttl("foo").cacheable && Keys.ttl("foo").isReadOnly)                                             // read-only but time-varying
+    assert(!Sets.sRandMember[String, String]("s").cacheable && Sets.sRandMember[String, String]("s").isReadOnly) // non-deterministic
+  }
+
   test("PING encodes against the golden wire frame, with and without a message") {
     assertEquals(Connection.ping().encode.asUtf8String, "*1\r\n$4\r\nPING\r\n")
     assertEquals(Connection.ping(Some("hi")).encode.asUtf8String, "*2\r\n$4\r\nPING\r\n$2\r\nhi\r\n")
