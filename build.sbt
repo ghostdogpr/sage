@@ -45,6 +45,7 @@ lazy val root = project
 lazy val core = (projectMatrix in file("sage-core"))
   .settings(name := "sage-core")
   .settings(commonSettings)
+  .settings(parallelUnitTests)
   .defaultAxes(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version))
   .customRow(
     autoScalaLibrary = true,
@@ -63,6 +64,7 @@ lazy val client = (projectMatrix in file("sage-client"))
   .dependsOn(core)
   .settings(name := "sage-client")
   .settings(commonSettings)
+  .settings(parallelUnitTests)
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
     publish / skip := moduleName.value.endsWith("-future")
@@ -107,3 +109,7 @@ lazy val commonSettings = Def.settings(
   libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test,
   Test / fork                            := true
 )
+
+// only for container-free cells: integration suites each boot their own container, so running them in
+// parallel would multiply peak load and invite timing races
+lazy val parallelUnitTests = Def.settings(Test / testForkedParallel := true)
