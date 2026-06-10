@@ -72,8 +72,8 @@ final private[client] class DedicatedConnection private (
     bootstrap.foreach { command =>
       val latch   = new CountDownLatch(1)
       val outcome = new AtomicReference[Try[Any]]()
-      submit[Any](
-        command.asInstanceOf[Command[Any]],
+      submit(
+        command,
         result => {
           outcome.set(result)
           latch.countDown()

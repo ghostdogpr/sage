@@ -251,7 +251,7 @@ final private[client] class ClusterLive(
       if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(results.get)))
     }
     def reroute(index: Int): Unit                                     =
-      offload(dispatch(p.commands(index).asInstanceOf[Command[Any]], cluster.maxRedirects, result => finish(index, TxSupport.toEither(result))))
+      offload(dispatch(p.commands(index), cluster.maxRedirects, result => finish(index, TxSupport.toEither(result))))
 
     val plan = topologyRef.get().split(p)
     plan.rejected.foreach {
