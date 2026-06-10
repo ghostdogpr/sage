@@ -150,7 +150,7 @@ private[sage] object Hashes {
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F]
   ): Command[Vector[FieldExpiry]] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(ttl)) ("HEXPIRE", ttl.toSeconds) else ("HPEXPIRE", TimeArgs.millis(ttl))
+    val (name, amount) = TimeArgs.expireCommand("HEXPIRE", "HPEXPIRE", ttl)
     Command(
       name,
       Command.FirstKey,
@@ -163,7 +163,7 @@ private[sage] object Hashes {
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F]
   ): Command[Vector[FieldExpiry]] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(at)) ("HEXPIREAT", at.getEpochSecond) else ("HPEXPIREAT", TimeArgs.millis(at))
+    val (name, amount) = TimeArgs.expireCommand("HEXPIREAT", "HPEXPIREAT", at)
     Command(
       name,
       Command.FirstKey,

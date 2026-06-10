@@ -114,12 +114,12 @@ private[sage] object Keys {
     allKeys("EXISTS", first +: rest.toVector, Decode.long, readOnly = true)
 
   def expire[K](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(using keyCodec: KeyCodec[K]): Command[Boolean] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(in)) ("EXPIRE", in.toSeconds) else ("PEXPIRE", TimeArgs.millis(in))
+    val (name, amount) = TimeArgs.expireCommand("EXPIRE", "PEXPIRE", in)
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
 
   def expireAt[K](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(using keyCodec: KeyCodec[K]): Command[Boolean] = {
-    val (name, amount) = if (TimeArgs.wholeSeconds(at)) ("EXPIREAT", at.getEpochSecond) else ("PEXPIREAT", TimeArgs.millis(at))
+    val (name, amount) = TimeArgs.expireCommand("EXPIREAT", "PEXPIREAT", at)
     Command(name, Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(amount.toString)) ++ conditionArgs(condition), Decode.flag)
   }
 

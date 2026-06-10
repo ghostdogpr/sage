@@ -51,16 +51,7 @@ private[client] object NodeClient {
     dedicatedPool: DedicatedPoolConfig
   ): NodeClient = {
     val connection = MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
-    val pool       = new DedicatedPool(
-      factory,
-      bootstrap,
-      scheduler,
-      () => connection.isLive,
-      () => connection.liveGeneration(),
-      connection.isCurrent,
-      dedicatedPool,
-      connectTimeout.toMillis
-    )
+    val pool       = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
     new NodeClient(connection, pool)
   }
 }

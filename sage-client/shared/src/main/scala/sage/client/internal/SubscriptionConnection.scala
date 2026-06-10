@@ -111,8 +111,8 @@ final private[client] class SubscriptionConnection(
       subscribeConfirmed = 0L
       val channels = channelSinks.keys.toVector
       val patterns = patternSinks.keys.toVector
-      if (channels.nonEmpty) { conn.send(Pubsub.subscribe(channels)); subscribeSent += channels.size }
-      if (patterns.nonEmpty) { conn.send(Pubsub.psubscribe(patterns)); subscribeSent += patterns.size }
+      if (channels.nonEmpty) sendSubscribe(conn, isPattern = false, channels)
+      if (patterns.nonEmpty) sendSubscribe(conn, isPattern = true, patterns)
       if (channels.isEmpty && patterns.isEmpty) {
         // everything closed during the establish; tear back down rather than hold an idle socket open
         conn.close()

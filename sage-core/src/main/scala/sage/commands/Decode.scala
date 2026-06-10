@@ -254,6 +254,12 @@ private[commands] object TimeArgs {
     if (wholeSeconds(timestamp)) Vector(ExAt, Bytes.utf8(timestamp.getEpochSecond.toString))
     else Vector(PxAt, Bytes.utf8(millis(timestamp).toString))
 
+  def expireCommand(secName: String, msName: String, duration: FiniteDuration): (String, Long) =
+    if (wholeSeconds(duration)) (secName, duration.toSeconds) else (msName, millis(duration))
+
+  def expireCommand(secName: String, msName: String, timestamp: Instant): (String, Long) =
+    if (wholeSeconds(timestamp)) (secName, timestamp.getEpochSecond) else (msName, millis(timestamp))
+
   private val Ex   = Bytes.utf8("EX")
   private val Px   = Bytes.utf8("PX")
   private val ExAt = Bytes.utf8("EXAT")

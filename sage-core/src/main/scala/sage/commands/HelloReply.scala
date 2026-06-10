@@ -10,10 +10,9 @@ object HelloReply {
   private[commands] def decode(frame: Frame): Either[DecodeError, HelloReply] =
     frame match {
       case Frame.Map(entries) =>
-        val fields = entries.flatMap {
-          case (Frame.BulkString(key), value)   => Some(key.asUtf8String -> value)
-          case (Frame.SimpleString(key), value) => Some(key -> value)
-          case _                                => None
+        val fields = entries.collect {
+          case (Frame.BulkString(key), value)   => key.asUtf8String -> value
+          case (Frame.SimpleString(key), value) => key              -> value
         }.toMap
         for {
           server  <- string(fields, "server")

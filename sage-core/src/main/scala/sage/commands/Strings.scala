@@ -202,7 +202,7 @@ private[sage] object Strings {
     rest: (K, V)*
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] = {
     val pairs = first +: rest.toVector
-    val data  = pairs.flatMap { case (key, value) => Vector(keyCodec.encode(key), valueCodec.encode(value)) }
+    val data  = msetArgs(pairs)
     Command(
       "MSETEX",
       Vector.tabulate(pairs.size)(i => 1 + i * 2),

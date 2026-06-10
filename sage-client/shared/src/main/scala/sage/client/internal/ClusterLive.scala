@@ -122,7 +122,7 @@ final private[client] class ClusterLive(
         case Route.Unowned(_)       => onUnowned(command, redirectsLeft, complete)
         case Route.CrossSlot(slots) => complete(Failure(crossSlot(command.name, slots)))
         case Route.Malformed        =>
-          complete(Failure(new IllegalArgumentException(s"${command.name}: declared key positions fall outside its arguments")))
+          complete(Failure(malformedKeys(command.name)))
       }
     }
 
@@ -222,6 +222,9 @@ final private[client] class ClusterLive(
   private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
     CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
 
+  private def malformedKeys(name: String): IllegalArgumentException =
+    new IllegalArgumentException(s"$name: declared key positions fall outside its arguments")
+
   // a transaction never follows a redirect, so the caller's retry depends on the topology actually refreshing — bypass the throttle window
   // (the single-flight guard still collapses concurrent refreshes). Ordinary commands use the throttled triggerRefresh, since they re-route.
   private def forceRefresh(): Unit = offload(refresh(force = true))
@@ -259,7 +262,7 @@ final private[client] class ClusterLive(
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
       // a programmer error: fail the whole effect, like single-command dispatch and the up-front guard, never a per-position result
       case (index, Rejected.Malformed)        =>
-        complete(Failure(new IllegalArgumentException(s"${p.commands(index).name}: declared key positions fall outside its arguments")))
+        complete(Failure(malformedKeys(p.commands(index).name)))
     }
     // keyless positions ride along on the first node group's batch; with no keyed group, dispatch routes each to any node
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
@@ -457,7 +460,7 @@ final private[client] class ClusterLive(
 
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       if (isMalformed(command))
-        Left(new IllegalArgumentException(s"${command.name}: declared key positions fall outside its arguments"))
+        Left(malformedKeys(command.name))
       else if (command.keyIndices.isEmpty)
         Right(None)
       else {
