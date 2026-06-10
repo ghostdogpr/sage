@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.time.Instant
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReferenceArray}
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLException
 
@@ -842,13 +842,8 @@ object Client {
         CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
         CIO.async { complete =>
-          val n         = p.commands.length
-          val slots     = new AtomicReferenceArray[Either[SageException, Any]](n)
-          val remaining = new AtomicInteger(n)
-          val callbacks = Vector.tabulate(n) { i => (result: Try[Any]) =>
-            slots.set(i, TxSupport.toEither(result))
-            if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(slots.get)))
-          }
+          val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](p.commands.length, complete)
+          val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
           if (!connection.submitAll(p.commands, callbacks)) complete(Failure(NotConnected()))
         }
 
