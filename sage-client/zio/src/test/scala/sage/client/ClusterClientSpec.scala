@@ -179,13 +179,13 @@ class ClusterClientSpec extends munit.FunSuite {
     slotsFrame(ranges.toVector*)
   }
 
-  private val keyA  = "{a}" // hashes to a slot owned by nodeA below
-  private val keyB  = "{b}" // hashes to a different slot, parked on nodeB by `splitOn`
+  private val keyA  = "{a}"
+  private val keyB  = "{b}"
   private val slotB = Slot.of(Bytes.utf8(keyB)).value
 
   test("a cross-slot pipeline splits per node and merges in submission order") {
     assert(Slot.of(Bytes.utf8(keyA)).value != slotB, "test keys must hash to different slots")
-    // each node answers a GET with its own host, so the merged order reveals which node served which position
+    // each node answers a GET with its own host, so the merged result reveals which node served which position
     val behaviour =
       (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
     val fixture   = new Fixture(behaviour, Vector(nodeA))

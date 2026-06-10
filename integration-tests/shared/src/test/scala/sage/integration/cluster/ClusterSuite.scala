@@ -59,7 +59,7 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
       else CIO.sleep(100.millis).flatMap(_ => awaitClusterOk(admin0, attempts - 1))
     }
 
-  // one shared container per suite (TestContainerForAll), so the cluster is formed once and all routing exercised in a single test
+  // one shared container per suite, so the cluster is formed once and all routing exercised in a single test
   test("single-key commands, pipelines, and transactions route against a real cluster") {
     withContainers { server =>
       val host       = server.host
@@ -67,7 +67,6 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
       val standalone = SageConfig(host = host, port = port)
       val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
 
-      // hash tags keep a pipeline/transaction on one slot; a single-node cluster can't exercise cross-slot splitting (that needs multiple nodes)
       val program =
         connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
           connectAndUse(clustered) { client =>
