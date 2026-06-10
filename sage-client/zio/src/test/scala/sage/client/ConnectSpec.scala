@@ -25,7 +25,9 @@ class ConnectSpec extends munit.FunSuite {
     )
 
   private val helloThenPong: Bytes => Seq[Frame] = payload =>
-    if (payload.asUtf8String.contains("HELLO")) Seq(helloReply) else Seq(Frame.SimpleString("PONG"))
+    if (payload.asUtf8String.contains("HELLO")) Seq(helloReply)
+    else if (payload.asUtf8String.contains("TRACKING")) Seq(Frame.SimpleString("OK")) // CLIENT TRACKING ON OPTIN bootstrap
+    else Seq(Frame.SimpleString("PONG"))
 
   private def scripted(reply: Bytes => Seq[Frame]): (MultiplexedConnection.TransportFactory, () => FakeTransport) = {
     var transport: FakeTransport                        = null
@@ -78,7 +80,8 @@ class ConnectSpec extends munit.FunSuite {
     val empty                = Pipeline.sequence(Vector.empty[Command[Long]])
     Client.connectWith(factory).flatMap(_.pipeline(empty)).unsafeRun.map { result =>
       assertEquals(result, Vector.empty[Long])
-      assertEquals(transport().written.count(payload => !payload.asUtf8String.contains("HELLO")), 0)
+      // exclude the HELLO and CLIENT TRACKING bootstrap commands; the empty pipeline itself causes no write
+      assertEquals(transport().written.count(p => !p.asUtf8String.contains("HELLO") && !p.asUtf8String.contains("TRACKING")), 0)
     }
   }
 }

@@ -1,5 +1,7 @@
 package sage.zio
 
+import scala.concurrent.duration.FiniteDuration
+
 import kyo.compat.*
 import zio.*
 import zio.stream.ZStream
@@ -16,6 +18,12 @@ import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, Se
 type SageClient = Client[Task]
 
 extension (client: SageClient) {
+
+  /**
+    * Runs a read with client-side caching and a ZIO `Duration` TTL — the ZIO-native form of [[Client.cached]].
+    */
+  def cached[A](command: Command[A], ttl: Duration): Task[A] =
+    client.cached(command, ttl.asFiniteDuration)
 
   /**
     * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once.
@@ -123,6 +131,8 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[Task] {
 
     def run[A](command: Command[A]): Task[A] = underlying.run(command).lower
+
+    def cached[A](command: Command[A], ttl: FiniteDuration): Task[A] = underlying.cached(command, ttl).lower
 
     def pipeline[Out, R](p: Pipeline[Out, R]): Task[Out] = underlying.pipeline(p).lower
 

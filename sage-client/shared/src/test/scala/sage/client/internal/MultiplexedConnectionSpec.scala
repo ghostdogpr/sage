@@ -442,4 +442,80 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
     assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
   }
+
+  private def cachedConnection(): (MultiplexedConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed)
+      transports += transport
+      transport
+    }
+    val connection                                      =
+      MultiplexedConnection.connect(factory, scheduler, Vector.empty, fixedBackoff, noWatchdog, 1.second, Duration.Zero, cacheMaxBytes = 1L << 20)
+    (connection, scheduler, transports)
+  }
+
+  private def invalidationOf(redisKey: String): Frame =
+    Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Array(Vector(Frame.BulkString(Bytes.utf8(redisKey))))))
+
+  test("a cached read fetches once, then serves repeats locally until an invalidation push evicts it") {
+    val (connection, _, transports) = cachedConnection()
+    val get                         = Strings.get[String, String]("foo")
+
+    var first: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => first = Some(r))
+    assertEquals(transports.head.written.length, 1) // one batch: [CLIENT CACHING YES, GET foo]
+    transports.head.emit(Frame.SimpleString("OK"))  // CLIENT CACHING YES reply, discarded
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    assertEquals(first, Some(Success(Some("bar"))))
+
+    var second: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => second = Some(r))
+    assertEquals(second, Some(Success(Some("bar")))) // served locally
+    assertEquals(transports.head.written.length, 1)  // no new round-trip
+
+    transports.head.emit(invalidationOf("foo"))
+    var third: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => third = Some(r))
+    assertEquals(transports.head.written.length, 2) // evicted -> refetch
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("baz")))
+    assertEquals(third, Some(Success(Some("baz"))))
+  }
+
+  test("TTL expiry evicts a cached read independently of invalidations") {
+    val (connection, scheduler, transports) = cachedConnection()
+    val get                                 = Strings.get[String, String]("foo")
+
+    connection.cachedSubmit(get, 1000L, _ => ())
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    assertEquals(transports.head.written.length, 1)
+
+    scheduler.advance(1001.millis)                  // past the TTL
+    connection.cachedSubmit(get, 1000L, _ => ())
+    assertEquals(transports.head.written.length, 2) // expired -> refetch
+  }
+
+  test("a reconnect flushes the cache: tracking state is connection-bound") {
+    val (connection, scheduler, transports) = cachedConnection()
+    val get                                 = Strings.get[String, String]("foo")
+
+    connection.cachedSubmit(get, 60000L, _ => ())
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+
+    transports.head.emit(Frame.SimpleString("stray")) // nothing pending -> discard -> reconnect
+    assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
+    scheduler.advance(1.milli)
+    assertEquals(transports.size, 2)
+
+    var afterReconnect: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => afterReconnect = Some(r))
+    assertEquals(transports(1).written.length, 1) // fresh generation, empty cache -> refetch
+    transports(1).emit(Frame.SimpleString("OK"))
+    transports(1).emit(Frame.BulkString(Bytes.utf8("baz")))
+    assertEquals(afterReconnect, Some(Success(Some("baz"))))
+  }
 }

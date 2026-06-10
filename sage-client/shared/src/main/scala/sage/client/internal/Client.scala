@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, Message, PatternMessage, SageException}
-import sage.SageException.{ConnectionLost, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
+import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
@@ -559,6 +559,15 @@ trait CommandRunner[F[_]] {
   */
 trait Client[F[_]] extends CommandRunner[F] {
 
+  /**
+    * Runs a read with client-side caching: served from the local cache until a server invalidation push or `ttl` evicts it. Only a
+    * cacheable command with at least one key qualifies — a read whose result is a pure function of its keys' state, so an invalidation
+    * covers every change. A write, a keyless read, or a time-varying/non-deterministic read (`TTL`, `SRANDMEMBER`) fails with
+    * [[sage.SageException.NotCacheable]]. On a cluster client this currently runs the read without caching, so the same call stays
+    * topology-portable.
+    */
+  def cached[A](command: Command[A], ttl: FiniteDuration): F[A]
+
   def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
 
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
@@ -576,6 +585,13 @@ trait Client[F[_]] extends CommandRunner[F] {
 object Client {
 
   private val defaults = SageConfig()
+
+  // a cacheable read's result is a pure function of its keys' state (Command.cacheable) and it names at least one key — a keyless read
+  // could only ever be evicted by TTL, never by an invalidation push, so it is rejected rather than allowed to silently go stale
+  private[internal] def cacheable(command: Command[?]): Boolean = command.cacheable && command.keyIndices.nonEmpty
+
+  private[internal] def notCacheable(command: Command[?]): NotCacheable =
+    NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
 
   def connect(config: SageConfig): CIO[Client[CIO]] =
     validate(config) match {
@@ -638,7 +654,9 @@ object Client {
         config.closeTimeout,
         config.dedicatedPool,
         config.pubsub,
-        config.auth
+        config.auth,
+        config.clientCache.maxBytes,
+        config.clientCache.enabled
       )
     }
 
@@ -652,12 +670,17 @@ object Client {
     closeTimeout: FiniteDuration = defaults.closeTimeout,
     dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool,
     pubsub: PubSubConfig = defaults.pubsub,
-    auth: Option[AuthConfig] = None
+    auth: Option[AuthConfig] = None,
+    cacheMaxBytes: Long = defaults.clientCache.maxBytes,
+    cachingEnabled: Boolean = defaults.clientCache.enabled
   ): CIO[Client[CIO]] = {
-    val bootstrap = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
+    val bootstrap            = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
+    // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
+    // plain HELLO bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
+    val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
     CIO
       .blocking(
-        MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
+        MultiplexedConnection.connect(factory, scheduler, multiplexedBootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes)
       )
       .map { connection =>
         val pool          = new DedicatedPool(
@@ -681,7 +704,7 @@ object Client {
           pubsub.bufferSize,
           () => connection.isLive
         )
-        new Live(connection, pool, subscriptions)
+        new Live(connection, pool, subscriptions, cachingEnabled)
       }
       .mapError(translateHandshake)
   }
@@ -698,13 +721,23 @@ object Client {
       case other                                                                                                    => other
     }
 
-  final private class Live(connection: MultiplexedConnection, pool: DedicatedPool, subscriptions: SubscriptionConnection) extends Client[CIO] {
+  final private class Live(
+    connection: MultiplexedConnection,
+    pool: DedicatedPool,
+    subscriptions: SubscriptionConnection,
+    cachingEnabled: Boolean
+  ) extends Client[CIO] {
 
     def run[A](command: Command[A]): CIO[A] =
       command.execution match {
         case Execution.Ordinary => CIO.async(callback => connection.submit(command, callback))
         case Execution.Blocking => CIO.async(callback => pool.use(command, callback))
       }
+
+    def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
+      if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
+      else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
+      else CIO.async(callback => connection.cachedSubmit(command, ttl.toMillis, callback))
 
     def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))

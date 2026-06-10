@@ -72,6 +72,14 @@ final case class TlsConfig(trust: TrustSource = TrustSource.System)
 final case class PubSubConfig(bufferSize: Int = 128)
 
 /**
+  * Client-side caching tuning. When `enabled`, the Multiplexed Connection enables RESP3 opt-in tracking at bootstrap and `cached` reads are
+  * served locally; `maxBytes` caps the approximate retained size of each connection generation's cache, evicting least-recently-used
+  * entries so a single large value can never blow the budget. Set `enabled = false` for environments where ACLs or a proxy permit `HELLO`
+  * and ordinary commands but deny `CLIENT TRACKING` — `cached` then runs the read without caching, keeping the call portable.
+  */
+final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 1024 * 1024)
+
+/**
   * A server address. In cluster mode the seeds are contacted to discover the topology; thereafter the cluster's own reported node
   * addresses are used.
   */
@@ -104,6 +112,7 @@ final case class SageConfig(
   closeTimeout: FiniteDuration = 5.seconds,
   dedicatedPool: DedicatedPoolConfig = DedicatedPoolConfig(),
   pubsub: PubSubConfig = PubSubConfig(),
+  clientCache: CacheConfig = CacheConfig(),
   auth: Option[AuthConfig] = None,
   tls: Option[TlsConfig] = None,
   topology: Topology = Topology.Standalone

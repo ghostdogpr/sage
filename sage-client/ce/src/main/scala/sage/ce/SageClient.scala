@@ -1,5 +1,7 @@
 package sage.ce
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.effect.{IO, Resource}
 import kyo.compat.*
 
@@ -114,6 +116,8 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[IO] {
 
     def run[A](command: Command[A]): IO[A] = underlying.run(command).lower
+
+    def cached[A](command: Command[A], ttl: FiniteDuration): IO[A] = underlying.cached(command, ttl).lower
 
     def pipeline[Out, R](p: Pipeline[Out, R]): IO[Out] = underlying.pipeline(p).lower
 

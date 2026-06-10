@@ -95,13 +95,13 @@ private[sage] object SortedSets {
     )
 
   def zCard[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("ZCARD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
+    Command.read("ZCARD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def zScore[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[Double]] =
-    Command("ZSCORE", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalScore)
+    Command.read("ZSCORE", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalScore)
 
   def zMScore[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[Double]]] =
-    Command(
+    Command.read(
       "ZMSCORE",
       Command.FirstKey,
       keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode),
@@ -112,28 +112,28 @@ private[sage] object SortedSets {
     Command("ZINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), scoreArg(increment), valueCodec.encode(member)), Decode.score)
 
   def zRank[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[Long]] =
-    Command("ZRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalLong)
+    Command.read("ZRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalLong)
 
   def zRankWithScore[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(Long, Double)]] =
-    Command("ZRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member), WithScore), rankWithScore)
+    Command.read("ZRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member), WithScore), rankWithScore)
 
   def zRevRank[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[Long]] =
-    Command("ZREVRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalLong)
+    Command.read("ZREVRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalLong)
 
   def zRevRankWithScore[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(Long, Double)]] =
-    Command("ZREVRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member), WithScore), rankWithScore)
+    Command.read("ZREVRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member), WithScore), rankWithScore)
 
   def zCount[K](key: K, min: ScoreBoundary, max: ScoreBoundary)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("ZCOUNT", Command.FirstKey, Vector(keyCodec.encode(key), scoreBoundaryArg(min), scoreBoundaryArg(max)), Decode.long)
+    Command.read("ZCOUNT", Command.FirstKey, Vector(keyCodec.encode(key), scoreBoundaryArg(min), scoreBoundaryArg(max)), Decode.long)
 
   def zLexCount[K, V](key: K, min: LexBoundary[V], max: LexBoundary[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    Command("ZLEXCOUNT", Command.FirstKey, Vector(keyCodec.encode(key), lexBoundaryArg(min), lexBoundaryArg(max)), Decode.long)
+    Command.read("ZLEXCOUNT", Command.FirstKey, Vector(keyCodec.encode(key), lexBoundaryArg(min), lexBoundaryArg(max)), Decode.long)
 
   def zRange[K, V](key: K, range: ZRange[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("ZRANGE", Command.FirstKey, keyCodec.encode(key) +: rangeArgs(range), Decode.vector(Decode.value[V]))
+    Command.read("ZRANGE", Command.FirstKey, keyCodec.encode(key) +: rangeArgs(range), Decode.vector(Decode.value[V]))
 
   def zRangeWithScores[K, V](key: K, range: ZRange[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] =
-    Command("ZRANGE", Command.FirstKey, (keyCodec.encode(key) +: rangeArgs(range)) :+ WithScores, Decode.scoredMembers[V])
+    Command.read("ZRANGE", Command.FirstKey, (keyCodec.encode(key) +: rangeArgs(range)) :+ WithScores, Decode.scoredMembers[V])
 
   def zRangeStore[K, V](destination: K, source: K, range: ZRange[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command(
@@ -203,20 +203,25 @@ private[sage] object SortedSets {
   }
 
   def zRandMember[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
+    Command.readUncacheable("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
   def zRandMemberCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.value[V]))
+    Command.readUncacheable("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.value[V]))
 
   def zRandMemberWithScores[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] =
-    Command("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString), WithScores), Decode.scoredMembers[V])
+    Command.readUncacheable(
+      "ZRANDMEMBER",
+      Command.FirstKey,
+      Vector(keyCodec.encode(key), Bytes.utf8(count.toString), WithScores),
+      Decode.scoredMembers[V]
+    )
 
   def zUnion[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Vector[V]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZUNION", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
+    Command.read("ZUNION", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
   }
 
   def zUnionWithScores[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
@@ -224,7 +229,7 @@ private[sage] object SortedSets {
     valueCodec: ValueCodec[V]
   ): Command[Vector[(V, Double)]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZUNION", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
+    Command.read("ZUNION", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
   }
 
   def zUnionStore[K](destination: K, first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
@@ -239,7 +244,7 @@ private[sage] object SortedSets {
     valueCodec: ValueCodec[V]
   ): Command[Vector[V]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZINTER", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
+    Command.read("ZINTER", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
   }
 
   def zInterWithScores[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
@@ -247,7 +252,7 @@ private[sage] object SortedSets {
     valueCodec: ValueCodec[V]
   ): Command[Vector[(V, Double)]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZINTER", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
+    Command.read("ZINTER", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
   }
 
   def zInterStore[K](destination: K, first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
@@ -259,17 +264,17 @@ private[sage] object SortedSets {
 
   def zInterCard[K](first: K, rest: K*)(limit: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Long] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZINTERCARD", indices, prefix ++ limit.toVector.flatMap(n => Vector(LimitWord, Bytes.utf8(n.toString))), Decode.long)
+    Command.read("ZINTERCARD", indices, prefix ++ limit.toVector.flatMap(n => Vector(LimitWord, Bytes.utf8(n.toString))), Decode.long)
   }
 
   def zDiff[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZDIFF", indices, prefix, Decode.vector(Decode.value[V]))
+    Command.read("ZDIFF", indices, prefix, Decode.vector(Decode.value[V]))
   }
 
   def zDiffWithScores[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] = {
     val (indices, prefix) = numKeyed(first +: rest.toVector)
-    Command("ZDIFF", indices, prefix :+ WithScores, Decode.scoredMembers[V])
+    Command.read("ZDIFF", indices, prefix :+ WithScores, Decode.scoredMembers[V])
   }
 
   def zDiffStore[K](destination: K, first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] = {
@@ -281,7 +286,7 @@ private[sage] object SortedSets {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[(V, Double)]] =
-    Command(
+    Command.read(
       "ZSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),

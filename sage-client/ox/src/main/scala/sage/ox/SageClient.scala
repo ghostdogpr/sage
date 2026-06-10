@@ -1,5 +1,7 @@
 package sage.ox
 
+import scala.concurrent.duration.FiniteDuration
+
 import _root_.ox.{useInScope, Ox}
 import _root_.ox.flow.Flow
 import kyo.compat.*
@@ -126,6 +128,8 @@ object SageClient {
   final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> Ox ?=> A] {
 
     def run[A](command: Command[A]): Ox ?=> A = underlying.run(command).lower
+
+    def cached[A](command: Command[A], ttl: FiniteDuration): Ox ?=> A = underlying.cached(command, ttl).lower
 
     def pipeline[Out, R](p: Pipeline[Out, R]): Ox ?=> Out = underlying.pipeline(p).lower
 

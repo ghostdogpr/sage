@@ -86,6 +86,11 @@ final private[client] class ClusterLive(
   def run[A](command: Command[A]): CIO[A] =
     CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, complete)))
 
+  // client-side caching in cluster mode (per-node tracking through redirects/failover) is a follow-up; for now a cached read runs without
+  // caching so the same call stays portable between standalone and cluster. The cacheability guard still applies, matching standalone.
+  def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
+    if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command)) else run(command)
+
   def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 

@@ -55,10 +55,10 @@ private[sage] object Lists {
     Command("RPOP", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vectorOrEmpty(Decode.value[V]))
 
   def lLen[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("LLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
+    Command.read("LLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def lRange[K, V](key: K, start: Long, stop: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command(
+    Command.read(
       "LRANGE",
       Command.FirstKey,
       Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)),
@@ -66,7 +66,7 @@ private[sage] object Lists {
     )
 
   def lIndex[K, V](key: K, index: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command("LINDEX", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(index.toString)), Decode.optionalValue)
+    Command.read("LINDEX", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(index.toString)), Decode.optionalValue)
 
   def lSet[K, V](key: K, index: Long, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Unit] =
     Command("LSET", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(index.toString), valueCodec.encode(value)), Decode.ok)
@@ -90,7 +90,7 @@ private[sage] object Lists {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Option[Long]] =
-    Command(
+    Command.read(
       "LPOS",
       Command.FirstKey,
       Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ rankArg(rank) ++ maxLenArg(maxLen),
@@ -101,7 +101,7 @@ private[sage] object Lists {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Vector[Long]] =
-    Command(
+    Command.read(
       "LPOS",
       Command.FirstKey,
       Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ rankArg(rank) ++ Vector(Count, Bytes.utf8(count.toString)) ++ maxLenArg(maxLen),
