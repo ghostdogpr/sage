@@ -17,6 +17,15 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
     else if (asking) connection.submitAsking(command, callback)
     else connection.submit(command, callback)
 
+  // a pipeline's per-node batch: one round-trip on this node's Multiplexed Connection. False when not connected (nothing submitted), so
+  // the caller re-routes each position rather than fabricating per-position errors. Blocking commands never reach here (rejected up front).
+  def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean =
+    connection.submitAll(commands, callbacks)
+
+  def acquireForTransaction(): DedicatedConnection = pool.acquireForTransaction()
+
+  def releaseTransaction(connection: DedicatedConnection, reusable: Boolean): Unit = pool.releaseTransaction(connection, reusable)
+
   def isLive: Boolean = connection.isLive
 
   def close(): Unit = {

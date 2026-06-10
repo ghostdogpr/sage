@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference, AtomicReferenceArray}
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
@@ -11,17 +11,21 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage}
+import sage.{Message, PatternMessage, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
-import sage.cluster.{ClusterTopology, Node, Redirect, RedirectKind, Route, Shard}
-import sage.codec.ValueCodec
+import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
+import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Cluster, Command, Connection, Pipeline}
+import sage.protocol.Frame
 
 /**
   * The cluster runtime: one [[NodeClient]] bundle per master, a refreshable [[ClusterTopology]], and the routing/redirect/failover state
   * machine that executes the pure engine's [[Route]] classifications. The same `Client` type as standalone; only configuration selects it.
-  * Pipelines and Transactions are rejected in cluster mode.
+  *
+  * A Pipeline is split per node (the pure [[ClusterTopology.split]]), each group sent as one batch, and the results scattered back into
+  * submission order; positions a stale topology can't resolve fall back to per-command [[dispatch]]. A Transaction leases one Dedicated
+  * Connection, pinned lazily to the slot of its first key, and rejects any key on another slot with [[CrossSlot]].
   *
   * Routing and redirect-following run on offloaded virtual threads (never the reply thread), since establishing a node and refreshing the
   * topology both block. A submit's reply callback re-offloads before any blocking continuation.
@@ -82,9 +86,11 @@ final private[client] class ClusterLive(
   def run[A](command: Command[A]): CIO[A] =
     CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, complete)))
 
-  def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]               = CIO.fail(unsupported("Pipelines"))
-  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R]          = CIO.fail(unsupported("Pipelines"))
-  def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] = CIO.fail(unsupported("Transactions"))
+  def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
+  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
+
+  def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
+    CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
 
   // classic and sharded pub/sub in cluster mode arrive with the cluster pub/sub work; standalone subscriptions build the machinery first
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
@@ -109,8 +115,7 @@ final private[client] class ClusterLive(
         case Route.ToNode(node, _)  => sendTo(node, command, asking = false, redirectsLeft, complete)
         case Route.Keyless          => sendToAny(topology, command, redirectsLeft, complete)
         case Route.Unowned(_)       => onUnowned(command, redirectsLeft, complete)
-        case Route.CrossSlot(slots) =>
-          complete(Failure(CrossSlot(s"${command.name}: keys span ${slots.size} slots; a single command must touch exactly one")))
+        case Route.CrossSlot(slots) => complete(Failure(crossSlot(command.name, slots)))
         case Route.Malformed        =>
           complete(Failure(new IllegalArgumentException(s"${command.name}: declared key positions fall outside its arguments")))
       }
@@ -140,18 +145,30 @@ final private[client] class ClusterLive(
   }
 
   private def onFailure[A](node: Node, command: Command[A], error: Throwable, redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+    classify(error) match {
+      case ClusterLive.Disposition.Reroute             =>
+        error match {
+          // classify only reroutes a ServerError when it parses as a redirect, so `.get` is safe here
+          case ServerError(message) => onRedirect(node, Redirect.parse(message).get, command, redirectsLeft, complete)
+          case _                    => onUnreachable(command, redirectsLeft, complete)
+        }
+      case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); complete(Failure(error))
+      case ClusterLive.Disposition.Terminal            => complete(Failure(error))
+    }
+
+  // The single failure taxonomy a routed command can meet, shared by single-command [[onFailure]] and a Pipeline batch's per-position
+  // callbacks so the two cannot drift: a redirect or a provably-unexecuted loss is re-routed; a demoted master (`READONLY`) or a
+  // may-have-executed loss refreshes the topology but still fails its own command; anything else fails fast in place.
+  private def classify(error: Throwable): ClusterLive.Disposition =
     error match {
       case ServerError(message)  =>
-        Redirect.parse(message) match {
-          case Some(redirect) => onRedirect(node, redirect, command, redirectsLeft, complete)
-          case None           =>
-            if (message.startsWith("READONLY")) triggerRefresh() // a demoted master: adopt the new owner for subsequent commands
-            complete(Failure(error)) // fail fast, no retry
-        }
-      case NotConnected()        => onUnreachable(command, redirectsLeft, complete)
-      case ConnectionLost(false) => onUnreachable(command, redirectsLeft, complete) // never reached the wire: safe to retry
-      case ConnectionLost(true)  => triggerRefresh(); complete(Failure(error))      // may have executed: fail fast
-      case other                 => complete(Failure(other))
+        if (Redirect.parse(message).isDefined) ClusterLive.Disposition.Reroute
+        else if (message.startsWith("READONLY")) ClusterLive.Disposition.RefreshThenTerminal
+        else ClusterLive.Disposition.Terminal
+      case NotConnected()        => ClusterLive.Disposition.Reroute
+      case ConnectionLost(false) => ClusterLive.Disposition.Reroute
+      case ConnectionLost(true)  => ClusterLive.Disposition.RefreshThenTerminal
+      case _                     => ClusterLive.Disposition.Terminal
     }
 
   private def onRedirect[A](from: Node, redirect: Redirect, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
@@ -193,6 +210,290 @@ final private[client] class ClusterLive(
       .orElse(topology.shards.headOption.map(_.master))
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
+
+  private def isMalformed(command: Command[?]): Boolean =
+    command.keyIndices.exists(index => index < 0 || index >= command.args.length)
+
+  private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
+    CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
+
+  // a transaction never follows a redirect, so the caller's retry depends on the topology actually refreshing — bypass the throttle window
+  // (the single-flight guard still collapses concurrent refreshes). Ordinary commands use the throttled triggerRefresh, since they re-route.
+  private def forceRefresh(): Unit = offload(refresh(force = true))
+
+  // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
+
+  private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
+    if (p.commands.isEmpty)
+      CIO.value(Vector.empty)
+    // blocking commands and malformed key indices are programmer errors: they fail the whole effect up front, never a single position
+    else if (p.commands.exists(_.isBlocking))
+      CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
+    else if (p.commands.exists(isMalformed))
+      CIO.fail(new IllegalArgumentException("a Pipeline command declares key positions that fall outside its arguments"))
+    else
+      CIO.async(complete => offload(runPipeline(p, complete)))
+
+  // offloaded (getOrEstablish blocks): split the pipeline, send one batch per node, and scatter each reply into its submission-order slot.
+  // A per-command CrossSlot fails only its own slot; a position a stale topology can't resolve (redirect, unreachable node, Unowned) falls
+  // back to per-command dispatch. The countdown completes the effect once every position has landed terminally — once, never on a redirect.
+  private def runPipeline[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Either[SageException, Any]]] => Unit): Unit = {
+    val n                                                             = p.commands.length
+    val results                                                       = new AtomicReferenceArray[Either[SageException, Any]](n)
+    val remaining                                                     = new AtomicInteger(n)
+    def finish(index: Int, outcome: Either[SageException, Any]): Unit = {
+      results.set(index, outcome)
+      if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(results.get)))
+    }
+    def reroute(index: Int): Unit                                     =
+      offload(dispatch(p.commands(index).asInstanceOf[Command[Any]], cluster.maxRedirects, result => finish(index, TxSupport.toEither(result))))
+
+    val plan = topologyRef.get().split(p)
+    plan.rejected.foreach {
+      case (index, Rejected.CrossSlot(slots)) => finish(index, Left(crossSlot(p.commands(index).name, slots)))
+      case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
+      // a programmer error: fail the whole effect, like single-command dispatch and the up-front guard, never a per-position result
+      case (index, Rejected.Malformed)        =>
+        complete(Failure(new IllegalArgumentException(s"${p.commands(index).name}: declared key positions fall outside its arguments")))
+    }
+    // keyless positions ride along on the first node group's batch; with no keyed group, dispatch routes each to any node
+    if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
+    plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
+      // sorted: keep each node's batch in submission order even when keyless positions are folded into the first group
+      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, finish, reroute)
+    }
+  }
+
+  private def sendBatch[Out, R](
+    node: Node,
+    indices: Vector[Int],
+    p: Pipeline[Out, R],
+    finish: (Int, Either[SageException, Any]) => Unit,
+    reroute: Int => Unit
+  ): Unit = {
+    val callbacks: Vector[Try[Any] => Unit] = indices.map { index => (result: Try[Any]) =>
+      result match {
+        case Success(value) => finish(index, Right(value))
+        case Failure(error) =>
+          classify(error) match {
+            case ClusterLive.Disposition.Reroute             => reroute(index)
+            case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); finish(index, TxSupport.toEither(result))
+            case ClusterLive.Disposition.Terminal            => finish(index, TxSupport.toEither(result))
+          }
+      }
+    }
+    val nc                                  =
+      try getOrEstablish(node)
+      catch { case NonFatal(_) => null }
+    // node unreachable, or not connected when the batch reached it: nothing was sent, so re-route every position individually
+    if (nc == null || !nc.submitAll(indices.map(p.commands), callbacks)) indices.foreach(reroute)
+  }
+
+  // --- transactions (one leased connection, pinned lazily to the first key's slot) ------------------------------------------------------
+
+  private def acquireScope: CIO[ClusterTxScope] =
+    if (closed) CIO.fail(NotConnected()) else CIO.value(new ClusterTxScope)
+
+  private def releaseScope(scope: ClusterTxScope): CIO[Unit] = CIO.blocking(scope.release())
+
+  /**
+    * A cluster Transaction scope. It holds no connection until the first key is touched, then leases one Dedicated Connection on that
+    * slot's node and pins to the slot; every later key must hash to the pin or fail [[CrossSlot]]. Keyless commands ride the pinned
+    * connection (or, before any key, an arbitrary master). Redirects and losses are never followed — they surface and refresh the topology
+    * in the background — so the caller retries the whole block, as it already must for a `WATCH` abort.
+    */
+  final private class ClusterTxScope extends TransactionScope[CIO] {
+
+    private val lock                      = new ReentrantLock()
+    private var released                  = false
+    private var nodeClient: NodeClient    = null
+    private var conn: DedicatedConnection = null
+    private var pinnedNode: Node          = null
+    private var pinnedSlot: Option[Slot]  = None
+    private val armed                     = new AtomicBoolean(false)
+
+    def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] = {
+      val command = Connection.watch(key, rest*)
+      CIO.async[Unit](complete => offload(withConn(command, complete) { c => armed.set(true); c.submit(command, faulting(complete)) }))
+    }
+
+    def run[A](command: Command[A]): CIO[A] =
+      if (command.isBlocking)
+        CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
+      else
+        CIO.async[A](complete => offload(withConn(command, complete)(c => c.submit(command, faulting(complete)))))
+
+    def discard: CIO[Unit] =
+      CIO.async[Unit] { complete =>
+        offload {
+          lock.lock()
+          try
+            if (released) complete(Failure(TxSupport.scopeReleasedError))
+            else if (conn == null) complete(Success(())) // nothing leased, nothing watched
+            else { armed.set(false); conn.submit(Connection.unwatch, faulting(complete)) }
+          finally lock.unlock()
+        }
+      }
+
+    // A transaction never follows a redirect (that would break MULTI/EXEC atomicity), but on any ownership or connection fault — a MOVED/ASK,
+    // a READONLY from a demoted master, a lost connection, or a failed acquire — it refreshes the topology in the background so the caller's
+    // retry re-pins to the new owner. Without it a retry would loop on the same stale node. A data error (WRONGTYPE, decode) refreshes nothing.
+    private def refreshOnFault(error: Throwable): Unit =
+      classify(error) match {
+        case ClusterLive.Disposition.Terminal => ()
+        case _                                => forceRefresh()
+      }
+
+    private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
+      case failure @ Failure(error) => refreshOnFault(error); complete(failure)
+      case success                  => complete(success)
+    }
+
+    // EXEC replies arrive as a Success carrying raw frames, so an ownership fault (MOVED/ASK at queue time, READONLY, or one nested in the
+    // EXEC array at exec time) is an error *frame*, invisible to `faulting`. Scan those frames — top level and the EXEC array — and refresh
+    // the topology on any non-terminal one so the caller's retry re-pins, mirroring `refreshOnFault` for the decoded-reply path.
+    private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
+      val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
+      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => classify(ServerError(m)) != ClusterLive.Disposition.Terminal)
+      if (fault) forceRefresh()
+    }
+
+    def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
+      runExec(p).flatMap {
+        case None          => CIO.value(None)
+        case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
+      }
+
+    def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
+      runExec(p).map(_.map(p.toResults))
+
+    private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
+      if (isReleased)
+        CIO.fail(TxSupport.scopeReleasedError)
+      else if (p.commands.isEmpty && !armed.get)
+        CIO.value(Some(Vector.empty))
+      else if (p.commands.exists(_.isBlocking))
+        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
+      else
+        CIO
+          .async[Vector[Frame]](complete => offload(submitExec(p, complete)))
+          .flatMap { frames =>
+            armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
+            refreshOnExecFault(frames)
+            TxSupport.interpretExec(p.commands, frames)
+          }
+
+    // validates the whole pipeline's slots against the pin *before* sending MULTI, so a cross-slot transaction is rejected with nothing on the wire
+    private def submitExec[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Frame]] => Unit): Unit = {
+      lock.lock()
+      try
+        if (released) complete(Failure(TxSupport.scopeReleasedError))
+        else
+          pipelineSlot(p).flatMap(ensureConn) match {
+            case Left(error) => refreshOnFault(error); complete(Failure(error))
+            case Right(_)    => conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete))
+          }
+      finally lock.unlock()
+    }
+
+    private def withConn[A](command: Command[?], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit = {
+      lock.lock()
+      try
+        if (released) complete(Failure(TxSupport.scopeReleasedError))
+        else
+          commandSlot(command).flatMap(ensureConn) match {
+            case Left(error) => refreshOnFault(error); complete(Failure(error))
+            case Right(_)    => use(conn)
+          }
+      finally lock.unlock()
+    }
+
+    // lazily leases and pins the connection (called under `lock`; the blocking acquire is safe here — the finalizer never runs concurrently
+    // with a live block). With a slot: pin its owner on the first key, then require every later key to match; a keyless-acquired pin adopts
+    // the slot only if its node already owns it. Keyless before any key leases an arbitrary master.
+    private def ensureConn(slot: Option[Slot]): Either[Throwable, Unit] =
+      slot match {
+        case Some(s) if conn == null =>
+          nodeForSlotRefreshing(s) match {
+            case Some(node) => acquireOn(node).map(_ => pinnedSlot = Some(s))
+            case None       => Left(NotConnected())
+          }
+        case Some(s)                 =>
+          pinnedSlot match {
+            case Some(ps) if ps == s => Right(())
+            case Some(ps)            =>
+              Left(CrossSlot(s"transaction touches slot ${s.value} but is pinned to slot ${ps.value}; MULTI/EXEC requires a single slot"))
+            case None                =>
+              if (topologyRef.get().nodeForSlot(s).contains(pinnedNode)) { pinnedSlot = Some(s); Right(()) }
+              else Left(CrossSlot(s"transaction touches slot ${s.value} on a node other than its pinned one; MULTI/EXEC requires a single slot"))
+          }
+        case None if conn != null    => Right(())
+        case None                    =>
+          pickNode(topologyRef.get()) match {
+            case Some(node) => acquireOn(node)
+            case None       => Left(NotConnected())
+          }
+      }
+
+    private def nodeForSlotRefreshing(slot: Slot): Option[Node] =
+      topologyRef.get().nodeForSlot(slot).orElse { refresh(force = true); topologyRef.get().nodeForSlot(slot) }
+
+    private def acquireOn(node: Node): Either[Throwable, Unit] =
+      try {
+        val nc = getOrEstablish(node)
+        conn = nc.acquireForTransaction()
+        nodeClient = nc
+        pinnedNode = node
+        Right(())
+      } catch {
+        case error: SageException => Left(error)
+        case NonFatal(_)          => Left(ConnectionLost(mayHaveExecuted = false))
+      }
+
+    private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
+      if (isMalformed(command))
+        Left(new IllegalArgumentException(s"${command.name}: declared key positions fall outside its arguments"))
+      else if (command.keyIndices.isEmpty)
+        Right(None)
+      else {
+        val slots = command.keyIndices.iterator.map(index => Slot.of(command.args(index))).toSet
+        if (slots.sizeIs > 1) Left(crossSlot(command.name, slots))
+        else Right(Some(slots.head))
+      }
+
+    private def pipelineSlot[Out, R](p: Pipeline[Out, R]): Either[Throwable, Option[Slot]] = {
+      var acc = Option.empty[Slot]
+      val it  = p.commands.iterator
+      while (it.hasNext)
+        commandSlot(it.next()) match {
+          case Left(error)       => return Left(error)
+          case Right(None)       => ()
+          case Right(Some(slot)) =>
+            acc match {
+              case None       => acc = Some(slot)
+              case Some(prev) =>
+                if (prev != slot) return Left(CrossSlot("transaction keys span multiple slots; MULTI/EXEC requires a single slot"))
+            }
+        }
+      Right(acc)
+    }
+
+    private def isReleased: Boolean = {
+      lock.lock();
+      try released
+      finally lock.unlock()
+    }
+
+    // run once by the lease finalizer: seal against further ops and release the pinned connection (recycle if clean, discard if armed or
+    // mid-command). A scope that never touched a key leased nothing, so there is nothing to release.
+    private[internal] def release(): Unit = {
+      lock.lock()
+      val (nc, c, reusable) =
+        try { released = true; (nodeClient, conn, conn != null && conn.isHealthy && conn.isQuiescent && !armed.get) }
+        finally lock.unlock()
+      if (nc != null) nc.releaseTransaction(c, reusable)
+    }
+  }
 
   // --- node registry (single-flight establish) -----------------------------------------------------------------------------------------
 
@@ -295,6 +596,11 @@ final private[client] class ClusterLive(
 }
 
 private[client] object ClusterLive {
+
+  // the disposition of a routed command's failure: re-route from scratch, refresh the topology but still fail this command, or fail in place
+  private enum Disposition {
+    case Reroute, RefreshThenTerminal, Terminal
+  }
 
   // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get` and observe the same success or failure
   final private class Establish {

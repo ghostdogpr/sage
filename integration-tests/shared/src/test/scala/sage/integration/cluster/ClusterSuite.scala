@@ -11,7 +11,8 @@ import sage.Bytes
 import sage.SageException.DecodeError
 import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
-import sage.commands.Command
+import sage.commands.{Command, Commands, Pipeline}
+import sage.commands.Pipeline.pipeline
 import sage.integration.{ContainerClient, Images}
 import sage.protocol.Frame
 
@@ -75,6 +76,32 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
             } yield {
               assertEquals(value, Some("hello"))
               assertEquals(count, 1L)
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
+  test("a single-slot pipeline and transaction run against a real cluster") {
+    withContainers { server =>
+      val host       = server.host
+      val port       = server.mappedPort(6379)
+      val standalone = SageConfig(host = host, port = port)
+      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+
+      // hash tags keep every key on one slot; a single-node cluster can't exercise cross-slot splitting (that needs multiple nodes)
+      val program =
+        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+          connectAndUse(clustered) { client =>
+            for {
+              _      <- client.set("{t}a", "1")
+              _      <- client.set("{t}b", "2")
+              piped  <- client.pipeline((Commands.get[String, String]("{t}a"), Commands.get[String, String]("{t}b")).pipeline)
+              commit <- client.transaction(tx => tx.exec(Pipeline.sequence(Vector(Commands.incr[String]("{t}c"), Commands.incr[String]("{t}c")))))
+            } yield {
+              assertEquals(piped, (Some("1"), Some("2")))
+              assertEquals(commit, Some(Vector(1L, 2L)))
             }
           }
         }
