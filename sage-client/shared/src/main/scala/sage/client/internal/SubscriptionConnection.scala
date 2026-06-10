@@ -36,7 +36,7 @@ final private[client] class SubscriptionConnection(
   isLive: () => Boolean,
   cluster: Boolean = false,
   onTerminated: () => Unit = () => ()
-) {
+) extends Placement.ShardConn {
   import SubscriptionConnection.*
 
   private val lock          = new ReentrantLock()

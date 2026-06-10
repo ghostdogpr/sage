@@ -47,6 +47,10 @@ _Avoid_: pub/sub connection
 A connection carrying the Shard Channel subscriptions for the channels a single Node owns. A client holds one per owning Node, since a Shard Channel's `SSUBSCRIBE` must reach the Slot's owner; each is created on demand and released when its last subscription ends. On Slot migration or failover the affected subscriptions are re-homed to the new owner. Distinct from the Subscription Connection, which carries classic subscriptions; the two never share a connection.
 _Avoid_: per-node pub/sub connection, shard connection
 
+**Placement**:
+A single Shard Channel subscription's ledger of which Node currently carries which of its channels, and the one place that keeps that record in step with the wire. A plan groups a Node's channels so each group is one `SSUBSCRIBE` (one Slot, never `CROSSSLOT`). Applied two ways that differ only in failure handling: `place` is fail-fast for the initial subscribe (an attach failure propagates so the subscribe rolls back), `reconcile` is best-effort for re-homing (detach what left the plan, attach the rest, report whether to retry). `ClusterSubscriptions` owns one per sharded subscription and feeds it plans; classic subscriptions do not use it.
+_Avoid_: routing table, registry, placedAt
+
 **Shard Channel**:
 A pub/sub channel whose name hashes to a Slot (its Hash Tag, if present), so `SSUBSCRIBE`/`SPUBLISH` target that Slot's owning Node and messages stay within the Shard — unlike a classic channel, whose `PUBLISH` broadcasts across the whole cluster bus. There is no pattern form; a Shard Channel delivery surfaces to the subscriber as an ordinary Message (channel and payload).
 _Avoid_: sharded topic, shard topic
