@@ -85,6 +85,21 @@ private[commands] object Decode {
     case other                => Left(DecodeError("integer or null", Frame.describe(other)))
   }
 
+  // a double however the server framed it: a RESP3 Double, or a bulk string under RESP2 (geo coordinates, distances)
+  val lenientDouble: Frame => Either[DecodeError, Double] = {
+    case Frame.Double(value)     => Right(value)
+    case Frame.BulkString(bytes) =>
+      val text = bytes.asUtf8String
+      text.toDoubleOption.toRight(DecodeError("double", s"bulk string '$text'"))
+    case other                   => Left(DecodeError("double", Frame.describe(other)))
+  }
+
+  // GEODIST replies the distance as a double, or null when a member is absent
+  val optionalDouble: Frame => Either[DecodeError, Option[Double]] = {
+    case Frame.Null => Right(None)
+    case other      => lenientDouble(other).map(Some(_))
+  }
+
   private def buildEach[A, B, C](items: IterableOnce[A], builder: mutable.Builder[B, C])(
     f: A => Either[DecodeError, B]
   ): Either[DecodeError, C] = {
