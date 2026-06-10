@@ -7,10 +7,11 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{CrossSlot, NotConnected}
+import sage.SageException.{CrossSlot, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
 import sage.commands.{Command, Connection, Pipeline, Strings}
+import sage.commands.Pipeline.pipeline
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -45,7 +46,9 @@ class ClusterClientSpec extends munit.FunSuite {
     */
   final private class Fixture(behaviour: (Node, String) => Seq[Frame], seeds: Vector[Node], unreachable: Set[Node] = Set.empty) {
 
-    private val transports = mutable.Map.empty[Node, FakeTransport]
+    // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
+    // issued on one is still observable even after the other is created
+    private val transports = mutable.Map.empty[Node, mutable.ArrayBuffer[FakeTransport]]
 
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
@@ -55,7 +58,7 @@ class ClusterClientSpec extends munit.FunSuite {
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
-        transports(node) = transport
+        transports.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += transport
         transport
       }
 
@@ -75,7 +78,8 @@ class ClusterClientSpec extends munit.FunSuite {
 
     live.bootstrapTopology()
 
-    def written(node: Node): Vector[String] = transports.get(node).toVector.flatMap(_.written.map(_.asUtf8String))
+    def written(node: Node): Vector[String] =
+      transports.getOrElse(node, mutable.ArrayBuffer.empty).toVector.flatMap(_.written.map(_.asUtf8String))
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
@@ -166,19 +170,146 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
-  test("pipelines and transactions are rejected in cluster mode") {
-    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Null)
+  // nodeB owns only `slot`; nodeA owns the rest. A key hashing to `slot` routes to nodeB, any other key to nodeA.
+  private def splitOn(slot: Int): Frame = {
+    val ranges = mutable.ArrayBuffer.empty[(Node, Int, Int)]
+    if (slot > 0) ranges += ((nodeA, 0, slot - 1))
+    ranges += ((nodeB, slot, slot))
+    if (slot < Slot.Count - 1) ranges += ((nodeA, slot + 1, Slot.Count - 1))
+    slotsFrame(ranges.toVector*)
+  }
+
+  private val keyA  = "{a}"
+  private val keyB  = "{b}"
+  private val slotB = Slot.of(Bytes.utf8(keyB)).value
+
+  test("a cross-slot pipeline splits per node and merges in submission order") {
+    assert(Slot.of(Bytes.utf8(keyA)).value != slotB, "test keys must hash to different slots")
+    // each node answers a GET with its own host, so the merged result reveals which node served which position
+    val behaviour =
+      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
-    val pipelineFailed    = fixture.live.pipeline(Pipeline.sequence(Vector(Strings.get[String, String]("k")))).unsafeRun.failed
-    val transactionFailed = fixture.live.transaction(_ => CIO.value(())).unsafeRun.failed
-
-    for {
-      p <- pipelineFailed
-      t <- transactionFailed
-    } yield {
-      assert(p.isInstanceOf[UnsupportedOperationException], s"pipeline: $p")
-      assert(t.isInstanceOf[UnsupportedOperationException], s"transaction: $t")
+    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB)).pipeline).unsafeRun.map { result =>
+      assertEquals(result, (Right(Some(nodeA.host)), Right(Some(nodeB.host))))
+      assert(fixture.written(nodeA).exists(_.contains("GET")), "nodeA did not receive its GET")
+      assert(fixture.written(nodeB).exists(_.contains("GET")), "nodeB did not receive its GET")
     }
+  }
+
+  test("a per-node failure surfaces per-position without poisoning the other node's result") {
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (node == nodeB) Seq(Frame.SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value"))
+      else Seq(Frame.BulkString(Bytes.utf8("ok")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB)).pipeline).unsafeRun.map {
+      case (first, second) =>
+        assertEquals(first, Right(Some("ok")))
+        assert(second.fold(_.isInstanceOf[ServerError], _ => false), s"second position should be a ServerError: $second")
+    }
+  }
+
+  test("a single-slot pipeline routes to one node and returns the typed tuple") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2")).pipeline).unsafeRun.map { result =>
+      assertEquals(result, (Some("v1"), Some("v2")))
+    }
+  }
+
+  test("a cross-slot transaction is rejected with CrossSlot, with no MULTI sent") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(tx => tx.watch(keyA).flatMap(_ => tx.run(Strings.get[String, String](keyB))))
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+        assert(!fixture.written(nodeB).exists(_.contains("MULTI")), "no MULTI should reach the other slot's node")
+      }
+  }
+
+  test("a keyless command keeps its submission-order position within a node's batch") {
+    // get, ping, get all hash/route to one node; the keyless ping must stay between the two gets on the wire, not be reordered to the end
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.SimpleString("PONG"), Frame.BulkString(Bytes.utf8("v2")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .pipeline((Strings.get[String, String]("{a}1"), Connection.ping(None), Strings.get[String, String]("{a}2")).pipeline)
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, (Some("v1"), "PONG", Some("v2")))
+        val batch = fixture.written(nodeA).find(_.contains("PING")).getOrElse(fail("no batch reached the node"))
+        assert(batch.indexOf("{a}1") < batch.indexOf("PING"), s"ping reordered before the first get: $batch")
+        assert(batch.indexOf("PING") < batch.indexOf("{a}2"), s"ping reordered after the second get: $batch")
+      }
+  }
+
+  test("an ownership fault during a transaction refreshes the topology so a retry can re-pin") {
+    val slot      = Slot.of(Bytes.utf8("{a}1")).value
+    // the pinned node answers the MULTI/EXEC batch with a MOVED while queuing: the tx fails, but a background refresh must still fire so a
+    // retry routes to the new owner instead of looping on the stale node
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI"))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"MOVED $slot b:6379"), Frame.SimpleError("EXECABORT Transaction discarded"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(_.exec(Pipeline.sequence(Vector(Strings.get[String, String]("{a}1")))))
+      .unsafeRun
+      .failed
+      .map { _ =>
+        Thread.sleep(200) // the refresh is offloaded; give it a moment to issue its CLUSTER SLOTS
+        val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
+        assert(clusterCalls >= 2, s"a MOVED in EXEC should trigger a topology refresh; CLUSTER calls seen: $clusterCalls")
+      }
+  }
+
+  test("a transaction fault forces a refresh even inside the throttle window") {
+    val slot      = Slot.of(Bytes.utf8("{a}1")).value
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI"))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"MOVED $slot b:6379"), Frame.SimpleError("EXECABORT discarded"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA)) // default minRefreshInterval (5s) far exceeds this test's duration
+
+    // two faults within the throttle window: a throttled refresh would run only once (CLUSTER stays at 2), a forced one runs on each
+    val tx = fixture.live.transaction(_.exec(Pipeline.sequence(Vector(Strings.get[String, String]("{a}1")))))
+    for {
+      _ <- tx.unsafeRun.failed
+      _  = Thread.sleep(150) // let the first forced refresh complete and stamp the throttle window
+      _ <- tx.unsafeRun.failed
+    } yield {
+      Thread.sleep(150)
+      val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
+      assert(clusterCalls >= 3, s"each tx fault must force a refresh despite the throttle; CLUSTER calls: $clusterCalls")
+    }
+  }
+
+  test("a single-slot transaction commits in cluster mode") {
+    val key       = "{a}1"
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI"))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("v")))))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(tx => tx.watch(key).flatMap(_ => tx.exec(Pipeline.sequence(Vector(Strings.get[String, String](key))))))
+      .unsafeRun
+      .map(result => assertEquals(result, Some(Vector(Some("v")))))
   }
 }

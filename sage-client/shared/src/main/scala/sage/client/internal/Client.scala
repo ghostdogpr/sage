@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, Message, PatternMessage, SageException}
-import sage.SageException.{ConnectionLost, NotConnected, ProtocolError, ServerError, TimedOut, TlsError, TransactionDiscarded, UnsupportedServer}
+import sage.SageException.{ConnectionLost, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
@@ -698,17 +698,6 @@ object Client {
       case other                                                                                                    => other
     }
 
-  // the strict-collapse step shared by `pipeline` and a transaction's `exec`
-  private def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] =
-    results.collectFirst { case Left(error) => error } match {
-      case Some(error) => CIO.fail(error)
-      case None        => CIO.value(toOut(results.collect { case Right(value) => value }))
-    }
-
-  // a programmer error, deliberately outside the sealed hierarchy (like the blocking-command guard): a scope captured past its block
-  private def scopeReleasedError: IllegalStateException =
-    new IllegalStateException("transaction scope used after its block returned")
-
   final private class Live(connection: MultiplexedConnection, pool: DedicatedPool, subscriptions: SubscriptionConnection) extends Client[CIO] {
 
     def run[A](command: Command[A]): CIO[A] =
@@ -718,7 +707,7 @@ object Client {
       }
 
     def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
-      submitPipeline(p).flatMap(collapseStrict(_, p.toOut))
+      submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
 
     def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
       submitPipeline(p).map(p.toResults)
@@ -753,20 +742,11 @@ object Client {
           val slots     = new AtomicReferenceArray[Either[SageException, Any]](n)
           val remaining = new AtomicInteger(n)
           val callbacks = Vector.tabulate(n) { i => (result: Try[Any]) =>
-            slots.set(i, toEither(result))
+            slots.set(i, TxSupport.toEither(result))
             if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(slots.get)))
           }
           if (!connection.submitAll(p.commands, callbacks)) complete(Failure(NotConnected()))
         }
-
-    // decoders return Either and never throw; the catch in the connection's reply path is defensive, so a non-SageException here is a
-    // decoder bug surfaced as a decode failure rather than allowed to escape the per-position result model.
-    private def toEither(result: Try[Any]): Either[SageException, Any] =
-      result match {
-        case Success(value)            => Right(value)
-        case Failure(e: SageException) => Left(e)
-        case Failure(other)            => Left(SageException.DecodeError("a decodable reply", s"decoder threw $other"))
-      }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking {
@@ -821,7 +801,7 @@ object Client {
 
     private def submitting[A](complete: Try[A] => Unit)(submit: => Unit): Unit = {
       lock.lock()
-      try if (released) complete(Failure(scopeReleasedError)) else submit
+      try if (released) complete(Failure(TxSupport.scopeReleasedError)) else submit
       finally lock.unlock()
     }
 
@@ -850,7 +830,7 @@ object Client {
 
     def run[A](command: Command[A]): CIO[A] =
       if (isReleased)
-        CIO.fail(scopeReleasedError)
+        CIO.fail(TxSupport.scopeReleasedError)
       else if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
@@ -867,7 +847,7 @@ object Client {
     def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
       runExec(p).flatMap {
         case None          => CIO.value(None)
-        case Some(results) => collapseStrict(results, p.toOut).map(Some(_))
+        case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
       }
 
     def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
@@ -876,7 +856,7 @@ object Client {
     // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).
     private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
       if (isReleased)
-        CIO.fail(scopeReleasedError)
+        CIO.fail(TxSupport.scopeReleasedError)
       // a truly empty no-op only when nothing is watched; with watches armed we must still MULTI/EXEC so a concurrent change can abort it
       else if (p.commands.isEmpty && !armed.get)
         CIO.value(Some(Vector.empty))
@@ -889,39 +869,7 @@ object Client {
           }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
-            interpretExec(p.commands, frames)
+            TxSupport.interpretExec(p.commands, frames)
           }
-
-    private def interpretExec(
-      commands: Vector[Command[?]],
-      frames: Vector[Frame]
-    ): CIO[Option[Vector[Either[SageException, Any]]]] = {
-      val n          = commands.length
-      // frames: MULTI reply, then one queue reply per command, then the EXEC reply
-      val queueError = (0 to n).iterator.map(i => errorOf(frames(i))).collectFirst { case Some(message) => message }
-      queueError match {
-        case Some(message) => CIO.fail(TransactionDiscarded(message))
-        case None          =>
-          frames(n + 1) match {
-            case Frame.Null                              => CIO.value(None)
-            case Frame.Array(elems) if elems.length == n =>
-              CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i).asInstanceOf[Command[Any]], elems(i)))))
-            case Frame.Array(elems)                      =>
-              CIO.fail(ProtocolError(s"EXEC returned ${elems.length} results for $n queued commands"))
-            case other                                   =>
-              errorOf(other) match {
-                case Some(message) => CIO.fail(TransactionDiscarded(message))
-                case None          => CIO.fail(ProtocolError(s"unexpected EXEC reply: ${Frame.describe(other)}"))
-              }
-          }
-      }
-    }
-
-    private def errorOf(frame: Frame): Option[String] =
-      frame match {
-        case Frame.SimpleError(message) => Some(message)
-        case Frame.BulkError(message)   => Some(message.asUtf8String)
-        case _                          => None
-      }
   }
 }
