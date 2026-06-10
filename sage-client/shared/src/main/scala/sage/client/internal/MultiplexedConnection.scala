@@ -138,8 +138,8 @@ final private[client] class MultiplexedConnection private (
       bootstrap.foreach { command =>
         val latch   = new CountDownLatch(1)
         val outcome = new AtomicReference[Try[Any]]()
-        conn.submit[Any](
-          command.asInstanceOf[Command[Any]],
+        conn.submit(
+          command,
           result => {
             outcome.set(result)
             latch.countDown()
@@ -243,7 +243,7 @@ final private[client] class MultiplexedConnection private (
     // One Transport.Item, not N: the writer treats a queue element atomically, so concatenating the batch into a single payload is what
     // guarantees the pipeline is one socket write (one round-trip) rather than racing the writer between sends.
     def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Unit = {
-      val entries = Vector.tabulate(commands.length)(i => new Entry(commands(i).asInstanceOf[Command[Any]], callbacks(i)))
+      val entries = Vector.tabulate(commands.length)(i => new Entry(commands(i), callbacks(i)))
       transportRef.get().send(new Batch(entries))
     }
 

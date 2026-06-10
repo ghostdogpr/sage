@@ -42,7 +42,7 @@ private[internal] object TxSupport {
         frames(n + 1) match {
           case Frame.Null                              => CIO.value(None)
           case Frame.Array(elems) if elems.length == n =>
-            CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i).asInstanceOf[Command[Any]], elems(i)))))
+            CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i), elems(i)))))
           case Frame.Array(elems)                      =>
             CIO.fail(ProtocolError(s"EXEC returned ${elems.length} results for $n queued commands"))
           case other                                   =>

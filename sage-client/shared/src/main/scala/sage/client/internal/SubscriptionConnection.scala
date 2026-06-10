@@ -180,7 +180,7 @@ final private[client] class SubscriptionConnection(
         conn.close()
         throw ConnectionLost(mayHaveExecuted = false)
       }
-      Reply.run(command.asInstanceOf[Command[Any]], box.get()) match {
+      Reply.run(command, box.get()) match {
         case Left(error) => conn.close(); throw error
         case Right(_)    => ()
       }
