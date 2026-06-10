@@ -99,8 +99,7 @@ final private[client] class DedicatedPool(
     if (reusable) release(connection)
     else
       locked {
-        live -= connection
-        scheduleClose(connection)
+        discardLocked(connection)
         available.signalAll()
       }
 
@@ -177,20 +176,15 @@ final private[client] class DedicatedPool(
     while (result == null && idle.nonEmpty) {
       val candidate = idle.removeLast()
       if (reusable(candidate)) result = candidate.connection
-      else {
-        live -= candidate.connection
-        scheduleClose(candidate.connection)
-      }
+      else discardLocked(candidate.connection)
     }
     result
   }
 
   private def release(connection: DedicatedConnection): Unit =
     locked {
-      if (closing || !connection.isHealthy || !isCurrent(connection.epoch)) {
-        live -= connection
-        scheduleClose(connection)
-      } else idle.append(DedicatedPool.Idle(connection, scheduler.nowMillis))
+      if (closing || !healthyAndCurrent(connection)) discardLocked(connection)
+      else idle.append(DedicatedPool.Idle(connection, scheduler.nowMillis))
       available.signalAll()
     }
 
@@ -210,11 +204,20 @@ final private[client] class DedicatedPool(
   }
 
   // a connection from an older generation outlived a reconnect (e.g. DNS failover) and now points at the old server
+  private def healthyAndCurrent(connection: DedicatedConnection): Boolean =
+    connection.isHealthy && isCurrent(connection.epoch)
+
   private def reusable(entry: DedicatedPool.Idle): Boolean =
-    entry.connection.isHealthy && isCurrent(entry.connection.epoch) && !expired(entry)
+    healthyAndCurrent(entry.connection) && !expired(entry)
 
   private def expired(entry: DedicatedPool.Idle): Boolean =
     config.idleTimeout.isFinite && scheduler.nowMillis - entry.idleSinceMillis >= config.idleTimeout.toMillis
+
+  // must hold the lock; callers that free an occupied slot signal waiters themselves
+  private def discardLocked(connection: DedicatedConnection): Unit = {
+    live -= connection
+    scheduleClose(connection)
+  }
 
   // closing a connection joins its I/O threads, so it must never run under the lock or on the scheduler's timer thread
   private def scheduleClose(connection: DedicatedConnection): Unit =

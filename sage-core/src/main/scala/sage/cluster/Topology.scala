@@ -22,7 +22,7 @@ final class ClusterTopology private (val shards: Vector[Shard], owners: Array[No
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
 
   def route(command: Command[?]): Route =
-    if (command.keyIndices.exists(index => index < 0 || index >= command.args.length)) Route.Malformed
+    if (command.hasMalformedKeys) Route.Malformed
     else
       command.keyIndices.length match {
         case 0 => Route.Keyless
