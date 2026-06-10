@@ -6,7 +6,7 @@ package sage.integration
   */
 object Images {
 
-  val redis: String = "redis:8"
+  val redis: String = "redis:8.8.0"
 
-  val valkey: String = "valkey/valkey:8"
+  val valkey: String = "valkey/valkey:9.1.0"
 }
