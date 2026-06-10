@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference, AtomicReferenceArray}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
@@ -245,11 +245,10 @@ final private[client] class ClusterLive(
   private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
     if (p.commands.isEmpty)
       CIO.value(Vector.empty)
-    // blocking commands and malformed key indices are programmer errors: they fail the whole effect up front, never a single position
+    // a blocking command is a programmer error: it fails the whole effect up front, never a single position. Malformed keys are the same
+    // kind of error but classified by split, so runPipeline fails on them (the single source, shared with single-command dispatch).
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
-    else if (p.commands.exists(_.hasMalformedKeys))
-      CIO.fail(new IllegalArgumentException("a Pipeline command declares key positions that fall outside its arguments"))
     else
       CIO.async(complete => offload(runPipeline(p, complete)))
 
@@ -258,22 +257,22 @@ final private[client] class ClusterLive(
   // back to per-command dispatch. The countdown completes the effect once every position has landed terminally — once, never on a redirect.
   private def runPipeline[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Either[SageException, Any]]] => Unit): Unit = {
     val n                                                             = p.commands.length
-    val results                                                       = new AtomicReferenceArray[Either[SageException, Any]](n)
-    val remaining                                                     = new AtomicInteger(n)
-    def finish(index: Int, outcome: Either[SageException, Any]): Unit = {
-      results.set(index, outcome)
-      if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(results.get)))
-    }
+    val collector                                                     = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
+    def finish(index: Int, outcome: Either[SageException, Any]): Unit = collector.set(index, outcome)
     def reroute(index: Int): Unit                                     =
       offload(dispatch(p.commands(index), cluster.maxRedirects, result => finish(index, TxSupport.toEither(result))))
 
     val plan = topologyRef.get().split(p)
+    // a malformed command is a programmer error: split is the single source of that classification (the standalone client has no slots and
+    // doesn't check), so fail the whole effect before anything reaches the wire, never as a per-position result
+    plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
+      case Some(index) => complete(Failure(malformedKeys(p.commands(index).name))); return
+      case None        => ()
+    }
     plan.rejected.foreach {
       case (index, Rejected.CrossSlot(slots)) => finish(index, Left(crossSlot(p.commands(index).name, slots)))
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
-      // a programmer error: fail the whole effect, like single-command dispatch and the up-front guard, never a per-position result
-      case (index, Rejected.Malformed)        =>
-        complete(Failure(malformedKeys(p.commands(index).name)))
+      case (_, Rejected.Malformed)            => ()             // unreachable: the guard above returned
     }
     // keyless positions ride along on the first node group's batch; with no keyed group, dispatch routes each to any node
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
