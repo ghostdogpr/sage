@@ -25,6 +25,16 @@ name := "sage"
 addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
 addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck")
 
+addCommandAlias(
+  "testUnit",
+  "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
+    "clientFuture/Test/compile integrationTestsFuture/Test/compile"
+)
+addCommandAlias("itZio", "integrationTestsZio/test")
+addCommandAlias("itCe", "integrationTestsCe/test")
+addCommandAlias("itOx", "integrationTestsOx/test")
+addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
+
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
@@ -35,6 +45,7 @@ lazy val root = project
 lazy val core = (projectMatrix in file("sage-core"))
   .settings(name := "sage-core")
   .settings(commonSettings)
+  .settings(parallelUnitTests)
   .defaultAxes(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version))
   .customRow(
     autoScalaLibrary = true,
@@ -53,9 +64,10 @@ lazy val client = (projectMatrix in file("sage-client"))
   .dependsOn(core)
   .settings(name := "sage-client")
   .settings(commonSettings)
+  .settings(parallelUnitTests)
   .settings(
-    // the Scala Next compatLibrary call adds an implicit Future anchor row; only the LTS one is published
-    publish / skip := scalaVersion.value != scala3Version && moduleName.value.endsWith("-future")
+    // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
+    publish / skip := moduleName.value.endsWith("-future")
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
@@ -97,3 +109,7 @@ lazy val commonSettings = Def.settings(
   libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test,
   Test / fork                            := true
 )
+
+// only for container-free cells: integration suites each boot their own container, so running them in
+// parallel would multiply peak load and invite timing races
+lazy val parallelUnitTests = Def.settings(Test / testForkedParallel := true)

@@ -29,10 +29,29 @@ jobs:
       - name: Lint code
         run: sbt check
 
-  test:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Scala and Java
+        uses: coursier/setup-action@v3
+        with:
+          jvm: temurin:21
+          apps: sbt
+      - name: Cache scala dependencies
+        uses: coursier/cache-action@v8
+      - name: Run unit tests
+        run: sbt testUnit
+
+  integration:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      matrix:
+        backend: [Zio, Ce, Ox, Kyo]
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6
@@ -62,15 +81,15 @@ jobs:
       - name: Load server images
         if: steps.images.outputs.cache-hit == 'true'
         run: for f in ~/.docker-images/*.tar; do docker load -i "$f"; done
-      - name: Run tests
-        run: sbt test
+      - name: Run integration tests
+        run: sbt it${{ matrix.backend }}
         env:
           # ryuk adds a mandatory Docker Hub pull per run (rate-limit exposure) and ephemeral runners need no reaper
           TESTCONTAINERS_RYUK_DISABLED: "true"
   # re-enable when publishing is set up (requires PGP/Sonatype secrets)
   # publish:
   #   runs-on: ubuntu-24.04
-  #   needs: [lint, test]
+  #   needs: [lint, unit, integration]
   #   if: github.event_name != 'pull_request'
   #   steps:
   #     - name: Checkout current branch
