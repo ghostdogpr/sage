@@ -335,6 +335,68 @@ object CommandSamples {
       Strings.increxBy("k", 5L, saturate = true, upperBound = Some(100L), expiry = IncrExpiry.In(90.seconds, onlyIfNoTtl = true)),
       Vector("INCREX", "k", "BYINT", "5", "SATURATE", "UBOUND", "100", "EX", "90", "ENX")
     ),
-    Sample(Strings.increxByFloat("k", 1.5), Vector("INCREX", "k", "BYFLOAT", "1.5"))
+    Sample(Strings.increxByFloat("k", 1.5), Vector("INCREX", "k", "BYFLOAT", "1.5")),
+    Sample(Geo.geoAdd("k")(("Palermo", GeoCoordinates(15.0, 37.5))), Vector("GEOADD", "k", "15.0", "37.5", "Palermo")),
+    Sample(
+      Geo.geoAdd("k", GeoAddCondition.IfNotExists, changed = true)(("m", GeoCoordinates(1.0, 2.0))),
+      Vector("GEOADD", "k", "NX", "CH", "1.0", "2.0", "m")
+    ),
+    Sample(Geo.geoAdd("k", GeoAddCondition.IfExists)(("m", GeoCoordinates(1.0, 2.0))), Vector("GEOADD", "k", "XX", "1.0", "2.0", "m")),
+    Sample(Geo.geoDist("k", "a", "b"), Vector("GEODIST", "k", "a", "b", "m")),
+    Sample(Geo.geoDist("k", "a", "b", GeoUnit.Kilometers), Vector("GEODIST", "k", "a", "b", "km")),
+    Sample(Geo.geoHash("k", "a", "b"), Vector("GEOHASH", "k", "a", "b")),
+    Sample(Geo.geoPos("k", "a", "b"), Vector("GEOPOS", "k", "a", "b")),
+    Sample(
+      Geo.geoSearch("k", GeoOrigin.FromMember("m"), GeoShape.ByRadius(200.0, GeoUnit.Kilometers)),
+      Vector("GEOSEARCH", "k", "FROMMEMBER", "m", "BYRADIUS", "200.0", "km")
+    ),
+    Sample(
+      Geo.geoSearch[String, String](
+        "k",
+        GeoOrigin.FromLonLat(GeoCoordinates(15.0, 37.5)),
+        GeoShape.ByBox(1.0, 2.0, GeoUnit.Meters),
+        sort = Some(GeoSort.Asc),
+        count = Some(GeoCount(10, any = true))
+      ),
+      Vector("GEOSEARCH", "k", "FROMLONLAT", "15.0", "37.5", "BYBOX", "1.0", "2.0", "m", "ASC", "COUNT", "10", "ANY")
+    ),
+    Sample(
+      Geo.geoSearchWith("k", GeoOrigin.FromMember("m"), GeoShape.ByRadius(5.0, GeoUnit.Miles), withCoord = true, withDist = true, withHash = true),
+      Vector("GEOSEARCH", "k", "FROMMEMBER", "m", "BYRADIUS", "5.0", "mi", "WITHCOORD", "WITHDIST", "WITHHASH")
+    ),
+    Sample(
+      Geo.geoSearchStore("dst", "src", GeoOrigin.FromMember("m"), GeoShape.ByRadius(1.0, GeoUnit.Meters), storeDist = true),
+      Vector("GEOSEARCHSTORE", "dst", "src", "FROMMEMBER", "m", "BYRADIUS", "1.0", "m", "STOREDIST")
+    ),
+    Sample(Bitmaps.setBit("k", 7L, true), Vector("SETBIT", "k", "7", "1")),
+    Sample(Bitmaps.getBit("k", 7L), Vector("GETBIT", "k", "7")),
+    Sample(Bitmaps.bitCount("k"), Vector("BITCOUNT", "k")),
+    Sample(Bitmaps.bitCount("k", Some(BitRange(0L, 10L, BitUnit.Bit))), Vector("BITCOUNT", "k", "0", "10", "BIT")),
+    Sample(Bitmaps.bitPos("k", true), Vector("BITPOS", "k", "1")),
+    Sample(Bitmaps.bitPos("k", false, Some(BitPosRange.FromStart(2L))), Vector("BITPOS", "k", "0", "2")),
+    Sample(Bitmaps.bitPos("k", true, Some(BitPosRange.Within(0L, 5L, BitUnit.Byte))), Vector("BITPOS", "k", "1", "0", "5", "BYTE")),
+    Sample(Bitmaps.bitOpAnd("dst", "a", "b"), Vector("BITOP", "AND", "dst", "a", "b")),
+    Sample(Bitmaps.bitOpOr("dst", "a", "b"), Vector("BITOP", "OR", "dst", "a", "b")),
+    Sample(Bitmaps.bitOpXor("dst", "a", "b"), Vector("BITOP", "XOR", "dst", "a", "b")),
+    Sample(Bitmaps.bitOpNot("dst", "src"), Vector("BITOP", "NOT", "dst", "src")),
+    Sample(
+      Bitmaps.bitField(
+        "k",
+        BitFieldOp.Set(BitFieldType.Unsigned(8), BitFieldOffset.Absolute(0L), 255L),
+        BitFieldOp.Get(BitFieldType.Signed(8), BitFieldOffset.TypeWidth(0L)),
+        BitFieldOp.Overflow(BitFieldOverflow.Sat),
+        BitFieldOp.IncrBy(BitFieldType.Unsigned(8), BitFieldOffset.Absolute(0L), 10L)
+      ),
+      Vector("BITFIELD", "k", "SET", "u8", "0", "255", "GET", "i8", "#0", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "10")
+    ),
+    Sample(
+      Bitmaps.bitFieldRo("k", BitFieldOp.Get(BitFieldType.Unsigned(8), BitFieldOffset.Absolute(0L))),
+      Vector("BITFIELD_RO", "k", "GET", "u8", "0")
+    ),
+    Sample(HyperLogLog.pfAdd("k", "a", "b"), Vector("PFADD", "k", "a", "b")),
+    Sample(HyperLogLog.pfAdd[String, String]("k"), Vector("PFADD", "k")),
+    Sample(HyperLogLog.pfCount("a", "b"), Vector("PFCOUNT", "a", "b")),
+    Sample(HyperLogLog.pfMerge("dst", "a", "b"), Vector("PFMERGE", "dst", "a", "b")),
+    Sample(HyperLogLog.pfMerge[String]("dst"), Vector("PFMERGE", "dst"))
   )
 }

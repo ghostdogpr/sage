@@ -557,6 +557,77 @@ trait CommandRunner[F[_]] {
   final def pubsubShardNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubShardNumSub(channels*))
 
   final def pubsubNumPat: F[Long] = run(Pubsub.pubsubNumPat)
+
+  final def geoAdd[K: KeyCodec, V: ValueCodec](key: K, condition: GeoAddCondition = GeoAddCondition.Always, changed: Boolean = false)(
+    first: (V, GeoCoordinates),
+    rest: (V, GeoCoordinates)*
+  ): F[Long] = run(Geo.geoAdd(key, condition, changed)(first, rest*))
+
+  final def geoDist[K: KeyCodec, V: ValueCodec](key: K, member1: V, member2: V, unit: GeoUnit = GeoUnit.Meters): F[Option[Double]] =
+    run(Geo.geoDist(key, member1, member2, unit))
+
+  final def geoHash[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[String]]] =
+    run(Geo.geoHash(key, first, rest*))
+
+  final def geoPos[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[GeoCoordinates]]] =
+    run(Geo.geoPos(key, first, rest*))
+
+  final def geoSearch[K: KeyCodec, V: ValueCodec](
+    key: K,
+    origin: GeoOrigin[V],
+    shape: GeoShape,
+    sort: Option[GeoSort] = None,
+    count: Option[GeoCount] = None
+  ): F[Vector[V]] = run(Geo.geoSearch(key, origin, shape, sort, count))
+
+  final def geoSearchWith[K: KeyCodec, V: ValueCodec](
+    key: K,
+    origin: GeoOrigin[V],
+    shape: GeoShape,
+    withCoord: Boolean = false,
+    withDist: Boolean = false,
+    withHash: Boolean = false,
+    sort: Option[GeoSort] = None,
+    count: Option[GeoCount] = None
+  ): F[Vector[GeoSearchResult[V]]] = run(Geo.geoSearchWith(key, origin, shape, withCoord, withDist, withHash, sort, count))
+
+  final def geoSearchStore[K: KeyCodec, V: ValueCodec](
+    destination: K,
+    source: K,
+    origin: GeoOrigin[V],
+    shape: GeoShape,
+    sort: Option[GeoSort] = None,
+    count: Option[GeoCount] = None,
+    storeDist: Boolean = false
+  ): F[Long] = run(Geo.geoSearchStore(destination, source, origin, shape, sort, count, storeDist))
+
+  final def setBit[K: KeyCodec](key: K, offset: Long, value: Boolean): F[Boolean] = run(Bitmaps.setBit(key, offset, value))
+
+  final def getBit[K: KeyCodec](key: K, offset: Long): F[Boolean] = run(Bitmaps.getBit(key, offset))
+
+  final def bitCount[K: KeyCodec](key: K, range: Option[BitRange] = None): F[Long] = run(Bitmaps.bitCount(key, range))
+
+  final def bitPos[K: KeyCodec](key: K, bit: Boolean, range: Option[BitPosRange] = None): F[Long] = run(Bitmaps.bitPos(key, bit, range))
+
+  final def bitOpAnd[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpAnd(destination, first, rest*))
+
+  final def bitOpOr[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpOr(destination, first, rest*))
+
+  final def bitOpXor[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpXor(destination, first, rest*))
+
+  final def bitOpNot[K: KeyCodec](destination: K, source: K): F[Long] = run(Bitmaps.bitOpNot(destination, source))
+
+  final def bitField[K: KeyCodec](key: K, first: BitFieldOp, rest: BitFieldOp*): F[Vector[Option[Long]]] =
+    run(Bitmaps.bitField(key, first, rest*))
+
+  final def bitFieldRo[K: KeyCodec](key: K, first: BitFieldOp.Get, rest: BitFieldOp.Get*): F[Vector[Long]] =
+    run(Bitmaps.bitFieldRo(key, first, rest*))
+
+  final def pfAdd[K: KeyCodec, V: ValueCodec](key: K, elements: V*): F[Boolean] = run(HyperLogLog.pfAdd(key, elements*))
+
+  final def pfCount[K: KeyCodec](first: K, rest: K*): F[Long] = run(HyperLogLog.pfCount(first, rest*))
+
+  final def pfMerge[K: KeyCodec](destination: K, sources: K*): F[Unit] = run(HyperLogLog.pfMerge(destination, sources*))
 }
 
 /**
