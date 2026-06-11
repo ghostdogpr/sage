@@ -112,8 +112,9 @@ extension (client: SageClient) {
       .lower
 
   /**
-    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Entries
-    * dropped because they no longer exist are skipped (the server reports them per-call as deleted; they are not surfaced here).
+    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Tombstone
+    * entries — claimed ids whose data was already deleted, which the decoder surfaces with no fields — are skipped, so every emitted entry
+    * carries data.
     */
   def xAutoClaimAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
     key: K,
@@ -128,7 +129,7 @@ extension (client: SageClient) {
         case None       => CIO.value(None)
         case Some(from) =>
           CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))).map { result =>
-            Some((result.entries, if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
+            Some((result.entries.filter(_.fields.nonEmpty), if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
           }
       }
       .flatMap(items => CStream.init(items))
