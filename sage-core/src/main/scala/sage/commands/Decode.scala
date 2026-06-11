@@ -19,11 +19,6 @@ private[commands] object Decode {
     case other                => Left(DecodeError("integer", Frame.describe(other)))
   }
 
-  val int: Frame => Either[DecodeError, Int] = {
-    case Frame.Integer(value) => Right(value.toInt)
-    case other                => Left(DecodeError("integer", Frame.describe(other)))
-  }
-
   val flag: Frame => Either[DecodeError, Boolean] = {
     case Frame.Integer(0) => Right(false)
     case Frame.Integer(1) => Right(true)

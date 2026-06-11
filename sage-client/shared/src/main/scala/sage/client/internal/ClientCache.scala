@@ -100,17 +100,6 @@ final private[client] class ClientCache(maxBytes: Long) {
     } finally lock.unlock()
   }
 
-  private[internal] def size: Int       = {
-    lock.lock();
-    try entries.size
-    finally lock.unlock()
-  }
-  private[internal] def usedBytes: Long = {
-    lock.lock();
-    try bytesUsed
-    finally lock.unlock()
-  }
-
   private def insert(key: Key, entry: Entry): Unit = {
     val previous = entries.put(key, entry)
     if (previous != null) bytesUsed -= previous.sizeBytes
