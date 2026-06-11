@@ -23,9 +23,9 @@ import sage.commands.{Command, Pipeline, Role, Server}
   * [[ReadFrom]] policy (round-robin, with the policy's fallback). The same `Client` type as standalone and cluster; only the topology selects
   * it.
   *
-  * Roles refresh only on events — a reconnect-driven command loss or a `READONLY` from the presumed master — throttled by
-  * `minRefreshInterval`, never on a timer. A write that meets a demoted master fails fast (kicking off a re-discovery) so the caller's retry
-  * lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
+  * Roles refresh only on events — a reconnect-driven command loss, a `READONLY` from the presumed master, or a read that can reach no
+  * candidate — throttled by `minRefreshInterval`, never on a timer. A write that meets a demoted master fails fast (kicking off a
+  * re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
   */
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -198,7 +198,8 @@ final private[client] class MasterReplicaLive(
               case Failure(error) => offload(onReadFault(node, isMaster, error, command, rest, master, complete))
             }
           )
-      case _            => complete(Failure(NotConnected())) // strict Replica with no live replica, or whole set unreachable
+      // nothing reached the wire, so no fault event fires: re-discover here or a strict-Replica read stays stuck on a stale replica set
+      case _            => triggerRefresh(); complete(Failure(NotConnected()))
     }
 
   private def onReadFault[A](
@@ -245,6 +246,8 @@ final private[client] class MasterReplicaLive(
           // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else on the master
           val useReplica = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
           val nc         = if (useReplica) readConn() else masterConn()
+          // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
+          if (nc == null) triggerRefresh()
           // submitBatchOnOne either way, so a not-connected pipeline still reports a failed completion per position
           val submit     = if (nc == null) (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false else nc.submitAll
           Client.submitBatchOnOne(events, p.commands, submit, complete)

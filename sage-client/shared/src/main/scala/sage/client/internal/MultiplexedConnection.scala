@@ -318,16 +318,17 @@ final private[client] class MultiplexedConnection private (
 
     // Out-of-band frames never consume a pending entry. A READONLY reply fails its command, then poisons the connection: an in-place
     // failover demotes the old master without dropping the socket, so it looks healthy but rejects writes.
-    private def onFrame(frame: Frame): Unit = {
-      lastReplyAtMillis = scheduler.nowMillis
+    private def onFrame(frame: Frame): Unit =
       frame match {
         case Frame.Push(elements) =>
+          // not touching lastReplyAtMillis: a push proves only the read path, so push-only traffic must still get the idle keepalive PING
           Invalidation.decode(elements) match {
             case Some(Invalidation.Evict(keys)) => keys.foreach(cache.invalidate)
             case Some(Invalidation.FlushAll)    => cache.flush()
             case None                           => ()
           }
         case reply                =>
+          lastReplyAtMillis = scheduler.nowMillis
           val entry = pending.poll()
           if (entry == null) close()
           else {
@@ -336,7 +337,6 @@ final private[client] class MultiplexedConnection private (
           }
           if (Poison.isReadonly(reply)) close()
       }
-    }
 
     private def onClosed(): Unit = {
       var entry = pending.poll()

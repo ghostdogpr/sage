@@ -486,7 +486,21 @@ final private[client] class ClusterLive(
         case Success(_)     => settle(index, result)
         case Failure(error) =>
           classify(error) match {
-            case ClusterLive.Disposition.Reroute             => reroute(index)
+            case ClusterLive.Disposition.Reroute             =>
+              error match {
+                // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node again and burns a redirect; follow it
+                // straight to the importing node with ASKING (as single-command dispatch does). MOVED and connection loss re-route normally.
+                case e: ServerError =>
+                  val redirect = Redirect.parse(e.getMessage).get // classify only reroutes a ServerError that parses as a redirect
+                  redirect.kind match {
+                    // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
+                    case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
+                    case RedirectKind.Ask                                               =>
+                      onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
+                    case RedirectKind.Moved                                             => reroute(index)
+                  }
+                case _              => reroute(index)
+              }
             case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); settle(index, result)
             case ClusterLive.Disposition.Terminal            => settle(index, result)
           }
