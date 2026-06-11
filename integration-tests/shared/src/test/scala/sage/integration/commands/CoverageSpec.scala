@@ -41,7 +41,9 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
         redisCore  <- coreCommands(configOf(redis))
         valkeyCore <- coreCommands(configOf(valkey))
       } yield {
-        val serverUnion = redisCore ++ valkeyCore
+        // a subcommand modeled as an argument is covered by its bare command; only space-containing names sage implements as their own
+        // Command name (XINFO/XGROUP) are tracked
+        val serverUnion = (redisCore ++ valkeyCore).filterNot(name => name.contains(' ') && !implemented.contains(name))
 
         val unacknowledged = serverUnion -- implemented -- Coverage.skipped.keySet -- Coverage.todo
         assert(unacknowledged.isEmpty, s"unacknowledged server commands: ${unacknowledged.toVector.sorted.mkString(", ")}")

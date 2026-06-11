@@ -109,9 +109,12 @@ final private[client] class ClusterLive(
   // node order is fixed from the current snapshot when the walk begins (a reshard mid-scan can still miss or duplicate keys, as on any client).
   def scanTargets: CIO[Vector[ScanTarget]] =
     CIO.blocking {
-      val masters = topologyRef.get().shards.collect { case shard if shard.slots.nonEmpty => shard.master }.distinct
+      val masters = slotOwningMasters(topologyRef.get())
       if (masters.isEmpty) Vector(ScanTarget.any) else masters.map(node => ScanTarget(Some(node)))
     }
+
+  private def slotOwningMasters(topology: ClusterTopology): Vector[Node] =
+    topology.shards.collect { case shard if shard.slots.nonEmpty => shard.master }.distinct
 
   // pinned, redirect-free send: a keyless SCAN page must resume on the same node its cursor came from, so an unreachable node fails the walk
   // rather than rerouting to an arbitrary master (which would resume a node-local cursor on the wrong keyspace)
@@ -146,15 +149,44 @@ final private[client] class ClusterLive(
     if (closed) complete(Failure(NotConnected()))
     else {
       val topology = topologyRef.get()
-      topology.route(command) match {
-        case Route.ToNode(node, _)  => sendTo(node, command, asking = false, redirectsLeft, complete)
-        case Route.Keyless          => sendToAny(topology, command, redirectsLeft, complete)
-        case Route.Unowned(_)       => onUnowned(command, redirectsLeft, complete)
-        case Route.CrossSlot(slots) => complete(Failure(crossSlot(command.name, slots)))
-        case Route.Malformed        =>
-          complete(Failure(malformedKeys(command.name)))
+      if (command.allMasters) sendToAllMasters(topology, command, complete)
+      else
+        topology.route(command) match {
+          case Route.ToNode(node, _)  => sendTo(node, command, asking = false, redirectsLeft, complete)
+          case Route.Keyless          => sendToAny(topology, command, redirectsLeft, complete)
+          case Route.Unowned(_)       => onUnowned(command, redirectsLeft, complete)
+          case Route.CrossSlot(slots) => complete(Failure(crossSlot(command.name, slots)))
+          case Route.Malformed        =>
+            complete(Failure(malformedKeys(command.name)))
+        }
+    }
+
+  // a broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
+  // cache; any node failing fails the command, and the deterministic replies (SHA, library name, or OK) make agreement automatic
+  private def sendToAllMasters[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit): Unit = {
+    val masters = slotOwningMasters(topology)
+    if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
+    else {
+      val remaining                    = new java.util.concurrent.atomic.AtomicInteger(masters.size)
+      val firstError                   = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
+      val firstValue                   = new java.util.concurrent.atomic.AtomicReference[Try[A]](null)
+      def settle(result: Try[A]): Unit = {
+        result match {
+          case Success(_) => firstValue.compareAndSet(null, result)
+          case Failure(e) => firstError.compareAndSet(null, e)
+        }
+        if (remaining.decrementAndGet() == 0)
+          complete(Option(firstError.get()).map(Failure(_)).getOrElse(firstValue.get()))
+      }
+      masters.foreach { node =>
+        val nc =
+          try getOrEstablish(node)
+          catch { case NonFatal(_) => null }
+        if (nc == null) settle(Failure(NotConnected()))
+        else nc.submit[A](command, asking = false, settle)
       }
     }
+  }
 
   // sends to a live node if one is connected, else any master in the topology; used for keyless commands and as the still-unowned fallback
   private def sendToAny[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
@@ -265,6 +297,14 @@ final private[client] class ClusterLive(
     // kind of error but classified by split, so runPipeline fails on them (the single source, shared with single-command dispatch).
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
+    // a Pipeline batches per node, so it cannot fan a command out to every master; an all-masters command (SCRIPT LOAD, FUNCTION LOAD, …)
+    // would silently load one node only and break a later key-routed EVALSHA/FCALL. Fail up front rather than partially apply it.
+    else if (p.commands.exists(_.allMasters))
+      CIO.fail(
+        new IllegalArgumentException(
+          "a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD); run it individually on the client"
+        )
+      )
     else
       CIO.async(complete => offload(runPipeline(p, complete)))
 

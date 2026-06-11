@@ -1,9 +1,18 @@
 package sage.commands
 
+import scala.concurrent.duration.FiniteDuration
+
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.KeyCodec
 import sage.protocol.Frame
+
+/**
+  * `CLIENT PAUSE`'s scope: pause only writes, or all commands.
+  */
+enum ClientPauseMode {
+  case Write, All
+}
 
 private[sage] object Connection {
 
@@ -52,5 +61,42 @@ private[sage] object Connection {
       keyIndices = Command.NoKeys,
       args = Bytes.utf8("3") +: auth.toVector.flatMap { case (username, password) => Vector("AUTH", username, password).map(Bytes.utf8) },
       decode = HelloReply.decode
+    )
+
+  def echo(message: String): Command[String] =
+    Command("ECHO", Command.NoKeys, Vector(Bytes.utf8(message)), Decode.utf8String)
+
+  val clientId: Command[Long]        = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("ID")), Decode.long)
+  val clientGetName: Command[String] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector(Bytes.utf8("GETNAME")),
+      {
+        case Frame.Null              => Right("")
+        case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
+        case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
+      }
+    )
+  val clientInfo: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("INFO")), Decode.text)
+  val clientList: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("LIST")), Decode.text)
+  val clientGetRedir: Command[Long]  = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("GETREDIR")), Decode.long)
+
+  def clientPause(timeout: FiniteDuration, mode: Option[ClientPauseMode] = None): Command[Unit] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector(Bytes.utf8("PAUSE"), Bytes.utf8(timeout.toMillis.toString)) ++ mode.map(m => Bytes.utf8(m.toString.toUpperCase)).toVector,
+      Decode.ok
+    )
+
+  val clientUnpause: Command[Unit] = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("UNPAUSE")), Decode.ok)
+
+  def clientUnblock(id: Long, error: Boolean = false): Command[Boolean] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector(Bytes.utf8("UNBLOCK"), Bytes.utf8(id.toString), Bytes.utf8(if (error) "ERROR" else "TIMEOUT")),
+      Decode.flag
     )
 }

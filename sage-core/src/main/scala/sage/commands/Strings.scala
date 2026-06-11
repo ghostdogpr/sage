@@ -77,6 +77,26 @@ enum IncrExpiry {
 
 private[sage] object Strings {
 
+  private val Get          = Bytes.utf8("GET")
+  private val Nx           = Bytes.utf8("NX")
+  private val Xx           = Bytes.utf8("XX")
+  private val KeepTtl      = Bytes.utf8("KEEPTTL")
+  private val Persist      = Bytes.utf8("PERSIST")
+  private val Len          = Bytes.utf8("LEN")
+  private val Idx          = Bytes.utf8("IDX")
+  private val MinMatchLen  = Bytes.utf8("MINMATCHLEN")
+  private val WithMatchLen = Bytes.utf8("WITHMATCHLEN")
+  private val ByInt        = Bytes.utf8("BYINT")
+  private val ByFloat      = Bytes.utf8("BYFLOAT")
+  private val Saturate     = Bytes.utf8("SATURATE")
+  private val LBound       = Bytes.utf8("LBOUND")
+  private val UBound       = Bytes.utf8("UBOUND")
+  private val Enx          = Bytes.utf8("ENX")
+  private val IfEq         = Bytes.utf8("IFEQ")
+  private val IfNe         = Bytes.utf8("IFNE")
+  private val IfDeq        = Bytes.utf8("IFDEQ")
+  private val IfDne        = Bytes.utf8("IFDNE")
+
   def append[K, V](key: K, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command("APPEND", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(value)), Decode.long)
 
@@ -338,23 +358,4 @@ private[sage] object Strings {
     pairs.flatMap { case (key, value) => Vector(keyCodec.encode(key), valueCodec.encode(value)) }
 
   private def msetKeyIndices(pairs: Int): Vector[Int] = Vector.tabulate(pairs)(_ * 2)
-  private val Get                                     = Bytes.utf8("GET")
-  private val Nx                                      = Bytes.utf8("NX")
-  private val Xx                                      = Bytes.utf8("XX")
-  private val KeepTtl                                 = Bytes.utf8("KEEPTTL")
-  private val Persist                                 = Bytes.utf8("PERSIST")
-  private val Len                                     = Bytes.utf8("LEN")
-  private val Idx                                     = Bytes.utf8("IDX")
-  private val MinMatchLen                             = Bytes.utf8("MINMATCHLEN")
-  private val WithMatchLen                            = Bytes.utf8("WITHMATCHLEN")
-  private val ByInt                                   = Bytes.utf8("BYINT")
-  private val ByFloat                                 = Bytes.utf8("BYFLOAT")
-  private val Saturate                                = Bytes.utf8("SATURATE")
-  private val LBound                                  = Bytes.utf8("LBOUND")
-  private val UBound                                  = Bytes.utf8("UBOUND")
-  private val Enx                                     = Bytes.utf8("ENX")
-  private val IfEq                                    = Bytes.utf8("IFEQ")
-  private val IfNe                                    = Bytes.utf8("IFNE")
-  private val IfDeq                                   = Bytes.utf8("IFDEQ")
-  private val IfDne                                   = Bytes.utf8("IFDNE")
 }

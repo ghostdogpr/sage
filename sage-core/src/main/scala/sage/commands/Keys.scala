@@ -99,6 +99,28 @@ enum MigrateResult {
 
 private[sage] object Keys {
 
+  private val Replace   = Bytes.utf8("REPLACE")
+  private val Type      = Bytes.utf8("TYPE")
+  private val Nx        = Bytes.utf8("NX")
+  private val Xx        = Bytes.utf8("XX")
+  private val Gt        = Bytes.utf8("GT")
+  private val Lt        = Bytes.utf8("LT")
+  private val By        = Bytes.utf8("BY")
+  private val Get       = Bytes.utf8("GET")
+  private val LimitWord = Bytes.utf8("LIMIT")
+  private val Desc      = Bytes.utf8("DESC")
+  private val Alpha     = Bytes.utf8("ALPHA")
+  private val Store     = Bytes.utf8("STORE")
+  private val AbsTtl    = Bytes.utf8("ABSTTL")
+  private val IdleTime  = Bytes.utf8("IDLETIME")
+  private val Freq      = Bytes.utf8("FREQ")
+  private val Copy      = Bytes.utf8("COPY")
+  private val Auth      = Bytes.utf8("AUTH")
+  private val Auth2     = Bytes.utf8("AUTH2")
+  private val Keyword   = Bytes.utf8("KEYS")
+  private val Encoding  = Bytes.utf8("ENCODING")
+  private val RefCount  = Bytes.utf8("REFCOUNT")
+
   def copy[K](source: K, destination: K, replace: Boolean = false)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command(
       "COPY",
@@ -338,25 +360,4 @@ private[sage] object Keys {
     case Frame.Integer(amount) if amount >= 0 => Right(ExpiryTime.At(toInstant(amount)))
     case other                                => Left(DecodeError("expiry time integer", Frame.describe(other)))
   }
-  private val Replace                                                                                = Bytes.utf8("REPLACE")
-  private val Type                                                                                   = Bytes.utf8("TYPE")
-  private val Nx                                                                                     = Bytes.utf8("NX")
-  private val Xx                                                                                     = Bytes.utf8("XX")
-  private val Gt                                                                                     = Bytes.utf8("GT")
-  private val Lt                                                                                     = Bytes.utf8("LT")
-  private val By                                                                                     = Bytes.utf8("BY")
-  private val Get                                                                                    = Bytes.utf8("GET")
-  private val LimitWord                                                                              = Bytes.utf8("LIMIT")
-  private val Desc                                                                                   = Bytes.utf8("DESC")
-  private val Alpha                                                                                  = Bytes.utf8("ALPHA")
-  private val Store                                                                                  = Bytes.utf8("STORE")
-  private val AbsTtl                                                                                 = Bytes.utf8("ABSTTL")
-  private val IdleTime                                                                               = Bytes.utf8("IDLETIME")
-  private val Freq                                                                                   = Bytes.utf8("FREQ")
-  private val Copy                                                                                   = Bytes.utf8("COPY")
-  private val Auth                                                                                   = Bytes.utf8("AUTH")
-  private val Auth2                                                                                  = Bytes.utf8("AUTH2")
-  private val Keyword                                                                                = Bytes.utf8("KEYS")
-  private val Encoding                                                                               = Bytes.utf8("ENCODING")
-  private val RefCount                                                                               = Bytes.utf8("REFCOUNT")
 }

@@ -11,7 +11,7 @@ import sage.{Bytes, Message}
 import sage.SageException.DecodeError
 import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.{Client, ScanTarget}
-import sage.commands.{Command, Commands, Pipeline, ScanCursor}
+import sage.commands.{Command, Commands, FlushMode, Pipeline, ScanCursor}
 import sage.commands.Pipeline.pipeline
 import sage.integration.{ContainerClient, Images}
 import sage.protocol.Frame
@@ -164,6 +164,47 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
             } yield {
               assert(targets.forall(_.node.isDefined), s"cluster scan targets must be node-pinned: $targets")
               assertEquals(found, expected)
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
+  // the All-Masters broadcast path: SCRIPT LOAD and FUNCTION LOAD fan out to every master, so a key-routed EVALSHA/FCALL finds them. One
+  // node owns all slots here, so the broadcast reaches one master; multi-master fan-out rides the same dispatch branch.
+  test("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve") {
+    withContainers { server =>
+      val host       = server.host
+      val port       = server.mappedPort(6379)
+      val standalone = SageConfig(host = host, port = port)
+      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val library    =
+        """#!lua name=clib
+          |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)
+          |""".stripMargin
+
+      val program =
+        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+          connectAndUse(clustered) { client =>
+            for {
+              sha   <- client.scriptLoad("return redis.call('get', KEYS[1])")
+              _     <- client.set("bcast-key", "v")
+              eval  <- client.evalSha(sha, Seq("bcast-key"))
+              _     <- client.functionFlush(Some(FlushMode.Sync))
+              name  <- client.functionLoad(library)
+              fcall <- client.fCall("clib_get", Seq("bcast-key"))
+            } yield {
+              assertEquals(sha.length, 40)
+              assertEquals(name, "clib")
+              eval match {
+                case Frame.BulkString(b) => assertEquals(b.asUtf8String, "v")
+                case other               => fail(s"expected bulk string, got $other")
+              }
+              fcall match {
+                case Frame.BulkString(b) => assertEquals(b.asUtf8String, "v")
+                case other               => fail(s"expected bulk string, got $other")
+              }
             }
           }
         }

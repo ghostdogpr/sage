@@ -21,6 +21,10 @@ enum Execution {
   * needs: a read whose result is a pure function of the named keys' current state, so a server invalidation push covers every way it can
   * change. Time-varying reads (`TTL`, `OBJECT IDLETIME`) and non-deterministic ones (`SRANDMEMBER`) are read-only but **not** cacheable —
   * they change with no key write, so no invalidation would ever fire. Both are intrinsic metadata set by the builders.
+  *
+  * `allMasters` marks a keyless command whose effect is per-node and not replicated across shards, so a cluster must run it on every
+  * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, and `FLUSHALL`/
+  * `FLUSHDB`). Inert on a standalone server.
   */
 final case class Command[+Out](
   name: String,
@@ -29,10 +33,12 @@ final case class Command[+Out](
   decode: Frame => Either[DecodeError, Out],
   execution: Execution = Execution.Ordinary,
   isReadOnly: Boolean = false,
-  cacheable: Boolean = false
+  cacheable: Boolean = false,
+  allMasters: Boolean = false
 ) {
 
-  def map[B](f: Out => B): Command[B] = Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable)
+  def map[B](f: Out => B): Command[B] =
+    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters)
 
   def isBlocking: Boolean = execution == Execution.Blocking
 

@@ -30,6 +30,12 @@ enum InsertPosition {
 
 private[sage] object Lists {
 
+  private val Before = Bytes.utf8("BEFORE")
+  private val After  = Bytes.utf8("AFTER")
+  private val Rank   = Bytes.utf8("RANK")
+  private val Count  = Bytes.utf8("COUNT")
+  private val MaxLen = Bytes.utf8("MAXLEN")
+
   def lPush[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     push("LPUSH", key, first +: rest.toVector)
 
@@ -210,10 +216,4 @@ private[sage] object Lists {
       case InsertPosition.Before => Before
       case InsertPosition.After  => After
     }
-
-  private val Before = Bytes.utf8("BEFORE")
-  private val After  = Bytes.utf8("AFTER")
-  private val Rank   = Bytes.utf8("RANK")
-  private val Count  = Bytes.utf8("COUNT")
-  private val MaxLen = Bytes.utf8("MAXLEN")
 }

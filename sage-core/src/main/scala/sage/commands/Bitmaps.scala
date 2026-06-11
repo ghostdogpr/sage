@@ -41,6 +41,22 @@ enum BitFieldOp {
 
 private[sage] object Bitmaps {
 
+  private val Zero         = Bytes.utf8("0")
+  private val One          = Bytes.utf8("1")
+  private val And          = Bytes.utf8("AND")
+  private val Or           = Bytes.utf8("OR")
+  private val Xor          = Bytes.utf8("XOR")
+  private val Not          = Bytes.utf8("NOT")
+  private val GetWord      = Bytes.utf8("GET")
+  private val SetWord      = Bytes.utf8("SET")
+  private val IncrByWord   = Bytes.utf8("INCRBY")
+  private val OverflowWord = Bytes.utf8("OVERFLOW")
+  private val WrapWord     = Bytes.utf8("WRAP")
+  private val SatWord      = Bytes.utf8("SAT")
+  private val FailWord     = Bytes.utf8("FAIL")
+  private val ByteWord     = Bytes.utf8("BYTE")
+  private val BitWord      = Bytes.utf8("BIT")
+
   def setBit[K](key: K, offset: Long, value: Boolean)(using keyCodec: KeyCodec[K]): Command[Boolean] =
     Command("SETBIT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(offset.toString), bitToken(value)), Decode.flag)
 
@@ -116,20 +132,4 @@ private[sage] object Bitmaps {
     }
 
   private def bitToken(value: Boolean): Bytes = if (value) One else Zero
-
-  private val Zero         = Bytes.utf8("0")
-  private val One          = Bytes.utf8("1")
-  private val And          = Bytes.utf8("AND")
-  private val Or           = Bytes.utf8("OR")
-  private val Xor          = Bytes.utf8("XOR")
-  private val Not          = Bytes.utf8("NOT")
-  private val GetWord      = Bytes.utf8("GET")
-  private val SetWord      = Bytes.utf8("SET")
-  private val IncrByWord   = Bytes.utf8("INCRBY")
-  private val OverflowWord = Bytes.utf8("OVERFLOW")
-  private val WrapWord     = Bytes.utf8("WRAP")
-  private val SatWord      = Bytes.utf8("SAT")
-  private val FailWord     = Bytes.utf8("FAIL")
-  private val ByteWord     = Bytes.utf8("BYTE")
-  private val BitWord      = Bytes.utf8("BIT")
 }

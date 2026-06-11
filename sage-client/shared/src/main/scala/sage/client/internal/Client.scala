@@ -765,6 +765,126 @@ trait CommandRunner[F[_]] {
     retryCount: Option[Long] = None,
     force: Boolean = false
   ): F[Long] = run(Streams.xNack(key, group, mode)(first, rest*)(retryCount, force))
+
+  // --- scripting -----------------------------------------------------------------------------------------------------------------------
+
+  final def eval(script: String): F[Frame]                                                         = run(Scripting.eval(script))
+  final def eval[K: KeyCodec](script: String, keys: Seq[K]): F[Frame]                              = run(Scripting.eval(script, keys))
+  final def eval[K: KeyCodec, V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Scripting.eval(script, keys, args))
+
+  final def evalRo(script: String): F[Frame]                                                         = run(Scripting.evalRo(script))
+  final def evalRo[K: KeyCodec](script: String, keys: Seq[K]): F[Frame]                              = run(Scripting.evalRo(script, keys))
+  final def evalRo[K: KeyCodec, V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Scripting.evalRo(script, keys, args))
+
+  final def evalSha(sha: String): F[Frame]                                                         = run(Scripting.evalSha(sha))
+  final def evalSha[K: KeyCodec](sha: String, keys: Seq[K]): F[Frame]                              = run(Scripting.evalSha(sha, keys))
+  final def evalSha[K: KeyCodec, V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Scripting.evalSha(sha, keys, args))
+
+  final def evalShaRo(sha: String): F[Frame]                                                         = run(Scripting.evalShaRo(sha))
+  final def evalShaRo[K: KeyCodec](sha: String, keys: Seq[K]): F[Frame]                              = run(Scripting.evalShaRo(sha, keys))
+  final def evalShaRo[K: KeyCodec, V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Scripting.evalShaRo(sha, keys, args))
+
+  final def scriptLoad(script: String): F[String]                          = run(Scripting.scriptLoad(script))
+  final def scriptExists(first: String, rest: String*): F[Vector[Boolean]] = run(Scripting.scriptExists(first, rest*))
+  final def scriptFlush(mode: Option[FlushMode] = None): F[Unit]           = run(Scripting.scriptFlush(mode))
+  final def scriptKill: F[Unit]                                            = run(Scripting.scriptKill)
+  final def scriptShow(sha: String): F[String]                             = run(Scripting.scriptShow(sha))
+
+  // --- functions -----------------------------------------------------------------------------------------------------------------------
+
+  final def fCall(function: String): F[Frame]                                                         = run(Functions.fCall(function))
+  final def fCall[K: KeyCodec](function: String, keys: Seq[K]): F[Frame]                              = run(Functions.fCall(function, keys))
+  final def fCall[K: KeyCodec, V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Functions.fCall(function, keys, args))
+
+  final def fCallRo(function: String): F[Frame]                                                         = run(Functions.fCallRo(function))
+  final def fCallRo[K: KeyCodec](function: String, keys: Seq[K]): F[Frame]                              = run(Functions.fCallRo(function, keys))
+  final def fCallRo[K: KeyCodec, V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+    run(Functions.fCallRo(function, keys, args))
+
+  final def functionLoad(code: String, replace: Boolean = false): F[String]                                     = run(Functions.functionLoad(code, replace))
+  final def functionDelete(libraryName: String): F[Unit]                                                        = run(Functions.functionDelete(libraryName))
+  final def functionFlush(mode: Option[FlushMode] = None): F[Unit]                                              = run(Functions.functionFlush(mode))
+  final def functionKill: F[Unit]                                                                               = run(Functions.functionKill)
+  final def functionDump: F[Bytes]                                                                              = run(Functions.functionDump)
+  final def functionRestore(payload: Bytes, policy: Option[RestorePolicy] = None): F[Unit]                      =
+    run(Functions.functionRestore(payload, policy))
+  final def functionList(libraryName: Option[String] = None, withCode: Boolean = false): F[Vector[LibraryInfo]] =
+    run(Functions.functionList(libraryName, withCode))
+  final def functionStats: F[FunctionStats]                                                                     = run(Functions.functionStats)
+
+  // --- server admin --------------------------------------------------------------------------------------------------------------------
+
+  final def configGet(parameter: String, rest: String*): F[Map[String, String]]                      = run(Server.configGet(parameter, rest*))
+  final def configSet(setting: (String, String), rest: (String, String)*): F[Unit]                   = run(Server.configSet(setting, rest*))
+  final def configResetStat: F[Unit]                                                                 = run(Server.configResetStat)
+  final def configRewrite: F[Unit]                                                                   = run(Server.configRewrite)
+  final def info(sections: String*): F[String]                                                       = run(Server.info(sections*))
+  final def dbSize: F[Long]                                                                          = run(Server.dbSize)
+  final def time: F[Instant]                                                                         = run(Server.time)
+  final def lastSave: F[Instant]                                                                     = run(Server.lastSave)
+  final def role: F[Role]                                                                            = run(Server.role)
+  final def flushAll(mode: Option[FlushMode] = None): F[Unit]                                        = run(Server.flushAll(mode))
+  final def flushDb(mode: Option[FlushMode] = None): F[Unit]                                         = run(Server.flushDb(mode))
+  final def save: F[Unit]                                                                            = run(Server.save)
+  final def bgSave(schedule: Boolean = false): F[String]                                             = run(Server.bgSave(schedule))
+  final def bgRewriteAof: F[String]                                                                  = run(Server.bgRewriteAof)
+  final def waitReplicas(numReplicas: Long, timeout: FiniteDuration): F[Long]                        = run(Server.waitReplicas(numReplicas, timeout))
+  final def waitAof(numLocal: Long, numReplicas: Long, timeout: FiniteDuration): F[(Long, Long)]     =
+    run(Server.waitAof(numLocal, numReplicas, timeout))
+  final def memoryUsage[K: KeyCodec](key: K, samples: Option[Long] = None): F[Option[Long]]          = run(Server.memoryUsage(key, samples))
+  final def memoryPurge: F[Unit]                                                                     = run(Server.memoryPurge)
+  final def slowLogGet(count: Option[Long] = None): F[Vector[SlowLogEntry]]                          = run(Server.slowLogGet(count))
+  final def slowLogLen: F[Long]                                                                      = run(Server.slowLogLen)
+  final def slowLogReset: F[Unit]                                                                    = run(Server.slowLogReset)
+  final def latencyHistory(event: String): F[Vector[(Instant, FiniteDuration)]]                      = run(Server.latencyHistory(event))
+  final def latencyLatest: F[Vector[LatencyEntry]]                                                   = run(Server.latencyLatest)
+  final def latencyReset(events: String*): F[Long]                                                   = run(Server.latencyReset(events*))
+  final def latencyHistogram(commands: String*): F[Map[String, CommandHistogram]]                    = run(Server.latencyHistogram(commands*))
+  final def commandCount: F[Long]                                                                    = run(Server.commandCount)
+  final def commandList(filterBy: Option[CommandFilterBy] = None): F[Vector[String]]                 = run(Server.commandList(filterBy))
+  final def commandGetKeys(command: String, args: String*): F[Vector[String]]                        = run(Server.commandGetKeys(command, args*))
+  final def commandGetKeysAndFlags(command: String, args: String*): F[Vector[(String, Set[String])]] =
+    run(Server.commandGetKeysAndFlags(command, args*))
+  final def commandInfo(commands: String*): F[Vector[CommandInfo]]                                   = run(Server.commandInfo(commands*))
+  final def clusterInfo: F[String]                                                                   = run(Server.clusterInfo)
+  final def clusterNodes: F[String]                                                                  = run(Server.clusterNodes)
+  final def clusterMyId: F[String]                                                                   = run(Server.clusterMyId)
+  final def clusterKeySlot(key: String): F[Long]                                                     = run(Server.clusterKeySlot(key))
+  final def clusterCountKeysInSlot(slot: Int): F[Long]                                               = run(Server.clusterCountKeysInSlot(slot))
+
+  // --- access control ------------------------------------------------------------------------------------------------------------------
+
+  final def aclWhoAmI: F[String]                                                   = run(Acl.aclWhoAmI)
+  final def aclList: F[Vector[String]]                                             = run(Acl.aclList)
+  final def aclUsers: F[Vector[String]]                                            = run(Acl.aclUsers)
+  final def aclCat(category: Option[String] = None): F[Vector[String]]             = run(Acl.aclCat(category))
+  final def aclGenPass(bits: Option[Int] = None): F[String]                        = run(Acl.aclGenPass(bits))
+  final def aclGetUser(username: String): F[Option[AclUser]]                       = run(Acl.aclGetUser(username))
+  final def aclSetUser(username: String, rules: String*): F[Unit]                  = run(Acl.aclSetUser(username, rules*))
+  final def aclDelUser(first: String, rest: String*): F[Long]                      = run(Acl.aclDelUser(first, rest*))
+  final def aclDryRun(username: String, command: String, args: String*): F[String] = run(Acl.aclDryRun(username, command, args*))
+  final def aclLog(count: Option[Long] = None): F[Vector[AclLogEntry]]             = run(Acl.aclLog(count))
+  final def aclLogReset: F[Unit]                                                   = run(Acl.aclLogReset)
+  final def aclLoad: F[Unit]                                                       = run(Acl.aclLoad)
+  final def aclSave: F[Unit]                                                       = run(Acl.aclSave)
+
+  // --- connection ----------------------------------------------------------------------------------------------------------------------
+
+  final def echo(message: String): F[String]                                                    = run(Connection.echo(message))
+  final def clientId: F[Long]                                                                   = run(Connection.clientId)
+  final def clientGetName: F[String]                                                            = run(Connection.clientGetName)
+  final def clientInfo: F[String]                                                               = run(Connection.clientInfo)
+  final def clientList: F[String]                                                               = run(Connection.clientList)
+  final def clientGetRedir: F[Long]                                                             = run(Connection.clientGetRedir)
+  final def clientPause(timeout: FiniteDuration, mode: Option[ClientPauseMode] = None): F[Unit] =
+    run(Connection.clientPause(timeout, mode))
+  final def clientUnpause: F[Unit]                                                              = run(Connection.clientUnpause)
+  final def clientUnblock(id: Long, error: Boolean = false): F[Boolean]                         = run(Connection.clientUnblock(id, error))
 }
 
 /**
