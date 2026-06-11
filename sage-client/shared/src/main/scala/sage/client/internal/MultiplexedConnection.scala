@@ -8,10 +8,10 @@ import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-import sage.Bytes
-import sage.SageException
+import sage.{Bytes, Outcome, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.cluster.Node
 import sage.commands.{Command, Connection, Invalidation, Reply}
 import sage.protocol.Frame
 
@@ -32,7 +32,9 @@ final private[client] class MultiplexedConnection private (
   watchdog: WatchdogConfig,
   connectTimeout: FiniteDuration,
   closeTimeout: FiniteDuration,
-  cacheMaxBytes: Long
+  cacheMaxBytes: Long,
+  node: Option[Node],
+  events: Events
 ) {
   import MultiplexedConnection.{Generation, State}
 
@@ -122,11 +124,14 @@ final private[client] class MultiplexedConnection private (
 
   private def connectInitial(): Unit = {
     val conn = establish() // the first connect propagates a handshake failure; only reconnects retry
+    // emit under the lock so the enqueue is ordered with the state transition: a socket dropping immediately after cannot deliver
+    // Disconnected before this Connected (the same lock serializes both)
     locked {
       current = conn
       state = State.Live
       generation = generation.next
       startWatchdog()
+      events.emit(SageEvent.Connection.Connected(node))
     }
   }
 
@@ -175,6 +180,7 @@ final private[client] class MultiplexedConnection private (
             current = conn
             state = State.Live
             generation = generation.next
+            events.emit(SageEvent.Connection.Connected(node))
             true
           } else false
         }
@@ -185,14 +191,18 @@ final private[client] class MultiplexedConnection private (
   }
 
   // Connections that never became `current` (a failed establish) are ignored here; their caller handles them.
-  private def onConnTerminated(conn: Conn): Unit = locked {
-    if (conn eq current)
-      state match {
-        case State.Live | State.Reconnecting => state = State.Reconnecting; scheduleReconnect(0)
-        case State.Draining                  => state = State.Closed; stopWatchdog()
-        case State.Closed                    => ()
-      }
-  }
+  private def onConnTerminated(conn: Conn): Unit =
+    // Disconnected fires only on the Live edge (a fresh loss, not a failed reconnect attempt), under the lock so it is ordered after the
+    // Connected of the connection it ends
+    locked {
+      if (conn eq current)
+        state match {
+          case State.Live         => state = State.Reconnecting; scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node))
+          case State.Reconnecting => scheduleReconnect(0)
+          case State.Draining     => state = State.Closed; stopWatchdog()
+          case State.Closed       => ()
+        }
+    }
 
   private def startWatchdog(): Unit =
     if (watchdog.enabled && watchdogHandle == null)
@@ -258,13 +268,28 @@ final private[client] class MultiplexedConnection private (
         case Failure(error) => callback(Failure(error))
       }
       cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
-        case ClientCache.Hit(frame) => deliver(frame)
-        case ClientCache.Wait       => ()
+        // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
+        case ClientCache.Hit(frame) => events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
+        case ClientCache.Wait       => events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Fetch      =>
+          events.emit(SageEvent.Cache.Miss(command.name))
+          val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
-          val onReply: Try[Frame] => Unit = {
-            case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
-            case Failure(error) => cache.fail(commandBytes, error)
+          val onReply: Try[Frame] => Unit = { result =>
+            result match {
+              case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
+              case Failure(error) => cache.fail(commandBytes, error)
+            }
+            // a miss touched the server, so unlike a hit it also produces a CommandCompleted; the outcome reflects the decoded reply
+            if (events.enabled)
+              events.emit(
+                SageEvent.CommandCompleted(
+                  command.name,
+                  node,
+                  FiniteDuration(System.nanoTime() - started, NANOSECONDS),
+                  Outcome.of(result.flatMap(decodeFrame(command, _)))
+                )
+              )
           }
           submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
       }
@@ -381,10 +406,12 @@ private[client] object MultiplexedConnection {
     watchdog: WatchdogConfig,
     connectTimeout: FiniteDuration,
     closeTimeout: FiniteDuration,
-    cacheMaxBytes: Long = 0L
+    cacheMaxBytes: Long = 0L,
+    node: Option[Node] = None,
+    events: Events = Events.disabled
   ): MultiplexedConnection = {
     val connection =
-      new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout, cacheMaxBytes)
+      new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, node, events)
     connection.connectInitial()
     connection
   }

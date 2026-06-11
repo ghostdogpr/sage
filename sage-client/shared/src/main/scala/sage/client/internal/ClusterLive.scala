@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage, SageException}
+import sage.{Message, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
@@ -41,7 +41,8 @@ final private[client] class ClusterLive(
   dedicatedPool: DedicatedPoolConfig,
   cluster: ClusterConfig,
   pubsubBufferSize: Int,
-  seeds: Vector[Node]
+  seeds: Vector[Node],
+  events: Events = Events.disabled
 ) extends Client[CIO] {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
@@ -98,7 +99,7 @@ final private[client] class ClusterLive(
   }
 
   def run[A](command: Command[A]): CIO[A] =
-    CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, complete)))
+    CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete))))
 
   // client-side caching in cluster mode (per-node tracking through redirects/failover) is a follow-up; for now a cached read runs without
   // caching so the same call stays portable between standalone and cluster. The cacheability guard still applies, matching standalone.
@@ -120,7 +121,8 @@ final private[client] class ClusterLive(
   // rather than rerouting to an arbitrary master (which would resume a node-local cursor on the wrong keyspace)
   def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] =
     target.node match {
-      case Some(node) => CIO.async[A](complete => offload(sendTo(node, command, asking = false, redirectsLeft = 0, complete)))
+      case Some(node) =>
+        CIO.async[A](complete => offload(sendTo(node, command, asking = false, redirectsLeft = 0, Events.trackCommand(events, command, complete))))
       case None       => run(command)
     }
 
@@ -205,7 +207,7 @@ final private[client] class ClusterLive(
         command,
         asking,
         {
-          case Success(value) => complete(Success(value))
+          case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
           case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete))
         }
       )
@@ -219,8 +221,9 @@ final private[client] class ClusterLive(
           case ServerError(message) => onRedirect(node, Redirect.parse(message).get, command, redirectsLeft, complete)
           case _                    => onUnreachable(command, redirectsLeft, complete)
         }
-      case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); complete(Failure(error))
-      case ClusterLive.Disposition.Terminal            => complete(Failure(error))
+      case ClusterLive.Disposition.RefreshThenTerminal =>
+        triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
+      case ClusterLive.Disposition.Terminal            => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
   // The single failure taxonomy a routed command can meet, shared by single-command [[onFailure]] and a Pipeline batch's per-position
@@ -312,11 +315,13 @@ final private[client] class ClusterLive(
   // A per-command CrossSlot fails only its own slot; a position a stale topology can't resolve (redirect, unreachable node, Unowned) falls
   // back to per-command dispatch. The countdown completes the effect once every position has landed terminally — once, never on a redirect.
   private def runPipeline[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Either[SageException, Any]]] => Unit): Unit = {
-    val n                                                             = p.commands.length
-    val collector                                                     = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
-    def finish(index: Int, outcome: Either[SageException, Any]): Unit = collector.set(index, outcome)
-    def reroute(index: Int): Unit                                     =
-      offload(dispatch(p.commands(index), cluster.maxRedirects, result => finish(index, TxSupport.toEither(result))))
+    val n                         = p.commands.length
+    val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
+    // one tracking callback per position: the terminal completion for that command, emitting CommandCompleted with the node the routing
+    // layer attributes onto it (set in sendBatch for the batch path, or by dispatch->sendTo for a rerouted position)
+    val emits                     =
+      Vector.tabulate(n)(i => Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result))))
+    def reroute(index: Int): Unit = offload(dispatch(p.commands(index), cluster.maxRedirects, emits(index)))
 
     val plan = topologyRef.get().split(p)
     // a malformed command is a programmer error: split is the single source of that classification (the standalone client has no slots and
@@ -326,7 +331,7 @@ final private[client] class ClusterLive(
       case None        => ()
     }
     plan.rejected.foreach {
-      case (index, Rejected.CrossSlot(slots)) => finish(index, Left(crossSlot(p.commands(index).name, slots)))
+      case (index, Rejected.CrossSlot(slots)) => emits(index)(Failure(crossSlot(p.commands(index).name, slots)))
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
       case (_, Rejected.Malformed)            => ()             // unreachable: the guard above returned
     }
@@ -334,7 +339,7 @@ final private[client] class ClusterLive(
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
     plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
       // sorted: keep each node's batch in submission order even when keyless positions are folded into the first group
-      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, finish, reroute)
+      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute)
     }
   }
 
@@ -342,21 +347,22 @@ final private[client] class ClusterLive(
     node: Node,
     indices: Vector[Int],
     p: Pipeline[Out, R],
-    finish: (Int, Either[SageException, Any]) => Unit,
+    emits: Vector[Try[Any] => Unit],
     reroute: Int => Unit
   ): Unit = {
-    val callbacks: Vector[Try[Any] => Unit] = indices.map { index => (result: Try[Any]) =>
+    def settle(index: Int, result: Try[Any]): Unit = { Events.attributeNode(emits(index), node); emits(index)(result) }
+    val callbacks: Vector[Try[Any] => Unit]        = indices.map { index => (result: Try[Any]) =>
       result match {
-        case Success(value) => finish(index, Right(value))
+        case Success(_)     => settle(index, result)
         case Failure(error) =>
           classify(error) match {
             case ClusterLive.Disposition.Reroute             => reroute(index)
-            case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); finish(index, TxSupport.toEither(result))
-            case ClusterLive.Disposition.Terminal            => finish(index, TxSupport.toEither(result))
+            case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); settle(index, result)
+            case ClusterLive.Disposition.Terminal            => settle(index, result)
           }
       }
     }
-    val nc                                  =
+    val nc                                         =
       try getOrEstablish(node)
       catch { case NonFatal(_) => null }
     // node unreachable, or not connected when the batch reached it: nothing was sent, so re-route every position individually
@@ -590,7 +596,19 @@ final private[client] class ClusterLive(
     else if (waitOn != null) waitOn.get()
     else
       try {
-        val nc    = NodeClient.connect(nodeFactory(node), scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout, dedicatedPool)
+        val nc    =
+          NodeClient.connect(
+            nodeFactory(node),
+            scheduler,
+            bootstrap,
+            reconnect,
+            watchdog,
+            connectTimeout,
+            closeTimeout,
+            dedicatedPool,
+            Some(node),
+            events
+          )
         // re-check under the lock: a close that landed during the blocking connect must not re-publish this bundle into a closed client
         val stale = lockedNodes { pendingEstablish.remove(node); if (closed) true else { established.put(node, nc); false } }
         if (stale) { nc.close(); throw NotConnected() }
@@ -653,10 +671,18 @@ final private[client] class ClusterLive(
   // installs a fresh topology and prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak. An empty
   // announce-IP from CLUSTER SLOTS means "the node I queried", so substitute `from` the same way redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
-    val resolved = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
-    topologyRef.set(ClusterTopology.from(resolved))
-    val masters  = resolved.map(_.master).toSet
-    val gone     = lockedNodes {
+    val resolved    = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
+    val previous    = if (events.enabled) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
+    val newTopology = ClusterTopology.from(resolved)
+    topologyRef.set(newTopology)
+    // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change. A real failover/reshard
+    // always replaces a non-empty master set, so `previous.nonEmpty` only suppresses the startup event.
+    if (events.enabled && previous.nonEmpty) {
+      val current = slotOwningMasters(newTopology)
+      if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
+    }
+    val masters     = resolved.map(_.master).toSet
+    val gone        = lockedNodes {
       val absent = established.keysIterator.filterNot(masters.contains).toVector
       absent.flatMap(node => established.remove(node))
     }
@@ -670,6 +696,7 @@ final private[client] class ClusterLive(
     val all = lockedNodes { closed = true; val snapshot = established.values.toVector; established.clear(); snapshot }
     subscriptions.close()
     all.foreach(_.close())
+    events.close()
   }
 }
 
@@ -710,6 +737,7 @@ private[client] object ClusterLive {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)
         (onFrame, onClosed) => SocketTransport.connect(node.host, node.port, config.connectTimeout, upgrade, onFrame, onClosed)
       }
+      val events                                                  = Events(config.listeners)
       val live                                                    = new ClusterLive(
         factory,
         scheduler,
@@ -721,11 +749,12 @@ private[client] object ClusterLive {
         config.dedicatedPool,
         cluster,
         config.pubsub.bufferSize,
-        seeds
+        seeds,
+        events
       )
       // discovery's handshake/TLS failures are translated here (a NOPROTO/SSL surfaces like a standalone connect) rather than via mapError,
       // which the per-backend CIO alias does not reconcile through `Client`'s invariant type parameter
       try { live.bootstrapTopology(); live }
-      catch { case NonFatal(error) => throw translate(error) }
+      catch { case NonFatal(error) => events.close(); throw translate(error) }
     }
 }

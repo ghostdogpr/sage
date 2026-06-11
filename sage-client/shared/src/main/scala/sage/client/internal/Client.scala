@@ -5,13 +5,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLException
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Bytes, Message, PatternMessage, SageException}
+import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
@@ -1074,7 +1074,8 @@ object Client {
         config.pubsub,
         config.auth,
         config.clientCache.maxBytes,
-        config.clientCache.enabled
+        config.clientCache.enabled,
+        Events(config.listeners)
       )
     }
 
@@ -1090,7 +1091,8 @@ object Client {
     pubsub: PubSubConfig = defaults.pubsub,
     auth: Option[AuthConfig] = None,
     cacheMaxBytes: Long = defaults.clientCache.maxBytes,
-    cachingEnabled: Boolean = defaults.clientCache.enabled
+    cachingEnabled: Boolean = defaults.clientCache.enabled,
+    events: Events = Events.disabled
   ): CIO[Client[CIO]] = {
     val bootstrap            = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
     // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
@@ -1098,7 +1100,8 @@ object Client {
     val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
     CIO
       .blocking(
-        MultiplexedConnection.connect(factory, scheduler, multiplexedBootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes)
+        MultiplexedConnection
+          .connect(factory, scheduler, multiplexedBootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, None, events)
       )
       .map { connection =>
         val pool          = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
@@ -1113,9 +1116,9 @@ object Client {
           pubsub.bufferSize,
           () => connection.isLive
         )
-        new Live(connection, pool, subscriptions, cachingEnabled)
+        new Live(connection, pool, subscriptions, cachingEnabled, events)
       }
-      .mapError(translateHandshake)
+      .mapError { error => events.close(); translateHandshake(error) }
   }
 
   // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO. A
@@ -1134,13 +1137,14 @@ object Client {
     connection: MultiplexedConnection,
     pool: DedicatedPool,
     subscriptions: SubscriptionConnection,
-    cachingEnabled: Boolean
+    cachingEnabled: Boolean,
+    events: Events
   ) extends Client[CIO] {
 
     def run[A](command: Command[A]): CIO[A] =
       command.execution match {
-        case Execution.Ordinary => CIO.async(callback => connection.submit(command, callback))
-        case Execution.Blocking => CIO.async(callback => pool.use(command, callback))
+        case Execution.Ordinary => CIO.async(callback => connection.submit(command, Events.trackCommand(events, command, callback)))
+        case Execution.Blocking => CIO.async(callback => pool.use(command, Events.trackCommand(events, command, callback)))
       }
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
@@ -1185,8 +1189,15 @@ object Client {
       else
         CIO.async { complete =>
           val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](p.commands.length, complete)
-          val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
-          if (!connection.submitAll(p.commands, callbacks)) complete(Failure(NotConnected()))
+          val callbacks = Vector.tabulate(p.commands.length)(i =>
+            Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
+          )
+          if (!connection.submitAll(p.commands, callbacks)) {
+            // not connected: still fail fast with one error, but report a failed completion per position (as a single disconnected run does)
+            if (events.enabled)
+              p.commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(NotConnected()))))
+            complete(Failure(NotConnected()))
+          }
         }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
@@ -1199,7 +1210,7 @@ object Client {
     def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
-    def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close() }
+    def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close(); events.close() }
   }
 
   // wrap a raw subscription as the effect-typed seam each backend lowers into its native stream; a channel/shard delivery is a Message

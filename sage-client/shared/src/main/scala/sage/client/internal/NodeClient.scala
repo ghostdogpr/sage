@@ -4,6 +4,7 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
 
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
+import sage.cluster.Node
 import sage.commands.Command
 
 /**
@@ -48,9 +49,12 @@ private[client] object NodeClient {
     watchdog: WatchdogConfig,
     connectTimeout: FiniteDuration,
     closeTimeout: FiniteDuration,
-    dedicatedPool: DedicatedPoolConfig
+    dedicatedPool: DedicatedPoolConfig,
+    node: Option[Node] = None,
+    events: Events = Events.disabled
   ): NodeClient = {
-    val connection = MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout)
+    val connection =
+      MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout, 0L, node, events)
     val pool       = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
     new NodeClient(connection, pool)
   }

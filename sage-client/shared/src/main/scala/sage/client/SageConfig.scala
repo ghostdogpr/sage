@@ -5,6 +5,8 @@ import javax.net.ssl.SSLContext
 
 import scala.concurrent.duration.*
 
+import sage.SageListener
+
 /**
   * Exponential reconnect backoff with full jitter (a random wait in `[0, base]`), spreading the reconnect storm across clients.
   */
@@ -115,5 +117,6 @@ final case class SageConfig(
   clientCache: CacheConfig = CacheConfig(),
   auth: Option[AuthConfig] = None,
   tls: Option[TlsConfig] = None,
-  topology: Topology = Topology.Standalone
+  topology: Topology = Topology.Standalone,
+  listeners: Vector[SageListener] = Vector.empty
 )

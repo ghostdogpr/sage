@@ -1,12 +1,15 @@
 package sage.client
 
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+
 import scala.concurrent.ExecutionContext
+import scala.jdk.CollectionConverters.*
 
 import kyo.compat.*
 
-import sage.Bytes
-import sage.SageException.UnsupportedServer
-import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
+import sage.{Bytes, Outcome, SageEvent, SageListener}
+import sage.SageException.{NotConnected, UnsupportedServer}
+import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
 import sage.commands.{Command, Execution, Pipeline}
 import sage.protocol.Frame
 
@@ -73,6 +76,36 @@ class ConnectSpec extends munit.FunSuite {
       assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
       assertEquals(transport().written.count(_.asUtf8String.contains("BLPOP")), 0)
     }
+  }
+
+  test("a pipeline that fails fast while disconnected reports a failed completion per position") {
+    val (factory, transport) = scripted(helloThenPong)
+    val scheduler            = new ManualScheduler // so the post-drop reconnect stays pending and the connection stays not-live
+    val completions          = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
+    val latch                = new CountDownLatch(2)
+    val listener             = new SageListener {
+      def onEvent(event: SageEvent): Unit = event match {
+        case c: SageEvent.CommandCompleted => completions.add(c); latch.countDown()
+        case _                             => ()
+      }
+    }
+    val get                  = Command("GET", Command.NoKeys, Vector.empty, (_: Frame) => Right(0L))
+    val twoGets              = Pipeline.sequence(Vector(get, get))
+    Client
+      .connectWith(factory, scheduler, events = Events(Vector(listener)))
+      .flatMap { client =>
+        transport().close() // drop the live socket; reconnect is scheduled on the manual scheduler and never runs
+        client.pipeline(twoGets)
+      }
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[NotConnected], s"unexpected error: $error")
+        assert(latch.await(2, TimeUnit.SECONDS), "expected a failed completion per pipeline position")
+        val seen = completions.asScala.toVector
+        assertEquals(seen.map(_.name), Vector("GET", "GET"))
+        assert(seen.forall(_.outcome.isInstanceOf[Outcome.Failed]), s"expected all failed, got ${seen.map(_.outcome)}")
+      }
   }
 
   test("an empty pipeline succeeds without a round-trip") {
