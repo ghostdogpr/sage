@@ -43,9 +43,10 @@ final case class GroupInfo(
 final case class ConsumerInfo(name: String, pending: Long, idle: FiniteDuration, inactive: Option[FiniteDuration])
 
 /**
-  * A row of a full PEL listing: the entry id, the instant it was last delivered, and how many times it has been delivered.
+  * A row of a full PEL listing: the entry id, the instant it was last delivered, and how many times it has been delivered. `consumer` is
+  * the owning consumer at the group level (empty string for an `XNACK`-released entry) and `None` at the consumer level, where it is implied.
   */
-final case class FullPendingEntry(id: StreamId, lastDelivered: Instant, deliveryCount: Long)
+final case class FullPendingEntry(id: StreamId, consumer: Option[String], lastDelivered: Instant, deliveryCount: Long)
 
 /**
   * A consumer inside `XINFO STREAM ... FULL`, with its own slice of the PEL.
@@ -175,7 +176,7 @@ private[sage] object StreamInfo {
           pelCount  <- f.optional("pel-count", Decode.long)
           read      <- f.optional("entries-read", Decode.long)
           lag       <- f.optional("lag", Decode.long)
-          pending   <- f.optionalVector("pending", fullPendingReply)
+          pending   <- f.optionalVector("pending", groupPendingReply)
           consumers <- f.optionalVector("consumers", fullConsumerReply)
         } yield FullGroupInfo(name, lastId, pelCount, read, lag, pending, consumers)
       }
@@ -188,19 +189,31 @@ private[sage] object StreamInfo {
           seen    <- f.optional("seen-time", millisInstant)
           active  <- f.optional("active-time", millisInstant)
           pel     <- f.optional("pel-count", Decode.long)
-          pending <- f.optionalVector("pending", fullPendingReply)
+          pending <- f.optionalVector("pending", consumerPendingReply)
         } yield FullConsumerInfo(name, seen, active, pel, pending)
       }
 
-  // a FULL PEL row is the flat array [id, delivery-time-ms, delivery-count]
-  private val fullPendingReply: Frame => Either[DecodeError, FullPendingEntry] = {
+  // a group-level FULL PEL row carries its owning consumer: [id, consumer, delivery-time-ms, delivery-count]
+  private val groupPendingReply: Frame => Either[DecodeError, FullPendingEntry] = {
+    case Frame.Array(Vector(idFrame, consumerFrame, deliveredFrame, countFrame)) =>
+      for {
+        id        <- Streams.streamId(idFrame)
+        consumer  <- Decode.utf8String(consumerFrame)
+        delivered <- millisInstant(deliveredFrame)
+        count     <- Decode.long(countFrame)
+      } yield FullPendingEntry(id, Some(consumer), delivered, count)
+    case other                                                                   => Left(DecodeError("group pending [id, consumer, delivery-time, delivery-count]", Frame.describe(other)))
+  }
+
+  // a consumer-level FULL PEL row omits the (implied) consumer: [id, delivery-time-ms, delivery-count]
+  private val consumerPendingReply: Frame => Either[DecodeError, FullPendingEntry] = {
     case Frame.Array(Vector(idFrame, deliveredFrame, countFrame)) =>
       for {
         id        <- Streams.streamId(idFrame)
         delivered <- millisInstant(deliveredFrame)
         count     <- Decode.long(countFrame)
-      } yield FullPendingEntry(id, delivered, count)
-    case other                                                    => Left(DecodeError("full pending [id, delivery-time, delivery-count]", Frame.describe(other)))
+      } yield FullPendingEntry(id, None, delivered, count)
+    case other                                                    => Left(DecodeError("consumer pending [id, delivery-time, delivery-count]", Frame.describe(other)))
   }
 
   private val millisDuration: Frame => Either[DecodeError, FiniteDuration] =

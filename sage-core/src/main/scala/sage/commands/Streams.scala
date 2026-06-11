@@ -149,7 +149,7 @@ private[sage] object Streams {
     first: (F, V),
     rest: (F, V)*
   )(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[StreamId] =
-    Command("XADD", Command.FirstKey, addArgs(key, noMkStream = false, id, trim, policy, first +: rest.toVector), streamIdReply)
+    Command("XADD", Command.FirstKey, addArgs(key, noMkStream = false, id, trim, policy, first +: rest.toVector), streamId)
 
   // returns None when NOMKSTREAM was set and the stream did not exist
   def xAddNoMkStream[K, F, V](
@@ -158,7 +158,7 @@ private[sage] object Streams {
     trim: Option[Trimming] = None,
     policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef
   )(first: (F, V), rest: (F, V)*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Option[StreamId]] =
-    Command("XADD", Command.FirstKey, addArgs(key, noMkStream = true, id, trim, policy, first +: rest.toVector), optionalStreamIdReply)
+    Command("XADD", Command.FirstKey, addArgs(key, noMkStream = true, id, trim, policy, first +: rest.toVector), optionalStreamId)
 
   def xLen[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command.read("XLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
@@ -167,7 +167,7 @@ private[sage] object Streams {
     Command("XDEL", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(_.wire), Decode.long)
 
   def xTrim[K](key: K, trim: Trimming, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("XTRIM", Command.FirstKey, (keyCodec.encode(key) +: policyArgs(policy)) ++ trimArgs(trim), Decode.long)
+    Command("XTRIM", Command.FirstKey, (keyCodec.encode(key) +: trimArgs(trim)) ++ policyArgs(policy), Decode.long)
 
   def xSetId[K](key: K, id: GroupStartId, entriesAdded: Option[Long] = None, maxDeletedId: Option[StreamId] = None)(
     using keyCodec: KeyCodec[K]
@@ -291,7 +291,7 @@ private[sage] object Streams {
       "XCLAIM",
       Command.FirstKey,
       claimArgs(key, group, consumer, minIdle, first +: rest.toVector, idle, retryCount, force, justId = true),
-      Decode.vector(streamIdElement)
+      Decode.vector(streamId)
     )
 
   def xAutoClaim[K, F, V](
@@ -517,8 +517,6 @@ private[sage] object Streams {
     case other                   => Left(DecodeError("stream id", Frame.describe(other)))
   }
 
-  private val streamIdElement: Frame => Either[DecodeError, StreamId] = streamId
-
   private def parseId(text: String): Either[DecodeError, StreamId] = {
     val dash = text.indexOf('-')
     if (dash < 0) text.toLongOption.map(ms => StreamId(ms, 0L)).toRight(DecodeError("stream id 'ms-seq'", s"'$text'"))
@@ -529,9 +527,7 @@ private[sage] object Streams {
       }
   }
 
-  private val streamIdReply: Frame => Either[DecodeError, StreamId] = streamId
-
-  private val optionalStreamIdReply: Frame => Either[DecodeError, Option[StreamId]] = {
+  private val optionalStreamId: Frame => Either[DecodeError, Option[StreamId]] = {
     case Frame.Null => Right(None)
     case other      => streamId(other).map(Some(_))
   }
@@ -579,7 +575,7 @@ private[sage] object Streams {
       for {
         cursor  <- streamId(cursorFrame)
         entries <- Decode.vector(streamEntry[F, V])(entriesFrame)
-        deleted <- Decode.vector(streamIdElement)(deletedFrame)
+        deleted <- Decode.vector(streamId)(deletedFrame)
       } yield XAutoClaimResult(cursor, entries, deleted)
     // pre-7.0 omits the deleted-ids element
     case Frame.Array(Vector(cursorFrame, entriesFrame))               =>
@@ -594,13 +590,13 @@ private[sage] object Streams {
     case Frame.Array(Vector(cursorFrame, claimedFrame, deletedFrame)) =>
       for {
         cursor  <- streamId(cursorFrame)
-        claimed <- Decode.vector(streamIdElement)(claimedFrame)
-        deleted <- Decode.vector(streamIdElement)(deletedFrame)
+        claimed <- Decode.vector(streamId)(claimedFrame)
+        deleted <- Decode.vector(streamId)(deletedFrame)
       } yield XAutoClaimJustIdResult(cursor, claimed, deleted)
     case Frame.Array(Vector(cursorFrame, claimedFrame))               =>
       for {
         cursor  <- streamId(cursorFrame)
-        claimed <- Decode.vector(streamIdElement)(claimedFrame)
+        claimed <- Decode.vector(streamId)(claimedFrame)
       } yield XAutoClaimJustIdResult(cursor, claimed, Vector.empty)
     case other                                                        => Left(DecodeError("xautoclaim justid [cursor, ids, deleted]", Frame.describe(other)))
   }
@@ -617,8 +613,8 @@ private[sage] object Streams {
     case Frame.Array(Vector(totalFrame, minFrame, maxFrame, consumersFrame)) =>
       for {
         total     <- Decode.long(totalFrame)
-        min       <- optionalId(minFrame)
-        max       <- optionalId(maxFrame)
+        min       <- optionalStreamId(minFrame)
+        max       <- optionalStreamId(maxFrame)
         consumers <- consumersFrame match {
                        case Frame.Null        => Right(Vector.empty[(String, Long)])
                        case Frame.Array(rows) => collect(rows)(consumerCount)
@@ -647,11 +643,6 @@ private[sage] object Streams {
         deliveries <- Decode.long(deliveriesFrame)
       } yield PendingEntry(id, consumer, FiniteDuration(idle, java.util.concurrent.TimeUnit.MILLISECONDS), deliveries)
     case other                                                                   => Left(DecodeError("xpending entry [id, consumer, idle, count]", Frame.describe(other)))
-  }
-
-  private val optionalId: Frame => Either[DecodeError, Option[StreamId]] = {
-    case Frame.Null => Right(None)
-    case other      => streamId(other).map(Some(_))
   }
 
   // XPENDING per-consumer counts come back as bulk-string integers

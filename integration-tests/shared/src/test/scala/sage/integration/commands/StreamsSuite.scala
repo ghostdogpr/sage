@@ -116,6 +116,23 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("XINFO STREAM FULL decodes the group PEL after a consumer has read but not acked") {
+    withClient { client =>
+      for {
+        _    <- client.xAdd("s-full", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
+        _    <- client.xGroupCreate("s-full", "g", GroupStartId.At(StreamId(0L, 0L)))
+        _    <- client.xReadGroup[String, String, String]("g", "c1")(("s-full", GroupReadId.New))()
+        full <- client.xInfoStreamFull[String, String, String]("s-full")
+      } yield {
+        assertEquals(full.length, 1L)
+        assertEquals(full.groups.map(_.name), Vector("g"))
+        assertEquals(full.groups.head.pending.map(_.id), Vector(StreamId(1L, 0L)))
+        assertEquals(full.groups.head.pending.head.consumer, Some("c1"))
+        assertEquals(full.groups.head.consumers.head.pending.map(_.id), Vector(StreamId(1L, 0L)))
+      }
+    }
+  }
+
   test("XREAD with BLOCK does not stall ordinary commands on the multiplexed connection") {
     withClient { client =>
       for {

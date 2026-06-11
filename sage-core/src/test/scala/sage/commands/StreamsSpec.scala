@@ -155,4 +155,34 @@ class StreamsSpec extends munit.FunSuite {
       Right(Vector(GroupInfo("g1", 2L, 3L, StreamId(5L, 0L), Some(5L), None)))
     )
   }
+
+  test("XINFO STREAM FULL decodes the 4-element group PEL row and the 3-element consumer PEL row") {
+    val groupPel    = Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), bulk("c1"), Frame.Integer(1000L), Frame.Integer(2L)))))
+    val consumerPel = Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), Frame.Integer(1000L), Frame.Integer(2L)))))
+    val consumer    = Frame.Map(Vector(bulk("name") -> bulk("c1"), bulk("pel-count") -> Frame.Integer(1L), bulk("pending") -> consumerPel))
+    val group       = Frame.Map(
+      Vector(
+        bulk("name")              -> bulk("g1"),
+        bulk("last-delivered-id") -> bulk("1-0"),
+        bulk("pel-count")         -> Frame.Integer(1L),
+        bulk("pending")           -> groupPel,
+        bulk("consumers")         -> Frame.Array(Vector(consumer))
+      )
+    )
+    val reply       = Frame.Map(
+      Vector(
+        bulk("length")            -> Frame.Integer(1L),
+        bulk("radix-tree-keys")   -> Frame.Integer(1L),
+        bulk("radix-tree-nodes")  -> Frame.Integer(2L),
+        bulk("last-generated-id") -> bulk("1-0"),
+        bulk("entries")           -> Frame.Array(Vector(entry("1-0", "f", "v"))),
+        bulk("groups")            -> Frame.Array(Vector(group))
+      )
+    )
+    val full        = Reply.run(StreamInfo.xInfoStreamFull[String, String, String]("k"), reply).toOption.get
+    assertEquals(full.entries.map(_.id), Vector(StreamId(1L, 0L)))
+    val g           = full.groups.head
+    assertEquals(g.pending, Vector(FullPendingEntry(StreamId(1L, 0L), Some("c1"), java.time.Instant.ofEpochMilli(1000L), 2L)))
+    assertEquals(g.consumers.head.pending, Vector(FullPendingEntry(StreamId(1L, 0L), None, java.time.Instant.ofEpochMilli(1000L), 2L)))
+  }
 }

@@ -416,6 +416,10 @@ object CommandSamples {
     Sample(Streams.xDel("k")(StreamId(1L, 0L), StreamId(2L, 3L)), Vector("XDEL", "k", "1-0", "2-3")),
     Sample(Streams.xTrim("k", Trimming.Exact(TrimThreshold.MaxLen(5L))), Vector("XTRIM", "k", "MAXLEN", "=", "5")),
     Sample(Streams.xTrim("k", Trimming.Approximate(TrimThreshold.MinId(StreamId(7L, 0L)))), Vector("XTRIM", "k", "MINID", "~", "7-0")),
+    Sample(
+      Streams.xTrim("k", Trimming.Approximate(TrimThreshold.MaxLen(1000L), Some(100L)), StreamDeletionPolicy.DelRef),
+      Vector("XTRIM", "k", "MAXLEN", "~", "1000", "LIMIT", "100", "DELREF")
+    ),
     Sample(Streams.xSetId("k", GroupStartId.At(StreamId(5L, 0L))), Vector("XSETID", "k", "5-0")),
     Sample(Streams.xRange[String, String, String]("k"), Vector("XRANGE", "k", "-", "+")),
     Sample(
