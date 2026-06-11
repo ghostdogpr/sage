@@ -63,6 +63,7 @@ final private[client] class ClusterLive(
   )
   // per-master round-robin cursor over its shard's replicas, so successive eligible reads spread across them
   private val replicaCursors = new java.util.concurrent.ConcurrentHashMap[Node, java.util.concurrent.atomic.AtomicInteger]()
+  private val keylessCursor  = new java.util.concurrent.atomic.AtomicInteger()
 
   private val subscriptions = new ClusterSubscriptions(
     nodeFactory,
@@ -172,7 +173,10 @@ final private[client] class ClusterLive(
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendRead(command, node, slot, redirectsLeft, complete)
             else sendTo(node, command, asking = false, redirectsLeft, complete)
-          case Route.Keyless            => sendToAny(topology, command, redirectsLeft, complete)
+          case Route.Keyless            =>
+            if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
+              sendKeylessRead(topology, command, redirectsLeft, complete)
+            else sendToAny(topology, command, redirectsLeft, complete)
           case Route.Unowned(_)         => onUnowned(command, redirectsLeft, complete)
           case Route.CrossSlot(slots)   => complete(Failure(crossSlot(command.name, slots)))
           case Route.Malformed          =>
@@ -188,6 +192,21 @@ final private[client] class ClusterLive(
     val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
     tryReadCandidates(command, ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()), master, redirectsLeft, complete)
   }
+
+  // a keyless eligible read (KEYS, RANDOMKEY): round-robin over every replica, falling back per policy, so strict Replica never hits a master
+  private def sendKeylessRead[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+    pickNode(topology) match {
+      case Some(master) =>
+        val replicas = topology.shards.iterator.flatMap(_.replicas).toVector.distinct
+        tryReadCandidates(
+          command,
+          ReadRouting.candidates(readFrom, master, replicas, keylessCursor.getAndIncrement()),
+          master,
+          redirectsLeft,
+          complete
+        )
+      case None         => complete(Failure(NotConnected()))
+    }
 
   private def tryReadCandidates[A](command: Command[A], candidates: Vector[Node], master: Node, redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     candidates match {
@@ -221,11 +240,14 @@ final private[client] class ClusterLive(
     classify(error) match {
       case ClusterLive.Disposition.Reroute             =>
         error match {
-          // redirect from a replica: sync-refresh then re-dispatch so the retry re-applies the policy on the new owner, not the named master
-          case _: ServerError =>
-            if (redirectsLeft <= 0)
-              complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
-            else { refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete)) }
+          case e: ServerError =>
+            Redirect.parse(e.getMessage).get match {
+              // ASK is a one-shot handoff to the importing node (follow with ASKING); MOVED refreshes, then re-dispatch re-applies the policy
+              case ask if ask.kind == RedirectKind.Ask => onRedirect(node, ask, command, redirectsLeft, complete)
+              case _ if redirectsLeft <= 0             =>
+                complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+              case _                                   => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
+            }
           // connection loss: try the next candidate, else refresh and re-dispatch
           case _              =>
             if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
