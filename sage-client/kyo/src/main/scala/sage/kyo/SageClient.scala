@@ -8,7 +8,7 @@ import _root_.kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, ScanStep, ScanTarget, Subscription, TransactionScope}
+import sage.client.internal.{Client, LoweredClient, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -198,49 +198,8 @@ object SageClient {
   def scoped(config: SageConfig): SageClient < (Scope & Abort[Throwable] & Async) =
     Scope.acquireRelease(connect(config))(client => Abort.run(client.close))
 
-  final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> A < (Abort[Throwable] & Async)] {
-
-    def run[A](command: Command[A]): A < (Abort[Throwable] & Async) = underlying.run(command).lower
-
-    def cached[A](command: Command[A], ttl: FiniteDuration): A < (Abort[Throwable] & Async) = underlying.cached(command, ttl).lower
-
-    def pipeline[Out, R](p: Pipeline[Out, R]): Out < (Abort[Throwable] & Async) = underlying.pipeline(p).lower
-
-    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): R < (Abort[Throwable] & Async) = underlying.pipelineAttempt(p).lower
-
-    def transaction[A](
-      body: TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] => A < (Abort[Throwable] & Async)
-    ): A < (Abort[Throwable] & Async) =
-      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
-
-    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): Subscription[KyoEff, Message[V]] < (Abort[Throwable] & Async) =
-      underlying.subscribeChannels[V](channel, rest*).lower.map(lower)
-
-    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Subscription[KyoEff, PatternMessage[V]] < (Abort[Throwable] & Async) =
-      underlying.subscribePatterns[V](pattern, rest*).lower.map(lower)
-
-    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Subscription[KyoEff, Message[V]] < (Abort[Throwable] & Async) =
-      underlying.subscribeShardChannels[V](channel, rest*).lower.map(lower)
-
-    def scanTargets: Vector[ScanTarget] < (Abort[Throwable] & Async) = underlying.scanTargets.lower
-
-    def runOn[A](target: ScanTarget, command: Command[A]): A < (Abort[Throwable] & Async) = underlying.runOn(target, command).lower
-
-    private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] =
-      new TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] {
-        def watch[K: KeyCodec](key: K, rest: K*): Unit < (Abort[Throwable] & Async)          = scope.watch(key, rest*).lower
-        def run[A](command: Command[A]): A < (Abort[Throwable] & Async)                      = scope.run(command).lower
-        def exec[Out, R](p: Pipeline[Out, R]): Option[Out] < (Abort[Throwable] & Async)      = scope.exec(p).lower
-        def execAttempt[Out, R](p: Pipeline[Out, R]): Option[R] < (Abort[Throwable] & Async) = scope.execAttempt(p).lower
-        def discard: Unit < (Abort[Throwable] & Async)                                       = scope.discard.lower
-      }
-
-    private def lower[A](sub: Subscription[CIO, A]): Subscription[KyoEff, A] =
-      new Subscription[KyoEff, A] {
-        def next: Option[A] < (Abort[Throwable] & Async) = sub.next.lower
-        def close: Unit < (Abort[Throwable] & Async)     = sub.close.lower
-      }
-
-    def close: Unit < (Abort[Throwable] & Async) = underlying.close.lower
+  final private class Lowered(underlying: Client[CIO]) extends LoweredClient[[A] =>> A < (Abort[Throwable] & Async)](underlying) {
+    protected def lower[A](c: CIO[A]): A < (Abort[Throwable] & Async) = c.lower
+    protected def lift[A](fa: A < (Abort[Throwable] & Async)): CIO[A] = CIO.lift(fa)
   }
 }

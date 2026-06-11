@@ -10,7 +10,7 @@ import kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, ScanStep, ScanTarget, Subscription, TransactionScope}
+import sage.client.internal.{Client, LoweredClient, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -200,47 +200,8 @@ object SageClient {
       catch { case _: Throwable => () }
     }
 
-  final private class Lowered(underlying: Client[CIO]) extends Client[[A] =>> Ox ?=> A] {
-
-    def run[A](command: Command[A]): Ox ?=> A = underlying.run(command).lower
-
-    def cached[A](command: Command[A], ttl: FiniteDuration): Ox ?=> A = underlying.cached(command, ttl).lower
-
-    def pipeline[Out, R](p: Pipeline[Out, R]): Ox ?=> Out = underlying.pipeline(p).lower
-
-    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> R = underlying.pipelineAttempt(p).lower
-
-    def transaction[A](body: TransactionScope[[X] =>> Ox ?=> X] => (Ox ?=> A)): Ox ?=> A =
-      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
-
-    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, Message[V]] =
-      lower(underlying.subscribeChannels[V](channel, rest*).lower)
-
-    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, PatternMessage[V]] =
-      lower(underlying.subscribePatterns[V](pattern, rest*).lower)
-
-    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Ox ?=> Subscription[[X] =>> Ox ?=> X, Message[V]] =
-      lower(underlying.subscribeShardChannels[V](channel, rest*).lower)
-
-    def scanTargets: Ox ?=> Vector[ScanTarget] = underlying.scanTargets.lower
-
-    def runOn[A](target: ScanTarget, command: Command[A]): Ox ?=> A = underlying.runOn(target, command).lower
-
-    private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> Ox ?=> X] =
-      new TransactionScope[[X] =>> Ox ?=> X] {
-        def watch[K: KeyCodec](key: K, rest: K*): Ox ?=> Unit          = scope.watch(key, rest*).lower
-        def run[A](command: Command[A]): Ox ?=> A                      = scope.run(command).lower
-        def exec[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[Out]      = scope.exec(p).lower
-        def execAttempt[Out, R](p: Pipeline[Out, R]): Ox ?=> Option[R] = scope.execAttempt(p).lower
-        def discard: Ox ?=> Unit                                       = scope.discard.lower
-      }
-
-    private def lower[A](sub: Subscription[CIO, A]): Subscription[[X] =>> Ox ?=> X, A] =
-      new Subscription[[X] =>> Ox ?=> X, A] {
-        def next: Ox ?=> Option[A] = sub.next.lower
-        def close: Ox ?=> Unit     = sub.close.lower
-      }
-
-    def close: Ox ?=> Unit = underlying.close.lower
+  final private class Lowered(underlying: Client[CIO]) extends LoweredClient[[X] =>> Ox ?=> X](underlying) {
+    protected def lower[A](c: CIO[A]): Ox ?=> A = c.lower
+    protected def lift[A](fa: Ox ?=> A): CIO[A] = CIO.lift(fa)
   }
 }

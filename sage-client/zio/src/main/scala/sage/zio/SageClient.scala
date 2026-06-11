@@ -10,7 +10,7 @@ import zio.stream.ZStream
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, ScanStep, ScanTarget, Subscription, TransactionScope}
+import sage.client.internal.{Client, LoweredClient, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -201,47 +201,8 @@ object SageClient {
   def layer(config: SageConfig): ZLayer[Any, Throwable, SageClient] =
     ZLayer.scoped(scoped(config))
 
-  final private class Lowered(underlying: Client[CIO]) extends Client[Task] {
-
-    def run[A](command: Command[A]): Task[A] = underlying.run(command).lower
-
-    def cached[A](command: Command[A], ttl: FiniteDuration): Task[A] = underlying.cached(command, ttl).lower
-
-    def pipeline[Out, R](p: Pipeline[Out, R]): Task[Out] = underlying.pipeline(p).lower
-
-    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): Task[R] = underlying.pipelineAttempt(p).lower
-
-    def transaction[A](body: TransactionScope[Task] => Task[A]): Task[A] =
-      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
-
-    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): Task[Subscription[Task, Message[V]]] =
-      underlying.subscribeChannels[V](channel, rest*).map(lower).lower
-
-    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): Task[Subscription[Task, PatternMessage[V]]] =
-      underlying.subscribePatterns[V](pattern, rest*).map(lower).lower
-
-    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Task[Subscription[Task, Message[V]]] =
-      underlying.subscribeShardChannels[V](channel, rest*).map(lower).lower
-
-    def scanTargets: Task[Vector[ScanTarget]] = underlying.scanTargets.lower
-
-    def runOn[A](target: ScanTarget, command: Command[A]): Task[A] = underlying.runOn(target, command).lower
-
-    private def lower(scope: TransactionScope[CIO]): TransactionScope[Task] =
-      new TransactionScope[Task] {
-        def watch[K: KeyCodec](key: K, rest: K*): Task[Unit]          = scope.watch(key, rest*).lower
-        def run[A](command: Command[A]): Task[A]                      = scope.run(command).lower
-        def exec[Out, R](p: Pipeline[Out, R]): Task[Option[Out]]      = scope.exec(p).lower
-        def execAttempt[Out, R](p: Pipeline[Out, R]): Task[Option[R]] = scope.execAttempt(p).lower
-        def discard: Task[Unit]                                       = scope.discard.lower
-      }
-
-    private def lower[A](sub: Subscription[CIO, A]): Subscription[Task, A] =
-      new Subscription[Task, A] {
-        def next: Task[Option[A]] = sub.next.lower
-        def close: Task[Unit]     = sub.close.lower
-      }
-
-    def close: Task[Unit] = underlying.close.lower
+  final private class Lowered(underlying: Client[CIO]) extends LoweredClient[Task](underlying) {
+    protected def lower[A](c: CIO[A]): Task[A] = c.lower
+    protected def lift[A](fa: Task[A]): CIO[A] = CIO.lift(fa)
   }
 }

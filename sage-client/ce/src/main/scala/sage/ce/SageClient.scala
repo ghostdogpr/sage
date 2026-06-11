@@ -9,7 +9,7 @@ import kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, ScanStep, ScanTarget, Subscription, TransactionScope}
+import sage.client.internal.{Client, LoweredClient, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -187,47 +187,8 @@ object SageClient {
   def resource(config: SageConfig): Resource[IO, SageClient] =
     Resource.make(connect(config))(_.close.voidError)
 
-  final private class Lowered(underlying: Client[CIO]) extends Client[IO] {
-
-    def run[A](command: Command[A]): IO[A] = underlying.run(command).lower
-
-    def cached[A](command: Command[A], ttl: FiniteDuration): IO[A] = underlying.cached(command, ttl).lower
-
-    def pipeline[Out, R](p: Pipeline[Out, R]): IO[Out] = underlying.pipeline(p).lower
-
-    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): IO[R] = underlying.pipelineAttempt(p).lower
-
-    def transaction[A](body: TransactionScope[IO] => IO[A]): IO[A] =
-      underlying.transaction[A](scope => CIO.lift(body(lower(scope)))).lower
-
-    def subscribeChannels[V: ValueCodec](channel: String, rest: String*): IO[Subscription[IO, Message[V]]] =
-      underlying.subscribeChannels[V](channel, rest*).map(lower).lower
-
-    def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): IO[Subscription[IO, PatternMessage[V]]] =
-      underlying.subscribePatterns[V](pattern, rest*).map(lower).lower
-
-    def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): IO[Subscription[IO, Message[V]]] =
-      underlying.subscribeShardChannels[V](channel, rest*).map(lower).lower
-
-    def scanTargets: IO[Vector[ScanTarget]] = underlying.scanTargets.lower
-
-    def runOn[A](target: ScanTarget, command: Command[A]): IO[A] = underlying.runOn(target, command).lower
-
-    private def lower(scope: TransactionScope[CIO]): TransactionScope[IO] =
-      new TransactionScope[IO] {
-        def watch[K: KeyCodec](key: K, rest: K*): IO[Unit]          = scope.watch(key, rest*).lower
-        def run[A](command: Command[A]): IO[A]                      = scope.run(command).lower
-        def exec[Out, R](p: Pipeline[Out, R]): IO[Option[Out]]      = scope.exec(p).lower
-        def execAttempt[Out, R](p: Pipeline[Out, R]): IO[Option[R]] = scope.execAttempt(p).lower
-        def discard: IO[Unit]                                       = scope.discard.lower
-      }
-
-    private def lower[A](sub: Subscription[CIO, A]): Subscription[IO, A] =
-      new Subscription[IO, A] {
-        def next: IO[Option[A]] = sub.next.lower
-        def close: IO[Unit]     = sub.close.lower
-      }
-
-    def close: IO[Unit] = underlying.close.lower
+  final private class Lowered(underlying: Client[CIO]) extends LoweredClient[IO](underlying) {
+    protected def lower[A](c: CIO[A]): IO[A] = c.lower
+    protected def lift[A](fa: IO[A]): CIO[A] = CIO.lift(fa)
   }
 }
