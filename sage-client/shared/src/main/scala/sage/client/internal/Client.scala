@@ -13,7 +13,7 @@ import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
-import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, PubSubConfig, SageConfig, Topology, WatchdogConfig}
+import sage.client.{AuthConfig, BackoffConfig, BuildInfo, DedicatedPoolConfig, Endpoint, PubSubConfig, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
@@ -1016,7 +1016,7 @@ object Client {
       case Some(problem) => CIO.fail(new IllegalArgumentException(problem))
       case None          =>
         config.topology match {
-          case Topology.Standalone                    => connectStandalone(config)
+          case Topology.Standalone(endpoint)          => connectStandalone(config, endpoint)
           case Topology.Cluster(seeds, clusterConfig) =>
             ClusterLive.connect(config, seeds.map(e => Node(e.host, e.port)), clusterConfig, Scheduler.real, translateHandshake)
         }
@@ -1034,7 +1034,7 @@ object Client {
         )
       else Vector.empty
     val checks   = Vector(
-      port(config.port, "port"),
+      cond(config.database >= 0, "database must be >= 0"),
       positive(config.connectTimeout, "connectTimeout"),
       positive(config.closeTimeout, "closeTimeout"),
       positive(config.reconnect.initialDelay, "reconnect.initialDelay"),
@@ -1047,10 +1047,11 @@ object Client {
       case Topology.Cluster(seeds, cluster) =>
         Vector(
           cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
+          cond(config.database == 0, "cluster topology has no SELECT; database must be 0"),
           cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
           positive(cluster.minRefreshInterval, "cluster.minRefreshInterval")
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
-      case Topology.Standalone              => Vector.empty
+      case Topology.Standalone(endpoint)    => Vector(port(endpoint.port, s"endpoint ${endpoint.host}:${endpoint.port} port"))
     })
     checks.flatten.headOption
   }
@@ -1059,12 +1060,12 @@ object Client {
   private def port(value: Int, label: String): Option[String]                = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
   private def positive(value: FiniteDuration, label: String): Option[String] = cond(value.toNanos > 0L, s"$label must be positive")
 
-  private def connectStandalone(config: SageConfig): CIO[Client[CIO]] =
+  private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
     // multiplexed one and each dedicated one — is upgraded identically
-    CIO.blocking(Tls.buildUpgrade(config.tls, config.host, config.port)).flatMap { upgrade =>
+    CIO.blocking(Tls.buildUpgrade(config.tls, endpoint.host, endpoint.port)).flatMap { upgrade =>
       connectWith(
-        (onFrame, onClosed) => SocketTransport.connect(config.host, config.port, config.connectTimeout, upgrade, onFrame, onClosed),
+        (onFrame, onClosed) => SocketTransport.connect(endpoint.host, endpoint.port, config.connectTimeout, upgrade, onFrame, onClosed),
         Scheduler.real,
         config.reconnect,
         config.watchdog,
@@ -1075,9 +1076,23 @@ object Client {
         config.auth,
         config.clientCache.maxBytes,
         config.clientCache.enabled,
-        Events(config.listeners)
+        Events(config.listeners),
+        config.database,
+        config.clientName
       )
     }
+
+  // The setup commands every connection runs after HELLO and re-runs on reconnection. Shared by the standalone and cluster paths so
+  // identification is never applied to one topology and dropped on the other. SELECT lives here, never as a runtime command, because it
+  // would move the db under every fiber sharing the connection.
+  private[client] def bootstrapCommands(auth: Option[AuthConfig], database: Int, clientName: Option[String]): Vector[Command[?]] = {
+    val identification = Vector(
+      Connection.clientSetInfo("LIB-NAME", "sage"),
+      Connection.clientSetInfo("LIB-VER", BuildInfo.version)
+    ) ++ clientName.map(Connection.clientSetName).toVector
+    val selectDb       = if (database > 0) Vector(Connection.select(database)) else Vector.empty
+    (Connection.hello(auth.map(a => a.username -> a.password)) +: identification) ++ selectDb
+  }
 
   // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
   private[client] def connectWith(
@@ -1092,11 +1107,13 @@ object Client {
     auth: Option[AuthConfig] = None,
     cacheMaxBytes: Long = defaults.clientCache.maxBytes,
     cachingEnabled: Boolean = defaults.clientCache.enabled,
-    events: Events = Events.disabled
+    events: Events = Events.disabled,
+    database: Int = 0,
+    clientName: Option[String] = None
   ): CIO[Client[CIO]] = {
-    val bootstrap            = Vector(Connection.hello(auth.map(a => a.username -> a.password)))
+    val bootstrap            = bootstrapCommands(auth, database, clientName)
     // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
-    // plain HELLO bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
+    // plain bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
     val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
     CIO
       .blocking(
@@ -1126,11 +1143,11 @@ object Client {
   // hierarchy.
   private def translateHandshake(error: Throwable): Throwable =
     error match {
-      case ServerError(message) if message.startsWith("NOPROTO") || message.toLowerCase.contains("unknown command") =>
-        UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: $message")
-      case e: SSLException                                                                                          =>
+      case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase.contains("unknown command") =>
+        UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: ${e.getMessage}")
+      case e: SSLException                                                                               =>
         TlsError(s"TLS handshake failed: ${e.getMessage}")
-      case other                                                                                                    => other
+      case other                                                                                         => other
     }
 
   final private class Live(

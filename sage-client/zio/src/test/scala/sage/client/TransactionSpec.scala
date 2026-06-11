@@ -89,7 +89,7 @@ class TransactionSpec extends munit.FunSuite {
   test("an execution-phase error fails strict exec with the first error") {
     val factory = scripted(Seq(ok, queued, queued, Frame.Array(Vector(Frame.Integer(1), Frame.SimpleError("WRONGTYPE nope")))))
     Client.connectWith(factory).flatMap(_.transaction(_.exec(twoIncrements))).unsafeRun.failed.map { error =>
-      assertEquals(error, ServerError("WRONGTYPE nope"))
+      assertEquals(error, ServerError("WRONGTYPE", "nope"))
     }
   }
 
@@ -98,7 +98,7 @@ class TransactionSpec extends munit.FunSuite {
     Client.connectWith(factory).flatMap(_.transaction(_.execAttempt(twoIncrements))).unsafeRun.map { result =>
       val (a, b) = result.getOrElse(fail("expected a committed transaction"))
       assertEquals(a, Right(1L))
-      assertEquals(b, Left(ServerError("WRONGTYPE nope")))
+      assertEquals(b, Left(ServerError("WRONGTYPE", "nope")))
     }
   }
 

@@ -54,6 +54,19 @@ private[sage] object Connection {
       decode = HelloReply.decode
     )
 
+  // connection-setup commands, issued from configuration during the HELLO bootstrap (and re-issued on reconnect), never as a per-call
+  // command: each mutates per-connection state the shared Multiplexed Connection's fibers all observe.
+
+  def select(database: Int): Command[Unit] =
+    Command("SELECT", Command.NoKeys, Vector(Bytes.utf8(database.toString)), Decode.ok)
+
+  def clientSetName(name: String): Command[Unit] =
+    Command("CLIENT", Command.NoKeys, Vector("SETNAME", name).map(Bytes.utf8), Decode.ok)
+
+  // announces the client library to CLIENT INFO/CLIENT LIST (Redis 7.2+/Valkey); one call per attribute (LIB-NAME, LIB-VER)
+  def clientSetInfo(attribute: String, value: String): Command[Unit] =
+    Command("CLIENT", Command.NoKeys, Vector("SETINFO", attribute, value).map(Bytes.utf8), Decode.ok)
+
   def echo(message: String): Command[String] =
     Command("ECHO", Command.NoKeys, Vector(Bytes.utf8(message)), Decode.utf8String)
 

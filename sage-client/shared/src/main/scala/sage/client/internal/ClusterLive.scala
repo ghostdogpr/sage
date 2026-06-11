@@ -218,8 +218,8 @@ final private[client] class ClusterLive(
       case ClusterLive.Disposition.Reroute             =>
         error match {
           // classify only reroutes a ServerError when it parses as a redirect, so `.get` is safe here
-          case ServerError(message) => onRedirect(node, Redirect.parse(message).get, command, redirectsLeft, complete)
-          case _                    => onUnreachable(command, redirectsLeft, complete)
+          case e: ServerError => onRedirect(node, Redirect.parse(e.getMessage).get, command, redirectsLeft, complete)
+          case _              => onUnreachable(command, redirectsLeft, complete)
         }
       case ClusterLive.Disposition.RefreshThenTerminal =>
         triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
@@ -231,9 +231,9 @@ final private[client] class ClusterLive(
   // may-have-executed loss refreshes the topology but still fails its own command; anything else fails fast in place.
   private def classify(error: Throwable): ClusterLive.Disposition =
     error match {
-      case ServerError(message)  =>
-        if (Redirect.parse(message).isDefined) ClusterLive.Disposition.Reroute
-        else if (message.startsWith("READONLY")) ClusterLive.Disposition.RefreshThenTerminal
+      case e: ServerError        =>
+        if (Redirect.parse(e.getMessage).isDefined) ClusterLive.Disposition.Reroute
+        else if (e.code == "READONLY") ClusterLive.Disposition.RefreshThenTerminal
         else ClusterLive.Disposition.Terminal
       case NotConnected()        => ClusterLive.Disposition.Reroute
       case ConnectionLost(false) => ClusterLive.Disposition.Reroute
@@ -243,7 +243,7 @@ final private[client] class ClusterLive(
 
   private def onRedirect[A](from: Node, redirect: Redirect, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     if (redirectsLeft <= 0)
-      complete(Failure(ServerError(s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+      complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
     else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
@@ -434,7 +434,7 @@ final private[client] class ClusterLive(
     // the topology on any non-terminal one so the caller's retry re-pins, mirroring `refreshOnFault` for the decoded-reply path.
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
       val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
-      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => classify(ServerError(m)) != ClusterLive.Disposition.Terminal)
+      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => classify(ServerError.of(m)) != ClusterLive.Disposition.Terminal)
       if (fault) forceRefresh()
     }
 
@@ -732,7 +732,8 @@ private[client] object ClusterLive {
     translate: Throwable => Throwable
   ): CIO[Client[CIO]] =
     CIO.blocking[Client[CIO]] {
-      val bootstrap                                               = Vector(Connection.hello(config.auth.map(a => a.username -> a.password)))
+      // same setup as standalone (identification, clientName); cluster validation forces database 0, so this adds no SELECT
+      val bootstrap                                               = Client.bootstrapCommands(config.auth, config.database, config.clientName)
       val factory: Node => MultiplexedConnection.TransportFactory = node => {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)
         (onFrame, onClosed) => SocketTransport.connect(node.host, node.port, config.connectTimeout, upgrade, onFrame, onClosed)
