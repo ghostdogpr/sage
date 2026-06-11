@@ -1,9 +1,10 @@
 package sage.integration.commands
 
 /**
-  * The acknowledged command-coverage partition. `skipped` is deliberate-never with reasons; `todo` is the honest gap. The coverage spec
-  * fails on any unacknowledged drift. Subcommands modeled as arguments under a bare command are not listed here — the spec drops
-  * space-containing server names that sage does not implement as a name of their own.
+  * The acknowledged command-coverage partition. Every server-reported command is either implemented (via a [[CommandSamples]] sample) or
+  * listed in `skipped` (deliberate-never, with a reason); the coverage spec fails on any unacknowledged drift. Subcommands modeled as
+  * arguments under a bare command are not listed here — the spec drops space-containing server names that sage does not implement as a name
+  * of their own.
   */
 object Coverage {
 
@@ -62,31 +63,11 @@ object Coverage {
     "READWRITE"            -> "replica-read routing is managed internally, not toggled per command on the shared connection",
     "MODULE"               -> "loadable modules are out of scope",
     "CLUSTERSCAN"          -> "cluster operator administration; sage consumes topology internally and is not a cluster-admin tool",
-    "TRIMSLOTS"            -> "cluster operator administration; sage consumes topology internally and is not a cluster-admin tool"
-  )
-
-  val todo: Set[String] = Set(
-    "ARCOUNT",
-    "ARDEL",
-    "ARDELRANGE",
-    "ARGET",
-    "ARGETRANGE",
-    "ARGREP",
-    "ARINFO",
-    "ARINSERT",
-    "ARLASTITEMS",
-    "ARLEN",
-    "ARMGET",
-    "ARMSET",
-    "ARNEXT",
-    "AROP",
-    "ARRING",
-    "ARSCAN",
-    "ARSEEK",
-    "ARSET",
-    "DELIFEQ",
-    "XCFGSET",
-    "COMMANDLOG",
-    "HOTKEYS"
+    "TRIMSLOTS"            -> "cluster operator administration; sage consumes topology internally and is not a cluster-admin tool",
+    "SAVE"                 -> "persistence administration; synchronous save blocks the server, operator/cron tooling not an app-client concern",
+    "BGSAVE"               -> "persistence administration; backup is operator/cron tooling, not an app-client concern",
+    "BGREWRITEAOF"         -> "persistence administration; AOF rewrite is operator/cron tooling, not an app-client concern",
+    "LASTSAVE"             -> "persistence introspection paired with SAVE/BGSAVE, which are operator tooling",
+    "HOTKEYS"              -> "hot-key profiling session (START/STOP/GET/RESET); operator diagnostic tooling like MONITOR, not exposed"
   )
 }

@@ -114,6 +114,8 @@ trait CommandRunner[F[_]] {
 
   final def del[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.del(first, rest*))
 
+  final def delIfEq[K: KeyCodec, V: ValueCodec](key: K, value: V): F[Boolean] = run(Keys.delIfEq(key, value))
+
   final def exists[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.exists(first, rest*))
 
   final def expire[K: KeyCodec](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always): F[Boolean] =
@@ -653,6 +655,9 @@ trait CommandRunner[F[_]] {
   final def xSetId[K: KeyCodec](key: K, id: GroupStartId, entriesAdded: Option[Long] = None, maxDeletedId: Option[StreamId] = None): F[Unit] =
     run(Streams.xSetId(key, id, entriesAdded, maxDeletedId))
 
+  final def xCfgSet[K: KeyCodec](key: K, idmpDuration: Option[FiniteDuration] = None, idmpMaxSize: Option[Long] = None): F[Unit] =
+    run(Streams.xCfgSet(key, idmpDuration, idmpMaxSize))
+
   final def xRange[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
     key: K,
     start: StreamRangeId = StreamRangeId.Min,
@@ -821,18 +826,12 @@ trait CommandRunner[F[_]] {
 
   final def configGet(parameter: String, rest: String*): F[Map[String, String]]                      = run(Server.configGet(parameter, rest*))
   final def configSet(setting: (String, String), rest: (String, String)*): F[Unit]                   = run(Server.configSet(setting, rest*))
-  final def configResetStat: F[Unit]                                                                 = run(Server.configResetStat)
-  final def configRewrite: F[Unit]                                                                   = run(Server.configRewrite)
   final def info(sections: String*): F[String]                                                       = run(Server.info(sections*))
   final def dbSize: F[Long]                                                                          = run(Server.dbSize)
   final def time: F[Instant]                                                                         = run(Server.time)
-  final def lastSave: F[Instant]                                                                     = run(Server.lastSave)
   final def role: F[Role]                                                                            = run(Server.role)
   final def flushAll(mode: Option[FlushMode] = None): F[Unit]                                        = run(Server.flushAll(mode))
   final def flushDb(mode: Option[FlushMode] = None): F[Unit]                                         = run(Server.flushDb(mode))
-  final def save: F[Unit]                                                                            = run(Server.save)
-  final def bgSave(schedule: Boolean = false): F[String]                                             = run(Server.bgSave(schedule))
-  final def bgRewriteAof: F[String]                                                                  = run(Server.bgRewriteAof)
   final def waitReplicas(numReplicas: Long, timeout: FiniteDuration): F[Long]                        = run(Server.waitReplicas(numReplicas, timeout))
   final def waitAof(numLocal: Long, numReplicas: Long, timeout: FiniteDuration): F[(Long, Long)]     =
     run(Server.waitAof(numLocal, numReplicas, timeout))
@@ -841,6 +840,9 @@ trait CommandRunner[F[_]] {
   final def slowLogGet(count: Option[Long] = None): F[Vector[SlowLogEntry]]                          = run(Server.slowLogGet(count))
   final def slowLogLen: F[Long]                                                                      = run(Server.slowLogLen)
   final def slowLogReset: F[Unit]                                                                    = run(Server.slowLogReset)
+  final def commandLogGet(count: Long, logType: CommandLogType): F[Vector[CommandLogEntry]]          = run(Server.commandLogGet(count, logType))
+  final def commandLogLen(logType: CommandLogType): F[Long]                                          = run(Server.commandLogLen(logType))
+  final def commandLogReset(logType: CommandLogType): F[Unit]                                        = run(Server.commandLogReset(logType))
   final def latencyHistory(event: String): F[Vector[(Instant, FiniteDuration)]]                      = run(Server.latencyHistory(event))
   final def latencyLatest: F[Vector[LatencyEntry]]                                                   = run(Server.latencyLatest)
   final def latencyReset(events: String*): F[Long]                                                   = run(Server.latencyReset(events*))
@@ -859,32 +861,89 @@ trait CommandRunner[F[_]] {
 
   // --- access control ------------------------------------------------------------------------------------------------------------------
 
-  final def aclWhoAmI: F[String]                                                   = run(Acl.aclWhoAmI)
-  final def aclList: F[Vector[String]]                                             = run(Acl.aclList)
-  final def aclUsers: F[Vector[String]]                                            = run(Acl.aclUsers)
-  final def aclCat(category: Option[String] = None): F[Vector[String]]             = run(Acl.aclCat(category))
-  final def aclGenPass(bits: Option[Int] = None): F[String]                        = run(Acl.aclGenPass(bits))
-  final def aclGetUser(username: String): F[Option[AclUser]]                       = run(Acl.aclGetUser(username))
-  final def aclSetUser(username: String, rules: String*): F[Unit]                  = run(Acl.aclSetUser(username, rules*))
-  final def aclDelUser(first: String, rest: String*): F[Long]                      = run(Acl.aclDelUser(first, rest*))
-  final def aclDryRun(username: String, command: String, args: String*): F[String] = run(Acl.aclDryRun(username, command, args*))
-  final def aclLog(count: Option[Long] = None): F[Vector[AclLogEntry]]             = run(Acl.aclLog(count))
-  final def aclLogReset: F[Unit]                                                   = run(Acl.aclLogReset)
-  final def aclLoad: F[Unit]                                                       = run(Acl.aclLoad)
-  final def aclSave: F[Unit]                                                       = run(Acl.aclSave)
+  final def aclWhoAmI: F[String]                                       = run(Acl.aclWhoAmI)
+  final def aclList: F[Vector[String]]                                 = run(Acl.aclList)
+  final def aclUsers: F[Vector[String]]                                = run(Acl.aclUsers)
+  final def aclCat(category: Option[String] = None): F[Vector[String]] = run(Acl.aclCat(category))
+  final def aclGetUser(username: String): F[Option[AclUser]]           = run(Acl.aclGetUser(username))
+  final def aclLog(count: Option[Long] = None): F[Vector[AclLogEntry]] = run(Acl.aclLog(count))
 
   // --- connection ----------------------------------------------------------------------------------------------------------------------
 
-  final def echo(message: String): F[String]                                                    = run(Connection.echo(message))
-  final def clientId: F[Long]                                                                   = run(Connection.clientId)
-  final def clientGetName: F[String]                                                            = run(Connection.clientGetName)
-  final def clientInfo: F[String]                                                               = run(Connection.clientInfo)
-  final def clientList: F[String]                                                               = run(Connection.clientList)
-  final def clientGetRedir: F[Long]                                                             = run(Connection.clientGetRedir)
-  final def clientPause(timeout: FiniteDuration, mode: Option[ClientPauseMode] = None): F[Unit] =
-    run(Connection.clientPause(timeout, mode))
-  final def clientUnpause: F[Unit]                                                              = run(Connection.clientUnpause)
-  final def clientUnblock(id: Long, error: Boolean = false): F[Boolean]                         = run(Connection.clientUnblock(id, error))
+  final def echo(message: String): F[String] = run(Connection.echo(message))
+  final def clientId: F[Long]                = run(Connection.clientId)
+  final def clientGetName: F[String]         = run(Connection.clientGetName)
+  final def clientInfo: F[String]            = run(Connection.clientInfo)
+  final def clientList: F[String]            = run(Connection.clientList)
+  final def clientGetRedir: F[Long]          = run(Connection.clientGetRedir)
+
+  // --- arrays --------------------------------------------------------------------------------------------------------------------------
+
+  final def arSet[K: KeyCodec, V: ValueCodec](key: K, index: Long, first: V, rest: V*): F[Long] = run(Arrays.arSet(key, index, first, rest*))
+
+  final def arMSet[K: KeyCodec, V: ValueCodec](key: K, first: (Long, V), rest: (Long, V)*): F[Long] = run(Arrays.arMSet(key, first, rest*))
+
+  final def arGet[K: KeyCodec, V: ValueCodec](key: K, index: Long): F[Option[V]] = run(Arrays.arGet(key, index))
+
+  final def arMGet[K: KeyCodec, V: ValueCodec](key: K, first: Long, rest: Long*): F[Vector[Option[V]]] = run(Arrays.arMGet(key, first, rest*))
+
+  final def arLen[K: KeyCodec](key: K): F[Long] = run(Arrays.arLen(key))
+
+  final def arCount[K: KeyCodec](key: K): F[Long] = run(Arrays.arCount(key))
+
+  final def arGetRange[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long): F[Vector[Option[V]]] =
+    run(Arrays.arGetRange(key, start, end))
+
+  final def arRing[K: KeyCodec, V: ValueCodec](key: K, size: Long, first: V, rest: V*): F[Long] = run(Arrays.arRing(key, size, first, rest*))
+
+  final def arLastItems[K: KeyCodec, V: ValueCodec](key: K, count: Long, rev: Boolean = false): F[Vector[V]] =
+    run(Arrays.arLastItems(key, count, rev))
+
+  final def arDel[K: KeyCodec](key: K, first: Long, rest: Long*): F[Long] = run(Arrays.arDel(key, first, rest*))
+
+  final def arDelRange[K: KeyCodec](key: K, first: (Long, Long), rest: (Long, Long)*): F[Long] = run(Arrays.arDelRange(key, first, rest*))
+
+  final def arInsert[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Arrays.arInsert(key, first, rest*))
+
+  final def arNext[K: KeyCodec](key: K): F[Option[Long]] = run(Arrays.arNext(key))
+
+  final def arSeek[K: KeyCodec](key: K, index: Long): F[Boolean] = run(Arrays.arSeek(key, index))
+
+  final def arScan[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long, limit: Option[Long] = None): F[Vector[(Long, V)]] =
+    run(Arrays.arScan(key, start, end, limit))
+
+  final def arGrep[K: KeyCodec](
+    key: K,
+    start: Long,
+    end: Long,
+    combine: ArGrepCombine = ArGrepCombine.Or,
+    limit: Option[Long] = None,
+    noCase: Boolean = false
+  )(first: ArMatch, rest: ArMatch*): F[Vector[Long]] = run(Arrays.arGrep(key, start, end, combine, limit, noCase)(first, rest*))
+
+  final def arGrepWithValues[K: KeyCodec, V: ValueCodec](
+    key: K,
+    start: Long,
+    end: Long,
+    combine: ArGrepCombine = ArGrepCombine.Or,
+    limit: Option[Long] = None,
+    noCase: Boolean = false
+  )(first: ArMatch, rest: ArMatch*): F[Vector[(Long, V)]] = run(Arrays.arGrepWithValues(key, start, end, combine, limit, noCase)(first, rest*))
+
+  final def arOpSum[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpSum(key, start, end))
+  final def arOpMin[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMin(key, start, end))
+  final def arOpMax[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMax(key, start, end))
+  final def arOpAnd[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]]   = run(Arrays.arOpAnd(key, start, end))
+  final def arOpOr[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]]    = run(Arrays.arOpOr(key, start, end))
+  final def arOpXor[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]]   = run(Arrays.arOpXor(key, start, end))
+  final def arOpUsed[K: KeyCodec](key: K, start: Long, end: Long): F[Long]          = run(Arrays.arOpUsed(key, start, end))
+
+  final def arOpMatch[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long, value: V): F[Long] =
+    run(Arrays.arOpMatch(key, start, end, value))
+
+  final def arInfo[K: KeyCodec](key: K): F[ArrayInfo] = run(Arrays.arInfo(key))
+
+  final def arInfoFull[K: KeyCodec](key: K): F[ArrayInfoFull] = run(Arrays.arInfoFull(key))
 }
 
 /**

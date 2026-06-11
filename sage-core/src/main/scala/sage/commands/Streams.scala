@@ -174,6 +174,8 @@ private[sage] object Streams {
   private val Silent       = Bytes.utf8("SILENT")
   private val Fail         = Bytes.utf8("FAIL")
   private val Fatal        = Bytes.utf8("FATAL")
+  private val IdmpDuration = Bytes.utf8("IDMP-DURATION")
+  private val IdmpMaxSize  = Bytes.utf8("IDMP-MAXSIZE")
 
   // --- writes -------------------------------------------------------------
 
@@ -209,6 +211,17 @@ private[sage] object Streams {
       Command.FirstKey,
       (Vector(keyCodec.encode(key), groupStartWire(id)) ++ entriesAdded.toVector.flatMap(n => Vector(EntriesAdded, Bytes.utf8(n.toString)))) ++
         maxDeletedId.toVector.flatMap(d => Vector(MaxDeletedId, d.wire)),
+      Decode.ok
+    )
+
+  // sets per-stream idempotent-message-processing config; the server rejects an empty option set, so neither is required here (ADR-0026)
+  def xCfgSet[K](key: K, idmpDuration: Option[FiniteDuration] = None, idmpMaxSize: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Unit] =
+    Command(
+      "XCFGSET",
+      Command.FirstKey,
+      keyCodec.encode(key) +:
+        (idmpDuration.toVector.flatMap(d => Vector(IdmpDuration, Bytes.utf8(d.toSeconds.toString))) ++
+          idmpMaxSize.toVector.flatMap(n => Vector(IdmpMaxSize, Bytes.utf8(n.toString)))),
       Decode.ok
     )
 

@@ -32,9 +32,9 @@ final case class AclLogEntry(
 )
 
 /**
-  * Access-control administration. Reads (`WHOAMI`, `LIST`, `USERS`, `CAT`, `GETUSER`, `GENPASS`, `LOG`) and mutations (`SETUSER`,
-  * `DELUSER`, `LOAD`, `SAVE`, `DRYRUN`). `SETUSER` takes raw rule strings rather than a typed DSL: the rule grammar is large and evolving,
-  * and a partial model would reject valid rules.
+  * Access-control introspection. Reads only (`WHOAMI`, `LIST`, `USERS`, `CAT`, `GETUSER`, `LOG`). The mutations — user provisioning
+  * (`SETUSER`/`DELUSER`/`GENPASS`/`DRYRUN`) and the rule-file/ledger operations (`LOAD`/`SAVE`/`LOG RESET`) — are deliberately not exposed,
+  * being deployment-time operator tooling rather than an app-client concern.
   */
 private[sage] object Acl {
 
@@ -42,15 +42,8 @@ private[sage] object Acl {
   private val ListWord = Bytes.utf8("LIST")
   private val Users    = Bytes.utf8("USERS")
   private val Cat      = Bytes.utf8("CAT")
-  private val GenPass  = Bytes.utf8("GENPASS")
   private val GetUser  = Bytes.utf8("GETUSER")
-  private val SetUser  = Bytes.utf8("SETUSER")
-  private val DelUser  = Bytes.utf8("DELUSER")
-  private val DryRun   = Bytes.utf8("DRYRUN")
   private val Log      = Bytes.utf8("LOG")
-  private val Reset    = Bytes.utf8("RESET")
-  private val Load     = Bytes.utf8("LOAD")
-  private val Save     = Bytes.utf8("SAVE")
 
   val aclWhoAmI: Command[String]        = Command("ACL", Command.NoKeys, Vector(WhoAmI), Decode.utf8String)
   val aclList: Command[Vector[String]]  = Command("ACL", Command.NoKeys, Vector(ListWord), Decode.vector(Decode.utf8String))
@@ -59,32 +52,11 @@ private[sage] object Acl {
   def aclCat(category: Option[String] = None): Command[Vector[String]] =
     Command("ACL", Command.NoKeys, Cat +: category.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String))
 
-  def aclGenPass(bits: Option[Int] = None): Command[String] =
-    Command("ACL", Command.NoKeys, GenPass +: bits.map(b => Bytes.utf8(b.toString)).toVector, Decode.utf8String)
-
   def aclGetUser(username: String): Command[Option[AclUser]] =
     Command("ACL", Command.NoKeys, Vector(GetUser, Bytes.utf8(username)), decodeUser)
 
-  def aclSetUser(username: String, rules: String*): Command[Unit] =
-    Command("ACL", Command.NoKeys, SetUser +: Bytes.utf8(username) +: rules.iterator.map(Bytes.utf8).toVector, Decode.ok)
-
-  def aclDelUser(first: String, rest: String*): Command[Long] =
-    Command("ACL", Command.NoKeys, DelUser +: (first +: rest).iterator.map(Bytes.utf8).toVector, Decode.long)
-
-  def aclDryRun(username: String, command: String, args: String*): Command[String] =
-    Command(
-      "ACL",
-      Command.NoKeys,
-      DryRun +: Bytes.utf8(username) +: Bytes.utf8(command) +: args.iterator.map(Bytes.utf8).toVector,
-      Decode.text
-    )
-
   def aclLog(count: Option[Long] = None): Command[Vector[AclLogEntry]] =
     Command("ACL", Command.NoKeys, Log +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeLogEntry))
-
-  val aclLogReset: Command[Unit] = Command("ACL", Command.NoKeys, Vector(Log, Reset), Decode.ok)
-  val aclLoad: Command[Unit]     = Command("ACL", Command.NoKeys, Vector(Load), Decode.ok)
-  val aclSave: Command[Unit]     = Command("ACL", Command.NoKeys, Vector(Save), Decode.ok)
 
   private val decodeUser: Frame => Either[DecodeError, Option[AclUser]] = {
     case Frame.Null => Right(None)

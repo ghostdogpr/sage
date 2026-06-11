@@ -23,7 +23,7 @@ abstract class ServerAdminSuite(image: String) extends ServerSuite(image) {
     }
   }
 
-  test("DBSIZE, FLUSHDB, ECHO, TIME, LASTSAVE") {
+  test("DBSIZE, FLUSHDB, ECHO, TIME") {
     withClient { client =>
       for {
         _     <- client.set("admin-k", "v")
@@ -32,13 +32,11 @@ abstract class ServerAdminSuite(image: String) extends ServerSuite(image) {
         empty <- client.dbSize
         echo  <- client.echo("ping")
         time  <- client.time
-        saved <- client.lastSave
       } yield {
         assert(size >= 1L)
         assertEquals(empty, 0L)
         assertEquals(echo, "ping")
         assert(time.getEpochSecond > 1_000_000_000L)
-        assert(saved.getEpochSecond > 0L)
       }
     }
   }

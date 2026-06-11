@@ -39,6 +39,36 @@ final case class SlowLogEntry(id: Long, timestamp: Instant, duration: FiniteDura
 
 final case class LatencyEntry(event: String, timestamp: Instant, latest: FiniteDuration, max: FiniteDuration)
 
+/**
+  * The Valkey command log's three tracked categories. `Slow` logs by execution time; `LargeRequest`/`LargeReply` log by payload size.
+  */
+enum CommandLogType {
+  case Slow, LargeRequest, LargeReply
+}
+
+object CommandLogType {
+
+  private[commands] def wire(tpe: CommandLogType): Bytes =
+    Bytes.utf8(tpe match {
+      case Slow         => "slow"
+      case LargeRequest => "large-request"
+      case LargeReply   => "large-reply"
+    })
+}
+
+/**
+  * One `COMMANDLOG GET` entry. `metric` is microseconds for [[CommandLogType.Slow]] and bytes for the large-request/large-reply logs — the
+  * caller already chose the type, so the unit is known. `clientAddr`/`clientName` may be empty on older entries.
+  */
+final case class CommandLogEntry(
+  id: Long,
+  timestamp: Instant,
+  metric: Long,
+  command: Vector[String],
+  clientAddr: String,
+  clientName: String
+)
+
 final case class CommandHistogram(calls: Long, histogramUsec: Map[Long, Long])
 
 /**
@@ -64,9 +94,6 @@ private[sage] object Server {
 
   private val Get             = Bytes.utf8("GET")
   private val Set             = Bytes.utf8("SET")
-  private val ResetStat       = Bytes.utf8("RESETSTAT")
-  private val Rewrite         = Bytes.utf8("REWRITE")
-  private val Schedule        = Bytes.utf8("SCHEDULE")
   private val Usage           = Bytes.utf8("USAGE")
   private val Samples         = Bytes.utf8("SAMPLES")
   private val Purge           = Bytes.utf8("PURGE")
@@ -96,9 +123,6 @@ private[sage] object Server {
   def configSet(setting: (String, String), rest: (String, String)*): Command[Unit] =
     Command("CONFIG", Command.NoKeys, Set +: (setting +: rest).flatMap { case (k, v) => Vector(Bytes.utf8(k), Bytes.utf8(v)) }.toVector, Decode.ok)
 
-  val configResetStat: Command[Unit] = Command("CONFIG", Command.NoKeys, Vector(ResetStat), Decode.ok)
-  val configRewrite: Command[Unit]   = Command("CONFIG", Command.NoKeys, Vector(Rewrite), Decode.ok)
-
   def info(sections: String*): Command[String] =
     Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text)
 
@@ -118,8 +142,6 @@ private[sage] object Server {
         case other                                                                => Left(DecodeError("TIME [seconds, microseconds]", Frame.describe(other)))
       }
     )
-
-  val lastSave: Command[Instant] = Command("LASTSAVE", Command.NoKeys, Vector.empty, Decode.long.andThen(_.map(Instant.ofEpochSecond)))
 
   private val decodeRole: Frame => Either[DecodeError, Role] = {
     case Frame.Array(Frame.BulkString(kind) +: rest) =>
@@ -154,11 +176,6 @@ private[sage] object Server {
   def flushDb(mode: Option[FlushMode] = None): Command[Unit]  =
     Command("FLUSHDB", Command.NoKeys, FlushMode.args(mode), Decode.ok, allMasters = true)
 
-  val save: Command[Unit]                                = Command("SAVE", Command.NoKeys, Vector.empty, Decode.ok)
-  def bgSave(schedule: Boolean = false): Command[String] =
-    Command("BGSAVE", Command.NoKeys, if (schedule) Vector(Schedule) else Vector.empty, Decode.text)
-  val bgRewriteAof: Command[String]                      = Command("BGREWRITEAOF", Command.NoKeys, Vector.empty, Decode.text)
-
   def waitReplicas(numReplicas: Long, timeout: FiniteDuration): Command[Long] =
     Command("WAIT", Command.NoKeys, Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(timeout.toMillis.toString)), Decode.long, Execution.Blocking)
 
@@ -189,6 +206,16 @@ private[sage] object Server {
 
   val slowLogLen: Command[Long]   = Command("SLOWLOG", Command.NoKeys, Vector(SlowLen), Decode.long)
   val slowLogReset: Command[Unit] = Command("SLOWLOG", Command.NoKeys, Vector(Reset), Decode.ok)
+
+  // Valkey command-log observability; `count` of -1 returns every entry of the type
+  def commandLogGet(count: Long, logType: CommandLogType): Command[Vector[CommandLogEntry]] =
+    Command("COMMANDLOG", Command.NoKeys, Vector(Get, Bytes.utf8(count.toString), CommandLogType.wire(logType)), Decode.vector(decodeCommandLog))
+
+  def commandLogLen(logType: CommandLogType): Command[Long] =
+    Command("COMMANDLOG", Command.NoKeys, Vector(SlowLen, CommandLogType.wire(logType)), Decode.long)
+
+  def commandLogReset(logType: CommandLogType): Command[Unit] =
+    Command("COMMANDLOG", Command.NoKeys, Vector(Reset, CommandLogType.wire(logType)), Decode.ok)
 
   def latencyHistory(event: String): Command[Vector[(Instant, FiniteDuration)]] =
     Command("LATENCY", Command.NoKeys, Vector(History, Bytes.utf8(event)), Decode.vector(decodeLatencyHistory))
@@ -263,17 +290,31 @@ private[sage] object Server {
       case other                                                                                         => Left(DecodeError("replica [host, port, offset]", Frame.describe(other)))
     }(frame)
 
+  // SLOWLOG GET and COMMANDLOG GET share this trailing [clientAddr, clientName] shape, absent on servers older than 4.0
+  private def clientFields(tail: Vector[Frame]): (String, String) = {
+    val addr = tail.headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
+    val name = tail.drop(1).headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
+    (addr, name)
+  }
+
   private def decodeSlowLog(frame: Frame): Either[DecodeError, SlowLogEntry] =
     frame match {
       case Frame.Array(Frame.Integer(id) +: Frame.Integer(ts) +: Frame.Integer(micros) +: argsFrame +: tail) =>
-        for {
-          command <- Decode.vector(Decode.utf8String)(argsFrame)
-        } yield {
-          val addr = tail.headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
-          val name = tail.drop(1).headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
+        Decode.vector(Decode.utf8String)(argsFrame).map { command =>
+          val (addr, name) = clientFields(tail)
           SlowLogEntry(id, Instant.ofEpochSecond(ts), micros.micros, command, addr, name)
         }
       case other                                                                                             => Left(DecodeError("slowlog entry", Frame.describe(other)))
+    }
+
+  private def decodeCommandLog(frame: Frame): Either[DecodeError, CommandLogEntry] =
+    frame match {
+      case Frame.Array(Frame.Integer(id) +: Frame.Integer(ts) +: Frame.Integer(metric) +: argsFrame +: tail) =>
+        Decode.vector(Decode.utf8String)(argsFrame).map { command =>
+          val (addr, name) = clientFields(tail)
+          CommandLogEntry(id, Instant.ofEpochSecond(ts), metric, command, addr, name)
+        }
+      case other                                                                                             => Left(DecodeError("commandlog entry", Frame.describe(other)))
     }
 
   private def decodeLatencyLatest(frame: Frame): Either[DecodeError, LatencyEntry] =

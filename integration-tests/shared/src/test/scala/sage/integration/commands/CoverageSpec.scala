@@ -32,7 +32,7 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
   private val implemented: Set[String] = CommandSamples.all.map(_.command.name).toSet
 
   test("implemented commands never overlap the acknowledged gaps") {
-    assertEquals(implemented.intersect(Coverage.todo ++ Coverage.skipped.keySet), Set.empty[String])
+    assertEquals(implemented.intersect(Coverage.skipped.keySet), Set.empty[String])
   }
 
   test("the partition is exact against both live servers") {
@@ -45,14 +45,14 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
         // Command name (XINFO/XGROUP) are tracked
         val serverUnion = (redisCore ++ valkeyCore).filterNot(name => name.contains(' ') && !implemented.contains(name))
 
-        val unacknowledged = serverUnion -- implemented -- Coverage.skipped.keySet -- Coverage.todo
+        val unacknowledged = serverUnion -- implemented -- Coverage.skipped.keySet
         assert(unacknowledged.isEmpty, s"unacknowledged server commands: ${unacknowledged.toVector.sorted.mkString(", ")}")
 
         val unknownImplemented = implemented -- serverUnion
         assert(unknownImplemented.isEmpty, s"implemented commands unknown to both servers: ${unknownImplemented.toVector.sorted.mkString(", ")}")
 
-        val stale = (Coverage.todo ++ Coverage.skipped.keySet) -- serverUnion
-        assert(stale.isEmpty, s"todo/skipped entries unknown to both servers: ${stale.toVector.sorted.mkString(", ")}")
+        val stale = Coverage.skipped.keySet -- serverUnion
+        assert(stale.isEmpty, s"skipped entries unknown to both servers: ${stale.toVector.sorted.mkString(", ")}")
 
         report("redis", redisCore)
         report("valkey", valkeyCore)
@@ -63,7 +63,7 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
   private def report(server: String, core: Set[String]): Unit =
     println(
       s"[coverage] $server: ${core.size} commands, ${core.intersect(implemented).size} implemented, " +
-        s"${core.intersect(Coverage.todo).size} todo, ${core.intersect(Coverage.skipped.keySet).size} skipped"
+        s"${core.intersect(Coverage.skipped.keySet).size} skipped"
     )
 
   private def configOf(server: GenericContainer): SageConfig =

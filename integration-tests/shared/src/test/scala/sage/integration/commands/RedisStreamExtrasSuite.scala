@@ -1,14 +1,30 @@
 package sage.integration.commands
 
+import scala.concurrent.duration.*
+
 import kyo.compat.*
 
 import sage.commands.*
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * XDELEX/XACKDEL (8.2) and XNACK (8.8) are Redis-only stream commands absent in Valkey, so they have no cross-server counterpart (ADR-0026).
+  * XDELEX/XACKDEL (8.2), XNACK (8.8) and XCFGSET are Redis-only stream commands absent in Valkey, so they have no cross-server counterpart
+  * (ADR-0026).
   */
 class RedisStreamExtrasSuite extends ServerSuite(Images.redis) {
+
+  test("XCFGSET sets per-stream idempotent-message-processing config") {
+    withClient { client =>
+      for {
+        _    <- client.xAdd("sx-cfg", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
+        both <- client.xCfgSet("sx-cfg", idmpDuration = Some(1.hour), idmpMaxSize = Some(100L))
+        one  <- client.xCfgSet("sx-cfg", idmpMaxSize = Some(50L))
+      } yield {
+        assertEquals(both, ())
+        assertEquals(one, ())
+      }
+    }
+  }
 
   test("XDELEX reports per-id deletion status") {
     withClient { client =>

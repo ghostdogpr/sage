@@ -132,6 +132,10 @@ private[sage] object Keys {
   def del[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
     allKeys("DEL", first +: rest.toVector, Decode.long)
 
+  // Valkey's atomic compare-and-delete: removes the key only if its current string value equals `value`
+  def delIfEq[K, V](key: K, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] =
+    Command("DELIFEQ", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(value)), Decode.flag)
+
   def exists[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =
     allKeys("EXISTS", first +: rest.toVector, Decode.long, readOnly = true)
 
