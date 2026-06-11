@@ -71,6 +71,28 @@ enum ZRange[+V] {
 
 private[sage] object SortedSets {
 
+  private val Nx            = Bytes.utf8("NX")
+  private val Xx            = Bytes.utf8("XX")
+  private val Gt            = Bytes.utf8("GT")
+  private val Lt            = Bytes.utf8("LT")
+  private val Ch            = Bytes.utf8("CH")
+  private val Incr          = Bytes.utf8("INCR")
+  private val ByScore       = Bytes.utf8("BYSCORE")
+  private val ByLex         = Bytes.utf8("BYLEX")
+  private val Rev           = Bytes.utf8("REV")
+  private val LimitWord     = Bytes.utf8("LIMIT")
+  private val WithScores    = Bytes.utf8("WITHSCORES")
+  private val WithScore     = Bytes.utf8("WITHSCORE")
+  private val WeightsWord   = Bytes.utf8("WEIGHTS")
+  private val AggregateWord = Bytes.utf8("AGGREGATE")
+  private val MinWord       = Bytes.utf8("MIN")
+  private val MaxWord       = Bytes.utf8("MAX")
+  private val CountWord     = Bytes.utf8("COUNT")
+  private val NegInfWord    = Bytes.utf8("-inf")
+  private val PosInfWord    = Bytes.utf8("+inf")
+  private val LexMin        = Bytes.utf8("-")
+  private val LexMax        = Bytes.utf8("+")
+
   def zAdd[K, V](key: K, condition: ZAddCondition = ZAddCondition.Always, changed: Boolean = false)(
     first: (V, Double),
     rest: (V, Double)*
@@ -426,26 +448,4 @@ private[sage] object SortedSets {
     System.arraycopy(src, 0, out, 1, src.length)
     Bytes.wrap(IArray.unsafeFromArray(out))
   }
-
-  private val Nx            = Bytes.utf8("NX")
-  private val Xx            = Bytes.utf8("XX")
-  private val Gt            = Bytes.utf8("GT")
-  private val Lt            = Bytes.utf8("LT")
-  private val Ch            = Bytes.utf8("CH")
-  private val Incr          = Bytes.utf8("INCR")
-  private val ByScore       = Bytes.utf8("BYSCORE")
-  private val ByLex         = Bytes.utf8("BYLEX")
-  private val Rev           = Bytes.utf8("REV")
-  private val LimitWord     = Bytes.utf8("LIMIT")
-  private val WithScores    = Bytes.utf8("WITHSCORES")
-  private val WithScore     = Bytes.utf8("WITHSCORE")
-  private val WeightsWord   = Bytes.utf8("WEIGHTS")
-  private val AggregateWord = Bytes.utf8("AGGREGATE")
-  private val MinWord       = Bytes.utf8("MIN")
-  private val MaxWord       = Bytes.utf8("MAX")
-  private val CountWord     = Bytes.utf8("COUNT")
-  private val NegInfWord    = Bytes.utf8("-inf")
-  private val PosInfWord    = Bytes.utf8("+inf")
-  private val LexMin        = Bytes.utf8("-")
-  private val LexMax        = Bytes.utf8("+")
 }

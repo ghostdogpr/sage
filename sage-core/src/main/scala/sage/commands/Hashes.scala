@@ -54,6 +54,12 @@ enum HSetExCondition {
   */
 private[sage] object Hashes {
 
+  private val WithValues = Bytes.utf8("WITHVALUES")
+  private val NoValues   = Bytes.utf8("NOVALUES")
+  private val Fields     = Bytes.utf8("FIELDS")
+  private val Fnx        = Bytes.utf8("FNX")
+  private val Fxx        = Bytes.utf8("FXX")
+
   def hSet[K, F, V](key: K, first: (F, V), rest: (F, V)*)(
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F],
@@ -277,10 +283,4 @@ private[sage] object Hashes {
     case Frame.Integer(1)  => Right(FieldPersist.Persisted)
     case other             => Left(DecodeError("field persist integer", Frame.describe(other)))
   }
-
-  private val WithValues = Bytes.utf8("WITHVALUES")
-  private val NoValues   = Bytes.utf8("NOVALUES")
-  private val Fields     = Bytes.utf8("FIELDS")
-  private val Fnx        = Bytes.utf8("FNX")
-  private val Fxx        = Bytes.utf8("FXX")
 }

@@ -158,6 +158,14 @@ _Avoid_: worker, reader, client (a Client owns connections, not group membership
 The Consumer Group's set of entries delivered to some Consumer but not yet acknowledged, each tracking its owning Consumer, idle time, and delivery count. `XACK` removes an entry from it; `XCLAIM`/`XAUTOCLAIM` reassign ownership within it; `XPENDING` inspects it as either a group-level summary or a per-entry extended form.
 _Avoid_: pending list, ack list, inflight set
 
+**All-Masters Command**:
+A command whose cluster routing fans out to every slot-owning master rather than to one node, because the state it manages is per-node and not replicated across shards: the script/function mutations (`SCRIPT LOAD`, `FUNCTION LOAD`, and the `FLUSH`/`DELETE`/`RESTORE` forms) and the keyspace flushes (`FLUSHALL`, `FLUSHDB`). The runtime sends it to all masters in parallel and returns the single result only if every node's reply agrees; any node failing fails the command (no rollback — the operations are idempotent, so a re-run converges). Inert on a standalone server. Distinct from a classic `PUBLISH` broadcasting across the cluster bus — that is one keyless command the server propagates; an All-Masters Command is the client sending to each master itself.
+_Avoid_: broadcast (reserved for classic `PUBLISH`), fan-out
+
+**Library**:
+A named, server-stored collection of Functions loaded as one unit of code under one engine (e.g. Lua) by `FUNCTION LOAD`, which returns its name. `FUNCTION LIST` groups Functions under their Library; `FUNCTION DELETE` removes a whole Library. A **Function** is one callable entry within a Library, invoked by name with `FCALL`. Distinct from a Script (`EVAL`), which is anonymous code addressed by its SHA, not a named member of a Library.
+_Avoid_: module (a loadable native plugin — see `MODULE`), package
+
 ## Example dialogue
 
 > **Dev**: When a fiber calls `client.get`, does it borrow a connection from a pool?

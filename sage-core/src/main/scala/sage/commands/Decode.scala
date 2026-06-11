@@ -12,8 +12,15 @@ import sage.protocol.Frame
 
 private[commands] object Decode {
 
+  val frame: Frame => Either[DecodeError, Frame] = Right(_)
+
   val long: Frame => Either[DecodeError, Long] = {
     case Frame.Integer(value) => Right(value)
+    case other                => Left(DecodeError("integer", Frame.describe(other)))
+  }
+
+  val int: Frame => Either[DecodeError, Int] = {
+    case Frame.Integer(value) => Right(value.toInt)
     case other                => Left(DecodeError("integer", Frame.describe(other)))
   }
 
@@ -49,6 +56,14 @@ private[commands] object Decode {
   val utf8String: Frame => Either[DecodeError, String] = {
     case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
     case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
+  }
+
+  // text however the server framed it: simple, bulk, or the RESP3 verbatim form INFO/CLIENT INFO/CLUSTER NODES use
+  val text: Frame => Either[DecodeError, String] = {
+    case Frame.SimpleString(value)      => Right(value)
+    case Frame.BulkString(bytes)        => Right(bytes.asUtf8String)
+    case Frame.VerbatimString(_, bytes) => Right(bytes.asUtf8String)
+    case other                          => Left(DecodeError("string", Frame.describe(other)))
   }
 
   val optionalUtf8String: Frame => Either[DecodeError, Option[String]] = {
@@ -127,6 +142,15 @@ private[commands] object Decode {
         case Frame.Null => Right(Vector.empty)
         case other      => decodeVector(other)
       }
+  }
+
+  // an introspection reply keyed by its string field names: a RESP3 map, or the flat RESP2 array of alternating key/value some replies
+  // still use. Non-string keys are dropped. Used by FUNCTION/ACL/CONFIG decoders that then look fields up by name.
+  val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = {
+    case Frame.Map(entries) => Right(entries.collect { case (Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
+    case Frame.Array(elements) if elements.length % 2 == 0 =>
+      Right(elements.grouped(2).collect { case Vector(Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
+    case other => Left(DecodeError("map", Frame.describe(other)))
   }
 
   def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {

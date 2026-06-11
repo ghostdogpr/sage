@@ -11,6 +11,8 @@ import sage.protocol.Frame
   */
 private[sage] object Sets {
 
+  private val Limit = Bytes.utf8("LIMIT")
+
   def sAdd[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
     Command("SADD", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode), Decode.long)
 
@@ -100,6 +102,4 @@ private[sage] object Sets {
     val args = (destination +: keys).map(keyCodec.encode)
     Command(name, args.indices.toVector, args, Decode.long)
   }
-
-  private val Limit = Bytes.utf8("LIMIT")
 }

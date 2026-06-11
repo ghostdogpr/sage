@@ -40,6 +40,26 @@ final case class GeoSearchResult[V](member: V, distance: Option[Double], hash: O
 
 private[sage] object Geo {
 
+  private val Nx             = Bytes.utf8("NX")
+  private val Xx             = Bytes.utf8("XX")
+  private val Ch             = Bytes.utf8("CH")
+  private val FromMember     = Bytes.utf8("FROMMEMBER")
+  private val FromLonLat     = Bytes.utf8("FROMLONLAT")
+  private val ByRadius       = Bytes.utf8("BYRADIUS")
+  private val ByBox          = Bytes.utf8("BYBOX")
+  private val Asc            = Bytes.utf8("ASC")
+  private val Desc           = Bytes.utf8("DESC")
+  private val CountWord      = Bytes.utf8("COUNT")
+  private val AnyWord        = Bytes.utf8("ANY")
+  private val WithCoord      = Bytes.utf8("WITHCOORD")
+  private val WithDist       = Bytes.utf8("WITHDIST")
+  private val WithHash       = Bytes.utf8("WITHHASH")
+  private val StoreDist      = Bytes.utf8("STOREDIST")
+  private val UnitMeters     = Bytes.utf8("m")
+  private val UnitKilometers = Bytes.utf8("km")
+  private val UnitMiles      = Bytes.utf8("mi")
+  private val UnitFeet       = Bytes.utf8("ft")
+
   def geoAdd[K, V](key: K, condition: GeoAddCondition = GeoAddCondition.Always, changed: Boolean = false)(
     first: (V, GeoCoordinates),
     rest: (V, GeoCoordinates)*
@@ -213,24 +233,4 @@ private[sage] object Geo {
       }
     }
   }
-
-  private val Nx             = Bytes.utf8("NX")
-  private val Xx             = Bytes.utf8("XX")
-  private val Ch             = Bytes.utf8("CH")
-  private val FromMember     = Bytes.utf8("FROMMEMBER")
-  private val FromLonLat     = Bytes.utf8("FROMLONLAT")
-  private val ByRadius       = Bytes.utf8("BYRADIUS")
-  private val ByBox          = Bytes.utf8("BYBOX")
-  private val Asc            = Bytes.utf8("ASC")
-  private val Desc           = Bytes.utf8("DESC")
-  private val CountWord      = Bytes.utf8("COUNT")
-  private val AnyWord        = Bytes.utf8("ANY")
-  private val WithCoord      = Bytes.utf8("WITHCOORD")
-  private val WithDist       = Bytes.utf8("WITHDIST")
-  private val WithHash       = Bytes.utf8("WITHHASH")
-  private val StoreDist      = Bytes.utf8("STOREDIST")
-  private val UnitMeters     = Bytes.utf8("m")
-  private val UnitKilometers = Bytes.utf8("km")
-  private val UnitMiles      = Bytes.utf8("mi")
-  private val UnitFeet       = Bytes.utf8("ft")
 }
