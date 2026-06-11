@@ -3,7 +3,7 @@ package sage.integration
 import com.dimafeng.testcontainers.GenericContainer
 import kyo.compat.*
 
-import sage.client.SageConfig
+import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
 
 /**
@@ -13,7 +13,7 @@ import sage.client.internal.Client
 trait ContainerClient {
 
   protected def configOf(server: GenericContainer): SageConfig =
-    SageConfig(host = server.host, port = server.mappedPort(6379))
+    SageConfig(topology = Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
 
   // CIO.acquireReleaseWith fails to compile on the Ox/Future cells when its type argument nests CIO (Client[CIO]); fold instead
   protected def connectAndUse[A](config: SageConfig)(body: Client[CIO] => CIO[A]): CIO[A] =

@@ -131,6 +131,32 @@ class CodecSpec extends munit.FunSuite {
     assertEquals(summon[KeyCodec[Array[Byte]]].decode(summon[KeyCodec[Array[Byte]]].encode(input)).map(_.toList), Right(input.toList))
   }
 
+  test("imap derives a total newtype codec for both value and key positions") {
+    final case class UserId(value: Long)
+    given ValueCodec[UserId] = ValueCodec[Long].imap(UserId(_))(_.value)
+    given KeyCodec[UserId]   = KeyCodec[Long].imap(UserId(_))(_.value)
+    assertValueRoundTrip(UserId(42L))
+    assertKeyRoundTrip(UserId(-7L))
+    assert(summon[ValueCodec[UserId]].encode(UserId(42L)).sameBytes(Bytes.utf8("42")))
+  }
+
+  test("emap derives a failable codec that rejects bad input with a DecodeError") {
+    final case class Even(value: Int)
+    val codec: ValueCodec[Even] =
+      ValueCodec[Int].emap(n => if (n % 2 == 0) Right(Even(n)) else Left(DecodeError("an even Int", n.toString)))(_.value)
+    assertEquals(codec.decode(codec.encode(Even(4))), Right(Even(4)))
+    assertEquals(codec.decode(Bytes.utf8("3")), Left(DecodeError("an even Int", "3")))
+    // a failure decoding the underlying Int still surfaces, unchanged
+    assertEquals(codec.decode(Bytes.utf8("abc")), Left(DecodeError("Int", "'abc'")))
+  }
+
+  test("from builds a codec from an encode/decode pair") {
+    val codec =
+      ValueCodec.from[Int](i => Bytes.utf8(s"#$i"))(b => b.asUtf8String.stripPrefix("#").toIntOption.toRight(DecodeError("#Int", b.asUtf8String)))
+    assertEquals(codec.decode(codec.encode(7)), Right(7))
+    assertEquals(codec.decode(Bytes.utf8("nope")), Left(DecodeError("#Int", "nope")))
+  }
+
   test("no KeyCodec for Double, Float, or Boolean") {
     assert(compileErrors("summon[sage.codec.KeyCodec[Double]]").nonEmpty)
     assert(compileErrors("summon[sage.codec.KeyCodec[Float]]").nonEmpty)

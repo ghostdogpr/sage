@@ -9,7 +9,7 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.client.SageConfig
+import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
 import sage.commands.{Command, CommandSamples}
 import sage.integration.Images
@@ -67,7 +67,7 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll {
     )
 
   private def configOf(server: GenericContainer): SageConfig =
-    SageConfig(host = server.host, port = server.mappedPort(6379))
+    SageConfig(topology = Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
 
   private def coreCommands(config: SageConfig): CIO[Set[String]] =
     Client.connect(config).flatMap { client =>

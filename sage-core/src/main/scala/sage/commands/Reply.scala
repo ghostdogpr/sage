@@ -12,8 +12,8 @@ object Reply {
 
   def run[Out](command: Command[Out], frame: Frame): Either[SageException, Out] =
     frame match {
-      case Frame.SimpleError(message) => Left(ServerError(message))
-      case Frame.BulkError(message)   => Left(ServerError(message.asUtf8String))
+      case Frame.SimpleError(message) => Left(ServerError.of(message))
+      case Frame.BulkError(message)   => Left(ServerError.of(message.asUtf8String))
       case other                      => command.decode(other)
     }
 }

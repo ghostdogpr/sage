@@ -117,7 +117,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.submit(Connection.ping(), r => second = Some(r))
     transports.head.emit(Frame.SimpleError("ERR boom"))
     transports.head.emit(Frame.SimpleString("PONG"))
-    assertEquals(first, Some(Failure(ServerError("ERR boom"))))
+    assertEquals(first, Some(Failure(ServerError("ERR", "boom"))))
     assertEquals(second, Some(Success("PONG")))
   }
 
@@ -314,7 +314,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.submit(Strings.set("k", "v"), r => result = Some(r))
     transports.head.emit(Frame.SimpleError("READONLY You can't write against a read only replica."))
 
-    assertEquals(result, Some(Failure(ServerError("READONLY You can't write against a read only replica."))))
+    assertEquals(result, Some(Failure(ServerError("READONLY", "You can't write against a read only replica."))))
     assertEquals(transports.head.closeCount, 1)
     assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
 

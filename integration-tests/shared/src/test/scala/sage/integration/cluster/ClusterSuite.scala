@@ -66,8 +66,8 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
     withContainers { server =>
       val host       = server.host
       val port       = server.mappedPort(6379)
-      val standalone = SageConfig(host = host, port = port)
-      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
 
       val program =
         connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
@@ -98,8 +98,8 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
     withContainers { server =>
       val host       = server.host
       val port       = server.mappedPort(6379)
-      val standalone = SageConfig(host = host, port = port)
-      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
 
       val program =
         connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
@@ -133,8 +133,8 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
     withContainers { server =>
       val host       = server.host
       val port       = server.mappedPort(6379)
-      val standalone = SageConfig(host = host, port = port)
-      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
       val expected   = (1 to 50).map(i => s"cscan:$i").toSet
 
       def writeKeys(client: Client[CIO], i: Int): CIO[Unit] =
@@ -177,8 +177,8 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
     withContainers { server =>
       val host       = server.host
       val port       = server.mappedPort(6379)
-      val standalone = SageConfig(host = host, port = port)
-      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
       val library    =
         """#!lua name=clib
           |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)

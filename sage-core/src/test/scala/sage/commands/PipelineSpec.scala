@@ -18,8 +18,8 @@ class PipelineSpec extends munit.FunSuite {
 
   test("tuple pipeline shapes per-position results, mixing success and failure") {
     val p       = (Connection.ping(), Strings.incr[String]("n")).pipeline
-    val results = p.toResults(Vector(Right("PONG"), Left(ServerError("WRONGTYPE"))))
-    assertEquals(results, (Right("PONG"), Left(ServerError("WRONGTYPE"))))
+    val results = p.toResults(Vector(Right("PONG"), Left(ServerError("WRONGTYPE", ""))))
+    assertEquals(results, (Right("PONG"), Left(ServerError("WRONGTYPE", ""))))
   }
 
   test("sequence preserves order and assembles a homogeneous vector") {

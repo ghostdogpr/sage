@@ -81,11 +81,11 @@ class CommandSpec extends munit.FunSuite {
   test("a top-level error frame becomes a ServerError for any command") {
     assertEquals(
       Reply.run(Strings.get[String, String]("foo"), Frame.SimpleError("ERR oops")),
-      Left(SageException.ServerError("ERR oops"))
+      Left(SageException.ServerError("ERR", "oops"))
     )
     assertEquals(
       Reply.run(Strings.set("foo", "bar"), Frame.BulkError(Bytes.utf8("WRONGTYPE bad"))),
-      Left(SageException.ServerError("WRONGTYPE bad"))
+      Left(SageException.ServerError("WRONGTYPE", "bad"))
     )
   }
 

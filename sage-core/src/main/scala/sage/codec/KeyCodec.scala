@@ -9,14 +9,35 @@ import sage.SageException.DecodeError
   * are excluded because their formatting is representation-sensitive — two writers must not silently address different keys or fields.
   * Cluster-slot hashing is a property of key positions only ([[sage.commands.Command.keyIndices]]); this typeclass does no hashing itself.
   */
-trait KeyCodec[A] {
+trait KeyCodec[A] { self =>
 
   def encode(value: A): Bytes
 
   def decode(bytes: Bytes): Either[DecodeError, A]
+
+  /**
+    * Derives a key codec for `B` from a total, lossless mapping — typically a newtype over an existing key type. Caution: this is the
+    * escape hatch around the deliberate absence of float/boolean key givens; mapping onto a representation-sensitive type reintroduces the
+    * hazard that two writers silently address different keys, so keep `f`/`g` canonical and total.
+    */
+  final def imap[B](f: A => B)(g: B => A): KeyCodec[B] =
+    KeyCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).map(f))
+
+  /**
+    * Derives a key codec for `B` whose decode may fail. A `Left` keeps the strict, no-coercion contract.
+    */
+  final def emap[B](f: A => Either[DecodeError, B])(g: B => A): KeyCodec[B] =
+    KeyCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).flatMap(f))
 }
 
 object KeyCodec {
+
+  def apply[A](using codec: KeyCodec[A]): KeyCodec[A] = codec
+
+  /**
+    * Builds a key codec from an encode/decode pair. The decode returns `Either` so a custom codec rejects bad input rather than throwing.
+    */
+  def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): KeyCodec[A] = instance(enc, dec)
 
   // no Double/Float/Boolean keys: float formatting is representation-sensitive, so two writers can silently address different keys
 

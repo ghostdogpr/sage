@@ -62,12 +62,16 @@ lazy val core = (projectMatrix in file("sage-core"))
 // The kyo cell builds with Scala Next (like proteus/purelogic); the others stay on LTS.
 lazy val client = (projectMatrix in file("sage-client"))
   .dependsOn(core)
+  .enablePlugins(BuildInfoPlugin)
   .settings(name := "sage-client")
   .settings(commonSettings)
   .settings(parallelUnitTests)
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
-    publish / skip := moduleName.value.endsWith("-future")
+    publish / skip   := moduleName.value.endsWith("-future"),
+    // surfaces the library version to the CLIENT SETINFO LIB-VER announced at connection setup; version comes from sbt-dynver
+    buildInfoKeys    := Seq[BuildInfoKey](version),
+    buildInfoPackage := "sage.client"
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))

@@ -15,7 +15,22 @@ object SageException {
 
   final case class DecodeError(expected: String, actual: String) extends SageException(s"expected $expected, got $actual")
 
-  final case class ServerError(message: String) extends SageException(message)
+  /**
+    * An error reply from the server. `code` is the leading token Redis/Valkey put on every error (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`,
+    * the generic `ERR`, …), split out so callers can branch on it — `case ServerError("WRONGTYPE", _)` — without parsing the message
+    * themselves. `detail` is the rest; for a single-token error it is empty. Build from a raw wire message with [[ServerError.of]].
+    */
+  final case class ServerError(code: String, detail: String) extends SageException(if (detail.isEmpty) code else s"$code $detail")
+
+  object ServerError {
+
+    // the wire form is "CODE detail…"; the code is the first whitespace-delimited token, the detail everything after it
+    def of(raw: String): ServerError =
+      raw.indexOf(' ') match {
+        case -1 => ServerError(raw, "")
+        case i  => ServerError(raw.substring(0, i), raw.substring(i + 1))
+      }
+  }
 
   final case class ConnectionLost(mayHaveExecuted: Boolean)
     extends SageException(

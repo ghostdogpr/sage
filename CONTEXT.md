@@ -71,6 +71,10 @@ _Avoid_: invalidate
 The monotonic epoch of the Multiplexed Connection's current socket, bumped each time a fresh socket becomes live. A Dedicated Connection is stamped with the Generation that was live when it joined the pool and discarded once that Generation is no longer current — so a connection that outlived a reconnect (e.g. a DNS failover to a new master) is never reused. The Multiplexed Connection is the sole authority on its Generation: it answers `liveGeneration` (the epoch to stamp, only while live) and `isCurrent` (whether a stamp is still the live epoch); no caller compares raw epoch numbers.
 _Avoid_: version, era, incarnation
 
+**Database**:
+A standalone server's logical keyspace (`SELECT 0`–`15` by default), selected once at connection setup from configuration and fixed for the Client's lifetime — re-applied on every reconnect, on every connection, never changed by a runtime command (that would move the keyspace under every fiber sharing a connection). A cluster has only database 0.
+_Avoid_: DB index, schema, namespace, partition
+
 **Cached Read**:
 A read command executed with explicit per-call opt-in to client-side caching: served from the local cache until a server invalidation push or TTL evicts it.
 _Avoid_: tracked read, local read
@@ -129,6 +133,10 @@ _Avoid_: cluster map, slot map, layout
 **Seed**:
 A user-supplied address the cluster runtime contacts at startup to discover the Cluster Topology. Seeds bootstrap discovery only — once the topology is known, routing targets are Nodes the cluster reports, and a seed that is not itself a master is dropped. Any one seed answering is enough.
 _Avoid_: bootstrap node, contact point, seed node
+
+**Read Policy**:
+The `ReadFrom` setting governing which Node a read-only command may run on, the same setting for both cluster and master-replica deployments: `Master` (default — every command to the master), `MasterPreferred`, `Replica`, or `ReplicaPreferred`. Only read-only commands are eligible; writes and any command not marked read-only always go to the master, regardless of the policy. `Replica` fails when no replica is reachable; the `*Preferred` policies fall back to the master. Reads served by a replica may lag the master — staleness is the policy's accepted contract, not a fault. Uses "master", never "primary", matching the Node/Shard vocabulary.
+_Avoid_: read preference, routing policy, primary
 
 **Redirect**:
 A server reply telling the client a slot lives elsewhere. `MOVED` is permanent — the slot's owner changed, refresh the topology — while `ASK` is a one-shot hand-off during a live migration: send the single command (prefixed with `ASKING`) to the named node without touching the topology. The Core parses both into one value; acting on the difference is the runtime's job.
