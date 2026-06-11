@@ -10,8 +10,8 @@ import kyo.compat.*
 import sage.{Bytes, Message}
 import sage.SageException.DecodeError
 import sage.client.{Endpoint, SageConfig, Topology}
-import sage.client.internal.Client
-import sage.commands.{Command, Commands, Pipeline}
+import sage.client.internal.{Client, ScanTarget}
+import sage.commands.{Command, Commands, Pipeline, ScanCursor}
 import sage.commands.Pipeline.pipeline
 import sage.integration.{ContainerClient, Images}
 import sage.protocol.Frame
@@ -121,6 +121,49 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
               assertEquals(sMsg, Some(Message("orders", "placed")))
               assertEquals(cMsg, Some(Message("news", "hello")))
               assert(channels.contains("orders"), channels)
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+  // the keyless SCAN walk: scanTargets enumerates the slot-owning masters and runOn pins each page to one node (no rerouting), so the
+  // sweep covers the whole keyspace. A single-node cluster owns every slot, so one target is expected; multi-master coverage rides the same path.
+  test("scanAll sweeps every slot-owning master via node-pinned runOn") {
+    withContainers { server =>
+      val host       = server.host
+      val port       = server.mappedPort(6379)
+      val standalone = SageConfig(host = host, port = port)
+      val clustered  = SageConfig(host = host, port = port, topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val expected   = (1 to 50).map(i => s"cscan:$i").toSet
+
+      def writeKeys(client: Client[CIO], i: Int): CIO[Unit] =
+        if (i > 50) CIO.value(()) else client.set(s"cscan:$i", i.toString).flatMap(_ => writeKeys(client, i + 1))
+
+      def scanNode(client: Client[CIO], target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
+        client.runOn(target, Commands.scan[String](cursor, pattern = Some("cscan:*"), count = Some(10L))).flatMap { page =>
+          page.next match {
+            case Some(next) => scanNode(client, target, next, found ++ page.items)
+            case None       => CIO.value(found ++ page.items)
+          }
+        }
+
+      def sweep(client: Client[CIO], targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
+        targets match {
+          case head +: tail => scanNode(client, head, ScanCursor.start, found).flatMap(sweep(client, tail, _))
+          case _            => CIO.value(found)
+        }
+
+      val program =
+        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+          connectAndUse(clustered) { client =>
+            for {
+              _       <- writeKeys(client, 1)
+              targets <- client.scanTargets
+              found   <- sweep(client, targets, Set.empty[String])
+            } yield {
+              assert(targets.forall(_.node.isDefined), s"cluster scan targets must be node-pinned: $targets")
+              assertEquals(found, expected)
             }
           }
         }

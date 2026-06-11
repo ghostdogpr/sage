@@ -771,6 +771,22 @@ trait CommandRunner[F[_]] {
   * The user-facing handle owning all connections to one server: the command surface, plus pipelines and transactions. Commands compose into
   * a [[Pipeline]] value (built from [[sage.commands.Commands]]) that `pipeline` sends in one round-trip, yielding a typed result per command.
   */
+// one independent keyspace a full SCAN sweep visits: a single node standalone, one per slot-owning master in cluster. `node` is None when
+// the backend has no node to pin to (standalone, or a not-yet-discovered cluster topology), in which case the command runs through normal routing.
+final private[sage] case class ScanTarget(node: Option[Node])
+
+private[sage] object ScanTarget {
+  val any: ScanTarget = ScanTarget(None)
+}
+
+// drives the cluster-wide SCAN walk: scan each target to its node-local zero cursor, then move to the next, so the iteration never silently
+// covers a single node. Begin resolves the targets, Visit pages the head target (resetting the cursor on each hand-off), End stops the stream.
+private[sage] enum ScanStep {
+  case Begin
+  case Visit(cursor: ScanCursor, remaining: Vector[ScanTarget])
+  case End
+}
+
 trait Client[F[_]] extends CommandRunner[F] {
 
   /**
@@ -795,6 +811,12 @@ trait Client[F[_]] extends CommandRunner[F] {
 
   // Shard Channel subscriptions: in a cluster each channel is routed to the Node owning its Slot; a sharded delivery is an ordinary Message
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
+
+  // the keyspaces a full SCAN sweep must visit (one per slot-owning master in cluster), and a node-pinned run for the keyless SCAN page so a
+  // cursor resumes on the node it came from. The streaming `scanAll` walks the targets in order; keyed h/s/zScan stay single-target and route by key.
+  private[sage] def scanTargets: F[Vector[ScanTarget]]
+
+  private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]
 
   def close: F[Unit]
 }
@@ -946,6 +968,10 @@ object Client {
       if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
       else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
       else CIO.async(callback => connection.cachedSubmit(command, ttl.toMillis, callback))
+
+    def scanTargets: CIO[Vector[ScanTarget]] = CIO.value(Vector(ScanTarget.any))
+
+    def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] = run(command)
 
     def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))

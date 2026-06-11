@@ -53,11 +53,15 @@ class ClusterClientSpec extends munit.FunSuite {
     // issued on one is still observable even after the other is created
     private val transports = mutable.Map.empty[Node, mutable.ArrayBuffer[FakeTransport]]
 
+    // nodes whose *next* HELLO fails and then clears: simulates an establish that fails once mid-recovery, so a re-home must retry to converge
+    val flakyHello = mutable.Set.empty[Node]
+
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
         val respond: Bytes => Seq[Frame] = payload => {
           val text = payload.asUtf8String
-          if (text.contains("HELLO")) if (unreachable(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(helloReply)
+          if (text.contains("HELLO"))
+            if (unreachable(node) || flakyHello.remove(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(helloReply)
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
@@ -91,6 +95,12 @@ class ClusterClientSpec extends munit.FunSuite {
       transports
         .getOrElse(node, mutable.ArrayBuffer.empty)
         .find(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE")))
+        .foreach(_.close())
+
+    // close the master's classic Subscription Connection so its onClosed fires and the manager re-homes
+    def dropClassicConn(): Unit =
+      transports.values.flatten
+        .find(_.written.exists(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n")))
         .foreach(_.close())
   }
 
@@ -380,6 +390,26 @@ class ClusterClientSpec extends munit.FunSuite {
       fixture.dropShardConn(nodeB)
       Thread.sleep(300) // re-homing is offloaded: force a refresh, reconcile, and re-SSUBSCRIBE on the new owner
       assert(fixture.written(nodeA).exists(_.contains("SSUBSCRIBE")), "subscription did not re-home to the new owner nodeA")
+    }
+  }
+
+  test("a classic subscription recovers when a re-home's establish fails, rather than stranding") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("SUBSCRIBE")) Seq(subscribed("subscribe", "news"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    def classicSubscribes = fixture.written(nodeA).count(_.contains("\r\nSUBSCRIBE\r\n"))
+
+    fixture.live.subscribeChannels[String]("news").unsafeRun.map { _ =>
+      assertEquals(classicSubscribes, 1, "initial classic subscribe did not reach the master")
+      // the master drops the classic connection; the first re-home attempt's HELLO fails, so establish throws without firing onTerminated.
+      // The old code swallowed that and stranded the sub; the manager must instead retry until it re-attaches.
+      fixture.flakyHello += nodeA
+      fixture.dropClassicConn()
+      Thread.sleep(300) // the failed establish retries after the 50ms backoff, once HELLO succeeds again
+      assert(classicSubscribes >= 2, "classic subscription did not recover after the failed re-home")
     }
   }
 }

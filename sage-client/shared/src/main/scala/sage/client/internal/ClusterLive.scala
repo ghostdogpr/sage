@@ -105,6 +105,22 @@ final private[client] class ClusterLive(
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command)) else run(command)
 
+  // a full SCAN must sweep every slot-owning master: SCAN cursors are node-local, so one arbitrary master would silently miss the rest. The
+  // node order is fixed from the current snapshot when the walk begins (a reshard mid-scan can still miss or duplicate keys, as on any client).
+  def scanTargets: CIO[Vector[ScanTarget]] =
+    CIO.blocking {
+      val masters = topologyRef.get().shards.collect { case shard if shard.slots.nonEmpty => shard.master }.distinct
+      if (masters.isEmpty) Vector(ScanTarget.any) else masters.map(node => ScanTarget(Some(node)))
+    }
+
+  // pinned, redirect-free send: a keyless SCAN page must resume on the same node its cursor came from, so an unreachable node fails the walk
+  // rather than rerouting to an arbitrary master (which would resume a node-local cursor on the wrong keyspace)
+  def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] =
+    target.node match {
+      case Some(node) => CIO.async[A](complete => offload(sendTo(node, command, asking = false, redirectsLeft = 0, complete)))
+      case None       => run(command)
+    }
+
   def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 

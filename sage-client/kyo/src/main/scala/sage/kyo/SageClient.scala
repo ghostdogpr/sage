@@ -8,7 +8,7 @@ import _root_.kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, Subscription, TransactionScope}
+import sage.client.internal.{Client, ScanStep, ScanTarget, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -28,14 +28,15 @@ extension (client: SageClient) {
     client.cached(command, FiniteDuration(ttl.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
 
   /**
-    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once.
+    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once. In cluster
+    * mode it walks every slot-owning master in turn, each with its own node-local cursor, so the sweep covers the whole keyspace.
     */
   def scanAll[K: KeyCodec](
     pattern: Option[String] = None,
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   )(using Tag[K]): Stream[K, Abort[Throwable] & Async] =
-    scanStream(cursor => client.run(Keys.scan[K](cursor, pattern, count, ofType)))
+    scanStreamAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
 
   /**
     * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
@@ -72,6 +73,26 @@ extension (client: SageClient) {
       .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start)) {
         case None         => CIO.value(None)
         case Some(cursor) => CIO.lift(fetch(cursor)).map(page => Some((page.items, page.next)))
+      }
+      .flatMap(items => CStream.init(items))
+      .lower
+
+  // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
+  private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => KyoEff[ScanPage[A]])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
+    CStream
+      .unfold[ScanStep, Vector[A]](ScanStep.Begin) {
+        case ScanStep.Begin                 =>
+          CIO
+            .lift(client.scanTargets)
+            .map(targets => if (targets.isEmpty) None else Some((Vector.empty[A], ScanStep.Visit(ScanCursor.start, targets))))
+        case ScanStep.Visit(cursor, remain) =>
+          CIO.lift(fetch(remain.head)(cursor)).map { page =>
+            page.next match {
+              case Some(next) => Some((page.items, ScanStep.Visit(next, remain)))
+              case None       => Some((page.items, if (remain.tail.isEmpty) ScanStep.End else ScanStep.Visit(ScanCursor.start, remain.tail)))
+            }
+          }
+        case ScanStep.End                   => CIO.value(None)
       }
       .flatMap(items => CStream.init(items))
       .lower
@@ -200,6 +221,10 @@ object SageClient {
 
     def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): Subscription[KyoEff, Message[V]] < (Abort[Throwable] & Async) =
       underlying.subscribeShardChannels[V](channel, rest*).lower.map(lower)
+
+    def scanTargets: Vector[ScanTarget] < (Abort[Throwable] & Async) = underlying.scanTargets.lower
+
+    def runOn[A](target: ScanTarget, command: Command[A]): A < (Abort[Throwable] & Async) = underlying.runOn(target, command).lower
 
     private def lower(scope: TransactionScope[CIO]): TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] =
       new TransactionScope[[X] =>> X < (Abort[Throwable] & Async)] {

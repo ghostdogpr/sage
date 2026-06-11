@@ -43,6 +43,7 @@ final private[client] class ClusterSubscriptions(
   // --- classic state (guarded by lock) ---
   private var classicConn: SubscriptionConnection = null
   private val classicSubs                         = mutable.LinkedHashSet.empty[ClassicSub]
+  private var rehomePending                       = false
 
   // --- sharded state (guarded by lock) ---
   private val shardConns       = mutable.HashMap.empty[Node, SubscriptionConnection]
@@ -109,8 +110,14 @@ final private[client] class ClusterSubscriptions(
 
   private def onClassicTerminated(): Unit = {
     locked { classicConn = null }
-    // force a topology refresh first: the master may be gone, so pick the re-home target from the current topology, not the stale one
-    offload { refresh(); rehomeClassic() }
+    scheduleRehomeClassic()
+  }
+
+  // coalesce passes: at most one queued plus one running. Refresh the topology first — the master may be gone, so the re-home target comes
+  // from the current topology, not the stale one.
+  private def scheduleRehomeClassic(): Unit = {
+    val go = locked(if (rehomePending || closed) false else { rehomePending = true; true })
+    if (go) offload { locked { rehomePending = false }; refresh(); rehomeClassic() }
   }
 
   private def rehomeClassic(): Unit = {
@@ -123,14 +130,25 @@ final private[client] class ClusterSubscriptions(
           classicConn
         }
       }
-      if (conn != null)
+      if (conn == null) scheduleRehomeRetry() // no master to re-home onto yet; retry until the topology yields one
+      else {
+        // attach's establish-failure path resets the connection to Idle and rethrows without firing onTerminated, so a swallowed failure
+        // would otherwise strand every classic sub: drop the dead connection and retry rather than wait for a termination that never comes
+        var failed = false
         subs.foreach { sub =>
           try conn.attach(sub.sink, sub.names, sub.kind)
-          catch { case NonFatal(_) => () } // a failed re-home leaves the connection dead; its onTerminated retries
+          catch { case NonFatal(_) => failed = true }
         }
-      // else: no master to re-home onto yet; a later topology change re-drives this
+        if (failed) {
+          locked(if (classicConn eq conn) classicConn = null)
+          scheduleRehomeRetry()
+        }
+      }
     }
   }
+
+  private def scheduleRehomeRetry(): Unit =
+    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(scheduleRehomeClassic())
 
   // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
