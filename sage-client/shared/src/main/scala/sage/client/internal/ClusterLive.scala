@@ -242,8 +242,11 @@ final private[client] class ClusterLive(
         error match {
           case e: ServerError =>
             Redirect.parse(e.getMessage).get match {
-              // ASK is a one-shot handoff to the importing node (follow with ASKING); MOVED refreshes, then re-dispatch re-applies the policy
-              case ask if ask.kind == RedirectKind.Ask => onRedirect(node, ask, command, redirectsLeft, complete)
+              // ASK hands off to the importing master: *Preferred may follow it with ASKING, but strict Replica must not touch a master, so
+              // it fails (the migrating key is not on any replica); MOVED refreshes, then re-dispatch re-applies the policy
+              case ask if ask.kind == RedirectKind.Ask =>
+                if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
+                else onRedirect(node, ask, command, redirectsLeft, complete)
               case _ if redirectsLeft <= 0             =>
                 complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
               case _                                   => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
