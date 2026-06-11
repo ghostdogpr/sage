@@ -11,5 +11,7 @@ object Commands {
   export Pubsub.{publish, pubsubChannels, pubsubNumPat, pubsubNumSub}
   export Sets.*
   export SortedSets.*
+  export StreamInfo.*
+  export Streams.*
   export Strings.*
 }

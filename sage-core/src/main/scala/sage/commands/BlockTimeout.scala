@@ -18,6 +18,7 @@ object BlockTimeout {
 
   // sub-second timeouts use the decimal-seconds wire form, rounding up so the wait is never shorter than asked. `After` floors at one
   // millisecond: a zero or negative duration must never emit "0", which is the wire's "block forever" — only `Forever` may mean infinite.
+  // This is the SECONDS form used by `BLPOP`/`BLMOVE`/`BZPOPMIN`; the stream blocking reads take milliseconds — see [[millisWire]].
   private[commands] def wire(timeout: BlockTimeout): Bytes =
     timeout match {
       case Forever         => Zero
@@ -27,6 +28,13 @@ object BlockTimeout {
           if (millis % 1000L == 0L) (millis / 1000L).toString
           else java.math.BigDecimal.valueOf(millis, 3).stripTrailingZeros.toPlainString
         Bytes.utf8(text)
+    }
+
+  // the millisecond form `XREAD`/`XREADGROUP` `BLOCK` requires (the SECONDS [[wire]] form would silently shorten the wait 1000x)
+  private[commands] def millisWire(timeout: BlockTimeout): Bytes =
+    timeout match {
+      case Forever         => Zero
+      case After(duration) => Bytes.utf8(Math.max(1L, Math.ceilDiv(duration.toNanos, 1000000L)).toString)
     }
 
   private val Zero = Bytes.utf8("0")

@@ -2,7 +2,7 @@ package sage.integration
 
 import zio.*
 
-import sage.commands.Commands
+import sage.commands.{BlockTimeout, Commands, GroupStartId, StreamId, XAddId}
 import sage.commands.Pipeline.pipeline
 import sage.zio.*
 
@@ -146,6 +146,54 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
             _      <- ZIO.foreachParDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
             pairs  <- client.zScanAll[String, String]("zscan", count = Some(10L)).runCollect
           } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
+  test("xRangeAll pages every entry as a native ZStream") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client  <- SageClient.scoped(configOf(server))
+            _       <- ZIO.foreachDiscard(1 to 50)(i => client.xAdd("xrangeall", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
+            entries <- client.xRangeAll[String, String, String]("xrangeall", batch = 10L).runCollect
+          } yield assertEquals(entries.map(_.id).toList, (1 to 50).map(i => StreamId(i.toLong, 0L)).toList)
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
+  test("xConsume tails a group and auto-acks each entry after the handler succeeds") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(configOf(server))
+            _      <- ZIO.foreachDiscard(1 to 3)(i => client.xAdd("xconsume", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
+            _      <- client.xGroupCreate("xconsume", "g", GroupStartId.At(StreamId(0L, 0L)))
+            seen   <- Ref.make(Vector.empty[String])
+            fiber  <- client
+                        .xConsume[String, String, String](
+                          "g",
+                          "c",
+                          "xconsume",
+                          block = BlockTimeout.After(scala.concurrent.duration.FiniteDuration(200L, java.util.concurrent.TimeUnit.MILLISECONDS))
+                        ) { entry =>
+                          seen.update(_ :+ entry.fields.head._2)
+                        }
+                        .fork
+            _      <- seen.get.repeatUntil(_.size >= 3).timeoutFail(new RuntimeException("xConsume did not deliver"))(zio.Duration.fromSeconds(10))
+            _      <- fiber.interrupt
+            got    <- seen.get
+            pend   <- client.xPending("xconsume", "g")
+          } yield {
+            assertEquals(got.sorted, Vector("v1", "v2", "v3"))
+            assertEquals(pend.total, 0L)
+          }
         }
 
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())

@@ -1,5 +1,7 @@
 package sage.ce
 
+import java.util.concurrent.TimeUnit
+
 import scala.concurrent.duration.FiniteDuration
 
 import cats.effect.{IO, Resource}
@@ -9,7 +11,7 @@ import sage.{Message, PatternMessage}
 import sage.client.SageConfig
 import sage.client.internal.{Client, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Command, Hashes, Keys, Pipeline, RedisType, ScanCursor, ScanPage, Sets, SortedSets}
+import sage.commands.*
 
 /**
   * The cats-effect-native surface: the same client, with every method returning `IO`.
@@ -68,6 +70,66 @@ extension (client: SageClient) {
       .lower
 
   /**
+    * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
+    */
+  def xRangeAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    key: K,
+    start: StreamRangeId = StreamRangeId.Min,
+    end: StreamRangeId = StreamRangeId.Max,
+    batch: Long = 100L
+  ): fs2.Stream[IO, StreamEntry[F, V]] =
+    CStream
+      .unfold[Option[StreamRangeId], Vector[StreamEntry[F, V]]](Some(start)) {
+        case None       => CIO.value(None)
+        case Some(from) =>
+          CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))).map { entries =>
+            if (entries.isEmpty) None
+            else Some((entries, if (entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
+          }
+      }
+      .flatMap(items => CStream.init(items))
+      .lower
+
+  /**
+    * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
+    * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
+    * recovery. See ADR-0032.
+    */
+  def xConsume[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    group: String,
+    consumer: String,
+    key: K,
+    count: Option[Long] = None,
+    block: BlockTimeout = SageClient.defaultPoll
+  )(handle: StreamEntry[F, V] => IO[Unit]): IO[Unit] =
+    consumeStream[K, F, V](group, consumer, key, count, block)
+      .evalMap(entry => handle(entry) >> client.run(Streams.xAck(key, group)(entry.id)).void)
+      .compile
+      .drain
+
+  private def consumeStream[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    group: String,
+    consumer: String,
+    key: K,
+    count: Option[Long],
+    block: BlockTimeout
+  ): fs2.Stream[IO, StreamEntry[F, V]] =
+    CStream
+      .unfold[Either[StreamId, Unit], Vector[StreamEntry[F, V]]](Left(StreamId.Zero)) {
+        case Left(after) =>
+          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map { result =>
+            val entries = result.flatMap(_._2)
+            if (entries.isEmpty) Some((Vector.empty, Right(()))) else Some((entries, Left(entries.last.id)))
+          }
+        case Right(_)    =>
+          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block)))).map { result =>
+            Some((result.flatMap(_._2), Right(())))
+          }
+      }
+      .flatMap(items => CStream.init(items))
+      .lower
+
+  /**
     * Subscribes to one or more channels; closing the stream's scope unsubscribes. Survives reconnects via auto-resubscribe, dropping
     * messages published during the reconnect gap.
     */
@@ -94,6 +156,9 @@ extension (client: SageClient) {
 }
 
 object SageClient {
+
+  // bounded poll so xConsume's blocking read returns periodically, keeping cancellation responsive
+  private[ce] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
   def connect(config: SageConfig): IO[SageClient] =
     Client.connect(config).lower.map(new Lowered(_))
