@@ -112,6 +112,50 @@ extension (client: SageClient) {
       .lower
 
   /**
+    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Entries
+    * dropped because they no longer exist are skipped (the server reports them per-call as deleted; they are not surfaced here).
+    */
+  def xAutoClaimAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    key: K,
+    group: String,
+    consumer: String,
+    minIdle: FiniteDuration,
+    start: StreamId = StreamId.Zero,
+    count: Option[Long] = None
+  ): fs2.Stream[IO, StreamEntry[F, V]] =
+    CStream
+      .unfold[Option[StreamId], Vector[StreamEntry[F, V]]](Some(start)) {
+        case None       => CIO.value(None)
+        case Some(from) =>
+          CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))).map { result =>
+            Some((result.entries, if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
+          }
+      }
+      .flatMap(items => CStream.init(items))
+      .lower
+
+  /**
+    * Follows a stream without a consumer group: replays every entry after `from`, then blocks for new entries forever, advancing past the
+    * last id each round. Blocking on an explicit id (never `$`) leaves no gap for entries arriving mid-loop. No acknowledgement, unlike
+    * [[xConsume]]. `from` defaults to the start; pass a later id to tail from there.
+    */
+  def xTail[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    key: K,
+    from: StreamId = StreamId.Zero,
+    count: Option[Long] = None,
+    block: BlockTimeout = SageClient.defaultPoll
+  ): fs2.Stream[IO, StreamEntry[F, V]] =
+    CStream
+      .unfold[StreamId, Vector[StreamEntry[F, V]]](from) { last =>
+        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map { result =>
+          val entries = result.flatMap(_._2)
+          Some((entries, if (entries.isEmpty) last else entries.last.id))
+        }
+      }
+      .flatMap(items => CStream.init(items))
+      .lower
+
+  /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
     * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
     * recovery. See ADR-0032.
