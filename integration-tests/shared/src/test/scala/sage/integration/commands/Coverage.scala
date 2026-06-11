@@ -64,7 +64,12 @@ object Coverage {
     "SWAPDB"               -> "whole-database administration, out of scope",
     "QUIT"                 -> "deprecated: close the client instead of sending QUIT",
     "RESET"                -> "would reset state on the shared Multiplexed Connection across all fibers; not exposed",
-    "DISCARD"              -> "the transaction scope abandons by dropping its connection, not via DISCARD"
+    "DISCARD"              -> "the transaction scope abandons by dropping its connection, not via DISCARD",
+    "XGROUP"               -> "subcommand container; each XGROUP subcommand is its own Command name",
+    "XGROUP HELP"          -> "human-readable help text, not a runnable command",
+    "XINFO"                -> "subcommand container; each XINFO subcommand is its own Command name",
+    "XINFO HELP"           -> "human-readable help text, not a runnable command",
+    "XIDMPRECORD"          -> "internal: replayed during AOF loading, not for client use"
   )
 
   val todo: Set[String] = Set(
@@ -250,35 +255,6 @@ object Coverage {
     "TRIMSLOTS",
     "WAIT",
     "WAITAOF",
-    "XACK",
-    "XACKDEL",
-    "XADD",
-    "XAUTOCLAIM",
-    "XCFGSET",
-    "XCLAIM",
-    "XDEL",
-    "XDELEX",
-    "XGROUP",
-    "XGROUP CREATE",
-    "XGROUP CREATECONSUMER",
-    "XGROUP DELCONSUMER",
-    "XGROUP DESTROY",
-    "XGROUP HELP",
-    "XGROUP SETID",
-    "XIDMPRECORD",
-    "XINFO",
-    "XINFO CONSUMERS",
-    "XINFO GROUPS",
-    "XINFO HELP",
-    "XINFO STREAM",
-    "XLEN",
-    "XNACK",
-    "XPENDING",
-    "XRANGE",
-    "XREAD",
-    "XREADGROUP",
-    "XREVRANGE",
-    "XSETID",
-    "XTRIM"
+    "XCFGSET"
   )
 }

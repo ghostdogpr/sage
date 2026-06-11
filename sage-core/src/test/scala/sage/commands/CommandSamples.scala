@@ -397,6 +397,102 @@ object CommandSamples {
     Sample(HyperLogLog.pfAdd[String, String]("k"), Vector("PFADD", "k")),
     Sample(HyperLogLog.pfCount("a", "b"), Vector("PFCOUNT", "a", "b")),
     Sample(HyperLogLog.pfMerge("dst", "a", "b"), Vector("PFMERGE", "dst", "a", "b")),
-    Sample(HyperLogLog.pfMerge[String]("dst"), Vector("PFMERGE", "dst"))
+    Sample(HyperLogLog.pfMerge[String]("dst"), Vector("PFMERGE", "dst")),
+    Sample(Streams.xAdd("k")(("f", "v")), Vector("XADD", "k", "*", "f", "v")),
+    Sample(
+      Streams.xAdd(
+        "k",
+        XAddId.Explicit(StreamId(5L, 0L)),
+        Some(Trimming.Approximate(TrimThreshold.MaxLen(1000L), Some(100L))),
+        StreamDeletionPolicy.DelRef
+      )(
+        ("f", "v")
+      ),
+      Vector("XADD", "k", "DELREF", "MAXLEN", "~", "1000", "LIMIT", "100", "5-0", "f", "v")
+    ),
+    Sample(Streams.xAdd("k", XAddId.AutoSeq(5L))(("f", "v")), Vector("XADD", "k", "5-*", "f", "v")),
+    Sample(Streams.xAddNoMkStream("k")(("f", "v")), Vector("XADD", "k", "NOMKSTREAM", "*", "f", "v")),
+    Sample(Streams.xLen("k"), Vector("XLEN", "k")),
+    Sample(Streams.xDel("k")(StreamId(1L, 0L), StreamId(2L, 3L)), Vector("XDEL", "k", "1-0", "2-3")),
+    Sample(Streams.xTrim("k", Trimming.Exact(TrimThreshold.MaxLen(5L))), Vector("XTRIM", "k", "MAXLEN", "=", "5")),
+    Sample(Streams.xTrim("k", Trimming.Approximate(TrimThreshold.MinId(StreamId(7L, 0L)))), Vector("XTRIM", "k", "MINID", "~", "7-0")),
+    Sample(Streams.xSetId("k", GroupStartId.At(StreamId(5L, 0L))), Vector("XSETID", "k", "5-0")),
+    Sample(Streams.xRange[String, String, String]("k"), Vector("XRANGE", "k", "-", "+")),
+    Sample(
+      Streams.xRange[String, String, String]("k", StreamRangeId.Inclusive(StreamId(1L, 0L)), StreamRangeId.Exclusive(StreamId(9L, 0L)), Some(10L)),
+      Vector("XRANGE", "k", "1-0", "(9-0", "COUNT", "10")
+    ),
+    Sample(Streams.xRevRange[String, String, String]("k"), Vector("XREVRANGE", "k", "+", "-")),
+    Sample(Streams.xRead[String, String, String](("k", ReadId.New))(), Vector("XREAD", "STREAMS", "k", "$")),
+    Sample(
+      Streams.xRead[String, String, String](("k", ReadId.After(StreamId(0L, 0L))))(count = Some(5L), block = Some(BlockTimeout.After(1.second))),
+      Vector("XREAD", "COUNT", "5", "BLOCK", "1000", "STREAMS", "k", "0-0")
+    ),
+    Sample(
+      Streams.xReadGroup[String, String, String]("g", "c")(("k", GroupReadId.New))(),
+      Vector("XREADGROUP", "GROUP", "g", "c", "STREAMS", "k", ">")
+    ),
+    Sample(
+      Streams.xReadGroup[String, String, String]("g", "c")(("k", GroupReadId.New))(
+        count = Some(5L),
+        block = Some(BlockTimeout.After(1.second)),
+        noAck = true
+      ),
+      Vector("XREADGROUP", "GROUP", "g", "c", "COUNT", "5", "BLOCK", "1000", "NOACK", "STREAMS", "k", ">")
+    ),
+    Sample(Streams.xAck("k", "g")(StreamId(1L, 0L)), Vector("XACK", "k", "g", "1-0")),
+    Sample(Streams.xGroupCreate("k", "g"), Vector("XGROUP", "CREATE", "k", "g", "$")),
+    Sample(
+      Streams.xGroupCreate("k", "g", GroupStartId.At(StreamId(0L, 0L)), mkStream = true, entriesRead = Some(7L)),
+      Vector("XGROUP", "CREATE", "k", "g", "0-0", "MKSTREAM", "ENTRIESREAD", "7")
+    ),
+    Sample(Streams.xGroupSetId("k", "g"), Vector("XGROUP", "SETID", "k", "g", "$")),
+    Sample(Streams.xGroupDestroy("k", "g"), Vector("XGROUP", "DESTROY", "k", "g")),
+    Sample(Streams.xGroupCreateConsumer("k", "g", "c"), Vector("XGROUP", "CREATECONSUMER", "k", "g", "c")),
+    Sample(Streams.xGroupDelConsumer("k", "g", "c"), Vector("XGROUP", "DELCONSUMER", "k", "g", "c")),
+    Sample(Streams.xClaim[String, String, String]("k", "g", "c", 5.seconds)(StreamId(1L, 0L))(), Vector("XCLAIM", "k", "g", "c", "5000", "1-0")),
+    Sample(
+      Streams.xClaim[String, String, String]("k", "g", "c", 5.seconds)(StreamId(1L, 0L))(
+        idle = Some(ClaimIdle.Idle(2.seconds)),
+        retryCount = Some(3L),
+        force = true
+      ),
+      Vector("XCLAIM", "k", "g", "c", "5000", "1-0", "IDLE", "2000", "RETRYCOUNT", "3", "FORCE")
+    ),
+    Sample(Streams.xClaimJustId("k", "g", "c", 5.seconds)(StreamId(1L, 0L))(), Vector("XCLAIM", "k", "g", "c", "5000", "1-0", "JUSTID")),
+    Sample(Streams.xAutoClaim[String, String, String]("k", "g", "c", 5.seconds), Vector("XAUTOCLAIM", "k", "g", "c", "5000", "0-0")),
+    Sample(
+      Streams.xAutoClaimJustId("k", "g", "c", 5.seconds, StreamId(0L, 0L), Some(50L)),
+      Vector("XAUTOCLAIM", "k", "g", "c", "5000", "0-0", "COUNT", "50", "JUSTID")
+    ),
+    Sample(Streams.xPending("k", "g"), Vector("XPENDING", "k", "g")),
+    Sample(Streams.xPendingExtended("k", "g"), Vector("XPENDING", "k", "g", "-", "+", "10")),
+    Sample(
+      Streams.xPendingExtended(
+        "k",
+        "g",
+        StreamRangeId.Inclusive(StreamId(1L, 0L)),
+        StreamRangeId.Exclusive(StreamId(9L, 0L)),
+        5L,
+        Some("c"),
+        Some(1.second)
+      ),
+      Vector("XPENDING", "k", "g", "IDLE", "1000", "1-0", "(9-0", "5", "c")
+    ),
+    Sample(StreamInfo.xInfoStream[String, String, String]("k"), Vector("XINFO", "STREAM", "k")),
+    Sample(StreamInfo.xInfoStreamFull[String, String, String]("k", Some(10L)), Vector("XINFO", "STREAM", "k", "FULL", "COUNT", "10")),
+    Sample(StreamInfo.xInfoGroups("k"), Vector("XINFO", "GROUPS", "k")),
+    Sample(StreamInfo.xInfoConsumers("k", "g"), Vector("XINFO", "CONSUMERS", "k", "g")),
+    Sample(Streams.xDelEx("k")(StreamId(1L, 0L)), Vector("XDELEX", "k", "IDS", "1", "1-0")),
+    Sample(
+      Streams.xDelEx("k", StreamDeletionPolicy.Acked)(StreamId(1L, 0L), StreamId(2L, 0L)),
+      Vector("XDELEX", "k", "ACKED", "IDS", "2", "1-0", "2-0")
+    ),
+    Sample(Streams.xAckDel("k", "g")(StreamId(1L, 0L)), Vector("XACKDEL", "k", "g", "IDS", "1", "1-0")),
+    Sample(Streams.xNack("k", "g", NackMode.Fail)(StreamId(1L, 0L))(), Vector("XNACK", "k", "g", "FAIL", "IDS", "1", "1-0")),
+    Sample(
+      Streams.xNack("k", "g", NackMode.Fatal)(StreamId(1L, 0L))(retryCount = Some(2L), force = true),
+      Vector("XNACK", "k", "g", "FATAL", "IDS", "1", "1-0", "RETRYCOUNT", "2", "FORCE")
+    )
   )
 }

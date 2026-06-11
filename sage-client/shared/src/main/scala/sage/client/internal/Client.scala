@@ -628,6 +628,143 @@ trait CommandRunner[F[_]] {
   final def pfCount[K: KeyCodec](first: K, rest: K*): F[Long] = run(HyperLogLog.pfCount(first, rest*))
 
   final def pfMerge[K: KeyCodec](destination: K, sources: K*): F[Unit] = run(HyperLogLog.pfMerge(destination, sources*))
+
+  final def xAdd[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    id: XAddId = XAddId.Auto,
+    trim: Option[Trimming] = None,
+    policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef
+  )(first: (F0, V), rest: (F0, V)*): F[StreamId] = run(Streams.xAdd(key, id, trim, policy)(first, rest*))
+
+  final def xAddNoMkStream[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    id: XAddId = XAddId.Auto,
+    trim: Option[Trimming] = None,
+    policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef
+  )(first: (F0, V), rest: (F0, V)*): F[Option[StreamId]] = run(Streams.xAddNoMkStream(key, id, trim, policy)(first, rest*))
+
+  final def xLen[K: KeyCodec](key: K): F[Long] = run(Streams.xLen(key))
+
+  final def xDel[K: KeyCodec](key: K)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xDel(key)(first, rest*))
+
+  final def xTrim[K: KeyCodec](key: K, trim: Trimming, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef): F[Long] =
+    run(Streams.xTrim(key, trim, policy))
+
+  final def xSetId[K: KeyCodec](key: K, id: GroupStartId, entriesAdded: Option[Long] = None, maxDeletedId: Option[StreamId] = None): F[Unit] =
+    run(Streams.xSetId(key, id, entriesAdded, maxDeletedId))
+
+  final def xRange[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    start: StreamRangeId = StreamRangeId.Min,
+    end: StreamRangeId = StreamRangeId.Max,
+    count: Option[Long] = None
+  ): F[Vector[StreamEntry[F0, V]]] = run(Streams.xRange(key, start, end, count))
+
+  final def xRevRange[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    end: StreamRangeId = StreamRangeId.Max,
+    start: StreamRangeId = StreamRangeId.Min,
+    count: Option[Long] = None
+  ): F[Vector[StreamEntry[F0, V]]] = run(Streams.xRevRange(key, end, start, count))
+
+  final def xRead[K: KeyCodec, F0: KeyCodec, V: ValueCodec](first: (K, ReadId), rest: (K, ReadId)*)(
+    count: Option[Long] = None,
+    block: Option[BlockTimeout] = None
+  ): F[Vector[(K, Vector[StreamEntry[F0, V]])]] = run(Streams.xRead(first, rest*)(count, block))
+
+  final def xReadGroup[K: KeyCodec, F0: KeyCodec, V: ValueCodec](group: String, consumer: String)(first: (K, GroupReadId), rest: (K, GroupReadId)*)(
+    count: Option[Long] = None,
+    block: Option[BlockTimeout] = None,
+    noAck: Boolean = false
+  ): F[Vector[(K, Vector[StreamEntry[F0, V]])]] = run(Streams.xReadGroup(group, consumer)(first, rest*)(count, block, noAck))
+
+  final def xAck[K: KeyCodec](key: K, group: String)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xAck(key, group)(first, rest*))
+
+  final def xGroupCreate[K: KeyCodec](
+    key: K,
+    group: String,
+    id: GroupStartId = GroupStartId.Last,
+    mkStream: Boolean = false,
+    entriesRead: Option[Long] = None
+  ): F[Unit] = run(Streams.xGroupCreate(key, group, id, mkStream, entriesRead))
+
+  final def xGroupSetId[K: KeyCodec](key: K, group: String, id: GroupStartId = GroupStartId.Last, entriesRead: Option[Long] = None): F[Unit] =
+    run(Streams.xGroupSetId(key, group, id, entriesRead))
+
+  final def xGroupDestroy[K: KeyCodec](key: K, group: String): F[Boolean] = run(Streams.xGroupDestroy(key, group))
+
+  final def xGroupCreateConsumer[K: KeyCodec](key: K, group: String, consumer: String): F[Boolean] =
+    run(Streams.xGroupCreateConsumer(key, group, consumer))
+
+  final def xGroupDelConsumer[K: KeyCodec](key: K, group: String, consumer: String): F[Long] =
+    run(Streams.xGroupDelConsumer(key, group, consumer))
+
+  final def xClaim[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, group: String, consumer: String, minIdle: FiniteDuration)(
+    first: StreamId,
+    rest: StreamId*
+  )(idle: Option[ClaimIdle] = None, retryCount: Option[Long] = None, force: Boolean = false): F[Vector[StreamEntry[F0, V]]] =
+    run(Streams.xClaim(key, group, consumer, minIdle)(first, rest*)(idle, retryCount, force))
+
+  final def xClaimJustId[K: KeyCodec](key: K, group: String, consumer: String, minIdle: FiniteDuration)(first: StreamId, rest: StreamId*)(
+    idle: Option[ClaimIdle] = None,
+    retryCount: Option[Long] = None,
+    force: Boolean = false
+  ): F[Vector[StreamId]] = run(Streams.xClaimJustId(key, group, consumer, minIdle)(first, rest*)(idle, retryCount, force))
+
+  final def xAutoClaim[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+    key: K,
+    group: String,
+    consumer: String,
+    minIdle: FiniteDuration,
+    start: StreamId = StreamId.Zero,
+    count: Option[Long] = None
+  ): F[XAutoClaimResult[F0, V]] = run(Streams.xAutoClaim(key, group, consumer, minIdle, start, count))
+
+  final def xAutoClaimJustId[K: KeyCodec](
+    key: K,
+    group: String,
+    consumer: String,
+    minIdle: FiniteDuration,
+    start: StreamId = StreamId.Zero,
+    count: Option[Long] = None
+  ): F[XAutoClaimJustIdResult] = run(Streams.xAutoClaimJustId(key, group, consumer, minIdle, start, count))
+
+  final def xPending[K: KeyCodec](key: K, group: String): F[PendingSummary] = run(Streams.xPending(key, group))
+
+  final def xPendingExtended[K: KeyCodec](
+    key: K,
+    group: String,
+    start: StreamRangeId = StreamRangeId.Min,
+    end: StreamRangeId = StreamRangeId.Max,
+    count: Long = 10L,
+    consumer: Option[String] = None,
+    idle: Option[FiniteDuration] = None
+  ): F[Vector[PendingEntry]] = run(Streams.xPendingExtended(key, group, start, end, count, consumer, idle))
+
+  final def xInfoStream[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K): F[StreamInfo[F0, V]] = run(StreamInfo.xInfoStream(key))
+
+  final def xInfoStreamFull[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, count: Option[Long] = None): F[StreamInfoFull[F0, V]] =
+    run(StreamInfo.xInfoStreamFull(key, count))
+
+  final def xInfoGroups[K: KeyCodec](key: K): F[Vector[GroupInfo]] = run(StreamInfo.xInfoGroups(key))
+
+  final def xInfoConsumers[K: KeyCodec](key: K, group: String): F[Vector[ConsumerInfo]] = run(StreamInfo.xInfoConsumers(key, group))
+
+  final def xDelEx[K: KeyCodec](key: K, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
+    first: StreamId,
+    rest: StreamId*
+  ): F[Vector[StreamEntryDeletion]] =
+    run(Streams.xDelEx(key, policy)(first, rest*))
+
+  final def xAckDel[K: KeyCodec](key: K, group: String, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
+    first: StreamId,
+    rest: StreamId*
+  ): F[Vector[StreamEntryDeletion]] = run(Streams.xAckDel(key, group, policy)(first, rest*))
+
+  final def xNack[K: KeyCodec](key: K, group: String, mode: NackMode)(first: StreamId, rest: StreamId*)(
+    retryCount: Option[Long] = None,
+    force: Boolean = false
+  ): F[Long] = run(Streams.xNack(key, group, mode)(first, rest*)(retryCount, force))
 }
 
 /**
