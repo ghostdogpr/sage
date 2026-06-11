@@ -5,9 +5,9 @@ import sage.Bytes
 /**
   * One of the [[Slot.Count]] hash slots a cluster partitions the keyspace into, fixed by CRC16 of the key's hash tag (or the whole key).
   */
-opaque type Slot = Int
+private[sage] opaque type Slot = Int
 
-object Slot {
+private[sage] object Slot {
 
   val Count = 16384
 

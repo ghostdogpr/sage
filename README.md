@@ -18,6 +18,28 @@ It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs �
 - **Client-side caching** — invalidation-driven local reads, opt-in per call
 - **TLS and ACL auth** out of the box
 
+## Getting started
+
+Two imports: `import sage.*` for the command vocabulary (backend-independent), and `import sage.<backend>.*` for the client and connection config.
+
+```scala
+import sage.*       // Commands, options/results, codecs, Frame, Pipeline
+import sage.zio.*   // SageClient + connection config, ZIO-native
+
+val program =
+  ZIO.scoped {
+    for {
+      client <- SageClient.scoped(SageConfig(Endpoint("localhost", 6379)))
+      _      <- client.set("greeting", "hello")
+      value  <- client.get[String, String]("greeting")                  // Some("hello")
+      popped <- client.blPop[String, String]("queue")(BlockTimeout.Forever) // blocking pop
+      tuple  <- client.pipeline((Commands.incr[String]("a"), Commands.incr[String]("b")).pipeline)
+    } yield (value, popped, tuple)
+  }
+```
+
+Swap `sage.zio` for `sage.ce`, `sage.ox`, or `sage.kyo` and the same vocabulary returns that ecosystem's native types. (`import sage.*` brings the `sage.*` subpackage names into scope, so qualify cross-library prefixes via the unqualified form — e.g. `Duration`, not `zio.Duration`.)
+
 ## Design
 
 The design is documented in the repo: [`CONTEXT.md`](CONTEXT.md) (glossary), [`docs/adr/`](docs/adr/) (architecture decision records), and [`docs/PRD.md`](docs/PRD.md).

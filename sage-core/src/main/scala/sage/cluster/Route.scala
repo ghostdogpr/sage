@@ -5,7 +5,7 @@ package sage.cluster
   * each case means — send to the node, pick any node (`Keyless`), refresh the topology (`Unowned`), or fail (`CrossSlot`, `Malformed`).
   * `Malformed` means the command's declared key positions don't match its arguments — a programmer error the runtime fails, never routes.
   */
-enum Route {
+private[sage] enum Route {
   case ToNode(node: Node, slot: Slot)
   case Keyless
   case Unowned(slot: Slot)

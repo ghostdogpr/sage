@@ -8,12 +8,12 @@ import sage.protocol.Frame
   * names the keys the server says changed; `FlushAll` is the null-payload form the server sends on `FLUSHALL`/`FLUSHDB` or when it drops
   * tracking state, meaning the whole local cache is now untrustworthy.
   */
-enum Invalidation {
+private[sage] enum Invalidation {
   case Evict(keys: Vector[Bytes])
   case FlushAll
 }
 
-object Invalidation {
+private[sage] object Invalidation {
 
   /**
     * Classifies a push frame's elements. `None` for any push that is not an `invalidate` message (so it sits beside [[Pubsub.decode]],

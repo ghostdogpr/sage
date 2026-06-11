@@ -9,15 +9,15 @@ final case class Node(host: String, port: Int)
 /**
   * Inclusive on both ends.
   */
-final case class SlotRange(start: Slot, end: Slot)
+final private[sage] case class SlotRange(start: Slot, end: Slot)
 
-final case class Shard(master: Node, replicas: Vector[Node], slots: Vector[SlotRange])
+final private[sage] case class Shard(master: Node, replicas: Vector[Node], slots: Vector[SlotRange])
 
 /**
   * A pure snapshot of which masters own which slots. Routing and splitting are total classifications over it — they never raise, choose a
   * connection, or decide a retry.
   */
-final class ClusterTopology private (val shards: Vector[Shard], owners: Array[Node], shardOwners: Array[Shard]) {
+final private[sage] class ClusterTopology private (val shards: Vector[Shard], owners: Array[Node], shardOwners: Array[Shard]) {
 
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
 
@@ -67,7 +67,7 @@ final class ClusterTopology private (val shards: Vector[Shard], owners: Array[No
     command.keyIndices.iterator.map(index => Slot.of(command.args(index))).toSet
 }
 
-object ClusterTopology {
+private[sage] object ClusterTopology {
 
   /**
     * Total: uncovered slots stay unowned (routed as a refresh) and an overlapping range resolves last-listed-wins — the server is the

@@ -6,9 +6,8 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 
+import sage.*
 import sage.ce.*
-import sage.commands.Commands
-import sage.commands.Pipeline.pipeline
 
 class CeSmokeSuite extends ServerSuite(Images.redis) {
 
