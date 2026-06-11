@@ -13,7 +13,7 @@ import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
-import sage.client.{AuthConfig, BackoffConfig, BuildInfo, DedicatedPoolConfig, Endpoint, PubSubConfig, SageConfig, Topology, WatchdogConfig}
+import sage.client.{AuthConfig, BackoffConfig, BuildInfo, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
@@ -1011,14 +1011,36 @@ object Client {
   private[internal] def notCacheable(command: Command[?]): NotCacheable =
     NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
 
+  // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
+  // completion per position (as a single disconnected run does) before failing the effect once. Shared by the standalone and master-replica
+  // runtimes; the cluster runtime splits per node instead.
+  private[internal] def submitBatchOnOne(
+    events: Events,
+    commands: Vector[Command[?]],
+    submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
+    complete: Try[Vector[Either[SageException, Any]]] => Unit
+  ): Unit = {
+    val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
+    val callbacks = Vector.tabulate(commands.length)(i =>
+      Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
+    )
+    if (!submitAll(commands, callbacks)) {
+      if (events.enabled)
+        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(NotConnected()))))
+      complete(Failure(NotConnected()))
+    }
+  }
+
   def connect(config: SageConfig): CIO[Client[CIO]] =
     validate(config) match {
       case Some(problem) => CIO.fail(new IllegalArgumentException(problem))
       case None          =>
         config.topology match {
-          case Topology.Standalone(endpoint)          => connectStandalone(config, endpoint)
-          case Topology.Cluster(seeds, clusterConfig) =>
+          case Topology.Standalone(endpoint)                => connectStandalone(config, endpoint)
+          case Topology.Cluster(seeds, clusterConfig)       =>
             ClusterLive.connect(config, seeds.map(e => Node(e.host, e.port)), clusterConfig, Scheduler.real, translateHandshake)
+          case Topology.MasterReplica(seeds, masterReplica) =>
+            MasterReplicaLive.connect(config, seeds.map(e => Node(e.host, e.port)), masterReplica, Scheduler.real, translateHandshake)
         }
     }
 
@@ -1044,14 +1066,25 @@ object Client {
       positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout"),
       cond(config.pubsub.bufferSize >= 1, "pubsub.bufferSize must be >= 1")
     ) ++ watchdog ++ (config.topology match {
-      case Topology.Cluster(seeds, cluster) =>
+      case Topology.Cluster(seeds, cluster)             =>
         Vector(
           cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
           cond(config.database == 0, "cluster topology has no SELECT; database must be 0"),
           cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
           positive(cluster.minRefreshInterval, "cluster.minRefreshInterval")
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
-      case Topology.Standalone(endpoint)    => Vector(port(endpoint.port, s"endpoint ${endpoint.host}:${endpoint.port} port"))
+      case Topology.MasterReplica(seeds, masterReplica) =>
+        Vector(
+          cond(seeds.nonEmpty, "master-replica topology requires at least one seed"),
+          positive(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval")
+        ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
+      // a Standalone has no replicas, so the strict Replica policy could never serve a read; the *Preferred policies harmlessly degrade to
+      // the one node, so they stay valid (a readFrom can then be shared across environments)
+      case Topology.Standalone(endpoint)                =>
+        Vector(
+          port(endpoint.port, s"endpoint ${endpoint.host}:${endpoint.port} port"),
+          cond(config.readFrom != ReadFrom.Replica, "readFrom = Replica needs replicas; a Standalone topology has none")
+        )
     })
     checks.flatten.headOption
   }
@@ -1204,18 +1237,7 @@ object Client {
       else if (p.commands.exists(_.isBlocking))
         CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
-        CIO.async { complete =>
-          val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](p.commands.length, complete)
-          val callbacks = Vector.tabulate(p.commands.length)(i =>
-            Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
-          )
-          if (!connection.submitAll(p.commands, callbacks)) {
-            // not connected: still fail fast with one error, but report a failed completion per position (as a single disconnected run does)
-            if (events.enabled)
-              p.commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(NotConnected()))))
-            complete(Failure(NotConnected()))
-          }
-        }
+        CIO.async(complete => Client.submitBatchOnOne(events, p.commands, connection.submitAll, complete))
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
@@ -1262,7 +1284,7 @@ object Client {
       case Left(error)  => throw error
     }
 
-  final private class TxScope(val conn: DedicatedConnection) extends TransactionScope[CIO] {
+  final private[internal] class TxScope(val conn: DedicatedConnection) extends TransactionScope[CIO] {
 
     // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
     val armed = new AtomicBoolean(false)
@@ -1280,7 +1302,7 @@ object Client {
     }
 
     // run once by the lease finalizer: seals the scope against further operations and reports whether the connection may be recycled
-    private[Client] def sealAndReusable(): Boolean = {
+    private[internal] def sealAndReusable(): Boolean = {
       lock.lock()
       try {
         released = true

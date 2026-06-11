@@ -47,7 +47,12 @@ class ClusterClientSpec extends munit.FunSuite {
     * A cluster of fake per-node transports. `behaviour` scripts each node's reply to a written command (HELLO and CLUSTER SLOTS are
     * answered here); `written(node)` exposes what reached that node so routing can be asserted.
     */
-  final private class Fixture(behaviour: (Node, String) => Seq[Frame], seeds: Vector[Node], unreachable: Set[Node] = Set.empty) {
+  final private class Fixture(
+    behaviour: (Node, String) => Seq[Frame],
+    seeds: Vector[Node],
+    unreachable: Set[Node] = Set.empty,
+    readFrom: ReadFrom = ReadFrom.Master
+  ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
     // issued on one is still observable even after the other is created
@@ -81,7 +86,8 @@ class ClusterClientSpec extends munit.FunSuite {
         DedicatedPoolConfig(),
         ClusterConfig(),
         1024,
-        seeds
+        seeds,
+        readFrom
       )
 
     live.bootstrapTopology()
@@ -122,6 +128,38 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some(owner.host))
       assert(fixture.written(owner).exists(_.contains("GET")), "owner did not receive GET")
       assert(!fixture.written(other).exists(_.contains("GET")), "non-owner received GET")
+    }
+  }
+
+  test("under a Replica policy an eligible read routes to the shard's replica, which gets READONLY at setup") {
+    val nodeR                   = Node("r", 6379)
+    // CLUSTER SLOTS lists nodeR as nodeA's replica for the whole keyspace
+    def slotsWithReplica: Frame =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else Seq(Frame.BulkString(Bytes.utf8(if (node == nodeR) "from-replica" else "from-master")))
+    val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("from-replica"))
+      assert(fixture.written(nodeR).exists(_.contains("READONLY")), "replica connection did not issue READONLY at setup")
+      assert(fixture.written(nodeR).exists(_.contains("GET")), "replica did not receive the read")
+      assert(!fixture.written(nodeA).exists(_.contains("GET")), "master received a read it should not have")
+    }
+  }
+
+  test("under a Replica policy a write still goes to the master") {
+    val nodeR     = Node("r", 6379)
+    def slots     =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(slots) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+
+    fixture.live.run(Strings.set[String, String]("foo", "bar")).unsafeRun.map { _ =>
+      assert(fixture.written(nodeA).exists(_.contains("SET")), "master did not receive the write")
+      assert(!fixture.written(nodeR).exists(_.contains("SET")), "replica received a write")
     }
   }
 

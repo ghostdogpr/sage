@@ -84,7 +84,7 @@ private[sage] object Sets {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[V]] =
-    Command.read(
+    Command.readCursor(
       "SSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
