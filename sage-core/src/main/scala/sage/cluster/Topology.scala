@@ -17,9 +17,13 @@ final case class Shard(master: Node, replicas: Vector[Node], slots: Vector[SlotR
   * A pure snapshot of which masters own which slots. Routing and splitting are total classifications over it — they never raise, choose a
   * connection, or decide a retry.
   */
-final class ClusterTopology private (val shards: Vector[Shard], owners: Array[Node]) {
+final class ClusterTopology private (val shards: Vector[Shard], owners: Array[Node], shardOwners: Array[Shard]) {
 
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
+
+  // the Shard owning a slot, exposing its replicas — the runtime's input for replica routing (the core only locates them; selecting a live
+  // one and applying the read policy is the runtime's job, since it alone knows connection liveness)
+  def shardForSlot(slot: Slot): Option[Shard] = Option(shardOwners(slot.value))
 
   def route(command: Command[?]): Route =
     if (command.hasMalformedKeys) Route.Malformed
@@ -70,16 +74,18 @@ object ClusterTopology {
     * authority, the core only represents what it is given.
     */
   def from(shards: Vector[Shard]): ClusterTopology = {
-    val owners = new Array[Node](Slot.Count)
+    val owners      = new Array[Node](Slot.Count)
+    val shardOwners = new Array[Shard](Slot.Count)
     shards.foreach { shard =>
       shard.slots.foreach { range =>
         var slot = range.start.value
         while (slot <= range.end.value) {
           owners(slot) = shard.master
+          shardOwners(slot) = shard
           slot += 1
         }
       }
     }
-    new ClusterTopology(shards, owners)
+    new ClusterTopology(shards, owners, shardOwners)
   }
 }

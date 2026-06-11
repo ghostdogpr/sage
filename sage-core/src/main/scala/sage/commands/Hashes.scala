@@ -139,7 +139,7 @@ private[sage] object Hashes {
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[(F, V)]] =
-    Command.read(
+    Command.readCursor(
       "HSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
@@ -150,7 +150,7 @@ private[sage] object Hashes {
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F]
   ): Command[ScanPage[F]] =
-    Command.read(
+    Command.readCursor(
       "HSCAN",
       Command.FirstKey,
       (Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count)) :+ NoValues,

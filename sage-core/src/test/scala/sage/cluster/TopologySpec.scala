@@ -31,6 +31,14 @@ class TopologySpec extends munit.FunSuite {
     assertEquals(topo.nodeForSlot(Slot.unsafe(15)), Some(b))
   }
 
+  test("shardForSlot exposes the owning shard's replicas, None for an uncovered slot") {
+    val r1    = Node("r1", 6379)
+    val shard = Shard(a, Vector(r1), Vector(SlotRange(Slot.unsafe(0), Slot.unsafe(100))))
+    val topo  = ClusterTopology.from(Vector(shard))
+    assertEquals(topo.shardForSlot(Slot.unsafe(50)).map(_.replicas), Some(Vector(r1)))
+    assertEquals(topo.shardForSlot(Slot.unsafe(200)), None)
+  }
+
   test("a single-slot command routes to its owner") {
     assertEquals(whole.route(keyed("foo")), Route.ToNode(a, Slot.of(Bytes.utf8("foo"))))
   }

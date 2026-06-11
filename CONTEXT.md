@@ -134,6 +134,10 @@ _Avoid_: cluster map, slot map, layout
 A user-supplied address the cluster runtime contacts at startup to discover the Cluster Topology. Seeds bootstrap discovery only — once the topology is known, routing targets are Nodes the cluster reports, and a seed that is not itself a master is dropped. Any one seed answering is enough.
 _Avoid_: bootstrap node, contact point, seed node
 
+**Master-Replica**:
+A non-cluster deployment of one master Node and one or more replica Nodes, selected by `Topology.MasterReplica` and discovered from seed endpoints by asking each its role. Unlike a Cluster it has no slots, no redirects, and no cluster bus; unlike a Sentinel setup (out of scope) it has no external monitor. Reads route per the Read Policy and everything else goes to the master, exactly as in a cluster Shard — a Master-Replica is effectively a single Shard owning the whole keyspace. The same Client type serves it; only the topology selects the runtime.
+_Avoid_: master-slave, replica set, primary-replica, sentinel
+
 **Read Policy**:
 The `ReadFrom` setting governing which Node a read-only command may run on, the same setting for both cluster and master-replica deployments: `Master` (default — every command to the master), `MasterPreferred`, `Replica`, or `ReplicaPreferred`. Only read-only commands are eligible; writes and any command not marked read-only always go to the master, regardless of the policy. `Replica` fails when no replica is reachable; the `*Preferred` policies fall back to the master. Reads served by a replica may lag the master — staleness is the policy's accepted contract, not a fault. Uses "master", never "primary", matching the Node/Shard vocabulary.
 _Avoid_: read preference, routing policy, primary

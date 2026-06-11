@@ -3,6 +3,7 @@ package sage.client
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 import kyo.compat.*
@@ -61,6 +62,31 @@ class ConnectSpec extends munit.FunSuite {
     Client.connectWith(factory).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
     }
+  }
+
+  test("readFrom = Replica on a Standalone topology is rejected before connecting") {
+    Client.connect(SageConfig(readFrom = ReadFrom.Replica)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+    }
+  }
+
+  test("a MasterReplica topology with no seeds is rejected") {
+    Client.connect(SageConfig(topology = Topology.MasterReplica(Vector.empty))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+    }
+  }
+
+  test("readFrom = ReplicaPreferred on a Standalone topology passes validation (degrades to the one node)") {
+    // it may connect (a local server) or fail to connect (none) — either way it must not be rejected by validation
+    Client
+      .connect(SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 100.millis))
+      .flatMap(_.close)
+      .unsafeRun
+      .map(_ => assert(true))
+      .recover {
+        case _: IllegalArgumentException => fail("ReplicaPreferred on Standalone should pass validation")
+        case _                           => assert(true) // a connect failure (no server) is fine; only validation matters here
+      }
   }
 
   test("the ZIO artifact lowers to a native ZIO") {

@@ -25,6 +25,10 @@ enum Execution {
   * `allMasters` marks a keyless command whose effect is per-node and not replicated across shards, so a cluster must run it on every
   * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, and `FLUSHALL`/
   * `FLUSHDB`). Inert on a standalone server.
+  *
+  * `cursorBound` marks a command whose reply carries a continuation cursor valid only on the node that issued it (`SCAN`/`HSCAN`/`SSCAN`/
+  * `ZSCAN`). Such a read is excluded from replica round-robin routing: iterating its pages across different replicas would feed a cursor to
+  * a node that never minted it, skipping or duplicating entries.
   */
 final case class Command[+Out](
   name: String,
@@ -34,11 +38,12 @@ final case class Command[+Out](
   execution: Execution = Execution.Ordinary,
   isReadOnly: Boolean = false,
   cacheable: Boolean = false,
-  allMasters: Boolean = false
+  allMasters: Boolean = false,
+  cursorBound: Boolean = false
 ) {
 
   def map[B](f: Out => B): Command[B] =
-    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters)
+    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters, cursorBound)
 
   def isBlocking: Boolean = execution == Execution.Blocking
 
@@ -64,6 +69,17 @@ object Command {
     args: Vector[Bytes],
     decode: Frame => Either[DecodeError, Out]
   ): Command[Out] = Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = true)
+
+  /**
+    * A read-only command whose reply carries a node-local continuation cursor (`SCAN` and its `H`/`S`/`Z` variants): read-only but pinned to
+    * its issuing node, so replica routing must not round-robin its pages. Not cacheable — a cursor page is not a pure function of key state.
+    */
+  def readCursor[Out](
+    name: String,
+    keyIndices: Vector[Int],
+    args: Vector[Bytes],
+    decode: Frame => Either[DecodeError, Out]
+  ): Command[Out] = Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = false, cursorBound = true)
 
   /**
     * A read-only command that must not be cached: its result varies with time or is non-deterministic, so no invalidation would evict it.

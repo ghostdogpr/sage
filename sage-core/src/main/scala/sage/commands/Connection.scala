@@ -17,6 +17,10 @@ private[sage] object Connection {
   // prefixes a single command redirected by `ASK`, telling the target node to serve the key it is importing for this one command
   val asking: Command[Unit] = Command("ASKING", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
+  // puts a cluster replica connection into read-only mode so it serves reads for slots its master owns instead of answering MOVED. Issued
+  // once at connection setup on replica connections only (re-issued on reconnect); a master connection never sends it, staying read-write.
+  val readonly: Command[Unit] = Command("READONLY", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
+
   // enables RESP3 server-assisted client-side caching in opt-in mode on this connection: no key is tracked until a CLIENT CACHING YES
   // precedes the read, and invalidation pushes arrive on this same connection. Run once per connection at bootstrap.
   val clientTrackingOnOptin: Command[Unit] =

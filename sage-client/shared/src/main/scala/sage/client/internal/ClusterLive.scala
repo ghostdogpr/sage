@@ -13,7 +13,7 @@ import kyo.compat.*
 
 import sage.{Message, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
-import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Cluster, Command, Connection, Pipeline}
@@ -42,10 +42,28 @@ final private[client] class ClusterLive(
   cluster: ClusterConfig,
   pubsubBufferSize: Int,
   seeds: Vector[Node],
+  readFrom: ReadFrom = ReadFrom.Master,
   events: Events = Events.disabled
 ) extends Client[CIO] {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
+
+  // replica connections are read-only (READONLY at setup, so a replica serves reads for its master's slots instead of answering MOVED) and
+  // carry no Dedicated Pool use — blocking reads stay on the master. A separate pool from the master registry, which drives redirects.
+  private val replicaPool    = new NodePool(
+    nodeFactory,
+    scheduler,
+    bootstrap :+ Connection.readonly,
+    reconnect,
+    watchdog,
+    connectTimeout,
+    closeTimeout,
+    dedicatedPool,
+    events
+  )
+  // per-master round-robin cursor over its shard's replicas, so successive eligible reads spread across them
+  private val replicaCursors = new java.util.concurrent.ConcurrentHashMap[Node, java.util.concurrent.atomic.AtomicInteger]()
+  private val keylessCursor  = new java.util.concurrent.atomic.AtomicInteger()
 
   private val subscriptions = new ClusterSubscriptions(
     nodeFactory,
@@ -66,13 +84,7 @@ final private[client] class ClusterLive(
   // set once by close; routing and node establishment refuse afterwards, so close is terminal like the standalone client's
   @volatile private var closed = false
 
-  private val refreshLock   = new ReentrantLock()
-  private val refreshDone   = refreshLock.newCondition()
-  private var refreshing    = false
-  private val minRefreshMs  = cluster.minRefreshInterval.toMillis
-  // bootstrap's CLUSTER SLOTS does not consume the throttle window: seed so the first redirect/READONLY-driven refresh runs immediately,
-  // and only refreshes within minRefreshInterval of one another are throttled (Long.MinValue here would overflow the elapsed subtraction)
-  private var lastRefreshMs = scheduler.nowMillis - minRefreshMs
+  private val refreshThrottle = new RefreshThrottle(scheduler, cluster.minRefreshInterval.toMillis)
 
   private inline def lockedNodes[A](inline body: A): A = {
     nodesLock.lock()
@@ -102,9 +114,12 @@ final private[client] class ClusterLive(
     CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete))))
 
   // client-side caching in cluster mode (per-node tracking through redirects/failover) is a follow-up; for now a cached read runs without
-  // caching so the same call stays portable between standalone and cluster. The cacheability guard still applies, matching standalone.
+  // caching so the same call stays portable between standalone and cluster. The cacheability guard still applies, matching standalone. It
+  // always targets the master (allowReplica = false): caching is anchored to the master's tracking stream, so it never honors ReadFrom.
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
-    if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command)) else run(command)
+    if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
+    else
+      CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete), allowReplica = false)))
 
   // a full SCAN must sweep every slot-owning master: SCAN cursors are node-local, so one arbitrary master would silently miss the rest. The
   // node order is fixed from the current snapshot when the walk begins (a reshard mid-scan can still miss or duplicate keys, as on any client).
@@ -147,20 +162,101 @@ final private[client] class ClusterLive(
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
-  private def dispatch[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+  private def dispatch[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, allowReplica: Boolean = true): Unit =
     if (closed) complete(Failure(NotConnected()))
     else {
       val topology = topologyRef.get()
       if (command.allMasters) sendToAllMasters(topology, command, complete)
       else
         topology.route(command) match {
-          case Route.ToNode(node, _)  => sendTo(node, command, asking = false, redirectsLeft, complete)
-          case Route.Keyless          => sendToAny(topology, command, redirectsLeft, complete)
-          case Route.Unowned(_)       => onUnowned(command, redirectsLeft, complete)
-          case Route.CrossSlot(slots) => complete(Failure(crossSlot(command.name, slots)))
-          case Route.Malformed        =>
+          case Route.ToNode(node, slot) =>
+            if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
+              sendRead(command, node, slot, redirectsLeft, complete)
+            else sendTo(node, command, asking = false, redirectsLeft, complete)
+          case Route.Keyless            =>
+            if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
+              sendKeylessRead(topology, command, redirectsLeft, complete)
+            else sendToAny(topology, command, redirectsLeft, complete)
+          case Route.Unowned(_)         => onUnowned(command, redirectsLeft, complete)
+          case Route.CrossSlot(slots)   => complete(Failure(crossSlot(command.name, slots)))
+          case Route.Malformed          =>
             complete(Failure(malformedKeys(command.name)))
         }
+    }
+
+  // an eligible read under a non-Master policy: walk the policy's ordered candidates (master vs this shard's replicas), submitting on the
+  // first that establishes live and falling through the rest on a connection loss. The master uses the redirect-driven master registry; a
+  // replica uses the read-only replica pool. Strict Replica with no live replica exhausts to NotConnected.
+  private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
+    val replicas = topologyRef.get().shardForSlot(slot).map(_.replicas).getOrElse(Vector.empty)
+    val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
+    tryReadCandidates(command, ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()), master, redirectsLeft, complete)
+  }
+
+  // a keyless eligible read (KEYS, RANDOMKEY): round-robin over every replica, falling back per policy, so strict Replica never hits a master
+  private def sendKeylessRead[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+    pickNode(topology) match {
+      case Some(master) =>
+        val replicas = topology.shards.iterator.flatMap(_.replicas).toVector.distinct
+        tryReadCandidates(
+          command,
+          ReadRouting.candidates(readFrom, master, replicas, keylessCursor.getAndIncrement()),
+          master,
+          redirectsLeft,
+          complete
+        )
+      case None         => complete(Failure(NotConnected()))
+    }
+
+  private def tryReadCandidates[A](command: Command[A], candidates: Vector[Node], master: Node, redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+    candidates match {
+      case node +: rest =>
+        val nc =
+          try if (node == master) getOrEstablish(node) else replicaPool.getOrEstablish(node)
+          catch { case NonFatal(_) => null }
+        if (nc == null || !nc.isLive) tryReadCandidates(command, rest, master, redirectsLeft, complete)
+        else
+          nc.submit[A](
+            command,
+            asking = false,
+            {
+              case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
+              case Failure(error) => offload(onReadFailure(node, command, error, rest, master, redirectsLeft, complete))
+            }
+          )
+      // strict Replica, all candidates unreachable: refresh so the next read sees the new roster
+      case _            => triggerRefresh(); complete(Failure(NotConnected()))
+    }
+
+  private def onReadFailure[A](
+    node: Node,
+    command: Command[A],
+    error: Throwable,
+    rest: Vector[Node],
+    master: Node,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit
+  ): Unit =
+    classify(error) match {
+      case ClusterLive.Disposition.Reroute             =>
+        error match {
+          case e: ServerError =>
+            Redirect.parse(e.getMessage).get match {
+              // ASK hands off to the importing master: *Preferred may follow it with ASKING, but strict Replica must not touch a master, so
+              // it fails (the migrating key is not on any replica); MOVED refreshes, then re-dispatch re-applies the policy
+              case ask if ask.kind == RedirectKind.Ask =>
+                if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
+                else onRedirect(node, ask, command, redirectsLeft, complete)
+              case _ if redirectsLeft <= 0             =>
+                complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+              case _                                   => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
+            }
+          // connection loss: try the next candidate, else refresh and re-dispatch
+          case _              =>
+            if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
+        }
+      case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
+      case ClusterLive.Disposition.Terminal            => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
   // a broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
@@ -266,9 +362,15 @@ final private[client] class ClusterLive(
     refresh(force = false)
     val topology = topologyRef.get()
     topology.route(command) match {
-      case Route.ToNode(node, _) => sendTo(node, command, asking = false, redirectsLeft, complete)
-      // still unowned after refresh: send to an arbitrary master and trust the server's reply (a MOVED to follow, or CLUSTERDOWN)
-      case _                     => sendToAny(topology, command, redirectsLeft, complete)
+      // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
+      case Route.ToNode(node, slot)                                                  =>
+        if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, node, slot, redirectsLeft, complete)
+        else sendTo(node, command, asking = false, redirectsLeft, complete)
+      // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
+      case _ if readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
+        onUnreachable(command, redirectsLeft, complete)
+      // still unowned after refresh: any master, trusting its reply (a MOVED to follow, or CLUSTERDOWN)
+      case _                                                                         => sendToAny(topology, command, redirectsLeft, complete)
     }
   }
 
@@ -321,7 +423,10 @@ final private[client] class ClusterLive(
     // layer attributes onto it (set in sendBatch for the batch path, or by dispatch->sendTo for a rerouted position)
     val emits                     =
       Vector.tabulate(n)(i => Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result))))
-    def reroute(index: Int): Unit = offload(dispatch(p.commands(index), cluster.maxRedirects, emits(index)))
+    // all-or-nothing: a fully replica-eligible pipeline batches on replicas, else on masters; reroutes honor the same choice so a slot is
+    // never split across master and replica
+    val useReplica                = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
+    def reroute(index: Int): Unit = offload(dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica))
 
     val plan = topologyRef.get().split(p)
     // a malformed command is a programmer error: split is the single source of that classification (the standalone client has no slots and
@@ -339,8 +444,23 @@ final private[client] class ClusterLive(
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
     plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
       // sorted: keep each node's batch in submission order even when keyless positions are folded into the first group
-      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute)
+      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute, useReplica)
     }
+  }
+
+  // first live read candidate for a shard under the policy, with the node it landed on (for attribution); (master, null) when none
+  private def readConn(master: Node): (Node, NodeClient) = {
+    val replicas = topologyRef.get().shards.collectFirst { case s if s.master == master => s.replicas }.getOrElse(Vector.empty)
+    val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
+    val it       = ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()).iterator
+    while (it.hasNext) {
+      val node = it.next()
+      val nc   =
+        try if (node == master) getOrEstablish(node) else replicaPool.getOrEstablish(node)
+        catch { case NonFatal(_) => null }
+      if (nc != null && nc.isLive) return (node, nc)
+    }
+    (master, null)
   }
 
   private def sendBatch[Out, R](
@@ -348,9 +468,19 @@ final private[client] class ClusterLive(
     indices: Vector[Int],
     p: Pipeline[Out, R],
     emits: Vector[Try[Any] => Unit],
-    reroute: Int => Unit
+    reroute: Int => Unit,
+    useReplica: Boolean
   ): Unit = {
-    def settle(index: Int, result: Try[Any]): Unit = { Events.attributeNode(emits(index), node); emits(index)(result) }
+    // the node the batch lands on (a replica when useReplica), so completions attribute the serving node
+    val (target, nc)                               =
+      if (useReplica) readConn(node)
+      else
+        (
+          node,
+          try getOrEstablish(node)
+          catch { case NonFatal(_) => null }
+        )
+    def settle(index: Int, result: Try[Any]): Unit = { Events.attributeNode(emits(index), target); emits(index)(result) }
     val callbacks: Vector[Try[Any] => Unit]        = indices.map { index => (result: Try[Any]) =>
       result match {
         case Success(_)     => settle(index, result)
@@ -362,9 +492,6 @@ final private[client] class ClusterLive(
           }
       }
     }
-    val nc                                         =
-      try getOrEstablish(node)
-      catch { case NonFatal(_) => null }
     // node unreachable, or not connected when the batch reached it: nothing was sent, so re-route every position individually
     if (nc == null || !nc.submitAll(indices.map(p.commands), callbacks)) indices.foreach(reroute)
   }
@@ -626,23 +753,8 @@ final private[client] class ClusterLive(
 
   private def triggerRefresh(): Unit = offload(refresh(force = false))
 
-  private def refresh(force: Boolean): Unit = {
-    refreshLock.lock()
-    val iRefresh =
-      try
-        if (refreshing) { while (refreshing) refreshDone.awaitUninterruptibly(); false }
-        else if (!force && scheduler.nowMillis - lastRefreshMs < minRefreshMs) false
-        else { refreshing = true; true }
-      finally refreshLock.unlock()
-
-    if (iRefresh)
-      try querySlots(refreshCandidates()).foreach { case (from, shards) => adopt(from, shards) }
-      finally {
-        refreshLock.lock()
-        try { refreshing = false; lastRefreshMs = scheduler.nowMillis; refreshDone.signalAll() }
-        finally refreshLock.unlock()
-      }
-  }
+  private def refresh(force: Boolean): Unit =
+    refreshThrottle(force)(querySlots(refreshCandidates()).foreach { case (from, shards) => adopt(from, shards) })
 
   private def refreshCandidates(): Vector[Node] = {
     val (live, others) = lockedNodes(established.toVector).partition(_._2.isLive)
@@ -671,9 +783,9 @@ final private[client] class ClusterLive(
   // installs a fresh topology and prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak. An empty
   // announce-IP from CLUSTER SLOTS means "the node I queried", so substitute `from` the same way redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
-    val resolved    = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
-    val previous    = if (events.enabled) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
-    val newTopology = ClusterTopology.from(resolved)
+    val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
+    val previous     = if (events.enabled) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
+    val newTopology  = ClusterTopology.from(resolved)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change. A real failover/reshard
     // always replaces a non-empty master set, so `previous.nonEmpty` only suppresses the startup event.
@@ -681,12 +793,16 @@ final private[client] class ClusterLive(
       val current = slotOwningMasters(newTopology)
       if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
     }
-    val masters     = resolved.map(_.master).toSet
-    val gone        = lockedNodes {
+    val masters      = resolved.map(_.master).toSet
+    val gone         = lockedNodes {
       val absent = established.keysIterator.filterNot(masters.contains).toVector
       absent.flatMap(node => established.remove(node))
     }
     gone.foreach(nc => offload(nc.close()))
+    // prune replica connections (and their round-robin cursors) for replicas the new topology no longer lists, mirroring the master prune
+    val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
+    replicaPool.retain(replicaNodes.contains)
+    replicaCursors.keySet.removeIf(node => !masters.contains(node))
     // re-home Shard Channel subscriptions onto the new slot owners; a classic subscription follows the cluster bus, so it only re-homes when
     // its pinned master's socket actually drops (handled by the connection's onTerminated), not on every topology change
     subscriptions.onTopologyChanged()
@@ -695,6 +811,7 @@ final private[client] class ClusterLive(
   private def closeAll(): Unit = {
     val all = lockedNodes { closed = true; val snapshot = established.values.toVector; established.clear(); snapshot }
     subscriptions.close()
+    replicaPool.close()
     all.foreach(_.close())
     events.close()
   }
@@ -751,6 +868,7 @@ private[client] object ClusterLive {
         cluster,
         config.pubsub.bufferSize,
         seeds,
+        config.readFrom,
         events
       )
       // discovery's handshake/TLS failures are translated here (a NOPROTO/SSL surfaces like a standalone connect) rather than via mapError,

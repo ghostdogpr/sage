@@ -308,7 +308,7 @@ private[sage] object SortedSets {
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[(V, Double)]] =
-    Command.read(
+    Command.readCursor(
       "ZSCAN",
       Command.FirstKey,
       Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),

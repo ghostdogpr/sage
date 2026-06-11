@@ -179,7 +179,7 @@ private[sage] object Keys {
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   )(using keyCodec: KeyCodec[K]): Command[ScanPage[K]] =
-    Command.read(
+    Command.readCursor(
       "SCAN",
       Command.NoKeys,
       ScanCursor.bytes(cursor) +:

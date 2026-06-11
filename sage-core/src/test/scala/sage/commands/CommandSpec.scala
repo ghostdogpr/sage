@@ -21,6 +21,18 @@ class CommandSpec extends munit.FunSuite {
     assert(!Sets.sRandMember[String, String]("s").cacheable && Sets.sRandMember[String, String]("s").isReadOnly) // non-deterministic
   }
 
+  test("SCAN-family commands are cursor-bound (node-local cursor) and not cacheable, so replica routing never round-robins them") {
+    val scans = Vector(
+      Keys.scan[String](ScanCursor.start),
+      Hashes.hScan[String, String, String]("h", ScanCursor.start),
+      Hashes.hScanNoValues[String, String]("h", ScanCursor.start),
+      Sets.sScan[String, String]("s", ScanCursor.start),
+      SortedSets.zScan[String, String]("z", ScanCursor.start)
+    )
+    scans.foreach(c => assert(c.cursorBound && c.isReadOnly && !c.cacheable, s"${c.name} should be a cursor-bound, non-cacheable read"))
+    assert(!Strings.get[String, String]("foo").cursorBound) // an ordinary read is not cursor-bound
+  }
+
   test("SORT_RO is cacheable only in its bare form; BY/GET dereference untracked keys") {
     assert(Keys.sortRo[String, String]("k").cacheable)
     assert(Keys.sortRo[String, String]("k", alpha = true, order = SortOrder.Desc).cacheable) // limit/order/alpha touch no extra keys

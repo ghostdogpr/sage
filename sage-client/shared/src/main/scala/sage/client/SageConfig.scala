@@ -99,13 +99,35 @@ final case class ClusterConfig(
 )
 
 /**
+  * Master-replica tuning. `minRefreshInterval` throttles role re-discovery (`ROLE`/`INFO replication`) so a burst of `READONLY`s or
+  * reconnects triggers at most one discovery per window. There is no periodic poll: roles refresh only on reconnect and on a `READONLY`
+  * from the presumed master.
+  */
+final case class MasterReplicaConfig(
+  minRefreshInterval: FiniteDuration = 5.seconds
+)
+
+/**
+  * Which Node a read-only command may run on, the same setting for both cluster and master-replica deployments. Only read-only,
+  * non-blocking commands are eligible; writes, blocking reads, transactions, and `cached` reads always go to the master regardless of the
+  * policy. `Master` (the default) is today's behavior — every command to the master. `MasterPreferred` falls back to a replica only when the
+  * master is unreachable; `Replica` reads only from replicas and fails when none is reachable; `ReplicaPreferred` reads from a replica, else
+  * the master. Reads served by a replica may lag the master — that staleness is the policy's accepted contract.
+  */
+enum ReadFrom {
+  case Master, MasterPreferred, Replica, ReplicaPreferred
+}
+
+/**
   * Standalone connects to the one server at `endpoint`; cluster discovers its topology from `seeds` and routes every command to the owning
-  * node. The address lives here, inside the topology, so there is one place it can come from. The client type is the same either way — only
+  * node; master-replica discovers one master and its replicas from `seeds` (by asking each its `ROLE`) and routes reads per the Read Policy.
+  * The address lives here, inside the topology, so there is one place it can come from. The client type is the same in every case — only
   * this selects the runtime.
   */
 enum Topology {
   case Standalone(endpoint: Endpoint = Endpoint())
   case Cluster(seeds: Vector[Endpoint], config: ClusterConfig = ClusterConfig())
+  case MasterReplica(seeds: Vector[Endpoint], config: MasterReplicaConfig = MasterReplicaConfig())
 }
 
 /**
@@ -125,6 +147,7 @@ final case class SageConfig(
   auth: Option[AuthConfig] = None,
   tls: Option[TlsConfig] = None,
   topology: Topology = Topology.Standalone(),
+  readFrom: ReadFrom = ReadFrom.Master,
   database: Int = 0,
   clientName: Option[String] = None,
   listeners: Vector[SageListener] = Vector.empty
