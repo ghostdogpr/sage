@@ -159,7 +159,7 @@ extension (client: SageClient) {
 
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
-    * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` returns, so a failure leaves it in the PEL for
+    * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
     * recovery. See ADR-0032.
     */
   def xConsume[K: KeyCodec, F: KeyCodec, V: ValueCodec](

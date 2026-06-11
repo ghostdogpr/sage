@@ -7,7 +7,7 @@ import scala.concurrent.duration.FiniteDuration
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 private[commands] object Decode {
@@ -33,7 +33,7 @@ private[commands] object Decode {
   val double: Frame => Either[DecodeError, Double] = {
     case Frame.BulkString(bytes) =>
       val text = bytes.asUtf8String
-      text.toDoubleOption.toRight(DecodeError("double bulk string", s"bulk string '$text'"))
+      Doubles.parse(text).toRight(DecodeError("double bulk string", s"bulk string '$text'"))
     case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
   }
 
@@ -100,7 +100,7 @@ private[commands] object Decode {
     case Frame.Double(value)     => Right(value)
     case Frame.BulkString(bytes) =>
       val text = bytes.asUtf8String
-      text.toDoubleOption.toRight(DecodeError("double", s"bulk string '$text'"))
+      Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
     case other                   => Left(DecodeError("double", Frame.describe(other)))
   }
 
@@ -254,16 +254,10 @@ private[commands] object Decode {
 
   private def scoreText(frame: Frame): Either[DecodeError, Double] =
     frame match {
-      case Frame.BulkString(bytes) => parseScore(bytes.asUtf8String)
+      case Frame.BulkString(bytes) =>
+        val text = bytes.asUtf8String
+        Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
       case other                   => Left(DecodeError("score bulk string", Frame.describe(other)))
-    }
-
-  private def parseScore(text: String): Either[DecodeError, Double] =
-    text match {
-      case "inf" | "+inf" => Right(Double.PositiveInfinity)
-      case "-inf"         => Right(Double.NegativeInfinity)
-      case "nan"          => Right(Double.NaN)
-      case other          => other.toDoubleOption.toRight(DecodeError("double", s"bulk string '$other'"))
     }
 }
 

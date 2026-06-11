@@ -21,9 +21,11 @@ object ValueCodec {
 
   given long: ValueCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
 
-  given double: ValueCodec[Double] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Double", _.toDoubleOption))
+  given double: ValueCodec[Double] =
+    instance(d => Bytes.utf8(Doubles.format(d)), Primitives.decodeNumber("Double", Doubles.parse))
 
-  given float: ValueCodec[Float] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Float", _.toFloatOption))
+  given float: ValueCodec[Float] =
+    instance(f => Bytes.utf8(Doubles.formatFloat(f)), Primitives.decodeNumber("Float", Doubles.parseFloat))
 
   given boolean: ValueCodec[Boolean] = instance(Primitives.encodeBoolean, Primitives.decodeBoolean)
 

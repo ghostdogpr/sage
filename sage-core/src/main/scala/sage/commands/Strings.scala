@@ -6,7 +6,7 @@ import scala.concurrent.duration.FiniteDuration
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
@@ -130,7 +130,7 @@ private[sage] object Strings {
     Command("INCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)), Decode.long)
 
   def incrByFloat[K](key: K, increment: Double)(using keyCodec: KeyCodec[K]): Command[Double] =
-    Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)), Decode.double)
+    Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(Doubles.format(increment))), Decode.double)
 
   def mGet[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)
@@ -258,8 +258,8 @@ private[sage] object Strings {
     Command(
       "INCREX",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ByFloat, Bytes.utf8(increment.toString)) ++
-        incrExArgs(saturate, lowerBound.map(_.toString), upperBound.map(_.toString), expiry),
+      Vector(keyCodec.encode(key), ByFloat, Bytes.utf8(Doubles.format(increment))) ++
+        incrExArgs(saturate, lowerBound.map(Doubles.format), upperBound.map(Doubles.format), expiry),
       incrExResultDouble
     )
 

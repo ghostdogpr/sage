@@ -2,7 +2,7 @@ package sage.commands
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
@@ -435,11 +435,7 @@ private[sage] object SortedSets {
 
   private def scoreArg(score: Double): Bytes = Bytes.utf8(formatScore(score))
 
-  private def formatScore(value: Double): String =
-    if (value == Double.PositiveInfinity) "inf"
-    else if (value == Double.NegativeInfinity) "-inf"
-    else if (value.isNaN) "nan"
-    else value.toString
+  private def formatScore(value: Double): String = Doubles.format(value)
 
   private def prefixed(prefix: Char, value: Bytes): Bytes = {
     val src = value.unsafeArray

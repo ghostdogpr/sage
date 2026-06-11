@@ -6,7 +6,7 @@ import scala.concurrent.duration.{FiniteDuration, MILLISECONDS, SECONDS, TimeUni
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
@@ -110,7 +110,12 @@ private[sage] object Hashes {
     Command("HINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field), Bytes.utf8(increment.toString)), Decode.long)
 
   def hIncrByFloat[K, F](key: K, field: F, increment: Double)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Double] =
-    Command("HINCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), fieldCodec.encode(field), Bytes.utf8(increment.toString)), Decode.double)
+    Command(
+      "HINCRBYFLOAT",
+      Command.FirstKey,
+      Vector(keyCodec.encode(key), fieldCodec.encode(field), Bytes.utf8(Doubles.format(increment))),
+      Decode.double
+    )
 
   def hRandField[K, F](key: K)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F]): Command[Option[F]] =
     Command.readUncacheable("HRANDFIELD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalKey[F])

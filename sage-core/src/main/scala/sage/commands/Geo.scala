@@ -2,7 +2,7 @@ package sage.commands
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 // longitude first, matching the wire order; named so the two same-typed coordinates cannot be silently swapped
@@ -167,8 +167,8 @@ private[sage] object Geo {
 
   private def shapeArgs(shape: GeoShape): Vector[Bytes] =
     shape match {
-      case GeoShape.ByRadius(radius, unit)     => Vector(ByRadius, Bytes.utf8(radius.toString), unitArg(unit))
-      case GeoShape.ByBox(width, height, unit) => Vector(ByBox, Bytes.utf8(width.toString), Bytes.utf8(height.toString), unitArg(unit))
+      case GeoShape.ByRadius(radius, unit)     => Vector(ByRadius, Bytes.utf8(Doubles.format(radius)), unitArg(unit))
+      case GeoShape.ByBox(width, height, unit) => Vector(ByBox, Bytes.utf8(Doubles.format(width)), Bytes.utf8(Doubles.format(height)), unitArg(unit))
     }
 
   private def sortArgs(sort: Option[GeoSort]): Vector[Bytes] =
@@ -193,7 +193,7 @@ private[sage] object Geo {
       case GeoUnit.Feet       => UnitFeet
     }
 
-  private def coordArg(value: Double): Bytes = Bytes.utf8(value.toString)
+  private def coordArg(value: Double): Bytes = Bytes.utf8(Doubles.format(value))
 
   private val coordinates: Frame => Either[DecodeError, GeoCoordinates] = {
     case Frame.Array(Vector(lon, lat)) =>
