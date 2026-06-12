@@ -2,8 +2,7 @@ package sage.integration
 
 import kyo.*
 
-import sage.commands.Commands
-import sage.commands.Pipeline.pipeline
+import sage.*
 import sage.kyo.*
 
 class KyoSmokeSuite extends ServerSuite(Images.redis) {

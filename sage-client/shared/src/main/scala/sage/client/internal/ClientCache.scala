@@ -16,6 +16,7 @@ import sage.protocol.Frame
   */
 final private[client] class ClientCache(maxBytes: Long) {
   import ClientCache.*
+  import ClientCache.Acquire.*
 
   private val lock            = new ReentrantLock()
   // accessOrder = true: a lookup promotes the entry to most-recently-used, so eviction sheds the genuinely cold entries
@@ -143,10 +144,11 @@ private[client] object ClientCache {
     }
   }
 
-  sealed trait Acquire
-  final case class Hit(frame: Frame) extends Acquire
-  case object Fetch                  extends Acquire
-  case object Wait                   extends Acquire
+  enum Acquire {
+    case Hit(frame: Frame)
+    case Fetch
+    case Wait
+  }
 
   final private class Entry(val frame: Frame, val sizeBytes: Long, val expiresAt: Long, val keys: Vector[Key])
 

@@ -4,16 +4,16 @@ package sage.cluster
   * `Moved` is permanent — the slot's owner changed, refresh the topology — while `Ask` is a one-shot hand-off during a live migration:
   * send the single command (prefixed `ASKING`) to the named node without touching the topology.
   */
-enum RedirectKind {
+private[sage] enum RedirectKind {
   case Moved, Ask
 }
 
 /**
   * A parsed `MOVED`/`ASK` reply. An empty target host means the IP of the current connection, which the runtime substitutes.
   */
-final case class Redirect(kind: RedirectKind, slot: Slot, target: Node)
+final private[sage] case class Redirect(kind: RedirectKind, slot: Slot, target: Node)
 
-object Redirect {
+private[sage] object Redirect {
 
   def parse(error: String): Option[Redirect] = {
     val parts = error.split(' ')

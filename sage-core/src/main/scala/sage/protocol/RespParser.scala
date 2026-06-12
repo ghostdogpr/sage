@@ -10,7 +10,7 @@ import sage.SageException.ProtocolError
   * thread-safe. After a `ProtocolError` the parser is poisoned — RESP3 has no resynchronization point — and the connection must be
   * discarded. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]; streamed types are not supported (no server sends them).
   */
-final class RespParser {
+final private[sage] class RespParser {
 
   private var buf: Array[Byte]       = Array.emptyByteArray
   private var readPos: Int           = 0 // start of unconsumed input

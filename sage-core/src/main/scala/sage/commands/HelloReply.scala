@@ -3,9 +3,9 @@ package sage.commands
 import sage.SageException.DecodeError
 import sage.protocol.Frame
 
-final case class HelloReply(server: String, version: String, proto: Int, role: String)
+final private[sage] case class HelloReply(server: String, version: String, proto: Int, role: String)
 
-object HelloReply {
+private[sage] object HelloReply {
 
   private[commands] def decode(frame: Frame): Either[DecodeError, HelloReply] =
     frame match {

@@ -2,8 +2,7 @@ package sage.integration
 
 import zio.*
 
-import sage.commands.{BlockTimeout, Commands, GroupStartId, StreamId, XAddId}
-import sage.commands.Pipeline.pipeline
+import sage.*
 import sage.zio.*
 
 class ZioSmokeSuite extends ServerSuite(Images.redis) {
@@ -94,7 +93,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client    <- SageClient.scoped(configOf(server))
             collected <- client.subscribe[String]("smoke").take(3).runCollect.fork
-            _         <- ZIO.sleep(zio.Duration.fromMillis(300)) // let SUBSCRIBE register before publishing
+            _         <- ZIO.sleep(Duration.fromMillis(300)) // let SUBSCRIBE register before publishing
             _         <- ZIO.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
             messages  <- collected.join
           } yield {
@@ -186,7 +185,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
                           seen.update(_ :+ entry.fields.head._2)
                         }
                         .fork
-            _      <- seen.get.repeatUntil(_.size >= 3).timeoutFail(new RuntimeException("xConsume did not deliver"))(zio.Duration.fromSeconds(10))
+            _      <- seen.get.repeatUntil(_.size >= 3).timeoutFail(new RuntimeException("xConsume did not deliver"))(Duration.fromSeconds(10))
             _      <- fiber.interrupt
             got    <- seen.get
             pend   <- client.xPending("xconsume", "g")

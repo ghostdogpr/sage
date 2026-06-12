@@ -8,7 +8,7 @@ import sage.protocol.Frame
   * Converts a raw reply frame into a command's typed result. Error frames are intercepted here, at the top level only: errors nested in
   * aggregates (an `EXEC` reply) still reach decoders.
   */
-object Reply {
+private[sage] object Reply {
 
   def run[Out](command: Command[Out], frame: Frame): Either[SageException, Out] =
     frame match {

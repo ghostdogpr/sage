@@ -269,9 +269,9 @@ final private[client] class MultiplexedConnection private (
       }
       cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
         // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
-        case ClientCache.Hit(frame) => events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
-        case ClientCache.Wait       => events.emit(SageEvent.Cache.Hit(command.name))
-        case ClientCache.Fetch      =>
+        case ClientCache.Acquire.Hit(frame) => events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
+        case ClientCache.Acquire.Wait       => events.emit(SageEvent.Cache.Hit(command.name))
+        case ClientCache.Acquire.Fetch      =>
           events.emit(SageEvent.Cache.Miss(command.name))
           val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
