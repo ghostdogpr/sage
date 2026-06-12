@@ -31,4 +31,8 @@ Sage uses the server's tracking so that when a key you have cached changes, the 
 
 Only reads whose result is a pure function of the named keys' current state are cacheable, because a server invalidation push covers every way such a result can change. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable: nothing would ever fire to invalidate them. Passing such a command to `cached` is not how caching is meant to be used.
 
+::: warning
+`cached` rejects a write or a keyless read with `NotCacheable`. A keyless read could only ever be evicted by its TTL, never by an invalidation, so it is refused rather than allowed to go silently stale.
+:::
+
 Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configuration).

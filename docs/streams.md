@@ -74,6 +74,10 @@ Each command position that admits a special ID token carries its own type, so an
 
 For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt.
 
+::: tip At-least-once delivery
+Because an entry is acknowledged only after the handler succeeds, the same entry can be delivered again after a crash or a failed handler. Make your handler idempotent. `xConsume` also blocks while tailing, so it is the body of a long-running worker, not a one-shot read.
+:::
+
 ::: code-group
 
 ```scala [Ox]

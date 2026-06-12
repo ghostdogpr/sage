@@ -48,4 +48,6 @@ Listeners are invoked off the command path, so they cannot block or break comman
 - A thrown exception is swallowed.
 - Events are shed once the internal dispatch queue fills, so delivery is lossy under load.
 
-That makes listeners a good fit for metrics, sampling, and operational logging, and a poor fit for anything that must be a complete, lossless record.
+::: warning
+Delivery is best-effort: events are dropped once the dispatch queue fills, and a throwing listener is swallowed. Listeners suit metrics, sampling, and operational logging, not anything that must be a complete or lossless record.
+:::

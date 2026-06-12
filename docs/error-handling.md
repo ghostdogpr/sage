@@ -45,6 +45,10 @@ def classify(e: SageException): String = e match {
 
 Sage does not retry for you, and it does not queue commands while disconnected (see [What happens when the connection drops?](/faq#what-happens-when-the-connection-drops)). This flag gives you what you need to decide.
 
+::: warning
+When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command: it may already have run. Retry only when the command is idempotent, or make it so first.
+:::
+
 ## How failures surface per backend
 
 The same `SageException` is delivered through each ecosystem's normal failure channel:

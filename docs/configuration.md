@@ -75,7 +75,11 @@ val config = SageConfig(
 )
 ```
 
-`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA, or `TrustSource.Custom(sslContext)` to supply your own `SSLContext` (the path to mutual TLS). `TrustSource.Insecure` exists for local development only and must never be used in production: it trusts every certificate and skips hostname verification. `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
+`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA, or `TrustSource.Custom(sslContext)` to supply your own `SSLContext` (the path to mutual TLS). `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
+
+::: warning
+`TrustSource.Insecure` is for local development only. It trusts every certificate and skips hostname verification, leaving the connection open to machine-in-the-middle attacks. Never use it in production.
+:::
 
 ## Connection tuning
 
