@@ -155,6 +155,26 @@ class RespParserSpec extends munit.FunSuite {
     }
   }
 
+  test("parses deeply nested aggregates and rejects nesting past the depth bound") {
+    val deep            = 500
+    var expected: Frame = Frame.Integer(1)
+    for (_ <- 1 to deep) expected = Frame.Array(Vector(expected))
+    assertEquals(parseOne("*1\r\n" * deep + ":1\r\n"), expected)
+    assert(parseError("*1\r\n" * 1000 + ":1\r\n").message.contains("aggregate nesting exceeds"))
+  }
+
+  test("resumes a deeply nested aggregate fed one byte at a time") {
+    val deep            = 50
+    val wire            = ("*1\r\n" * deep + ":1\r\n").getBytes
+    val parser          = new RespParser
+    var frames          = Vector.empty[Frame]
+    for (b <- wire)
+      frames ++= parser.feed(Bytes.fromArray(Array(b))).fold(error => fail(s"$error"), identity)
+    var expected: Frame = Frame.Integer(1)
+    for (_ <- 1 to deep) expected = Frame.Array(Vector(expected))
+    assertEquals(frames, Vector(expected))
+  }
+
   test("rejects an unknown frame type byte") {
     assert(parseError("?\r\n").message.contains("unknown frame type"))
   }
