@@ -28,7 +28,7 @@ export default defineConfig({
           { text: 'Pipelines & transactions', link: '/pipelines-transactions' },
           { text: 'Pub/Sub', link: '/pubsub' },
           { text: 'Client-side caching', link: '/client-side-caching' },
-          { text: 'Deployments', link: '/deployments' },
+          { text: 'Configuration', link: '/configuration' },
         ]
       },
       {

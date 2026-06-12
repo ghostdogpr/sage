@@ -1,4 +1,4 @@
-# Deployments
+# Configuration
 
 <!--
 WRITER NOTES — replace this body with real content.
@@ -7,10 +7,12 @@ Ground snippets in:
   examples/ox/MasterReplicaExample.scala    (master-replica + ReadFrom)
   examples/ce/TlsExample.scala              (TLS + ACL)
 Key point from examples/README.md: these are CONFIG-ONLY differences — the command
-code is identical to the tours. Lead with that: same Client type, topology selects the
-runtime.
+code is identical to the tours. Lead with that: same Client type, SageConfig selects the
+topology and runtime.
 
-Purpose: what sits behind the one Client — topologies, read routing, and secure auth.
+Purpose: everything you set on SageConfig — topology (standalone / cluster /
+master-replica), read routing, database selection, and secure auth. Frame the whole
+page as "config, not code": the command surface never changes.
 
 Sections to cover (grounded in CONTEXT.md glossary):
 

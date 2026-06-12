@@ -29,7 +29,7 @@ Each file has detailed per-section notes inside it. Order to write them:
 3. `pipelines-transactions.md` — Pipeline vs Transaction (the crisp distinction).
 4. `pubsub.md` — classic + sharded.
 5. `client-side-caching.md` — Cached Reads (per-call opt-in).
-6. `deployments.md` — standalone / cluster / master-replica / ReadFrom / TLS & ACL (config, not code).
+6. `configuration.md` — SageConfig: topology (standalone / cluster / master-replica), ReadFrom, database, TLS & ACL (config, not code).
 7. `faq.md` — Q&A list.
 8. `about.md` — short about page.
 
@@ -39,9 +39,17 @@ Each file has detailed per-section notes inside it. Order to write them:
   `sage-client-zio`, `sage-client-ce`, `sage-client-kyo`, `sage-client-ox`, all under
   `com.github.ghostdogpr`, `%%`, version `@VERSION@`. `sage-core` is transitive — users
   depend on the backend artifact only. Requires JDK 21+, Scala 3.3.x LTS+.
-- **Snippet style:** construction/connect is a **code-group with a tab per backend**;
-  every other (command) snippet is shown **once in Ox direct style** (reads like plain
-  Scala). Do not repeat command snippets four times.
+- **Snippet style:** every code sample is a **code-group with one tab per backend, in
+  the order Ox · ZIO · Cats Effect · Kyo** (Ox first, it reads like plain Scala). Tab
+  labels are `[Ox]`, `[ZIO]`, `[Cats Effect]`, `[Kyo]` (consistent capitalization, even
+  though cats-effect is lowercase in prose). **When the ZIO, Cats Effect, and Kyo tabs
+  would be character-for-character identical** (common, since the effectful
+  for-comprehension is the same and the effect type is not shown), **merge them into one
+  tab labeled `[ZIO · Cats Effect · Kyo]`** rather than repeating it three times. Keep
+  Ox separate. Pub/Sub is the case where all four genuinely differ (each ecosystem's
+  fork/stream API), so it keeps four tabs. No automated snippet validation: hand-write
+  each tab from the matching backend's example file and keep lines short enough to avoid
+  a horizontal scrollbar (wrap long calls, put result comments on their own line).
 - **No API / Scaladoc link** — deliberately omitted from nav (Scaladoc isn't hosted).
   Don't add one.
 - **Connection model + auto-pipelining** live inside `getting-started.md` as a "how it
@@ -60,7 +68,7 @@ Every code snippet must reflect real, compiling usage. Two sources of truth:
   - `*/PipelinesExample.scala`, `*/TransactionsExample.scala` → pipelines & transactions
   - `*/PubSubExample.scala`, `zio/ClusterExample.scala` → pub/sub
   - `*/CachedReadsExample.scala` → client-side caching
-  - `zio/ClusterExample.scala`, `ox/MasterReplicaExample.scala`, `ce/TlsExample.scala` → deployments
+  - `zio/ClusterExample.scala`, `ox/MasterReplicaExample.scala`, `ce/TlsExample.scala` → configuration
   - Read `examples/README.md` first — it explains the tour/spotlight split.
 - **`CONTEXT.md`** (repo root) — the glossary. Use its exact terms (Multiplexed/Dedicated/
   Subscription Connection, Auto-pipelining, Pipeline, Transaction, Cached Read, Shard
@@ -96,6 +104,6 @@ came from (open the source, copy, adapt the effect flavor only as the style rule
 
 - [ ] `npm run docs:build` succeeds
 - [ ] `docs.yml` deploys to Pages on release + manual dispatch, with `@VERSION@` substitution ✅ (skeleton)
-- [ ] Pages present: landing, getting started (install + tour + connection-model aside), feature guides (commands, pipelines & transactions, pub/sub, client-side caching), deployments
+- [ ] Pages present: landing, getting started (install + tour + connection-model aside), feature guides (commands, pipelines & transactions, pub/sub, client-side caching), configuration
 - [ ] Snippets cross-checked against `examples/`
 - [ ] Nav/sidebar + GitHub social link configured ✅ (skeleton)
