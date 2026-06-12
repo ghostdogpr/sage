@@ -1,6 +1,6 @@
 # Public API surface: flattened `sage.*` vocabulary and `private[sage]` internals
 
-The public surface is frozen behind two wildcard imports: `import sage.*` brings the whole command vocabulary, and `import sage.<backend>.*` (zio/ce/ox/kyo) brings the client plus its connection config. A hello-world — connect, GET/SET, a blocking pop, a pipeline, an `eval` — needs only those two. The layered packages (`sage.commands`, `sage.codec`, `sage.protocol`, `sage.cluster`) remain the code's organization, not the user's; `import sage.*` is the user's.
+The public surface is frozen behind two wildcard imports: `import sage.*` brings the whole command vocabulary and the connection config, and `import sage.<backend>.*` (zio/ce/ox/kyo) brings the client. A hello-world — connect, GET/SET, a blocking pop, a pipeline, an `eval` — needs only those two. The layered packages (`sage.commands`, `sage.codec`, `sage.protocol`, `sage.cluster`) remain the code's organization, not the user's; `import sage.*` is the user's.
 
 ## How the vocabulary is surfaced
 

@@ -20,11 +20,11 @@ It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs â
 
 ## Getting started
 
-Two imports: `import sage.*` for the command vocabulary (backend-independent), and `import sage.<backend>.*` for the client and connection config.
+Two imports: `import sage.*` for the command vocabulary and connection config (backend-independent), and `import sage.<backend>.*` for the client.
 
 ```scala
-import sage.*       // Commands, options/results, codecs, Frame, Pipeline
-import sage.zio.*   // SageClient + connection config, ZIO-native
+import sage.*       // Commands, options/results, codecs, Frame, Pipeline, connection config
+import sage.zio.*   // SageClient, ZIO-native
 
 val program =
   ZIO.scoped {
