@@ -27,8 +27,16 @@ inThisBuild(
 
 name := "sage"
 
-addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
-addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck")
+addCommandAlias(
+  "fmt",
+  "all scalafmtSbt scalafmt test:scalafmt " +
+    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksKyo3_8_3/scalafmt"
+)
+addCommandAlias(
+  "check",
+  "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
+    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
+)
 
 addCommandAlias(
   "testUnit",
@@ -107,23 +115,23 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
 
 // Runtime end-to-end benchmark harness (JMH), dev-only and never published. One cell per backend (the backends are cross-compiled from the
 // same sage.* sources and would collide on one classpath, so they cannot share a module). Competitor baselines are added per cell: zio-redis
-// to the zio cell, redis4cats to the ce cell, raw Lettuce (sync) to the ox cell as a direct-style peer. kyo is sage-only. See benchmarks/README.md.
+// to the zio cell, redis4cats to the ce cell, raw Lettuce (async) to the ox cell as the JVM ceiling. kyo is sage-only. See benchmarks/README.md.
 lazy val benchmarks = (projectMatrix in file("benchmarks"))
   .dependsOn(client)
   .enablePlugins(JmhPlugin)
   .settings(name := "benchmarks")
   .settings(commonSettings)
   .settings(
-    publish / skip := true,
+    publish / skip                        := true,
     // matrix cells have a non-existent baseDirectory (e.g. benchmarks/ce/jvm); fork JMH from the repo root so the JVM launches and the
-    // -rff benchmarks/results/*.csv paths resolve there
-    Jmh / run / forkOptions := (Jmh / run / forkOptions).value.withWorkingDirectory((ThisBuild / baseDirectory).value),
+    // -rff benchmarks/results/*.json paths resolve there
+    Jmh / run / forkOptions               := (Jmh / run / forkOptions).value.withWorkingDirectory((ThisBuild / baseDirectory).value),
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % testcontainersVersion,
     libraryDependencies ++= {
       val m = moduleName.value
       if (m.endsWith("-zio")) Seq("dev.zio" %% "zio-redis" % zioRedisVersion)
       else if (m.endsWith("-ce")) Seq("dev.profunktor" %% "redis4cats-effects" % redis4catsVersion)
-      // Lettuce (raw Java, driven sync/blocking) is the direct-style peer to sage-ox and the JVM ceiling in the flat results
+      // Lettuce (raw Java, async/auto-pipelined) is the JVM ceiling in the flat results
       else if (m.endsWith("-ox")) Seq("io.lettuce" % "lettuce-core" % lettuceVersion)
       else Seq.empty
     }
