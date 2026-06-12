@@ -39,7 +39,7 @@ private[sage] object ApiSurface {
     if (missing.nonEmpty)
       report.errorAndAbort(
         s"${missing.size} public type(s) in `sage.commands` are not re-exported from `sage` — add them to " +
-          s"sage-client/shared/src/main/scala/sage/exports.scala so `import sage.*` exposes them:\n  " +
+          s"the `sage.*` aggregator (sage/exports.scala) so `import sage.*` exposes them:\n  " +
           missing.mkString(", ")
       )
 
