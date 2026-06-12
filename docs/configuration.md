@@ -125,7 +125,8 @@ val config = SageConfig(
 For the common cases you can parse a `redis://` or `rediss://` URI instead of assembling the config by hand. `rediss` selects TLS with system trust, userinfo becomes the ACL auth, a `/<db>` path sets the database, and comma-separated hosts yield cluster seeds. It returns the problem as a `Left` rather than throwing, and there is intentionally no way to select insecure TLS from a URI:
 
 ```scala
-val config = SageConfig.fromUri("rediss://app:app-secret@localhost:6380/0")
+// fromUri returns Either: a Left describes the problem, a Right is the config
+val parsed = SageConfig.fromUri("rediss://app:app-secret@localhost:6380/0")
 // further tuning stays programmatic:
 //   SageConfig.fromUri(uri).map(_.copy(readFrom = ReadFrom.ReplicaPreferred))
 ```

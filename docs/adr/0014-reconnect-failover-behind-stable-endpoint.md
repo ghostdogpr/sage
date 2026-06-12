@@ -1,5 +1,0 @@
-# Reconnect supports master failover behind a stable endpoint
-
-Managed Redis/Valkey (ElastiCache, MemoryDB, Azure Cache, Kubernetes services) move the master behind one stable hostname, so plain reconnection isn't enough. Two behaviors close the gap. Every reconnect attempt re-resolves the hostname — sage never caches a resolved address across attempts — so a DNS repoint lands the next attempt on the new master. And a `-READONLY` reply poisons the Multiplexed Connection and triggers a reconnect: after in-place failover the old master is often demoted without the TCP connection dropping, so writes fail `READONLY` against a connection auto-reconnect would otherwise consider healthy; the triggering command fails `ServerError` — a clean refusal, not may-have-executed — with no auto-retry, per ADR-0006.
-
-Poisoning is scoped to `READONLY` only: `LOADING` means the server won't be ready on an immediate reconnect anyway, and `MASTERDOWN`/`CLUSTERDOWN` are cluster concerns. Sentinel-managed discovery stays out of scope per the PRD.
