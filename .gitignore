@@ -10,6 +10,11 @@ target/
 project/project/
 .bsp/
 
+# docs (VitePress)
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
 # IDE / tooling
 .metals/
 .bloop/
