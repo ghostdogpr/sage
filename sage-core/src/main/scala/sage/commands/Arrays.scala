@@ -25,7 +25,7 @@ enum ArGrepCombine {
 
 /**
   * `ARINFO`: an Array's metadata. `count`/`len`/`nextInsertIndex` are the user-meaningful invariants; the structural fields are decoded
-  * leniently (ADR-0024) since the Array type ships as a Redis preview and its internal layout reporting may still change.
+  * leniently since the Array type ships as a Redis preview and its internal layout reporting may still change.
   */
 final case class ArrayInfo(
   count: Long,
@@ -38,7 +38,7 @@ final case class ArrayInfo(
 )
 
 /**
-  * `ARINFO ... FULL`: [[ArrayInfo]] plus per-slice fill statistics, all decoded leniently (ADR-0024).
+  * `ARINFO ... FULL`: [[ArrayInfo]] plus per-slice fill statistics, all decoded leniently.
   */
 final case class ArrayInfoFull(
   count: Long,

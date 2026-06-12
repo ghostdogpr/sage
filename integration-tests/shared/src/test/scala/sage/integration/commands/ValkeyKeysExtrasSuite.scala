@@ -5,7 +5,7 @@ import kyo.compat.*
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * DELIFEQ is a Valkey-only atomic compare-and-delete absent in Redis, so it has no cross-server counterpart (ADR-0026).
+  * DELIFEQ is a Valkey-only atomic compare-and-delete absent in Redis, so it has no cross-server counterpart.
   */
 class ValkeyKeysExtrasSuite extends ServerSuite(Images.valkey) {
 

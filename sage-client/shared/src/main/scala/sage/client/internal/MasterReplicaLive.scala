@@ -125,7 +125,6 @@ final private[client] class MasterReplicaLive(
 
   private def triggerRefresh(): Unit = offload(refreshThrottle(force = false)(rediscover()))
 
-  // adopt the new master/replicas and prune pools for nodes that vanished
   private def rediscover(): Unit = {
     val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
     candidates.iterator
@@ -150,8 +149,8 @@ final private[client] class MasterReplicaLive(
       offload(if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked) else sendMaster(command, tracked))
     }
 
-  // cached reads always go to the master (caching is anchored to its tracking stream); cluster-style, the cache itself is a follow-up, so
-  // the read runs uncached but stays on the master so the call is portable
+  // cached reads always go to the master (caching is anchored to its tracking stream); the cache itself is a follow-up, so the read runs
+  // uncached but stays on the master to keep the call portable
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else CIO.async[A](complete => offload(sendMaster(command, Events.trackCommand(events, command, complete))))
@@ -215,7 +214,7 @@ final private[client] class MasterReplicaLive(
     if (isConnLoss(error)) {
       if (rest.nonEmpty) tryRead(command, rest, master, complete)
       else { triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error)) }
-    } else { Events.attributeNode(complete, node); complete(Failure(error)) } // data error: terminal in place
+    } else { Events.attributeNode(complete, node); complete(Failure(error)) }
   }
 
   private def isOwnershipFault(error: Throwable): Boolean = error match {
@@ -243,12 +242,11 @@ final private[client] class MasterReplicaLive(
     else
       CIO.async { complete =>
         offload {
-          // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else on the master
+          // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
           val useReplica = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
           val nc         = if (useReplica) readConn() else masterConn()
           // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
           if (nc == null) triggerRefresh()
-          // submitBatchOnOne either way, so a not-connected pipeline still reports a failed completion per position
           val submit     = if (nc == null) (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false else nc.submitAll
           Client.submitBatchOnOne(events, p.commands, submit, complete)
         }
@@ -258,7 +256,7 @@ final private[client] class MasterReplicaLive(
     try masterPool.getOrEstablish(masterNodeRef.get())
     catch { case NonFatal(_) => null }
 
-  // the first live read candidate under the policy, master or replica (used for a replica-eligible pipeline batch); null when none
+  // the first live read candidate under the policy, master or replica; null when none
   private def readConn(): NodeClient = {
     val master            = masterNodeRef.get()
     val it                = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement()).iterator

@@ -17,7 +17,7 @@ import sage.commands.{Command, Connection}
   * (that lives in the Multiplexed Connection); it simply establishes a fresh one when none is idle.
   *
   * Acquisition is gated on the client being live (`isLive`): a blocking command issued while disconnected fails fast `NotConnected`, the
-  * same contract ordinary commands get (ADR-0006). When all slots are in use the caller waits up to `acquireTimeout` for one to free, then
+  * same contract ordinary commands get. When all slots are in use the caller waits up to `acquireTimeout` for one to free, then
   * fails `TimedOut`. `close` force-closes every connection at once — an in-flight blocking command then fails `ConnectionLost(true)` rather
   * than stalling shutdown for a reply that may never come.
   */

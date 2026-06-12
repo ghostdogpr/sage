@@ -56,6 +56,9 @@ enum LexBoundary[+V] {
   case Max
 }
 
+/**
+  * A `LIMIT offset count` clause for a range query: skip `offset` matches, then return at most `count` (a negative `count` means all).
+  */
 final case class Limit(offset: Long, count: Long)
 
 /**
@@ -104,7 +107,6 @@ private[sage] object SortedSets {
       Decode.long
     )
 
-  // returns the member's new score, or None when the condition (NX/XX/GT/LT) skipped the write
   def zAddIncr[K, V](key: K, member: V, score: Double, condition: ZAddCondition = ZAddCondition.Always)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]

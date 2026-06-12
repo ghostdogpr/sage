@@ -19,6 +19,9 @@ enum SetExpiry {
   case KeepTtl
 }
 
+/**
+  * A guard on a `SET`-family write: write `Always`, only `IfExists` (`XX`), or only `IfNotExists` (`NX`).
+  */
 enum SetCondition {
   case Always
   case IfExists
@@ -45,6 +48,9 @@ final case class MatchRange(start: Long, end: Long)
   */
 final case class LcsMatch(a: MatchRange, b: MatchRange, length: Option[Long])
 
+/**
+  * An `LCS … IDX` reply: every aligned common run ([[LcsMatch]]) plus the total length of the longest common subsequence.
+  */
 final case class LcsMatches(matches: Vector[LcsMatch], length: Long)
 
 /**

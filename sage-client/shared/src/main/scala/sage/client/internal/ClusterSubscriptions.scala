@@ -82,7 +82,7 @@ final private[client] class ClusterSubscriptions(
     new RawSubscription(sink, () => closeClassic(sub))
   }
 
-  // must hold lock; lazily picks a master and builds the (not-yet-connected) classic connection
+  // must hold lock
   private def ensureClassicConn(): SubscriptionConnection = {
     if (classicConn == null)
       pickMaster() match {
@@ -152,7 +152,7 @@ final private[client] class ClusterSubscriptions(
 
   // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
-  // the per-node connections a placement attaches to: ensure under the manager lock (creating on demand), get without creating, both empty once closed
+  // ensure/get both yield nothing once closed, so no connection is created during teardown
   private val conns: Placement.Conns = new Placement.Conns {
     def ensure(node: Node): Option[Placement.ShardConn] = locked(if (closed) None else Some(ensureShardConn(node)))
     def get(node: Node): Option[Placement.ShardConn]    = locked(shardConns.get(node))
@@ -178,7 +178,7 @@ final private[client] class ClusterSubscriptions(
     if (!sub.placement.fullyPlaced) scheduleRetry()
   }
 
-  // pure: group channels by owning Node, then by Slot so each group becomes one SSUBSCRIBE; an unowned Slot is dropped (the caller refreshes once per pass)
+  // group channels by owning Node, then by Slot so each group becomes one SSUBSCRIBE; an unowned Slot is dropped (the caller refreshes per pass)
   private def planFor(channels: Vector[String]): Placement.Plan = {
     val topo   = topologyOf()
     val byNode = mutable.HashMap.empty[Node, mutable.HashMap[Slot, mutable.ArrayBuffer[String]]]
@@ -227,7 +227,7 @@ final private[client] class ClusterSubscriptions(
     }
   }
 
-  // a placement that could not complete (owner unreachable, or a Slot still unowned mid-failover) retries after a short delay until it converges
+  // an incomplete placement (owner unreachable, or a Slot still unowned mid-failover) retries after a short delay until it converges
   private def scheduleRetry(): Unit =
     if (!locked(closed)) scheduler.after(reconnect.initialDelay)(scheduleReconcile())
 

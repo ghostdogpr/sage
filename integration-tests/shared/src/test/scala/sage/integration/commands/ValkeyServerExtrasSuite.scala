@@ -6,7 +6,7 @@ import sage.commands.CommandLogType
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * COMMANDLOG is Valkey's command-log observability (the SLOWLOG successor), absent in Redis, so it has no cross-server counterpart (ADR-0026).
+  * COMMANDLOG is Valkey's command-log observability (the SLOWLOG successor), absent in Redis, so it has no cross-server counterpart.
   */
 class ValkeyServerExtrasSuite extends ServerSuite(Images.valkey) {
 

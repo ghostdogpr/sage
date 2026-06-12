@@ -19,21 +19,17 @@ import sage.SageException.ProtocolError
 final private[sage] class RespParser {
 
   private var buf: Array[Byte]       = Array.emptyByteArray
-  private var readPos: Int           = 0 // start of unconsumed input
-  private var writePos: Int          = 0 // end of valid input
+  private var readPos: Int           = 0
+  private var writePos: Int          = 0
   private var failure: ProtocolError = null
 
-  // out-fields, avoiding a result-wrapper allocation per value: a leaf parse sets `cursor` past it; an aggregate header sets `cursor` and
-  // pushes onto `stack`; a completed value is handed back via `produced`. `failMessage` carries an invalid-input diagnostic.
+  // out-fields, avoiding a result-wrapper allocation per parsed value
   private var cursor: Int         = 0
   private var produced: Frame     = null
   private var failMessage: String = null
 
-  // readLong validity out-field
   private var numberOk: Boolean = false
 
-  // open aggregates awaiting their children, innermost on top; grows on demand up to the depth guard's ceiling, so a parser that only
-  // ever sees shallow replies (the common case) never pays for the worst-case nesting bound
   private var stack      = new Array[Agg](8)
   private var stackDepth = 0
 
@@ -105,8 +101,6 @@ final private[sage] class RespParser {
     }
   }
 
-  // The driver: alternately close any aggregate whose children are all in (cascading completed parents and emitting top-level frames) and
-  // produce the next value into the open aggregate or to the top level. Stops on incomplete input (resumes next feed) or invalid input.
   private def parseLoop(onFrame: Frame => Unit): Unit = {
     var running = true
     while (running) {
@@ -130,13 +124,12 @@ final private[sage] class RespParser {
         val value = produced
         if (stackDepth == 0) onFrame(value) else addChild(stack(stackDepth - 1), value)
       } else if (status == Opened) () // re-loop: the close pass finalizes it if empty, otherwise its children are produced next
-      else running = false // Incomplete (resume next feed) or Invalid (failMessage set)
+      else running = false
     }
   }
 
   private def complete(agg: Agg): Boolean = agg.remaining == 0 && agg.pendingKey == null
 
-  // attaches a produced value to an open aggregate; a map/attribute alternates key then value per pair
   private def addChild(agg: Agg, value: Frame): Unit =
     agg.kind match {
       case Map  =>
@@ -166,8 +159,8 @@ final private[sage] class RespParser {
       case _    => Frame.Null // Attr is never built — completed attributes are discarded before this point
     }
 
-  // produces one value at `readPos`, returning Produced (`produced` set, `readPos` advanced), Opened (an aggregate header consumed and
-  // pushed), Incomplete (more bytes needed, `readPos` unmoved), or Invalid (`failMessage` set). Attributes open as a discarded aggregate.
+  // produces one value at `readPos`: Produced (`produced` set, `readPos` advanced), Opened (header pushed), Incomplete (`readPos` unmoved),
+  // or Invalid (`failMessage` set)
   private def produceValue(): Int =
     if (readPos >= writePos) Incomplete
     else if (stackDepth > MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
@@ -238,7 +231,6 @@ final private[sage] class RespParser {
       }
     }
 
-  // commits a completed leaf: advances past it and hands the frame back
   private def leaf(end: Int, frame: Frame): Int = {
     readPos = end
     produced = frame
@@ -310,8 +302,7 @@ final private[sage] class RespParser {
     stackDepth += 1
   }
 
-  // reads a length header up to its CRLF, setting `cursor` past it; -1 is the RESP2 null marker; '+' is signed-integer
-  // syntax that the length grammar does not permit
+  // -1 is the RESP2 null marker; '+' is signed-integer syntax that the length grammar does not permit
   private def readLength(pos: Int, allowNull: Boolean): Int = {
     val cr = findCrlf(pos)
     if (cr < 0) Incomplete
@@ -326,8 +317,7 @@ final private[sage] class RespParser {
     }
   }
 
-  // bounds-checks a length-prefixed payload (Long arithmetic: `start + length + 2` can overflow Int); returns the position
-  // past its trailing CRLF, Incomplete, or Invalid with `failMessage` set
+  // Long arithmetic: `start + length + 2` can overflow Int
   private def payloadEnd(start: Int, length: Int): Int =
     if ((writePos - start).toLong < length.toLong + 2) Incomplete
     else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') {
@@ -346,8 +336,7 @@ final private[sage] class RespParser {
     if (i < limit) i else -1
   }
 
-  // parses a decimal long from the buffer, signalling validity via `numberOk`; falls back to String parsing past 18 digits,
-  // where overflow becomes possible
+  // falls back to String parsing past 18 digits, where the fast-path accumulation could overflow
   private def readLong(from: Int, until: Int): Long = {
     numberOk = false
     var i        = from
@@ -389,13 +378,12 @@ final private[sage] class RespParser {
     Invalid
   }
 
-  // produceValue status codes; Incomplete/Invalid double as the readLength/payloadEnd sentinels (distinct from any valid Int position/length)
+  // Incomplete/Invalid also serve as readLength/payloadEnd sentinels, so they must stay distinct from any valid Int position/length
   final private val Incomplete: Int = Int.MinValue
   final private val Invalid: Int    = Int.MinValue + 1
   final private val Produced: Int   = Int.MinValue + 2
   final private val Opened: Int     = Int.MinValue + 3
 
-  // aggregate kind tags
   final private val Arr: Byte  = 0
   final private val Set: Byte  = 1
   final private val Push: Byte = 2
@@ -408,7 +396,7 @@ final private[sage] class RespParser {
   // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
   private inline def MaxDepth: Int = 512
 
-  // one open aggregate: `remaining` children still expected (pairs, for Map/Attr); `pendingKey` holds a parsed key awaiting its value
+  // for Map/Attr `remaining` counts pairs, not elements
   final private class Agg(val kind: Byte, var remaining: Int) {
     var elements: mutable.Builder[Frame, Vector[Frame]]                = null
     var pairs: mutable.Builder[(Frame, Frame), Vector[(Frame, Frame)]] = null

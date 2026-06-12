@@ -5,7 +5,7 @@ import sage.protocol.Frame
 /**
   * A `-READONLY` reply means the server was demoted from master without dropping the socket, so the connection looks healthy but rejects
   * writes; it must be discarded and reconnected rather than reused. Scoped to `READONLY` only — `LOADING` resolves on its own and the
-  * cluster codes are a separate concern (ADR-0014).
+  * cluster codes are a separate concern.
   */
 private[internal] object Poison {
 

@@ -42,10 +42,8 @@ final private[client] class NodePool(
     finally lock.unlock()
   }
 
-  // a live bundle for the node if one is already established, without attempting a connect
   def existingLive(node: Node): Option[NodeClient] = locked(established.get(node)).filter(_.isLive)
 
-  // connects and runs the bootstrap synchronously (single-flight); throws NotConnected if closed or the connect fails
   def getOrEstablish(node: Node): NodeClient = {
     var existing: NodeClient       = null
     var waitOn: NodePool.Establish = null

@@ -4,24 +4,42 @@ import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 /**
-  * An opaque, immutable byte container. Universal `==` on Bytes compares references and is unreliable — use `sameBytes`.
+  * The Core's opaque, immutable byte container, used at every protocol and codec boundary. Content equality is explicit: use `sameBytes`,
+  * never `==`, which compares references and is unreliable by design. Construction is copy-aware — see [[Bytes.wrap]] (zero-copy) versus
+  * [[Bytes.fromArray]] (defensive copy).
   */
 opaque type Bytes = IArray[Byte]
 
 object Bytes {
 
+  /**
+    * The empty byte container.
+    */
   val empty: Bytes = IArray.empty[Byte]
 
+  /**
+    * The UTF-8 encoding of `value`.
+    */
   def utf8(value: String): Bytes = IArray.unsafeFromArray(value.getBytes(StandardCharsets.UTF_8))
 
+  /**
+    * Zero-copy: wraps an already-immutable `IArray`.
+    */
   def wrap(bytes: IArray[Byte]): Bytes = bytes
 
+  /**
+    * Defensive copy of a mutable `Array`, so later mutation of the source cannot change these bytes.
+    */
   def fromArray(bytes: Array[Byte]): Bytes = IArray.unsafeFromArray(bytes.clone())
 
-  // One contiguous buffer from many: a Pipeline's commands are concatenated so they reach the socket as a single write.
+  /**
+    * One contiguous container from many, so a Pipeline's commands reach the socket as a single write.
+    */
   def concat(parts: Seq[Bytes]): Bytes = concatBy(parts)(identity)
 
-  // like `concat`, but pulls each part from `items` via `payload`, sparing the caller a throwaway mapped collection on the batch path
+  /**
+    * Like [[concat]], but reads each part from `items` via `payload`, sparing the caller a throwaway mapped collection.
+    */
   def concatBy[A](items: Seq[A])(payload: A => Bytes): Bytes =
     items match {
       case Seq()     => empty
@@ -41,16 +59,34 @@ object Bytes {
 
   extension (self: Bytes) {
 
+    /**
+      * The number of bytes.
+      */
     def length: Int = arr(self).length
 
+    /**
+      * Content equality. The correct way to compare two `Bytes`; `==` compares references.
+      */
     def sameBytes(that: Bytes): Boolean = Arrays.equals(arr(self), arr(that))
 
+    /**
+      * A content-based hash, consistent with [[sameBytes]] — equal content yields equal hashes.
+      */
     def contentHashCode: Int = Arrays.hashCode(arr(self))
 
+    /**
+      * Decodes the bytes as UTF-8.
+      */
     def asUtf8String: String = new String(arr(self), StandardCharsets.UTF_8)
 
+    /**
+      * A fresh mutable `Array` copy, safe for the caller to mutate.
+      */
     def toArray: Array[Byte] = arr(self).clone()
 
+    /**
+      * Zero-copy view as an immutable `IArray`.
+      */
     def toIArray: IArray[Byte] = self
 
     /**

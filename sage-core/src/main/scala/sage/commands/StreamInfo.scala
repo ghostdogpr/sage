@@ -10,7 +10,7 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * `XINFO STREAM`: the summary view. Version-specific fields (7.0+) are `Option`, decoded leniently on presence per ADR-0024.
+  * `XINFO STREAM`: the summary view. Version-specific fields (7.0+) are `Option`, decoded leniently on presence.
   */
 final case class StreamInfo[F, V](
   length: Long,
@@ -73,7 +73,7 @@ final case class FullGroupInfo(
 )
 
 /**
-  * `XINFO STREAM ... FULL`: the deep view, inlining every entry, group, PEL and consumer. Decoded leniently on presence (ADR-0024).
+  * `XINFO STREAM ... FULL`: the deep view, inlining every entry, group, PEL and consumer. Decoded leniently on presence.
   */
 final case class StreamInfoFull[F, V](
   length: Long,
@@ -223,7 +223,7 @@ private[sage] object StreamInfo {
     frame => Decode.long(frame).map(Instant.ofEpochMilli)
 
   /**
-    * A lenient view over an introspection reply map: read fields by known name, ignore the rest (ADR-0024).
+    * A lenient view over an introspection reply map: read fields by known name, ignore the rest.
     */
   final private class Fields private (table: Map[String, Frame]) {
 
