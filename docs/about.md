@@ -1,14 +1,11 @@
 # About
 
-<!--
-WRITER NOTES — replace this body with real content.
-See proteus/purelogic about.md for tone and length (short page).
+**Sage** is created and maintained by **[Pierre Ricadat](https://github.com/ghostdogpr)**.
 
-Cover:
-- What sage is, in a paragraph (echo README positioning).
-- Author / maintainer (ghostdogpr) and the GitHub repo link.
-- License — Apache 2.0 (see LICENSE).
-- How to contribute / report issues (link to the repo's issues).
-- Optionally: relationship to the wider ecosystem (kyo-compat runtime, sibling
-  libraries proteus / purelogic if relevant).
--->
+**Other projects:**
+- **[Caliban](https://github.com/ghostdogpr/caliban)** — A purely functional GraphQL library for Scala
+- **[Shardcake](https://github.com/devsisters/shardcake)** — A Scala library for distributed sharding
+- **[Proteus](https://github.com/ghostdogpr/proteus)** — A code-first Protobuf and gRPC library for Scala
+- **[PureLogic](https://github.com/ghostdogpr/purelogic)** — A direct-style, pure domain logic library for Scala
+
+If you find Sage useful, consider [sponsoring me on GitHub](https://github.com/sponsors/ghostdogpr) to support continued development.

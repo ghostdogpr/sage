@@ -1,30 +1,119 @@
 # Pipelines & transactions
 
-<!--
-WRITER NOTES — replace this body with real content.
-Ground snippets in: examples/*/PipelinesExample.scala and TransactionsExample.scala.
+Both group several commands together, but they answer different needs. A **pipeline** is about throughput: many commands, one round-trip, no atomicity. A **transaction** is about atomicity: the grouped commands run as a unit, optionally guarded against concurrent change.
 
-Purpose: the two ways to group commands, and how they differ. The whole point of
-this page is to make the Pipeline-vs-Transaction distinction crisp.
+## Pipelines
 
-Sections to cover (grounded in CONTEXT.md glossary):
+A pipeline is an applicative composition of `Command` values, sent in one round-trip and decoded into a typed tuple. There is no atomicity: other clients' commands may interleave, and in a cluster the pipeline is split and routed per key, then reassembled in order.
 
-1. Pipeline — applicative composition of Commands sent in ONE round-trip, yielding a
-   typed tuple. NOT a transaction — no atomicity. In a cluster a Pipeline may be split
-   across nodes. Show building + executing, with the typed-tuple result.
+::: code-group
 
-2. Transaction — a Pipeline executed atomically via MULTI/EXEC on a Dedicated
-   Connection, opened with `transaction { tx => … }` (the Transaction Scope).
-   - Optional WATCH guard: a watched key changing before EXEC aborts the txn — a normal
-     optimistic-concurrency outcome the caller RETRIES, not a failure.
-   - Within the scope: watch, run reads via tx.get / tx.run, then exec a Pipeline (or
-     discard). Reads must be ordinary commands; blocking commands are rejected.
-   - Failure model: queueing-phase rejection discards the whole txn (nothing runs);
-     execution-phase error leaves other commands committed (Redis does not roll back),
-     surfaced per-position like a Pipeline.
+```scala [Ox]
+client.set("pipe:a", "x")
+client.set("pipe:n", 10)
+val tuple = client.pipeline(
+  (
+    Commands.get[String, String]("pipe:a"),
+    Commands.incrBy("pipe:n", 5)
+  ).pipeline
+)
+// tuple: (Option[String], Long)
+```
 
-3. When to use which — quick guidance: Pipeline for throughput (no atomicity needed),
-   Transaction for read-decide-commit on one connection / optimistic concurrency.
+```scala [ZIO · Cats Effect · Kyo]
+for {
+  _     <- client.set("pipe:a", "x")
+  _     <- client.set("pipe:n", 10)
+  tuple <- client.pipeline(
+             (
+               Commands.get[String, String]("pipe:a"),
+               Commands.incrBy("pipe:n", 5)
+             ).pipeline
+           )
+} yield tuple // (Option[String], Long)
+```
 
-Avoid calling a Pipeline a "batch" or a Transaction a "batch".
--->
+:::
+
+By default a pipeline fails as a whole if any position fails. Use `pipelineAttempt` to keep each position's outcome separate, so one failing command does not sink the others:
+
+::: code-group
+
+```scala [Ox]
+client.set("pipe:str", "hello")
+// INCR on a non-numeric string fails only at its own position;
+// the GET still succeeds
+val attempt = client.pipelineAttempt(
+  (
+    Commands.get[String, String]("pipe:str"),
+    Commands.incr("pipe:str")
+  ).pipeline
+)
+```
+
+```scala [ZIO · Cats Effect · Kyo]
+for {
+  _       <- client.set("pipe:str", "hello")
+  // INCR on a non-numeric string fails only at its own position;
+  // the GET still succeeds
+  attempt <- client.pipelineAttempt(
+               (
+                 Commands.get[String, String]("pipe:str"),
+                 Commands.incr("pipe:str")
+               ).pipeline
+             )
+} yield attempt
+```
+
+:::
+
+## Transactions
+
+A transaction runs a pipeline atomically via `MULTI`/`EXEC` on a leased dedicated connection. Open one with `transaction { tx => … }`: inside the scope you may `watch` keys, run ordinary reads (`tx.get`, `tx.run`, …), decide, and then `exec` a pipeline (or abandon the scope to discard it).
+
+`exec` returns an `Option`. A `None` means a watched key changed before `EXEC`, so the transaction did not run. That is the normal optimistic-concurrency outcome you retry, not a failure:
+
+::: code-group
+
+```scala [Ox]
+client.set("tx:n", 1)
+val result = client.transaction { tx =>
+  tx.watch("tx:n")
+  tx.get[String, Int]("tx:n")
+  tx.exec(
+    (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline
+  )
+}
+// result: Some((2, 6)), or None if "tx:n" changed before EXEC
+```
+
+```scala [ZIO · Cats Effect · Kyo]
+for {
+  _      <- client.set("tx:n", 1)
+  result <- client.transaction { tx =>
+              for {
+                _   <- tx.watch("tx:n")
+                _   <- tx.get[String, Int]("tx:n")
+                res <- tx.exec(
+                         (
+                           Commands.incr("tx:n"),
+                           Commands.incrBy("tx:n", 4)
+                         ).pipeline
+                       )
+              } yield res
+            }
+} yield result // Some((2, 6)), or None if "tx:n" changed
+```
+
+:::
+
+A few rules follow from how Redis transactions work:
+
+- **Reads inside the scope must be ordinary commands.** A blocking command is rejected rather than parking the lease.
+- **A queueing-phase rejection discards the whole transaction**, so nothing runs.
+- **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
+- **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration) to force that). A pipeline has no such restriction.
+
+## Which to use
+
+Reach for a **pipeline** when the commands are independent and you only want fewer round-trips. Reach for a **transaction** when you need read-decide-commit on one connection, or all-or-nothing execution guarded by `WATCH`.

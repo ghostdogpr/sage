@@ -1,27 +1,78 @@
 # Pub/Sub
 
-<!--
-WRITER NOTES — replace this body with real content.
-Ground snippets in: examples/*/PubSubExample.scala (classic) and
-examples/zio/ClusterExample.scala (sharded pub/sub spotlight).
+Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, or a Kyo `Stream`. Each message carries the channel it arrived on and a payload decoded with a `ValueCodec`. Ending the stream unsubscribes.
 
-Purpose: how to subscribe and publish, classic and sharded, and the connection
-isolation that keeps a slow consumer from stalling commands.
+## Classic channels
 
-Sections to cover (grounded in CONTEXT.md glossary):
+`subscribe` listens on one or more channels; `publish` sends to a channel. Here a subscriber takes three messages while a publisher sends them:
 
-1. Classic pub/sub — channel and pattern subscriptions surface as a Message
-   (channel + payload); a pattern subscription yields a Pattern Message (also names
-   the matched glob). All classic subscriptions share the one Subscription Connection,
-   created lazily; a slow consumer backpressures it at the TCP level (lossless) and
-   can stall peer subscriptions but NEVER the Multiplexed Connection's commands.
-   Show subscribe → stream of Messages → publish. Source: PubSubExample.scala.
+::: code-group
 
-2. Sharded pub/sub — Shard Channels: SSUBSCRIBE/SPUBLISH target the slot's owning Node;
-   messages stay within the shard (no pattern form). Carried on per-owning-Node Sharded
-   Subscription Connections; re-homed on slot migration / failover. Surfaces as an
-   ordinary Message. This is a cluster feature — source: ClusterExample.scala (zio).
+```scala [Ox]
+val collector =
+  fork(client.subscribe[String]("news").take(3).runToList())
+(1 to 3).foreach(i => client.publish("news", s"item-$i"))
+val messages = collector.join() // the three published payloads
+```
 
-3. Note the distinction: a Message (pub/sub delivery) is NOT a Frame (wire value) and
-   NOT a Stream Entry (a record in a Stream).
--->
+```scala [ZIO]
+for {
+  sub      <- client.subscribe[String]("news").take(3).runCollect.fork
+  _        <- ZIO.sleep(300.millis)
+  _        <- ZIO.foreachDiscard(1 to 3) { i =>
+                client.publish("news", s"item-$i")
+              }
+  messages <- sub.join
+} yield messages.map(_.payload).toList
+```
+
+```scala [Cats Effect]
+for {
+  sub      <- client.subscribe[String]("news").take(3).compile.toVector.start
+  _        <- IO.sleep(300.millis)
+  _        <- (1 to 3).toList.traverse_ { i =>
+                client.publish("news", s"item-$i")
+              }
+  messages <- sub.joinWithNever
+} yield messages.map(_.payload).toList
+```
+
+```scala [Kyo]
+for {
+  publisher <- Fiber.init {
+                 for {
+                   _ <- Async.sleep(300.millis)
+                   _ <- Kyo.foreachDiscard(1 to 3) { i =>
+                          client.publish("news", s"item-$i")
+                        }
+                 } yield ()
+               }
+  chunk     <- client.subscribe[String]("news").take(3).run
+  _         <- publisher.get
+} yield chunk.toList.map(_.payload)
+```
+
+:::
+
+Pattern subscriptions are also available; they deliver a **pattern message** that additionally names the glob that matched.
+
+::: tip Connection isolation
+All classic subscriptions share one **subscription connection**, created the first time you subscribe and closed when the last subscription ends. It is separate from the connection that carries your commands, so a slow consumer can backpressure its own subscriptions but can never stall command replies. The subscription connection re-issues every active subscription automatically on reconnect.
+:::
+
+## Sharded channels (cluster)
+
+In a cluster, a **shard channel** keeps its traffic within the shard that owns the channel's slot: `sSubscribe` and `sPublish` target that owning node rather than broadcasting across the whole cluster. There is no pattern form, and a delivery surfaces as an ordinary message.
+
+```scala [ZIO]
+for {
+  sub      <- client.sSubscribe[String]("orders").take(1).runCollect.fork
+  _        <- ZIO.sleep(300.millis)
+  _        <- client.sPublish("orders", "placed")
+  messages <- sub.join
+} yield messages.map(_.payload).toList
+```
+
+The shape is the same on every backend, using each one's native stream type exactly as classic pub/sub does. Sage holds one sharded subscription connection per owning node and re-homes the affected subscriptions automatically when a slot migrates or a node fails over.
+
+See [Configuration](/configuration) for how to connect to a cluster.

@@ -1,30 +1,36 @@
 # FAQ
 
-<!--
-WRITER NOTES — replace this body with real content.
-Format: a list of `## Question?` headings, each with a short answer. Anchors are auto-
-generated so nav/cross-links can deep-link (see how proteus/purelogic FAQ pages read).
+## Why a native protocol implementation rather than wrapping an existing Java client?
 
-Candidate questions (pick the ones worth answering; add others as they come up):
+Implementing RESP3, the commands, and the codecs directly in Scala keeps the core free of any Java dependency and gives sage full control over allocation and decoding. It is the difference behind "native Redis protocol": there is no foreign client to adapt, configure, or work around.
 
-- Why a native protocol implementation instead of wrapping an existing Java client?
-    Differentiator + control over allocation/RESP3; tie to "Native Redis protocol".
-    (Don't name specific Java clients in the rendered docs.)
-- Which backend artifact should I use?
-    ZIO → sage-client-zio, cats-effect → sage-client-ce, Kyo → sage-client-kyo,
-    Ox → sage-client-ox. They share the same runtime; pick your effect system.
-- Does every command borrow a connection from a pool?
-    No — ordinary commands are auto-pipelined on the Multiplexed Connection; only
-    WATCH/MULTI/EXEC and blocking commands take a Dedicated Connection. (See the
-    "Example dialogue" in CONTEXT.md.)
-- Redis or Valkey? Which versions?
-    RESP3, Redis 8+ / Valkey 8+.
-- Scala / JDK requirements?
-    Scala 3.3.x LTS and later; JDK 21+ (blocking I/O on virtual threads).
-- Is Scala.js / Scala Native supported?
-    Core is JVM-only (ADR 0041) — state the fact plainly, do not cite the ADR.
-- Sentinel support?
-    Out of scope (per the Master-Replica glossary entry).
+## Which backend artifact should I use?
 
-State rationale in plain words — never reference ADRs / issues / the PRD in rendered docs.
--->
+One per effect system, all sharing the same runtime:
+
+- ZIO: `sage-client-zio`
+- cats-effect: `sage-client-ce`
+- Kyo: `sage-client-kyo`
+- Ox: `sage-client-ox`
+
+`sage-core` comes in transitively, so you depend on the backend artifact only. See [Getting started](/getting-started).
+
+## Does every command open or borrow a connection?
+
+No. Ordinary commands are auto-pipelined onto one multiplexed connection per node, shared by every fiber, with replies matched in order. Only commands that hold per-connection state or block (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) lease a dedicated connection, and pub/sub uses its own subscription connection. The [Getting started](/getting-started) "how it works" aside covers this.
+
+## Redis or Valkey? Which versions?
+
+Both. Sage targets RESP3 and modern Redis 8+ and Valkey 8+.
+
+## What Scala and JDK versions are required?
+
+Scala 3.3.x LTS and later, on JDK 21 or newer.
+
+## Is Scala.js or Scala Native supported?
+
+No. The core is JVM-only.
+
+## Is Redis Sentinel supported?
+
+No, Sentinel is out of scope. Sage supports standalone, cluster, and master-replica deployments; see [Configuration](/configuration).
