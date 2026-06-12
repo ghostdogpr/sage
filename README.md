@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/public/sage.svg" width="120" alt="Sage"></p>
+
 # Sage
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
