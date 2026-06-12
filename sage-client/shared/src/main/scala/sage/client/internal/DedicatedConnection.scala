@@ -15,7 +15,7 @@ import sage.protocol.Frame
 /**
   * A single connection held exclusively by one borrower at a time, borrowed from the [[DedicatedPool]]. Unlike the Multiplexed
   * Connection it carries no reconnect loop and no watchdog: on any connection loss it is marked dead and the pool discards it, failing the
-  * in-flight work `ConnectionLost(mayHaveExecuted = true)` per ADR-0006. Replies are matched FIFO so the synchronous HELLO bootstrap can
+  * in-flight work `ConnectionLost(mayHaveExecuted = true)`. Replies are matched FIFO so the synchronous HELLO bootstrap can
   * run on it before it is handed out, and so a transaction's `MULTI`/queue/`EXEC` replies line up with the commands that produced them.
   */
 final private[client] class DedicatedConnection private (

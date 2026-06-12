@@ -7,7 +7,7 @@ class ScriptingSpec extends munit.FunSuite {
 
   private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
 
-  test("EVAL returns the raw RESP3 frame untouched (ADR-0033)") {
+  test("EVAL returns the raw RESP3 frame untouched") {
     assertEquals(Reply.run(Scripting.eval("return 1"), Frame.Integer(1L)), Right(Frame.Integer(1L)))
     val nested = Frame.Array(Vector(bulk("a"), Frame.Integer(2L)))
     assertEquals(Reply.run(Scripting.eval("x", Seq("k")), nested), Right(nested))
@@ -39,7 +39,7 @@ class ScriptingSpec extends munit.FunSuite {
     assertEquals(Reply.run(Scripting.scriptLoad("return 1"), bulk("abc123")), Right("abc123"))
   }
 
-  test("the cluster mutations are All-Masters Commands; reads and KILL are not (ADR-0034)") {
+  test("the cluster mutations are All-Masters Commands; reads and KILL are not") {
     assert(Scripting.scriptLoad("s").allMasters)
     assert(Scripting.scriptFlush().allMasters)
     assert(!Scripting.scriptKill.allMasters)

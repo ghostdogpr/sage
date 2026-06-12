@@ -12,9 +12,8 @@ private[sage] object Cluster {
 
   final private case class Range(master: Node, replicas: Vector[Node], slots: SlotRange)
 
-  // CLUSTER SLOTS replies with an array of ranges, each `[start, end, master, replica*]` where a node is `[ip, port, id, meta?]` and the
-  // first node is the master. The reply is the topology authority, so an unparseable entry fails the whole decode rather than dropping a
-  // range and routing off a partial map. Ranges sharing a master are merged into one Shard, in first-seen master order.
+  // each range is `[start, end, master, replica*]`, a node `[ip, port, id, meta?]`, the first node the master. The reply is the topology
+  // authority, so an unparseable entry fails the whole decode rather than routing off a partial map.
   private def decodeSlots(frame: Frame): Either[DecodeError, Vector[Shard]] =
     Decode.vector(decodeRange)(frame).map(merge)
 

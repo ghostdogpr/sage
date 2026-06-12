@@ -8,8 +8,7 @@ import sage.commands.*
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * XDELEX/XACKDEL (8.2), XNACK (8.8) and XCFGSET are Redis-only stream commands absent in Valkey, so they have no cross-server counterpart
-  * (ADR-0026).
+  * XDELEX/XACKDEL (8.2), XNACK (8.8) and XCFGSET are Redis-only stream commands absent in Valkey, so they have no cross-server counterpart.
   */
 class RedisStreamExtrasSuite extends ServerSuite(Images.redis) {
 

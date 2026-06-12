@@ -20,18 +20,27 @@ enum FieldExpiry {
   case Deleted
 }
 
+/**
+  * A per-field `HTTL`/`HPTTL` reply: the field is absent (`NoField`), has no expiry (`NoExpiry`), or `Expires` after `remaining`.
+  */
 enum FieldTtl {
   case NoField
   case NoExpiry
   case Expires(remaining: FiniteDuration)
 }
 
+/**
+  * A per-field `HEXPIRETIME`/`HPEXPIRETIME` reply: the field is absent (`NoField`), has no expiry (`NoExpiry`), or expires `At` a timestamp.
+  */
 enum FieldExpiryTime {
   case NoField
   case NoExpiry
   case At(timestamp: Instant)
 }
 
+/**
+  * A per-field `HPERSIST` reply: the field is absent (`NoField`), already had no expiry (`NoExpiry`), or was `Persisted` (expiry removed).
+  */
 enum FieldPersist {
   case NoField
   case NoExpiry

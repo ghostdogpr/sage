@@ -131,10 +131,25 @@ enum Topology {
 }
 
 /**
-  * `database` is the logical keyspace `SELECT`ed at connection setup and fixed for the client's lifetime — re-issued on every reconnect, on
-  * every connection. It is never a runtime command: changing it would move the database under every fiber sharing a connection. Cluster has
-  * only database 0, so a non-zero `database` is rejected for a cluster topology. `clientName` sets the connection's `CLIENT SETNAME`,
-  * visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically.
+  * The full client configuration. Sub-tuning lives in the dedicated config types referenced below; the fields here are the top-level
+  * knobs, all with sensible defaults so `SageConfig()` connects to a local standalone server.
+  *
+  * @param connectTimeout how long to wait for a connection (and its `HELLO 3` setup) to complete before failing
+  * @param reconnect      exponential reconnect backoff — see [[BackoffConfig]]
+  * @param watchdog       idle-connection liveness checking — see [[WatchdogConfig]]
+  * @param closeTimeout   how long [[sage.client.internal.Client.close]] waits for in-flight commands to drain before forcing the close
+  * @param dedicatedPool  the pool backing blocking commands and transactions — see [[DedicatedPoolConfig]]
+  * @param pubsub         pub/sub buffering — see [[PubSubConfig]]
+  * @param clientCache    client-side caching — see [[CacheConfig]]
+  * @param auth           credentials for `HELLO 3 AUTH`; `None` connects unauthenticated — see [[AuthConfig]]
+  * @param tls            TLS settings; `None` connects in plaintext — see [[TlsConfig]]
+  * @param topology       standalone, cluster, or master-replica, and where to find the server(s) — see [[Topology]]
+  * @param readFrom       which node read-only commands may run on — see [[ReadFrom]]
+  * @param database       the logical keyspace `SELECT`ed once at setup and fixed for the client's lifetime (re-issued on every reconnect and
+  *                       every connection); never changed by a runtime command, since that would move the keyspace under every fiber sharing
+  *                       a connection. Must be 0 for a cluster topology, which has only database 0
+  * @param clientName     sets `CLIENT SETNAME`, visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically
+  * @param listeners      observers of runtime [[sage.SageEvent]]s — see [[sage.SageListener]]
   */
 final case class SageConfig(
   connectTimeout: FiniteDuration = 10.seconds,

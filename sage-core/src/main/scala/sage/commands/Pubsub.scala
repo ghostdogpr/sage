@@ -16,7 +16,6 @@ private[sage] object Pubsub {
   def publish[V](channel: String, message: V)(using codec: ValueCodec[V]): Command[Long] =
     Command("PUBLISH", Command.NoKeys, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 
-  // the channel is a routing key (FirstKey): a cluster hashes it to a slot and sends SPUBLISH to that slot's owner, like a keyed write
   def sPublish[V](channel: String, message: V)(using codec: ValueCodec[V]): Command[Long] =
     Command("SPUBLISH", Command.FirstKey, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 

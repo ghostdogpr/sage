@@ -12,7 +12,7 @@ import sage.protocol.Frame
 /**
   * A concrete Stream Entry ID: a millisecond timestamp and a per-millisecond sequence. The one type used for replies and for explicit
   * values; each command position that also admits a special token (`*`, `-`/`+`, `$`, `>`, `(`) carries its own sealed type listing only
-  * the tokens legal there, so an illegal form at a position cannot be written. See ADR-0031.
+  * the tokens legal there, so an illegal form at a position cannot be written.
   */
 final case class StreamId(ms: Long, seq: Long) extends Ordered[StreamId] {
   def compare(that: StreamId): Int  = {
@@ -185,7 +185,6 @@ private[sage] object Streams {
   )(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[StreamId] =
     Command("XADD", Command.FirstKey, addArgs(key, noMkStream = false, id, trim, policy, first +: rest.toVector), streamId)
 
-  // returns None when NOMKSTREAM was set and the stream did not exist
   def xAddNoMkStream[K, F, V](
     key: K,
     id: XAddId = XAddId.Auto,
@@ -214,7 +213,7 @@ private[sage] object Streams {
       Decode.ok
     )
 
-  // sets per-stream idempotent-message-processing config; the server rejects an empty option set, so neither is required here (ADR-0026)
+  // sets per-stream idempotent-message-processing config; the server rejects an empty option set, so neither is required here
   def xCfgSet[K](key: K, idmpDuration: Option[FiniteDuration] = None, idmpMaxSize: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Unit] =
     Command(
       "XCFGSET",
@@ -387,7 +386,7 @@ private[sage] object Streams {
       Decode.vector(pendingEntryElement)
     )
 
-  // --- Redis-only 8.2+/8.8+ (ADR-0026) ------------------------------------
+  // --- Redis-only 8.2+/8.8+ ------------------------------------
 
   def xDelEx[K](key: K, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(first: StreamId, rest: StreamId*)(
     using keyCodec: KeyCodec[K]

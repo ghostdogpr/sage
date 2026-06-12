@@ -5,37 +5,56 @@ import sage.SageException.DecodeError
 import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
-// longitude first, matching the wire order; named so the two same-typed coordinates cannot be silently swapped
+/**
+  * A longitude/latitude pair, longitude first to match the wire order and named so the two same-typed coordinates cannot be swapped.
+  */
 final case class GeoCoordinates(longitude: Double, latitude: Double)
 
-// shared across GEODIST/GEOSEARCH/GEOSEARCHSTORE: one distance-unit primitive, not a per-command option group
+/**
+  * A distance unit, shared across `GEODIST`/`GEOSEARCH`/`GEOSEARCHSTORE`.
+  */
 enum GeoUnit {
   case Meters, Kilometers, Miles, Feet
 }
 
+/**
+  * When `GEOADD` should write a member: `Always`, only `IfNotExists` (`NX`), or only `IfExists` (`XX`).
+  */
 enum GeoAddCondition {
   case Always, IfNotExists, IfExists
 }
 
+/**
+  * The center a geo search is measured from: an existing `FromMember`, or an explicit `FromLonLat` coordinate.
+  */
 enum GeoOrigin[+V] {
   case FromMember(member: V)
   case FromLonLat(coordinates: GeoCoordinates) extends GeoOrigin[Nothing]
 }
 
+/**
+  * The search area: a circle `ByRadius` or a rectangle `ByBox`, each in a [[GeoUnit]].
+  */
 enum GeoShape {
   case ByRadius(radius: Double, unit: GeoUnit)
   case ByBox(width: Double, height: Double, unit: GeoUnit)
 }
 
-// Asc is nearest-first, Desc farthest-first
+/**
+  * Result ordering by distance from the origin: `Asc` nearest-first, `Desc` farthest-first.
+  */
 enum GeoSort {
   case Asc, Desc
 }
 
-// ANY cannot be requested without a count, so the two travel together
+/**
+  * A search result limit. `any` returns the first `count` matches found rather than the `count` nearest, which is faster but unordered.
+  */
 final case class GeoCount(count: Long, any: Boolean = false)
 
-// each projection is Some only when its WITH flag was requested
+/**
+  * One geo search match. Each projection is `Some` only when its corresponding `WITH` flag was requested.
+  */
 final case class GeoSearchResult[V](member: V, distance: Option[Double], hash: Option[Long], coordinates: Option[GeoCoordinates])
 
 private[sage] object Geo {

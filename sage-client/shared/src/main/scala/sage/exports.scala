@@ -11,7 +11,6 @@ package sage
 // A package cannot be wildcard-exported, so the surface is enumerated here — which also makes this the one place the public API is reviewed;
 // a new public option/result type must be added below to appear under `sage.*`.
 
-// connection configuration
 export sage.client.{
   AuthConfig,
   BackoffConfig,
@@ -32,7 +31,6 @@ export sage.client.{
 export sage.cluster.Node
 // codec typeclasses (built-in givens live in their companions, already in implicit scope)
 export sage.codec.{KeyCodec, ValueCodec}
-// option inputs and typed results
 export sage.commands.{
   AclLogEntry,
   AclUser,
@@ -131,8 +129,7 @@ export sage.commands.{
   ZRange
 }
 export sage.commands.{as, asArray, asArrayOf, asLong, asString}
-// command facade and model
 export sage.commands.{Command, Commands, Execution, Pipeline}
 export sage.commands.Pipeline.pipeline
-// raw-Frame escape hatch for eval/fcall replies (ADR-0033)
+// raw-Frame escape hatch for eval/fcall replies
 export sage.protocol.Frame

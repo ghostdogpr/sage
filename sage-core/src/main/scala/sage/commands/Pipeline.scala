@@ -9,6 +9,9 @@ import sage.SageException
   * it to `Results` (attempt); the `Any` is confined to the assemblers below and never reaches a caller.
   */
 final class Pipeline[Out, Results] private[commands] (
+  /**
+    * The composed commands, in send order.
+    */
   val commands: Vector[Command[?]],
   private[sage] val toOut: Vector[Any] => Out,
   private[sage] val toResults: Vector[Either[SageException, Any]] => Results
@@ -16,6 +19,9 @@ final class Pipeline[Out, Results] private[commands] (
 
 object Pipeline {
 
+  /**
+    * One pipeline position's outcome: `Right` on success, `Left` carrying the per-position error.
+    */
   type Attempt[A] = Either[SageException, A]
 
   /**

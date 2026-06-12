@@ -123,6 +123,9 @@ lazy val examples = (projectMatrix in file("examples"))
   .settings(name := "examples")
   .settings(commonSettings)
   .settings(publish / skip := true)
+  // never-published runnable samples: no API docs to generate, and doc'ing them only surfaces broken links inside third-party sources
+  // (e.g. cats-effect's IOApp) that an example extends
+  .settings(Compile / doc / sources := Seq.empty)
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 

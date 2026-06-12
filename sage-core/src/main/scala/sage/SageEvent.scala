@@ -66,6 +66,10 @@ enum Outcome {
 }
 
 object Outcome {
+
+  /**
+    * The outcome of a settled `Try`: [[Outcome.Succeeded]] on success, [[Outcome.Failed]] carrying the error otherwise.
+    */
   def of(result: Try[?]): Outcome =
     result match {
       case Success(_) => Succeeded

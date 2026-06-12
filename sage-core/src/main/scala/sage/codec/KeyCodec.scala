@@ -8,11 +8,18 @@ import sage.SageException.DecodeError
   * [[ValueCodec]] for those). Deliberately unrelated to [[ValueCodec]] so given resolution stays unambiguous, and float/boolean types
   * are excluded because their formatting is representation-sensitive — two writers must not silently address different keys or fields.
   * Cluster-slot hashing is a property of key positions only ([[sage.commands.Command.keyIndices]]); this typeclass does no hashing itself.
+  * Like [[ValueCodec]], the built-in codecs decode strictly — non-canonical bytes fail with a [[sage.SageException.DecodeError]].
   */
 trait KeyCodec[A] { self =>
 
+  /**
+    * Encodes `value` to its wire bytes.
+    */
   def encode(value: A): Bytes
 
+  /**
+    * Decodes wire `bytes`, failing with a [[sage.SageException.DecodeError]] when they are not `A`'s canonical form.
+    */
   def decode(bytes: Bytes): Either[DecodeError, A]
 
   /**
@@ -32,6 +39,9 @@ trait KeyCodec[A] { self =>
 
 object KeyCodec {
 
+  /**
+    * Summons the `KeyCodec[A]` in scope.
+    */
   def apply[A](using codec: KeyCodec[A]): KeyCodec[A] = codec
 
   /**
@@ -39,16 +49,29 @@ object KeyCodec {
     */
   def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): KeyCodec[A] = instance(enc, dec)
 
-  // no Double/Float/Boolean keys: float formatting is representation-sensitive, so two writers can silently address different keys
-
+  /**
+    * UTF-8 text; decoding rejects malformed UTF-8.
+    */
   given string: KeyCodec[String] = instance(Bytes.utf8, Primitives.decodeUtf8)
 
+  /**
+    * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
+    */
   given int: KeyCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", _.toIntOption))
 
+  /**
+    * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
+    */
   given long: KeyCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
 
+  /**
+    * Raw [[sage.Bytes]], passed through unchanged in both directions.
+    */
   given bytes: KeyCodec[Bytes] = instance(identity, Right(_))
 
+  /**
+    * Raw `Array[Byte]`, copied at the boundary in both directions.
+    */
   given byteArray: KeyCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
 
   private def instance[A](enc: A => Bytes, dec: Bytes => Either[DecodeError, A]): KeyCodec[A] =

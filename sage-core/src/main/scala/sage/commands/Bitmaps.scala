@@ -3,35 +3,54 @@ package sage.commands
 import sage.Bytes
 import sage.codec.KeyCodec
 
+/**
+  * Whether a `BITCOUNT`/`BITPOS` range is measured in `Byte`s or `Bit`s.
+  */
 enum BitUnit {
   case Byte, Bit
 }
 
+/**
+  * An inclusive `[start, end]` range for `BITCOUNT`, in [[BitUnit]]s; negative indices count from the end.
+  */
 final case class BitRange(start: Long, end: Long, unit: BitUnit = BitUnit.Byte)
 
-// BITPOS's grammar is looser than BITCOUNT's: end requires start, and a unit requires end
+/**
+  * A `BITPOS` range, whose grammar is looser than [[BitRange]]: search `FromStart` (start only), or `Within` an explicit
+  * `[start, end]`; a unit is permitted only with an end, which this type enforces.
+  */
 enum BitPosRange {
   case FromStart(start: Long)
   case Within(start: Long, end: Long, unit: BitUnit = BitUnit.Byte)
 }
 
-// signed i<bits> (1..64) or unsigned u<bits> (1..63)
+/**
+  * A `BITFIELD` integer type: `Signed` `i<bits>` (1–64) or `Unsigned` `u<bits>` (1–63).
+  */
 enum BitFieldType {
   case Signed(bits: Int)
   case Unsigned(bits: Int)
 }
 
-// TypeWidth(n) is the wire's #n form: n * type-width bits in
+/**
+  * A `BITFIELD` offset: an `Absolute` bit offset, or `TypeWidth(n)` — the wire's `#n` form, meaning `n × type-width` bits in.
+  */
 enum BitFieldOffset {
   case Absolute(value: Long)
   case TypeWidth(factor: Long)
 }
 
+/**
+  * How `BITFIELD` arithmetic handles overflow: `Wrap` around, `Sat`urate at the type's bound, or `Fail` (no write).
+  */
 enum BitFieldOverflow {
   case Wrap, Sat, Fail
 }
 
-// Overflow yields no reply element; it sets the mode for later Set/IncrBy. Get is the only op BITFIELD_RO accepts (see bitFieldRo).
+/**
+  * One operation in a `BITFIELD` pipeline. `Overflow` produces no reply element — it sets the mode for the `Set`/`IncrBy` operations that
+  * follow it; `Get` is the only operation the read-only `BITFIELD_RO` accepts.
+  */
 enum BitFieldOp {
   case Get(fieldType: BitFieldType, offset: BitFieldOffset)
   case Set(fieldType: BitFieldType, offset: BitFieldOffset, value: Long)

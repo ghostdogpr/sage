@@ -46,6 +46,30 @@ jobs:
       - name: Run unit tests
         run: sbt testUnit
 
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Scala and Java
+        uses: coursier/setup-action@v3
+        with:
+          jvm: temurin:21
+          apps: sbt
+      - name: Cache scala dependencies
+        uses: coursier/cache-action@v8
+      # scaladoc drops -Werror and never fails on warnings, so capture the log and fail on any link/markup warning ourselves
+      - name: Build API docs (no Scaladoc warnings)
+        run: |
+          set -o pipefail
+          sbt -batch core/doc clientZio/doc clientCe/doc clientOx/doc clientKyo3_8_3/doc 2>&1 | tee doc.log
+          if grep -E "Couldn't resolve|-- (\[E\] )?(Warning|Error)" doc.log; then
+            echo "::error::Scaladoc emitted warnings; see the log above"
+            exit 1
+          fi
+
   integration:
     runs-on: ubuntu-24.04
     strategy:

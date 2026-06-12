@@ -42,22 +42,43 @@ final case class Command[+Out](
   cursorBound: Boolean = false
 ) {
 
+  /**
+    * Transforms the decoded result, leaving the wire encoding and routing metadata untouched.
+    */
   def map[B](f: Out => B): Command[B] =
     Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters, cursorBound)
 
+  /**
+    * Whether this command blocks its connection and so needs a Dedicated Connection.
+    */
   def isBlocking: Boolean = execution == Execution.Blocking
 
-  // the key bytes the server tracks for this command, in arg order — the reverse-index keys a cache invalidation evicts by
+  /**
+    * The key bytes the server tracks for this command, in arg order — the keys a cache invalidation evicts by.
+    */
   def keys: Vector[Bytes] = keyIndices.map(args)
 
+  /**
+    * Whether any declared key index falls outside `args` — a builder bug, never expected at runtime.
+    */
   def hasMalformedKeys: Boolean = keyIndices.exists(index => index < 0 || index >= args.length)
 
+  /**
+    * The full RESP3 wire encoding of this command.
+    */
   def encode: Bytes = RespWriter.writeCommand(name, args)
 }
 
 object Command {
 
-  val NoKeys: Vector[Int]   = Vector.empty
+  /**
+    * Key-index marker for a keyless command.
+    */
+  val NoKeys: Vector[Int] = Vector.empty
+
+  /**
+    * Key-index marker for the common case of a single key in the first argument position.
+    */
   val FirstKey: Vector[Int] = Vector(0)
 
   /**

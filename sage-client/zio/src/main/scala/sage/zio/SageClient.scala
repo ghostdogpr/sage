@@ -22,7 +22,7 @@ type SageClient = Client[Task]
 extension (client: SageClient) {
 
   /**
-    * Runs a read with client-side caching and a ZIO `Duration` TTL — the ZIO-native form of [[Client.cached]].
+    * Runs a read with client-side caching and a ZIO `Duration` TTL — the ZIO-native form of [[sage.client.internal.Client.cached]].
     */
   def cached[A](command: Command[A], ttl: Duration): Task[A] =
     client.cached(command, ttl.asFiniteDuration)
@@ -166,7 +166,7 @@ extension (client: SageClient) {
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
     * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
-    * recovery. See ADR-0032.
+    * recovery.
     */
   def xConsume[K: KeyCodec, F: KeyCodec, V: ValueCodec](
     group: String,

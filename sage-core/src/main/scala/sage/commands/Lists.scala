@@ -24,6 +24,9 @@ object ListSide {
   private val RightWord                             = Bytes.utf8("RIGHT")
 }
 
+/**
+  * Whether `LINSERT` places the new element `Before` or `After` the pivot.
+  */
 enum InsertPosition {
   case Before, After
 }

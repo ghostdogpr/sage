@@ -139,8 +139,7 @@ private[commands] object Decode {
       }
   }
 
-  // an introspection reply keyed by its string field names: a RESP3 map, or the flat RESP2 array of alternating key/value some replies
-  // still use. Non-string keys are dropped. Used by FUNCTION/ACL/CONFIG decoders that then look fields up by name.
+  // a RESP3 map, or the flat RESP2 array of alternating key/value some introspection replies still use; non-string keys are dropped
   val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = {
     case Frame.Map(entries) => Right(entries.collect { case (Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
     case Frame.Array(elements) if elements.length % 2 == 0 =>

@@ -6,7 +6,7 @@ import sage.commands.{ArGrepCombine, ArMatch}
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * The Array (`AR*`) data type is Redis-only (no Valkey counterpart) and shipped as a preview, so it has a single-server suite (ADR-0026).
+  * The Array (`AR*`) data type is Redis-only (no Valkey counterpart) and shipped as a preview, so it has a single-server suite.
   */
 class ArraysSuite extends ServerSuite(Images.redis) {
 

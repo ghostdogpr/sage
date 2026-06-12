@@ -29,6 +29,9 @@ enum Role {
   case Sentinel(masterNames: Vector[String])
 }
 
+/**
+  * A replica reported by `INFO replication`/`ROLE`: its address and how far its replication stream has caught up.
+  */
 final case class ReplicaNode(host: String, port: Int, replicationOffset: Long)
 
 /**
@@ -37,6 +40,9 @@ final case class ReplicaNode(host: String, port: Int, replicationOffset: Long)
   */
 final case class SlowLogEntry(id: Long, timestamp: Instant, duration: FiniteDuration, command: Vector[String], clientAddr: String, clientName: String)
 
+/**
+  * One `LATENCY LATEST` entry: the monitored event, when it last spiked, and its latest and all-time-max latencies.
+  */
 final case class LatencyEntry(event: String, timestamp: Instant, latest: FiniteDuration, max: FiniteDuration)
 
 /**
@@ -69,6 +75,9 @@ final case class CommandLogEntry(
   clientName: String
 )
 
+/**
+  * A per-command latency histogram from `LATENCY HISTOGRAM`: the call count and a cumulative distribution keyed by microsecond bucket.
+  */
 final case class CommandHistogram(calls: Long, histogramUsec: Map[Long, Long])
 
 /**
@@ -207,7 +216,7 @@ private[sage] object Server {
   val slowLogLen: Command[Long]   = Command("SLOWLOG", Command.NoKeys, Vector(SlowLen), Decode.long)
   val slowLogReset: Command[Unit] = Command("SLOWLOG", Command.NoKeys, Vector(Reset), Decode.ok)
 
-  // Valkey command-log observability; `count` of -1 returns every entry of the type
+  // `count` of -1 returns every entry of the type
   def commandLogGet(count: Long, logType: CommandLogType): Command[Vector[CommandLogEntry]] =
     Command("COMMANDLOG", Command.NoKeys, Vector(Get, Bytes.utf8(count.toString), CommandLogType.wire(logType)), Decode.vector(decodeCommandLog))
 

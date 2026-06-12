@@ -17,7 +17,6 @@ import sage.protocol.Frame
   */
 private[internal] object TxSupport {
 
-  // the strict-collapse step: fail with the first error, else hand the all-success values to the typed assembler
   def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] =
     results.collectFirst { case Left(error) => error } match {
       case Some(error) => CIO.fail(error)

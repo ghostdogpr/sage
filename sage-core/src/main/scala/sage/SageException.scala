@@ -13,6 +13,10 @@ object SageException {
     */
   final case class ProtocolError(message: String) extends SageException(message)
 
+  /**
+    * A reply could not be decoded into the expected type: the wire value was well-formed RESP3 but not the shape the command's decoder or a
+    * codec required (the built-in codecs decode strictly). `expected` names the shape that was wanted, `actual` what arrived.
+    */
   final case class DecodeError(expected: String, actual: String) extends SageException(s"expected $expected, got $actual")
 
   /**
@@ -24,7 +28,6 @@ object SageException {
 
   object ServerError {
 
-    // the wire form is "CODE detail…"; the code is the first whitespace-delimited token, the detail everything after it
     def of(raw: String): ServerError =
       raw.indexOf(' ') match {
         case -1 => ServerError(raw, "")
@@ -32,12 +35,19 @@ object SageException {
       }
   }
 
+  /**
+    * The connection dropped around this command. `mayHaveExecuted` is true when it was already in flight — the server may or may not have
+    * applied it, so a non-idempotent command is not safe to blindly retry; false means it was never sent and retrying is safe.
+    */
   final case class ConnectionLost(mayHaveExecuted: Boolean)
     extends SageException(
       if (mayHaveExecuted) "connection lost with the command in flight: it may have executed"
       else "connection lost before the command was sent"
     )
 
+  /**
+    * The client is not connected: it was never started, or it has been closed.
+    */
   final case class NotConnected() extends SageException("not connected")
 
   /**
@@ -51,8 +61,14 @@ object SageException {
     */
   final case class TlsError(message: String) extends SageException(message)
 
+  /**
+    * A multi-key command or transaction touched keys in more than one cluster slot, which the server cannot serve atomically.
+    */
   final case class CrossSlot(message: String) extends SageException(message)
 
+  /**
+    * A command did not complete within its configured timeout.
+    */
   final case class TimedOut(message: String) extends SageException(message)
 
   /**

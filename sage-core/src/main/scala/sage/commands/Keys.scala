@@ -9,6 +9,10 @@ import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
+/**
+  * A guard on an `EXPIRE`-family write: `Always`, only `IfNoExpiry` (`NX`), only `IfHasExpiry` (`XX`), only `IfGreater` than the current
+  * expiry (`GT`), or only `IfLess` (`LT`). The new expiry is applied only when the condition holds.
+  */
 enum ExpireCondition {
   case Always
   case IfNoExpiry
@@ -17,6 +21,9 @@ enum ExpireCondition {
   case IfLess
 }
 
+/**
+  * The data type a key holds, as reported by `TYPE`.
+  */
 enum RedisType {
   case String, List, Set, ZSet, Hash, Stream
 }
@@ -37,12 +44,18 @@ object RedisType {
     RedisType.values.find(wireName(_) == name)
 }
 
+/**
+  * A `TTL`/`PTTL` reply: the key is absent (`NoKey`), exists with no expiry set (`NoExpiry`), or `Expires` after `remaining`.
+  */
 enum Ttl {
   case NoKey
   case NoExpiry
   case Expires(remaining: FiniteDuration)
 }
 
+/**
+  * An `EXPIRETIME`/`PEXPIRETIME` reply: the key is absent (`NoKey`), has no expiry (`NoExpiry`), or expires `At` an absolute timestamp.
+  */
 enum ExpiryTime {
   case NoKey
   case NoExpiry
@@ -69,6 +82,9 @@ object ScanCursor {
   */
 final case class ScanPage[A](items: Vector[A], next: Option[ScanCursor])
 
+/**
+  * Ascending or descending order for `SORT`.
+  */
 enum SortOrder {
   case Asc
   case Desc
@@ -92,6 +108,9 @@ enum MigrateAuth {
   case UserPassword(username: String, password: String)
 }
 
+/**
+  * A `MIGRATE` outcome: `Ok` when the key was transferred, `NoKey` when the source held nothing to migrate.
+  */
 enum MigrateResult {
   case Ok
   case NoKey

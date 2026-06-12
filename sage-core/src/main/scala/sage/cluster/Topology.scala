@@ -4,6 +4,11 @@ import scala.collection.mutable
 
 import sage.commands.{Command, Pipeline}
 
+/**
+  * One server process in a cluster or master-replica deployment, addressed by host and port. The only cluster type users name directly —
+  * it appears on the [[sage.SageEvent]]s a [[sage.SageListener]] observes (which node served a command, the masters after a topology
+  * change). Routing targets the runtime chooses are otherwise internal.
+  */
 final case class Node(host: String, port: Int)
 
 /**
@@ -21,8 +26,7 @@ final private[sage] class ClusterTopology private (val shards: Vector[Shard], ow
 
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
 
-  // the Shard owning a slot, exposing its replicas — the runtime's input for replica routing (the core only locates them; selecting a live
-  // one and applying the read policy is the runtime's job, since it alone knows connection liveness)
+  // the core only locates the owning shard; selecting a live replica and applying the read policy is the runtime's job
   def shardForSlot(slot: Slot): Option[Shard] = Option(shardOwners(slot.value))
 
   def route(command: Command[?]): Route =

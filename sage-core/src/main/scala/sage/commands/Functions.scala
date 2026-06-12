@@ -27,10 +27,19 @@ final case class FunctionInfo(name: String, description: Option[String], flags: 
   */
 final case class LibraryInfo(libraryName: String, engine: String, functions: Vector[FunctionInfo], code: Option[String])
 
+/**
+  * The function or script currently executing, as reported by `FUNCTION STATS`: its name, the command line, and how long it has run.
+  */
 final case class RunningScript(name: String, command: Vector[String], duration: FiniteDuration)
 
+/**
+  * Per-engine totals from `FUNCTION STATS`: how many libraries and functions an engine holds.
+  */
 final case class EngineStats(librariesCount: Long, functionsCount: Long)
 
+/**
+  * A `FUNCTION STATS` reply: the [[RunningScript]] if one is executing, and per-engine [[EngineStats]] keyed by engine name.
+  */
 final case class FunctionStats(runningScript: Option[RunningScript], engines: Map[String, EngineStats])
 
 /**

@@ -7,5 +7,9 @@ package sage
   * sheds events once the dispatch queue fills), a throwing one is swallowed.
   */
 trait SageListener {
+
+  /**
+    * Called once per runtime [[SageEvent]], synchronously and off the command path. Must not block; thrown exceptions are swallowed.
+    */
   def onEvent(event: SageEvent): Unit
 }
