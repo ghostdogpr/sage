@@ -1,6 +1,7 @@
 package sage.protocol
 
 import scala.annotation.switch
+import scala.collection.mutable
 
 import sage.Bytes
 import sage.SageException.ProtocolError
@@ -9,6 +10,11 @@ import sage.SageException.ProtocolError
   * Incremental RESP3 parser: feed it bytes as they arrive, get back every frame completed so far. One instance per connection; not
   * thread-safe. After a `ProtocolError` the parser is poisoned — RESP3 has no resynchronization point — and the connection must be
   * discarded. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]; streamed types are not supported (no server sends them).
+  *
+  * Aggregates parse incrementally against an explicit stack of open frames rather than recursively: a feed that ends mid-aggregate keeps
+  * the partial builders on the stack and resumes from there, so a large reply split across many reads is parsed once, not re-scanned from
+  * the top on every read. Because each completed element advances `readPos`, the input buffer only ever holds the unparsed tail, never the
+  * whole aggregate.
   */
 final private[sage] class RespParser {
 
@@ -17,13 +23,19 @@ final private[sage] class RespParser {
   private var writePos: Int          = 0 // end of valid input
   private var failure: ProtocolError = null
 
-  // parseFrame out-fields, avoiding a result-wrapper allocation per frame: frame returned + `cursor` past it = parsed;
-  // null + `failMessage` = invalid; null without = incomplete
+  // out-fields, avoiding a result-wrapper allocation per value: a leaf parse sets `cursor` past it; an aggregate header sets `cursor` and
+  // pushes onto `stack`; a completed value is handed back via `produced`. `failMessage` carries an invalid-input diagnostic.
   private var cursor: Int         = 0
+  private var produced: Frame     = null
   private var failMessage: String = null
 
   // readLong validity out-field
   private var numberOk: Boolean = false
+
+  // open aggregates awaiting their children, innermost on top; grows on demand up to the depth guard's ceiling, so a parser that only
+  // ever sees shallow replies (the common case) never pays for the worst-case nesting bound
+  private var stack      = new Array[Agg](8)
+  private var stackDepth = 0
 
   /**
     * Returns every frame completed by `bytes`, in order.
@@ -45,17 +57,10 @@ final private[sage] class RespParser {
     if (failure != null) Some(failure)
     else if (!append(array, offset, length)) Some(poison("input exceeds the maximum buffer size"))
     else {
-      var done = false
-      while (!done) {
-        val frame = parseFrame(readPos, 0)
-        if (frame == null) done = true
-        else {
-          onFrame(frame)
-          readPos = cursor
-        }
-      }
+      parseLoop(onFrame)
       if (failMessage != null) Some(poison(failMessage))
       else {
+        // the stack carries partial frames independently of the buffer, so the buffer can reset whenever its bytes are spent
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
@@ -70,6 +75,7 @@ final private[sage] class RespParser {
     buf = Array.emptyByteArray
     readPos = 0
     writePos = 0
+    stackDepth = 0
     error
   }
 
@@ -99,71 +105,91 @@ final private[sage] class RespParser {
     }
   }
 
-  // attributes are out-of-band metadata prefixing a value, valid at any nesting level; skip them iteratively (not recursively, so a long
-  // attribute chain cannot overflow the stack) and return the value they annotate, so an attribute never occupies an aggregate slot
-  private def parseFrame(pos: Int, depth: Int): Frame = {
-    var p = pos
-    while (p < writePos && buf(p) == '|') {
-      val after = skipAttribute(p + 1, depth)
-      if (after < 0) return null // Incomplete, or Invalid with failMessage set
-      p = after
-    }
-    parseValue(p, depth)
-  }
+  // The driver: alternately close any aggregate whose children are all in (cascading completed parents and emitting top-level frames) and
+  // produce the next value into the open aggregate or to the top level. Stops on incomplete input (resumes next feed) or invalid input.
+  private def parseLoop(onFrame: Frame => Unit): Unit = {
+    var running = true
+    while (running) {
+      // close completed aggregates first: this also finalizes an empty aggregate (zero children) the instant it is opened
+      var closing = true
+      while (closing)
+        if (stackDepth > 0 && complete(stack(stackDepth - 1))) {
+          val top = stack(stackDepth - 1)
+          stack(stackDepth - 1) = null
+          stackDepth -= 1
+          if (top.kind == Attr) closing = false // an attribute yields no value; the value it prefixes is produced next, for the same slot
+          else {
+            val value = build(top)
+            if (stackDepth == 0) { onFrame(value); closing = false }
+            else addChild(stack(stackDepth - 1), value) // re-check: the parent may now be complete too
+          }
+        } else closing = false
 
-  // consumes a `|` attribute's pairs without materializing them; returns the position past it, or Incomplete / Invalid (failMessage set)
-  private def skipAttribute(pos: Int, depth: Int): Int = {
-    val count = readLength(pos, allowNull = false)
-    if (count == Incomplete) Incomplete
-    else if (count == Invalid) { failMessage = s"invalid attribute length: '${headerText(pos)}'"; Invalid }
-    else {
-      var p = cursor
-      var i = 0
-      while (i < count) {
-        val key   = parseFrame(p, depth + 1)
-        if (key == null) return if (failMessage != null) Invalid else Incomplete
-        val value = parseFrame(cursor, depth + 1)
-        if (value == null) return if (failMessage != null) Invalid else Incomplete
-        p = cursor
-        i += 1
-      }
-      p
+      val status = produceValue()
+      if (status == Produced) {
+        val value = produced
+        if (stackDepth == 0) onFrame(value) else addChild(stack(stackDepth - 1), value)
+      } else if (status == Opened) () // re-loop: the close pass finalizes it if empty, otherwise its children are produced next
+      else running = false // Incomplete (resume next feed) or Invalid (failMessage set)
     }
   }
 
-  private def parseValue(pos: Int, depth: Int): Frame =
-    if (pos >= writePos) null
-    else if (depth > MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
+  private def complete(agg: Agg): Boolean = agg.remaining == 0 && agg.pendingKey == null
+
+  // attaches a produced value to an open aggregate; a map/attribute alternates key then value per pair
+  private def addChild(agg: Agg, value: Frame): Unit =
+    agg.kind match {
+      case Map  =>
+        if (agg.pendingKey == null) agg.pendingKey = value
+        else {
+          agg.pairs += ((agg.pendingKey, value))
+          agg.pendingKey = null
+          agg.remaining -= 1
+        }
+      case Attr => // discarded metadata: count off each pair without materializing it
+        if (agg.pendingKey == null) agg.pendingKey = value
+        else {
+          agg.pendingKey = null
+          agg.remaining -= 1
+        }
+      case _    =>
+        agg.elements += value
+        agg.remaining -= 1
+    }
+
+  private def build(agg: Agg): Frame =
+    agg.kind match {
+      case Arr  => Frame.Array(agg.elements.result())
+      case Set  => Frame.Set(agg.elements.result())
+      case Push => Frame.Push(agg.elements.result())
+      case Map  => Frame.Map(agg.pairs.result())
+      case _    => Frame.Null // Attr is never built — completed attributes are discarded before this point
+    }
+
+  // produces one value at `readPos`, returning Produced (`produced` set, `readPos` advanced), Opened (an aggregate header consumed and
+  // pushed), Incomplete (more bytes needed, `readPos` unmoved), or Invalid (`failMessage` set). Attributes open as a discarded aggregate.
+  private def produceValue(): Int =
+    if (readPos >= writePos) Incomplete
+    else if (stackDepth > MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
     else {
+      val pos = readPos
       (buf(pos).toChar: @switch) match {
         case '+'   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
-          else {
-            cursor = cr + 2
-            Frame.SimpleString(stringAt(pos + 1, cr))
-          }
+          if (cr < 0) Incomplete else leaf(cr + 2, Frame.SimpleString(stringAt(pos + 1, cr)))
         case '-'   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
-          else {
-            cursor = cr + 2
-            Frame.SimpleError(stringAt(pos + 1, cr))
-          }
+          if (cr < 0) Incomplete else leaf(cr + 2, Frame.SimpleError(stringAt(pos + 1, cr)))
         case ':'   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
+          if (cr < 0) Incomplete
           else {
             val value = readLong(pos + 1, cr)
-            if (!numberOk) fail(s"invalid integer: '${stringAt(pos + 1, cr)}'")
-            else {
-              cursor = cr + 2
-              Frame.Integer(value)
-            }
+            if (!numberOk) fail(s"invalid integer: '${stringAt(pos + 1, cr)}'") else leaf(cr + 2, Frame.Integer(value))
           }
         case ','   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
+          if (cr < 0) Incomplete
           else {
             val text = stringAt(pos + 1, cr)
             try {
@@ -173,97 +199,116 @@ final private[sage] class RespParser {
                 case "nan"          => java.lang.Double.NaN
                 case other          => java.lang.Double.parseDouble(other)
               }
-              cursor = cr + 2
-              Frame.Double(value)
+              leaf(cr + 2, Frame.Double(value))
             } catch { case _: NumberFormatException => fail(s"invalid double: '$text'") }
           }
         case '#'   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
+          if (cr < 0) Incomplete
           else if (cr != pos + 2) fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
-          else {
+          else
             buf(pos + 1).toChar match {
-              case 't' =>
-                cursor = cr + 2
-                Frame.Bool(true)
-              case 'f' =>
-                cursor = cr + 2
-                Frame.Bool(false)
+              case 't' => leaf(cr + 2, Frame.Bool(true))
+              case 'f' => leaf(cr + 2, Frame.Bool(false))
               case _   => fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
             }
-          }
         case '('   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
+          if (cr < 0) Incomplete
           else {
             val text = stringAt(pos + 1, cr)
-            try {
-              val value = BigInt(text)
-              cursor = cr + 2
-              Frame.BigNumber(value)
-            } catch { case _: NumberFormatException => fail(s"invalid big number: '$text'") }
+            try leaf(cr + 2, Frame.BigNumber(BigInt(text)))
+            catch { case _: NumberFormatException => fail(s"invalid big number: '$text'") }
           }
         case '_'   =>
           val cr = findCrlf(pos + 1)
-          if (cr < 0) null
+          if (cr < 0) Incomplete
           else if (cr != pos + 1) fail(s"unexpected content in null frame: '${stringAt(pos + 1, cr)}'")
-          else {
-            cursor = cr + 2
-            Frame.Null
-          }
-        case '$'   =>
-          val length = readLength(pos + 1, allowNull = true)
-          if (length == Incomplete) null
-          else if (length == Invalid) fail(s"invalid bulk string length: '${headerText(pos + 1)}'")
-          else if (length == -1) Frame.Null
-          else {
-            val start = cursor
-            val end   = payloadEnd(start, length)
-            if (end < 0) null
-            else {
-              cursor = end
-              Frame.BulkString(bytesAt(start, start + length))
-            }
-          }
-        case '!'   =>
-          val length = readLength(pos + 1, allowNull = false)
-          if (length == Incomplete) null
-          else if (length == Invalid) fail(s"invalid bulk error length: '${headerText(pos + 1)}'")
-          else {
-            val start = cursor
-            val end   = payloadEnd(start, length)
-            if (end < 0) null
-            else {
-              cursor = end
-              Frame.BulkError(bytesAt(start, start + length))
-            }
-          }
-        case '='   =>
-          val length = readLength(pos + 1, allowNull = false)
-          if (length == Incomplete) null
-          else if (length < 4) fail(s"invalid verbatim string length: '${headerText(pos + 1)}'")
-          else {
-            val start = cursor
-            val end   = payloadEnd(start, length)
-            if (end < 0) null
-            else if (buf(start + 3) != ':') fail("verbatim string missing ':' separator")
-            else {
-              cursor = end
-              Frame.VerbatimString(stringAt(start, start + 3), bytesAt(start + 4, start + length))
-            }
-          }
-        case '*'   => parseAggregate(pos + 1, allowNull = true, Frame.Array.apply, depth)
-        case '~'   => parseAggregate(pos + 1, allowNull = false, Frame.Set.apply, depth)
-        case '>'   => parseAggregate(pos + 1, allowNull = false, Frame.Push.apply, depth)
-        case '%'   => parsePairAggregate(pos + 1, Frame.Map.apply, depth)
+          else leaf(cr + 2, Frame.Null)
+        case '$'   => bulk(pos, allowNull = true, "invalid bulk string length", (start, length) => Frame.BulkString(bytesAt(start, start + length)))
+        case '!'   => bulk(pos, allowNull = false, "invalid bulk error length", (start, length) => Frame.BulkError(bytesAt(start, start + length)))
+        case '='   => verbatim(pos)
+        case '*'   => openElements(pos, Arr, allowNull = true)
+        case '~'   => openElements(pos, Set, allowNull = false)
+        case '>'   => openElements(pos, Push, allowNull = false)
+        case '%'   => openPairs(pos, Map, "invalid aggregate length")
+        case '|'   => openPairs(pos, Attr, "invalid attribute length")
         case other =>
           fail(f"unknown frame type byte 0x${other.toByte}%02x")
       }
     }
 
-  // readLength/payloadEnd sentinels
-  private inline def Incomplete: Int = Int.MinValue
-  private inline def Invalid: Int    = Int.MinValue + 1
+  // commits a completed leaf: advances past it and hands the frame back
+  private def leaf(end: Int, frame: Frame): Int = {
+    readPos = end
+    produced = frame
+    Produced
+  }
+
+  private def bulk(pos: Int, allowNull: Boolean, lengthError: String, make: (Int, Int) => Frame): Int = {
+    val length = readLength(pos + 1, allowNull)
+    if (length == Incomplete) Incomplete
+    else if (length == Invalid) fail(s"$lengthError: '${headerText(pos + 1)}'")
+    else if (length == -1) leaf(cursor, Frame.Null)
+    else {
+      val start = cursor
+      val end   = payloadEnd(start, length)
+      if (end == Incomplete) Incomplete
+      else if (end == Invalid) Invalid // payloadEnd set failMessage
+      else leaf(end, make(start, length))
+    }
+  }
+
+  private def verbatim(pos: Int): Int = {
+    val length = readLength(pos + 1, allowNull = false)
+    if (length == Incomplete) Incomplete
+    else if (length < 4) fail(s"invalid verbatim string length: '${headerText(pos + 1)}'") // an Invalid sentinel is < 4 too
+    else {
+      val start = cursor
+      val end   = payloadEnd(start, length)
+      if (end == Incomplete) Incomplete
+      else if (end == Invalid) Invalid
+      else if (buf(start + 3) != ':') fail("verbatim string missing ':' separator")
+      else leaf(end, Frame.VerbatimString(stringAt(start, start + 3), bytesAt(start + 4, start + length)))
+    }
+  }
+
+  private def openElements(pos: Int, kind: Byte, allowNull: Boolean): Int = {
+    val count = readLength(pos + 1, allowNull)
+    if (count == Incomplete) Incomplete
+    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
+    else if (count == -1) leaf(cursor, Frame.Null)
+    else {
+      readPos = cursor
+      val agg = new Agg(kind, count)
+      agg.elements = Vector.newBuilder[Frame]
+      push(agg)
+      Opened
+    }
+  }
+
+  private def openPairs(pos: Int, kind: Byte, lengthError: String): Int = {
+    val count = readLength(pos + 1, allowNull = false)
+    if (count == Incomplete) Incomplete
+    else if (count == Invalid) fail(s"$lengthError: '${headerText(pos + 1)}'")
+    else {
+      readPos = cursor
+      val agg = new Agg(kind, count)
+      if (kind == Map) agg.pairs = Vector.newBuilder[(Frame, Frame)]
+      push(agg)
+      Opened
+    }
+  }
+
+  private def push(agg: Agg): Unit = {
+    if (stackDepth == stack.length) {
+      val grown = new Array[Agg](math.min(stack.length * 2, MaxDepth + 1))
+      System.arraycopy(stack, 0, grown, 0, stackDepth)
+      stack = grown
+    }
+    stack(stackDepth) = agg
+    stackDepth += 1
+  }
 
   // reads a length header up to its CRLF, setting `cursor` past it; -1 is the RESP2 null marker; '+' is signed-integer
   // syntax that the length grammar does not permit
@@ -291,59 +336,6 @@ final private[sage] class RespParser {
     } else start + length + 2
 
   private def headerText(pos: Int): String = stringAt(pos, findCrlf(pos))
-
-  private def parseAggregate(pos: Int, allowNull: Boolean, make: Vector[Frame] => Frame, depth: Int): Frame = {
-    val count = readLength(pos, allowNull)
-    if (count == Incomplete) null
-    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
-    else if (count == -1) Frame.Null
-    else {
-      val elements = parseElements(cursor, count, depth)
-      if (elements == null) null else make(elements)
-    }
-  }
-
-  private def parsePairAggregate(pos: Int, make: Vector[(Frame, Frame)] => Frame, depth: Int): Frame = {
-    val count = readLength(pos, allowNull = false)
-    if (count == Incomplete) null
-    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos)}'")
-    else {
-      val entries = parsePairs(cursor, count, depth)
-      if (entries == null) null else make(entries)
-    }
-  }
-
-  private def parseElements(start: Int, count: Int, depth: Int): Vector[Frame] = {
-    val elements = Vector.newBuilder[Frame]
-    var pos      = start
-    var i        = 0
-    while (i < count) {
-      val frame = parseFrame(pos, depth + 1)
-      if (frame == null) return null
-      elements += frame
-      pos = cursor
-      i += 1
-    }
-    cursor = pos
-    elements.result()
-  }
-
-  private def parsePairs(start: Int, count: Int, depth: Int): Vector[(Frame, Frame)] = {
-    val entries = Vector.newBuilder[(Frame, Frame)]
-    var pos     = start
-    var i       = 0
-    while (i < count) {
-      val key   = parseFrame(pos, depth + 1)
-      if (key == null) return null
-      val value = parseFrame(cursor, depth + 1)
-      if (value == null) return null
-      entries += ((key, value))
-      pos = cursor
-      i += 1
-    }
-    cursor = pos
-    entries.result()
-  }
 
   // index of the next CRLF's '\r', or -1 if the input ends first
   private def findCrlf(from: Int): Int = {
@@ -392,14 +384,34 @@ final private[sage] class RespParser {
   private def bytesAt(from: Int, until: Int): Bytes =
     Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOfRange(buf, from, until)))
 
-  private def fail(message: String): Frame = {
+  private def fail(message: String): Int = {
     failMessage = message
-    null
+    Invalid
   }
+
+  // produceValue status codes; Incomplete/Invalid double as the readLength/payloadEnd sentinels (distinct from any valid Int position/length)
+  final private val Incomplete: Int = Int.MinValue
+  final private val Invalid: Int    = Int.MinValue + 1
+  final private val Produced: Int   = Int.MinValue + 2
+  final private val Opened: Int     = Int.MinValue + 3
+
+  // aggregate kind tags
+  final private val Arr: Byte  = 0
+  final private val Set: Byte  = 1
+  final private val Push: Byte = 2
+  final private val Map: Byte  = 3
+  final private val Attr: Byte = 4
 
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8
 
   // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
   private inline def MaxDepth: Int = 512
+
+  // one open aggregate: `remaining` children still expected (pairs, for Map/Attr); `pendingKey` holds a parsed key awaiting its value
+  final private class Agg(val kind: Byte, var remaining: Int) {
+    var elements: mutable.Builder[Frame, Vector[Frame]]                = null
+    var pairs: mutable.Builder[(Frame, Frame), Vector[(Frame, Frame)]] = null
+    var pendingKey: Frame                                              = null
+  }
 }
