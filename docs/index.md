@@ -6,7 +6,8 @@ hero:
   text: "A Redis & Valkey client for Scala 3"
   tagline: One client for any effect system, built on a from-scratch native Redis protocol implementation.
   image:
-    src: /sage.svg
+    light: /sage.svg
+    dark: /sage-dark.svg
     alt: Sage
   actions:
     - theme: brand

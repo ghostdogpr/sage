@@ -17,7 +17,7 @@ export default defineConfig({
       { text: 'About', link: '/about' },
     ],
 
-    logo: '/sage.svg',
+    logo: { light: '/sage.svg', dark: '/sage-dark.svg' },
 
     sidebar: [
       {
