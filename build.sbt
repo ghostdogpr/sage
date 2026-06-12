@@ -7,6 +7,11 @@ val kyoCompatVersion      = "1.0.0-RC2+64-9487771b-SNAPSHOT"
 val munitVersion          = "1.3.2"
 val testcontainersVersion = "0.44.1"
 
+// competitor baselines for the runtime benchmark harness (dev-only, never published) — see benchmarks/README.md
+val zioRedisVersion   = "1.2.1"
+val redis4catsVersion = "2.0.3"
+val lettuceVersion    = "7.6.0.RELEASE"
+
 inThisBuild(
   List(
     scalaVersion     := scala3Version,
@@ -22,13 +27,22 @@ inThisBuild(
 
 name := "sage"
 
-addCommandAlias("fmt", "all scalafmtSbt scalafmt test:scalafmt")
-addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck")
+addCommandAlias(
+  "fmt",
+  "all scalafmtSbt scalafmt test:scalafmt " +
+    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksKyo3_8_3/scalafmt"
+)
+addCommandAlias(
+  "check",
+  "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
+    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
+)
 
 addCommandAlias(
   "testUnit",
   "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
-    "clientFuture/Test/compile integrationTestsFuture/Test/compile"
+    "clientFuture/Test/compile integrationTestsFuture/Test/compile " +
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
@@ -38,6 +52,8 @@ addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
+  // benchmarks is intentionally NOT aggregated: it is dev-only/on-demand and pulls JMH + testcontainers + competitor clients, which should
+  // not be dragged into ordinary root compile/test/CI. The benchAll alias and benchmarks<Cell>/Jmh/run target its cells directly.
   .aggregate(core.projectRefs ++ client.projectRefs ++ integrationTests.projectRefs: _*)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
@@ -96,6 +112,43 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+
+// Runtime end-to-end benchmark harness (JMH), dev-only and never published. One cell per backend (the backends are cross-compiled from the
+// same sage.* sources and would collide on one classpath, so they cannot share a module). Competitor baselines are added per cell: zio-redis
+// to the zio cell, redis4cats to the ce cell, raw Lettuce (async) to the ox cell as the JVM ceiling. kyo is sage-only. See benchmarks/README.md.
+lazy val benchmarks = (projectMatrix in file("benchmarks"))
+  .dependsOn(client)
+  .enablePlugins(JmhPlugin)
+  .settings(name := "benchmarks")
+  .settings(commonSettings)
+  .settings(
+    publish / skip                        := true,
+    // matrix cells have a non-existent baseDirectory (e.g. benchmarks/ce/jvm); fork JMH from the repo root so the JVM launches and the
+    // -rff benchmarks/results/*.json paths resolve there
+    Jmh / run / forkOptions               := (Jmh / run / forkOptions).value.withWorkingDirectory((ThisBuild / baseDirectory).value),
+    libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % testcontainersVersion,
+    libraryDependencies ++= {
+      val m = moduleName.value
+      if (m.endsWith("-zio")) Seq("dev.zio" %% "zio-redis" % zioRedisVersion)
+      else if (m.endsWith("-ce")) Seq("dev.profunktor" %% "redis4cats-effects" % redis4catsVersion)
+      // Lettuce (raw Java, async/auto-pipelined) is the JVM ceiling in the flat results
+      else if (m.endsWith("-ox")) Seq("io.lettuce" % "lettuce-core" % lettuceVersion)
+      else Seq.empty
+    }
+  )
+  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
+  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+
+// the runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
+// each writing JMH JSON to benchmarks/results/<cell>.json. benchmarks/merge-results.sh merges them into one all.json covering every client
+// (uploadable to https://jmh.morethan.io).
+addCommandAlias(
+  "benchAll",
+  ";benchmarksZio/Jmh/run -rf json -rff benchmarks/results/zio.json " +
+    ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
+    ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
+    ";benchmarksKyo3_8_3/Jmh/run -rf json -rff benchmarks/results/kyo.json"
+)
 
 lazy val commonSettings = Def.settings(
   scalacOptions ++= {
