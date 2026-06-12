@@ -18,7 +18,7 @@ object TransactionsExample {
                   for {
                     _   <- tx.watch("tx:n")
                     _   <- tx.get[String, Int]("tx:n")
-                    res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
+                    res <- tx.exec((Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline)
                   } yield res
                 }
       _      <- IO.println(s"transaction result=$result")

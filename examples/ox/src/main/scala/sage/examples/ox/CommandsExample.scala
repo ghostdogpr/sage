@@ -17,7 +17,7 @@ object CommandsExample {
     // strings, numbers, and a conditional write with a TTL
     val _        = client.set("greeting", "hello")
     val greeting = client.get[String, String]("greeting")
-    val _        = client.incrBy[String]("counter", 10)
+    val _        = client.incrBy("counter", 10)
     val _        = client.set("session", "token", expiry = SetExpiry.In(1.minute), condition = SetCondition.IfNotExists)
     // hashes
     val _        = client.hSet("user:1", ("name", "Ada"), ("age", "36"))

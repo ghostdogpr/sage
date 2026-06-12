@@ -22,7 +22,7 @@ object CommandsExample {
       // strings, numbers, and a conditional write with a TTL
       _        <- client.set("greeting", "hello")
       greeting <- client.get[String, String]("greeting")
-      _        <- client.incrBy[String]("counter", 10)
+      _        <- client.incrBy("counter", 10)
       _        <- client.set("session", "token", expiry = SetExpiry.In(oneMinute), condition = SetCondition.IfNotExists)
       // hashes
       _        <- client.hSet("user:1", ("name", "Ada"), ("age", "36"))

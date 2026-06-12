@@ -14,10 +14,10 @@ object PipelinesExample {
   def run(client: SageClient)(using Ox): Unit = {
     val _       = client.set("pipe:a", "x")
     val _       = client.set("pipe:n", 10)
-    val tuple   = client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)).pipeline)
+    val tuple   = client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy("pipe:n", 5)).pipeline)
     val _       = client.set("pipe:str", "hello")
     // INCR on a non-numeric string fails only at its own position; the GET still succeeds
-    val attempt = client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")).pipeline)
+    val attempt = client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr("pipe:str")).pipeline)
     println(s"tuple=$tuple attempt=$attempt")
   }
 }
