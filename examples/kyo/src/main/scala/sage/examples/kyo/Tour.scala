@@ -21,6 +21,7 @@ object Tour extends KyoApp {
         _      <- PipelinesExample.run(client)
         _      <- TransactionsExample.run(client)
         _      <- PubSubExample.run(client)
+        _      <- CachedReadsExample.run(client)
       } yield ()
     }
   }
