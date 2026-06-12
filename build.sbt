@@ -33,7 +33,8 @@ addCommandAlias("check", "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck"
 addCommandAlias(
   "testUnit",
   "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
-    "clientFuture/Test/compile integrationTestsFuture/Test/compile"
+    "clientFuture/Test/compile integrationTestsFuture/Test/compile " +
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
