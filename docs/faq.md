@@ -34,3 +34,11 @@ No. The core is JVM-only.
 ## Is Redis Sentinel supported?
 
 No, Sentinel is out of scope. Sage supports standalone, cluster, and master-replica deployments; see [Configuration](/configuration).
+
+## Can I run Lua scripts or server-side functions?
+
+Yes. `client.eval` (with `client.scriptLoad` / `client.evalSha` for cached scripts) runs Lua; `client.functionLoad`, `client.fCall`, `client.functionList`, and `client.functionDelete` manage and call server-side functions grouped into libraries. Read-only `*Ro` variants exist for the eligible commands. In a cluster, script and function management is routed to every master automatically. These replies come back as a raw `Frame`, which you decode with the strict helpers (for example `reply.asLong`).
+
+## What happens when the connection drops?
+
+Sage fails fast and reconnects in the background with exponential backoff. There is no offline queue: commands are not buffered while disconnected. A command in flight when the connection drops fails with `ConnectionLost`, whose `mayHaveExecuted` flag tells you whether retrying is safe (see [Error handling](/error-handling)). A watchdog detects connections that have gone silently dead so they are replaced. Reconnect and watchdog behavior are tunable on [`SageConfig`](/configuration).

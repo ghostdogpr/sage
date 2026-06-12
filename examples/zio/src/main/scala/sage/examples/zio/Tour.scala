@@ -18,5 +18,6 @@ object Tour extends ZIOAppDefault {
       PipelinesExample.run *>
       TransactionsExample.run *>
       PubSubExample.run *>
-      CachedReadsExample.run).provide(SageClient.layer(config))
+      CachedReadsExample.run *>
+      StreamsExample.run).provide(SageClient.layer(config))
 }

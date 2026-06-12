@@ -18,5 +18,6 @@ import sage.ox.*
     TransactionsExample.run(client)
     PubSubExample.run(client)
     CachedReadsExample.run(client)
+    StreamsExample.run(client)
   }
 }

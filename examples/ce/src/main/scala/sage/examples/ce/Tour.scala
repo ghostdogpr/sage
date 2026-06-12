@@ -19,6 +19,7 @@ object Tour extends IOApp.Simple {
         PipelinesExample.run(client) *>
         TransactionsExample.run(client) *>
         PubSubExample.run(client) *>
-        CachedReadsExample.run(client)
+        CachedReadsExample.run(client) *>
+        StreamsExample.run(client)
     }
 }

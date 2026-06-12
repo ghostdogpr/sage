@@ -27,8 +27,11 @@ export default defineConfig({
           { text: 'Commands & codecs', link: '/commands' },
           { text: 'Pipelines & transactions', link: '/pipelines-transactions' },
           { text: 'Pub/Sub', link: '/pubsub' },
+          { text: 'Streams', link: '/streams' },
           { text: 'Client-side caching', link: '/client-side-caching' },
           { text: 'Configuration', link: '/configuration' },
+          { text: 'Error handling', link: '/error-handling' },
+          { text: 'Observability', link: '/observability' },
         ]
       },
       {

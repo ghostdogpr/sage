@@ -319,5 +319,7 @@ More in [Client-side caching](/client-side-caching).
 - [Commands & codecs](/commands) for the command surface and typing your own values
 - [Pipelines & transactions](/pipelines-transactions) for batching and atomicity
 - [Pub/Sub](/pubsub) for classic and sharded messaging
+- [Streams](/streams) for append-only logs and consumer groups
 - [Client-side caching](/client-side-caching) for cached reads and invalidation
 - [Configuration](/configuration) for cluster, master-replica, read routing, and TLS
+- [Error handling](/error-handling) and [Observability](/observability)
