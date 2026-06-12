@@ -6,10 +6,8 @@
 
 It is designed to be **native**, meaning there is no Java client wrapped underneath: the wire protocol, commands, and codecs are implemented directly in Scala.
 
-It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs) with **zero dependencies**, plus a **runtime written once** against [kyo-compat](https://github.com/getkyo/kyo/tree/main/kyo-compat) and cross-published per backend. This makes it usable from **multiple effect ecosystems** — [ZIO](https://zio.dev), [cats-effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com) — each with its own native types and no wrapper visible.
+It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs) with **zero dependencies**, plus a **runtime written once** against [kyo-compat](https://github.com/getkyo/kyo/tree/main/kyo-compat) and cross-published per backend. This makes it usable from **multiple effect ecosystems** ([ZIO](https://zio.dev), [cats-effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com)), each with its own native types and no wrapper visible.
 
 It targets **RESP3** and modern **Redis 8+ / Valkey 8+**, with automatic pipelining, typed commands composable into pipelines and `MULTI`/`EXEC` transactions, standalone and cluster behind one client type, pub/sub (including sharded), client-side caching, and TLS and ACL auth.
 
 It is available for Scala 3.3.x LTS and later versions, and requires JDK 21+.
-
-> 🚧 **Work in progress** — sage is under active development and not yet released.
