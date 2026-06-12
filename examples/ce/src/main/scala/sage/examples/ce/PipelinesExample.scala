@@ -6,8 +6,8 @@ import sage.*
 import sage.ce.*
 
 /**
-  * A Pipeline is sent in one round-trip and yields a typed tuple. `pipelineAttempt` keeps each position's failure separate instead of
-  * failing the whole call.
+  * A Pipeline is an applicative composition of Commands sent in one round-trip, yielding a typed tuple. `pipelineAttempt` keeps each
+  * position's failure separate instead of failing the whole call.
   */
 object PipelinesExample {
 

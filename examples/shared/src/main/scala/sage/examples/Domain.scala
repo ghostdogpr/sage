@@ -11,13 +11,14 @@ final case class User(name: String, age: Int)
 
 object User {
 
-  // Encodes as "name|age" and decodes strictly: anything that is not that exact shape fails with a DecodeError rather than being coerced,
-  // matching the contract of the built-in codecs. `emap` is the partial-decode combinator; `imap` is its total counterpart.
+  // Encodes as "name|age" and decodes strictly: anything that is not that shape fails with a DecodeError rather than being coerced, matching
+  // the contract of the built-in codecs. `emap` is the partial-decode combinator; `imap` is its total counterpart. Age is the trailing
+  // segment, so the name may itself contain '|'.
   given ValueCodec[User] =
     ValueCodec[String].emap { raw =>
-      raw.split('|') match {
-        case Array(name, age) => age.toIntOption.map(User(name, _)).toRight(SageException.DecodeError("User(name|age)", raw))
-        case _                => Left(SageException.DecodeError("User(name|age)", raw))
+      raw.lastIndexOf('|') match {
+        case -1 => Left(SageException.DecodeError("User(name|age)", raw))
+        case i  => raw.drop(i + 1).toIntOption.map(User(raw.take(i), _)).toRight(SageException.DecodeError("User(name|age)", raw))
       }
     }(user => s"${user.name}|${user.age}")
 }
