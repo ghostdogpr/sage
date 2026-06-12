@@ -2,49 +2,14 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-**Sage** is a **modern, Scala 3-only client for [Redis](https://redis.io) and [Valkey](https://valkey.io)** — native (no Java client wrapper) and usable from **multiple effect ecosystems**: [ZIO](https://zio.dev), [cats-effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com).
+**Sage** is a **modern [Scala 3](https://www.scala-lang.org/) client** for **[Redis](https://redis.io)** and **[Valkey](https://valkey.io)**.
 
-It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs — zero dependencies) plus a **runtime written once** against [kyo-compat](https://github.com/getkyo/kyo/tree/main/kyo-compat) and cross-published per backend, so each ecosystem gets its native types with no wrapper visible.
+It is designed to be **native**, meaning there is no Java client wrapped underneath: the wire protocol, commands, and codecs are implemented directly in Scala.
+
+It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs) with **zero dependencies**, plus a **runtime written once** against [kyo-compat](https://github.com/getkyo/kyo/tree/main/kyo-compat) and cross-published per backend. This makes it usable from **multiple effect ecosystems** — [ZIO](https://zio.dev), [cats-effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com) — each with its own native types and no wrapper visible.
+
+It targets **RESP3** and modern **Redis 8+ / Valkey 8+**, with automatic pipelining, typed commands composable into pipelines and `MULTI`/`EXEC` transactions, standalone and cluster behind one client type, pub/sub (including sharded), client-side caching, and TLS and ACL auth.
+
+It is available for Scala 3.3.x LTS and later versions, and requires JDK 21+.
 
 > 🚧 **Work in progress** — sage is under active development and not yet released.
-
-## Highlights (planned for v1)
-
-- **RESP3 only** — typed replies, push frames; targets modern Redis (8+) and Valkey (8+)
-- **Automatic pipelining** — commands from all fibers multiplexed onto one connection
-- **Typed commands as values** — composable into pipelines and `MULTI`/`EXEC` transactions with typed results
-- **Standalone and cluster** behind one client type — topology is configuration
-- **Pub/sub** (including sharded) as native streams per backend
-- **Client-side caching** — invalidation-driven local reads, opt-in per call
-- **TLS and ACL auth** out of the box
-
-## Getting started
-
-Two imports: `import sage.*` for the command vocabulary and connection config (backend-independent), and `import sage.<backend>.*` for the client.
-
-```scala
-import sage.*       // Commands, options/results, codecs, Frame, Pipeline, connection config
-import sage.zio.*   // SageClient, ZIO-native
-
-val program =
-  ZIO.scoped {
-    for {
-      client <- SageClient.scoped(SageConfig(Endpoint("localhost", 6379)))
-      _      <- client.set("greeting", "hello")
-      value  <- client.get[String, String]("greeting")                  // Some("hello")
-      popped <- client.blPop[String, String]("queue")(BlockTimeout.Forever) // blocking pop
-      tuple  <- client.pipeline((Commands.incr[String]("a"), Commands.incr[String]("b")).pipeline)
-    } yield (value, popped, tuple)
-  }
-```
-
-Swap `sage.zio` for `sage.ce`, `sage.ox`, or `sage.kyo` and the same vocabulary returns that ecosystem's native types. (`import sage.*` brings the `sage.*` subpackage names into scope, so qualify cross-library prefixes via the unqualified form — e.g. `Duration`, not `zio.Duration`.)
-
-## Design
-
-The design is documented in the repo: [`CONTEXT.md`](CONTEXT.md) (glossary), [`docs/adr/`](docs/adr/) (architecture decision records), and [`docs/PRD.md`](docs/PRD.md).
-
-## Requirements
-
-- Scala 3.3+ (LTS)
-- JDK 21+
