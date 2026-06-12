@@ -1,0 +1,23 @@
+package sage.examples
+
+import sage.*
+
+/**
+  * A tiny domain type shared by every backend's tour. It rides on a hand-written [[ValueCodec]], so the tours can `set`/`get` a `User` the
+  * same way they do a `String` — the whole point of the codec typeclass. Backend-independent (only `import sage.*`), so it also compiles in
+  * the build's compile-only `future` anchor cell.
+  */
+final case class User(name: String, age: Int)
+
+object User {
+
+  // Encodes as "name|age" and decodes strictly: anything that is not that exact shape fails with a DecodeError rather than being coerced,
+  // matching the contract of the built-in codecs. `emap` is the partial-decode combinator; `imap` is its total counterpart.
+  given ValueCodec[User] =
+    ValueCodec[String].emap { raw =>
+      raw.split('|') match {
+        case Array(name, age) => age.toIntOption.map(User(name, _)).toRight(SageException.DecodeError("User(name|age)", raw))
+        case _                => Left(SageException.DecodeError("User(name|age)", raw))
+      }
+    }(user => s"${user.name}|${user.age}")
+}

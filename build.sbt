@@ -42,7 +42,9 @@ addCommandAlias(
   "testUnit",
   "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile " +
-    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile"
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile " +
+    "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile " +
+    "examplesKyo3_8_3/Compile/compile examplesFuture/Compile/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
@@ -54,7 +56,7 @@ lazy val root = project
   .settings(publish / skip := true)
   // benchmarks is intentionally NOT aggregated: it is dev-only/on-demand and pulls JMH + testcontainers + competitor clients, which should
   // not be dragged into ordinary root compile/test/CI. The benchAll alias and benchmarks<Cell>/Jmh/run target its cells directly.
-  .aggregate(core.projectRefs ++ client.projectRefs ++ integrationTests.projectRefs: _*)
+  .aggregate(core.projectRefs ++ client.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs: _*)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
 // Built for both Scala LTS (published) and Scala Next (compile-only, so the kyo client cell can depend on it).
@@ -110,6 +112,17 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
       Tests.Filter(name => !isAnchor && (isDesignated || !onceOnly.exists(name.startsWith)))
     }
   )
+  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
+  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+
+// Runnable, never-published usage examples — one cell per backend so each compiles against its own native artifact (ZIO Task, cats-effect
+// IO, Ox direct style, Kyo). Aggregated by root and compiled in CI via the testUnit alias; the forced future anchor cell carries no example
+// of its own and just compiles examples/shared. Run by hand against a local server, e.g. `sbt examplesZio/run` — see examples/README.md.
+lazy val examples = (projectMatrix in file("examples"))
+  .dependsOn(client)
+  .settings(name := "examples")
+  .settings(commonSettings)
+  .settings(publish / skip := true)
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
