@@ -60,12 +60,12 @@ object SageEvent {
 /**
   * A command's terminal result, stripped of its value: it either succeeded or failed with the error the caller saw.
   */
-sealed trait Outcome
+enum Outcome {
+  case Succeeded
+  case Failed(error: Throwable)
+}
 
 object Outcome {
-  case object Succeeded                     extends Outcome
-  final case class Failed(error: Throwable) extends Outcome
-
   def of(result: Try[?]): Outcome =
     result match {
       case Success(_) => Succeeded
