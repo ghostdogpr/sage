@@ -2363,10 +2363,21 @@ object Client {
       case Left(error)  => throw error
     }
 
-  final private[internal] class TxScope(val conn: DedicatedConnection) extends TransactionScope[CIO] {
+  final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => ()) extends TransactionScope[CIO] {
 
     // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
     val armed = new AtomicBoolean(false)
+
+    private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
+      case failure @ Failure(error) => onFault(error); complete(failure)
+      case success                  => complete(success)
+    }
+
+    // an EXEC fault arrives as an error *frame* in a Success, invisible to `faulting`, so scan the top level and the EXEC array
+    private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
+      val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
+      (frames.iterator ++ nested).flatMap(TxSupport.errorOf).foreach(message => onFault(ServerError.of(message)))
+    }
 
     // The lock makes "reject if released, else submit" atomic with the finalizer's seal-and-decide ([[sealAndReusable]]): a command
     // submitted under it is in-flight before the finalizer reads quiescence, so a handle captured past the block and raced against release
@@ -2399,7 +2410,7 @@ object Client {
       CIO.async[Unit] { complete =>
         submitting(complete) {
           armed.set(true)
-          conn.submit(Connection.watch(key, rest*), complete)
+          conn.submit(Connection.watch(key, rest*), faulting(complete))
         }
       }
 
@@ -2409,13 +2420,13 @@ object Client {
       else if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
-        CIO.async[A](complete => submitting(complete)(conn.submit(command, complete)))
+        CIO.async[A](complete => submitting(complete)(conn.submit(command, faulting(complete))))
 
     def discard: CIO[Unit] =
       CIO.async[Unit] { complete =>
         submitting(complete) {
           armed.set(false)
-          conn.submit(Connection.unwatch, complete)
+          conn.submit(Connection.unwatch, faulting(complete))
         }
       }
 
@@ -2440,10 +2451,11 @@ object Client {
       else
         CIO
           .async[Vector[Frame]] { complete =>
-            submitting(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, complete))
+            submitting(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
           }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
+            refreshOnExecFault(frames)
             TxSupport.interpretExec(p.commands, frames)
           }
   }
