@@ -3,6 +3,8 @@ package sage.client.internal
 import java.io.InputStream
 import java.net.{ServerSocket, Socket}
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.concurrent.duration.*
 
@@ -134,6 +136,28 @@ class SocketTransportSpec extends munit.FunSuite {
       awaitUntil(closedCount == 1, "the poisoned connection to close")
       transport.close()
       assertEquals(closedCount, 1)
+    }
+  }
+
+  test("onClosed runs only after the reader is fenced, so a buffered frame cannot race the close") {
+    val readerAliveAtClose                      = new AtomicBoolean(false)
+    val inOnFrame                               = new CountDownLatch(1)
+    val proceed                                 = new CountDownLatch(1)
+    @volatile var transportRef: SocketTransport = null
+    withTransport(
+      onClosed = () => { readerAliveAtClose.set(transportRef.reader.isAlive); proceed.countDown() },
+      onFrame = _ => { inOnFrame.countDown(); proceed.await() }
+    ) { (transport, peer) =>
+      transportRef = transport
+      peer.getOutputStream.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8))
+      peer.getOutputStream.flush()
+      assert(inOnFrame.await(5, TimeUnit.SECONDS), "reader should reach frame delivery")
+
+      val closer = new Thread(() => transport.close())
+      closer.start()
+      closer.join(5000)
+      assert(!closer.isAlive, "close() must not hang")
+      assert(!readerAliveAtClose.get(), "onClosed must run only after the reader has been joined")
     }
   }
 
