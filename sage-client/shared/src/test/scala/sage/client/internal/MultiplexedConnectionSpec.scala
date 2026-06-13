@@ -258,6 +258,41 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(afterReconnect, Some(Success("PONG")))
   }
 
+  test("a socket dying in the establish->Live window is not published Live, and the reconnect loop recovers") {
+    final class DyingAfterBootstrap(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
+      def start(): Unit                    = ()
+      def send(item: Transport.Item): Unit = {
+        item.writeAttempted()
+        onFrame(Frame.SimpleString("PONG"))
+        onClosed()
+      }
+      def close(): Unit                    = ()
+    }
+    val healthy = mutable.ArrayBuffer.empty[FakeTransport]
+    var first                                           = true
+    val scheduler                                       = new ManualScheduler
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
+      if (first) { first = false; new DyingAfterBootstrap(onFrame, onClosed) }
+      else {
+        val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
+        healthy += t
+        t
+      }
+    val connection                                      =
+      MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero)
+
+    assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
+
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, MultiplexedConnection.State.Live)
+    assertEquals(healthy.size, 1)
+
+    var afterRecovery: Option[Try[String]] = None
+    connection.submit(Connection.ping(), r => afterRecovery = Some(r))
+    healthy.head.emit(Frame.SimpleString("PONG"))
+    assertEquals(afterRecovery, Some(Success("PONG")))
+  }
+
   test("isCurrent gates on liveness: a stamp is current only while Live, never during a reconnect window at the same generation") {
     val (connection, scheduler, transports) = make()
     val g                                   = connection.liveGeneration().getOrElse(fail("expected a live generation"))

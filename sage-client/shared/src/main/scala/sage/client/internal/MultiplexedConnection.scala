@@ -130,11 +130,14 @@ final private[client] class MultiplexedConnection private (
     // emit under the lock so the enqueue is ordered with the state transition: a socket dropping immediately after cannot deliver
     // Disconnected before this Connected (the same lock serializes both)
     locked {
-      current = conn
-      state = State.Live
-      generation = generation.next
-      startWatchdog()
-      events.emit(SageEvent.Connection.Connected(node))
+      if (conn.isTerminated) scheduleReconnect(0)
+      else {
+        current = conn
+        state = State.Live
+        generation = generation.next
+        startWatchdog()
+        events.emit(SageEvent.Connection.Connected(node))
+      }
     }
   }
 
@@ -179,7 +182,7 @@ final private[client] class MultiplexedConnection private (
       try {
         val conn = establish()
         val live = locked {
-          if (state == State.Reconnecting) {
+          if (state == State.Reconnecting && !conn.isTerminated) {
             current = conn
             state = State.Live
             generation = generation.next
@@ -187,7 +190,10 @@ final private[client] class MultiplexedConnection private (
             true
           } else false
         }
-        if (!live) conn.close()
+        if (!live) {
+          conn.close()
+          locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1))
+        }
       } catch {
         case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1))
       }
@@ -245,6 +251,9 @@ final private[client] class MultiplexedConnection private (
     @volatile private var lastReplyAtMillis: Long    = scheduler.nowMillis
     @volatile private var drainLatch: CountDownLatch = null
     @volatile private var aborted: Boolean           = false
+    @volatile private var terminated: Boolean        = false
+
+    def isTerminated: Boolean = terminated
 
     // transportRef is published before start()'s blocking connect, so a concurrent close() can abort it; `aborted` covers the
     // narrow gap where close() lands before the transport is published.
@@ -347,6 +356,7 @@ final private[client] class MultiplexedConnection private (
       }
 
     private def onClosed(): Unit = {
+      terminated = true
       var entry = pending.poll()
       while (entry != null) {
         entry.fail(ConnectionLost(mayHaveExecuted = true))
