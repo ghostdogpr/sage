@@ -9,7 +9,7 @@ import scala.concurrent.duration.*
 import sage.Bytes
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, WatchdogConfig}
-import sage.commands.Connection
+import sage.commands.{Command, Connection}
 import sage.protocol.Frame
 
 class SubscriptionConnectionSpec extends munit.FunSuite {
@@ -37,7 +37,8 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     isLive: () => Boolean = () => true,
     watchdog: WatchdogConfig = noWatchdog,
     bufferSize: Int = 16,
-    respond: Bytes => Seq[Frame] = serverResponder
+    respond: Bytes => Seq[Frame] = serverResponder,
+    bootstrap: Vector[Command[?]] = Vector(Connection.ping())
   ): (SubscriptionConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
@@ -46,7 +47,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       transports += transport
       transport
     }
-    val connection                                      = new SubscriptionConnection(factory, Vector(Connection.ping()), scheduler, fixedBackoff, watchdog, 1000L, bufferSize, isLive)
+    val connection                                      = new SubscriptionConnection(factory, bootstrap, scheduler, fixedBackoff, watchdog, 1000L, bufferSize, isLive)
     (connection, scheduler, transports)
   }
 
@@ -175,6 +176,30 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     connection.close()
     assertEquals(nextBlocking(sub), None)
     assertEquals(transports.head.closeCount, 1)
+  }
+
+  test("a watchdog kill does not poison the next generation (no stale pingSentAtMillis kill-loop)") {
+    val silentToPing: Bytes => Seq[Frame]   = { payload =>
+      val s = payload.asUtf8String
+      if (s.contains("\r\nSELECT\r\n")) Seq(Frame.SimpleString("OK"))
+      else if (s.contains("\r\nSUBSCRIBE\r\n")) confirmations("subscribe", s)
+      else Nil
+    }
+    val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
+    val (connection, scheduler, transports) = make(watchdog = watchdog, respond = silentToPing, bootstrap = Vector(Connection.select(0)))
+    val sub                                 = connection.subscribeChannels(Vector("news"))
+    assertEquals(transports.size, 1)
+
+    scheduler.advance(250.millis)
+    assertEquals(transports.size, 2, "the killed connection reconnects to a fresh transport")
+    assertEquals(transports.head.closeCount, 1, "the unresponsive original connection was killed by the watchdog")
+
+    scheduler.advance(200.millis)
+    assertEquals(transports(1).closeCount, 0, "the fresh generation must not be killed by a ping left outstanding on the dead one")
+    assertEquals(transports.size, 2, "no further reconnect churn")
+
+    transports(1).emit(message("news", "after-reconnect"))
+    assertChannel(nextBlocking(sub), "news", "after-reconnect")
   }
 
   test("subscribing to multiple channels in one call delivers messages from any of them") {

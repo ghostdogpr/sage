@@ -156,6 +156,8 @@ final private[client] class SubscriptionConnection(
       current = conn
       subscribeSent = 0L
       subscribeConfirmed = 0L
+      pingSentAtMillis = 0L
+      lastReplyAtMillis = scheduler.nowMillis
       val channels = channelSinks.keys.toVector
       val patterns = patternSinks.keys.toVector
       val shards   = shardSinks.keys.toVector
