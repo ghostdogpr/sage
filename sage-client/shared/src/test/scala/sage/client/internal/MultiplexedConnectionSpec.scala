@@ -468,6 +468,26 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
   }
 
+  test("graceful drain waits for a command accepted but still queued unwritten, instead of dropping it") {
+    val (connection, _, transports) = make(autoWrite = false, closeTimeout = 2.seconds)
+    var result: Option[Try[String]] = None
+    connection.submit(Connection.ping(), r => result = Some(r))
+
+    val drainer = new Thread(() => {
+      Thread.sleep(20)
+      try {
+        transports.head.writeNext()
+        transports.head.emit(Frame.SimpleString("PONG"))
+      } catch { case _: Throwable => () }
+    })
+    drainer.start()
+    connection.close()
+    drainer.join()
+
+    assertEquals(result, Some(Success("PONG")))
+    assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
+  }
+
   test("graceful drain force-closes a straggler at the timeout, failing it as possibly executed") {
     val (connection, _, transports) = make(autoWrite = false, closeTimeout = 20.millis)
     var result: Option[Try[String]] = None
