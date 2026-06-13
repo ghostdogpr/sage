@@ -29,7 +29,7 @@ private[sage] object HelloReply {
       case Some(Frame.BulkString(value))   => Right(value.asUtf8String)
       case Some(Frame.SimpleString(value)) => Right(value)
       case Some(other)                     => Left(DecodeError(s"string for '$name'", Frame.describe(other)))
-      case None                            => Left(DecodeError(s"map entry '$name'", "nothing"))
+      case None                            => Left(DecodeError(s"map entry '$name'", "absent"))
     }
 
   // RESP3 is the only supported protocol, so any other proto value is a decode failure.
@@ -38,6 +38,6 @@ private[sage] object HelloReply {
       case Some(Frame.Integer(3))     => Right(3)
       case Some(Frame.Integer(value)) => Left(DecodeError("proto 3", s"proto $value"))
       case Some(other)                => Left(DecodeError("integer for 'proto'", Frame.describe(other)))
-      case None                       => Left(DecodeError("map entry 'proto'", "nothing"))
+      case None                       => Left(DecodeError("map entry 'proto'", "absent"))
     }
 }

@@ -162,9 +162,9 @@ trait CommandRunner[F[_]] {
     * Atomically sets several key/value pairs with a shared `expiry` and set `condition` (Valkey `MSETEX`), returning whether applied.
     */
   final def msetEx[K: KeyCodec, V: ValueCodec](
-    condition: SetCondition = SetCondition.Always,
-    expiry: SetExpiry = SetExpiry.Clear
-  )(first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.msetEx(condition, expiry)(first, rest*))
+    expiry: SetExpiry = SetExpiry.Clear,
+    condition: SetCondition = SetCondition.Always
+  )(first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.msetEx(expiry, condition)(first, rest*))
 
   /**
     * Increments the integer at `key` (Valkey `INCREX`), optionally clamping to bounds and updating expiry; see [[sage.commands.IncrExResult]].
@@ -556,9 +556,9 @@ trait CommandRunner[F[_]] {
     */
   final def hSetEx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
     key: K,
-    condition: HSetExCondition = HSetExCondition.Always,
-    expiry: SetExpiry = SetExpiry.Clear
-  )(first: (F0, V), rest: (F0, V)*): F[Boolean] = run(Hashes.hSetEx(key, condition, expiry)(first, rest*))
+    expiry: SetExpiry = SetExpiry.Clear,
+    condition: HSetExCondition = HSetExCondition.Always
+  )(first: (F0, V), rest: (F0, V)*): F[Boolean] = run(Hashes.hSetEx(key, expiry, condition)(first, rest*))
 
   /**
     * Prepends the given values to the list at `key` (left), returning the new length.
@@ -807,11 +807,9 @@ trait CommandRunner[F[_]] {
     */
   final def zAddIncr[K: KeyCodec, V: ValueCodec](
     key: K,
-    member: V,
-    score: Double,
     condition: ZAddCondition = ZAddCondition.Always
-  ): F[Option[Double]] =
-    run(SortedSets.zAddIncr(key, member, score, condition))
+  )(member: V, score: Double): F[Option[Double]] =
+    run(SortedSets.zAddIncr(key, condition)(member, score))
 
   /**
     * Returns the number of members in the sorted set at `key`.

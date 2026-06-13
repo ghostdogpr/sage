@@ -136,7 +136,7 @@ private[sage] object Keys {
   private val Copy      = Bytes.utf8("COPY")
   private val Auth      = Bytes.utf8("AUTH")
   private val Auth2     = Bytes.utf8("AUTH2")
-  private val Keyword   = Bytes.utf8("KEYS")
+  private val KeysWord  = Bytes.utf8("KEYS")
   private val Encoding  = Bytes.utf8("ENCODING")
   private val RefCount  = Bytes.utf8("REFCOUNT")
 
@@ -314,7 +314,7 @@ private[sage] object Keys {
         (if (copy) Vector(Copy) else Vector.empty) ++
         (if (replace) Vector(Replace) else Vector.empty) ++
         authArgs(auth) ++
-        (Keyword +: keys)
+        (KeysWord +: keys)
     Command("MIGRATE", Vector.range(args.size - keys.size, args.size), args, migrateResult)
   }
 

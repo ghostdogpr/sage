@@ -243,8 +243,8 @@ private[sage] object Hashes {
 
   def hSetEx[K, F, V](
     key: K,
-    condition: HSetExCondition = HSetExCondition.Always,
-    expiry: SetExpiry = SetExpiry.Clear
+    expiry: SetExpiry = SetExpiry.Clear,
+    condition: HSetExCondition = HSetExCondition.Always
   )(first: (F, V), rest: (F, V)*)(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Boolean] =
     Command(
       "HSETEX",

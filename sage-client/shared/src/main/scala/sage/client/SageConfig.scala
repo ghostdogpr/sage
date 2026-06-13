@@ -235,6 +235,7 @@ object SageConfig {
           case '%' if i + 2 < component.length && isHex(component.charAt(i + 1)) && isHex(component.charAt(i + 2)) =>
             out.write(Integer.parseInt(component.substring(i + 1, i + 3), 16)); i += 3
           case '%'                                                                                                 => fail = true
+          case c if c < 128                                                                                        => out.write(c.toInt); i += 1
           case c                                                                                                   => out.write(c.toString.getBytes(StandardCharsets.UTF_8)); i += 1
         }
       if (fail) Left(s"invalid redis URI '$uri': malformed percent-encoding in $label")

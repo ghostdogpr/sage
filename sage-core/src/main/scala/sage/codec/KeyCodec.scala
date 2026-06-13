@@ -70,7 +70,7 @@ object KeyCodec {
   given bytes: KeyCodec[Bytes] = instance(identity, Right(_))
 
   /**
-    * Raw `Array[Byte]`, copied at the boundary in both directions.
+    * Raw `Array[Byte]`, copied at the boundary in both directions (see [[sage.Bytes.fromArray]]/[[sage.Bytes.toArray]]).
     */
   given byteArray: KeyCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
 

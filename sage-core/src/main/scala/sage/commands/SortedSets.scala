@@ -107,7 +107,7 @@ private[sage] object SortedSets {
       Decode.long
     )
 
-  def zAddIncr[K, V](key: K, member: V, score: Double, condition: ZAddCondition = ZAddCondition.Always)(
+  def zAddIncr[K, V](key: K, condition: ZAddCondition = ZAddCondition.Always)(member: V, score: Double)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Option[Double]] =

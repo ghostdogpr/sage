@@ -109,11 +109,11 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
   test("HSETEX sets fields with a shared TTL and honors FNX/FXX") {
     withClient { client =>
       for {
-        created <- client.hSetEx("hfe-setex", HSetExCondition.IfNoneExist, SetExpiry.In(100.seconds))(("a", "1"), ("b", "2"))
+        created <- client.hSetEx("hfe-setex", SetExpiry.In(100.seconds), HSetExCondition.IfNoneExist)(("a", "1"), ("b", "2"))
         ttl     <- client.hTtl("hfe-setex")("a")
-        blocked <- client.hSetEx("hfe-setex", HSetExCondition.IfNoneExist)(("a", "9"))
+        blocked <- client.hSetEx("hfe-setex", condition = HSetExCondition.IfNoneExist)(("a", "9"))
         aStill  <- client.hGet[String, String, String]("hfe-setex", "a")
-        updated <- client.hSetEx("hfe-setex", HSetExCondition.IfAllExist, SetExpiry.KeepTtl)(("a", "10"))
+        updated <- client.hSetEx("hfe-setex", SetExpiry.KeepTtl, HSetExCondition.IfAllExist)(("a", "10"))
         aNew    <- client.hGet[String, String, String]("hfe-setex", "a")
       } yield {
         assertEquals(created, true)

@@ -180,8 +180,8 @@ object CommandSamples {
       SortedSets.zAdd("z", ZAddCondition.IfExistsAndGreater, changed = true)(("a", 1.0)),
       Vector("ZADD", "z", "XX", "GT", "CH", "1.0", "a")
     ),
-    Sample(SortedSets.zAddIncr("z", "a", 1.5), Vector("ZADD", "z", "INCR", "1.5", "a")),
-    Sample(SortedSets.zAddIncr("z", "a", 1.5, ZAddCondition.IfExists), Vector("ZADD", "z", "XX", "INCR", "1.5", "a")),
+    Sample(SortedSets.zAddIncr("z")("a", 1.5), Vector("ZADD", "z", "INCR", "1.5", "a")),
+    Sample(SortedSets.zAddIncr("z", ZAddCondition.IfExists)("a", 1.5), Vector("ZADD", "z", "XX", "INCR", "1.5", "a")),
     Sample(SortedSets.zCard("z"), Vector("ZCARD", "z")),
     Sample(SortedSets.zScore[String, String]("z", "a"), Vector("ZSCORE", "z", "a")),
     Sample(SortedSets.zMScore[String, String]("z", "a", "b"), Vector("ZMSCORE", "z", "a", "b")),
@@ -288,7 +288,7 @@ object CommandSamples {
     Sample(Hashes.hGetEx[String, String, String]("h", GetExpiry.Persist)("f"), Vector("HGETEX", "h", "PERSIST", "FIELDS", "1", "f")),
     Sample(Hashes.hSetEx("h")(("f", "v")), Vector("HSETEX", "h", "FIELDS", "1", "f", "v")),
     Sample(
-      Hashes.hSetEx("h", HSetExCondition.IfNoneExist, SetExpiry.In(90.seconds))(("f1", "v1"), ("f2", "v2")),
+      Hashes.hSetEx("h", SetExpiry.In(90.seconds), HSetExCondition.IfNoneExist)(("f1", "v1"), ("f2", "v2")),
       Vector("HSETEX", "h", "FNX", "EX", "90", "FIELDS", "2", "f1", "v1", "f2", "v2")
     ),
     Sample(Keys.sort[String, String]("k"), Vector("SORT", "k")),

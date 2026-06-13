@@ -4,7 +4,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
 
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
@@ -93,7 +93,7 @@ final private[client] class NodePool(
       val absent = established.keysIterator.filterNot(keep).toVector
       absent.flatMap(node => established.remove(node))
     }
-    gone.foreach(nc => scheduler.after(scala.concurrent.duration.Duration.Zero)(nc.close()))
+    gone.foreach(nc => scheduler.after(Duration.Zero)(nc.close()))
   }
 
   def close(): Unit = {

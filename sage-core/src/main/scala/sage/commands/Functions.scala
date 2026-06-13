@@ -110,14 +110,12 @@ private[sage] object Functions {
       allMasters = true
     )
 
-  private val decodeLibraries: Frame => Either[DecodeError, Vector[LibraryInfo]] = Decode.vector(decodeLibrary)
-
   def functionList(libraryName: Option[String] = None, withCode: Boolean = false): Command[Vector[LibraryInfo]] =
     Command(
       "FUNCTION",
       Command.NoKeys,
       List +: (libraryName.toVector.flatMap(name => Vector(LibraryName, Bytes.utf8(name))) ++ (if (withCode) Vector(WithCode) else Vector.empty)),
-      decodeLibraries
+      Decode.vector(decodeLibrary)
     )
 
   private val decodeStats: Frame => Either[DecodeError, FunctionStats] =

@@ -15,8 +15,8 @@ class SortedSetsSpec extends munit.FunSuite {
   }
 
   test("ZADD INCR decodes the new score or None when the condition skipped the write") {
-    assertEquals(Reply.run(SortedSets.zAddIncr("z", "a", 1.0), Frame.Double(3.0)), Right(Some(3.0)))
-    assertEquals(Reply.run(SortedSets.zAddIncr("z", "a", 1.0, ZAddCondition.IfNotExists), Frame.Null), Right(None))
+    assertEquals(Reply.run(SortedSets.zAddIncr("z")("a", 1.0), Frame.Double(3.0)), Right(Some(3.0)))
+    assertEquals(Reply.run(SortedSets.zAddIncr("z", ZAddCondition.IfNotExists)("a", 1.0), Frame.Null), Right(None))
   }
 
   test("ZMSCORE decodes the score array, keeping missing members as None") {

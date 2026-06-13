@@ -181,7 +181,7 @@ private[sage] object Strings {
     Command(
       "SET",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(value)) ++ conditionArgs(condition) :+ Get :++ setExpiryArgs(expiry),
+      Vector(keyCodec.encode(key), valueCodec.encode(value)) ++ conditionArgs(condition) ++ Vector(Get) ++ setExpiryArgs(expiry),
       Decode.optionalValue
     )
 
@@ -223,7 +223,7 @@ private[sage] object Strings {
   ): Command[Boolean] =
     Command("DELEX", Command.FirstKey, keyCodec.encode(key) +: delexConditionArgs(condition), Decode.flag)
 
-  def msetEx[K, V](condition: SetCondition = SetCondition.Always, expiry: SetExpiry = SetExpiry.Clear)(
+  def msetEx[K, V](expiry: SetExpiry = SetExpiry.Clear, condition: SetCondition = SetCondition.Always)(
     first: (K, V),
     rest: (K, V)*
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] = {

@@ -35,9 +35,9 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
         _        <- client.zAdd("zset-cond")(("a", 5.0))
         skipNew  <- client.zAdd("zset-cond", ZAddCondition.IfExists)(("b", 1.0))
         addedNew <- client.zAdd("zset-cond", ZAddCondition.IfNotExists)(("b", 1.0))
-        lower    <- client.zAddIncr("zset-cond", "a", -1.0, ZAddCondition.IfExists)
-        skipped  <- client.zAddIncr("zset-cond", "c", 1.0, ZAddCondition.IfExists)
-        gtNoBump <- client.zAddIncr("zset-cond", "a", -1.0, ZAddCondition.IfExistsAndGreater)
+        lower    <- client.zAddIncr("zset-cond", ZAddCondition.IfExists)("a", -1.0)
+        skipped  <- client.zAddIncr("zset-cond", ZAddCondition.IfExists)("c", 1.0)
+        gtNoBump <- client.zAddIncr("zset-cond", ZAddCondition.IfExistsAndGreater)("a", -1.0)
       } yield {
         assertEquals(skipNew, 0L)
         assertEquals(addedNew, 1L)

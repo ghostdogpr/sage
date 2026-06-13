@@ -192,7 +192,7 @@ class RespParserSpec extends munit.FunSuite {
   }
 
   test("rejects a negative aggregate length") {
-    assert(parseError("%-1\r\n").message.contains("invalid aggregate length"))
+    assert(parseError("%-1\r\n").message.contains("invalid map length"))
   }
 
   test("is poisoned after a protocol error") {

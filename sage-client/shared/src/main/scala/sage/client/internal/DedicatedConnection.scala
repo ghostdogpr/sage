@@ -148,7 +148,7 @@ final private[client] class DedicatedConnection private (
     private val remaining = new AtomicInteger(n)
     private val done      = new AtomicBoolean(false)
 
-    val payload: Bytes = Bytes.concat(commands.map(_.encode))
+    val payload: Bytes = Bytes.concatBy(commands)(_.encode)
 
     def writeAttempted(): Unit = {
       var i = 0

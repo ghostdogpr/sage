@@ -683,7 +683,7 @@ final private[client] class ClusterLive(
     }
 
     private def isReleased: Boolean = {
-      lock.lock();
+      lock.lock()
       try released
       finally lock.unlock()
     }

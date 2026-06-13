@@ -224,8 +224,8 @@ final private[sage] class RespParser {
         case '*'   => openElements(pos, Arr, allowNull = true)
         case '~'   => openElements(pos, Set, allowNull = false)
         case '>'   => openElements(pos, Push, allowNull = false)
-        case '%'   => openPairs(pos, Map, "invalid aggregate length")
-        case '|'   => openPairs(pos, Attr, "invalid attribute length")
+        case '%'   => openPairs(pos, Map)
+        case '|'   => openPairs(pos, Attr)
         case other =>
           fail(f"unknown frame type byte 0x${other.toByte}%02x")
       }
@@ -268,7 +268,7 @@ final private[sage] class RespParser {
   private def openElements(pos: Int, kind: Byte, allowNull: Boolean): Int = {
     val count = readLength(pos + 1, allowNull)
     if (count == Incomplete) Incomplete
-    else if (count == Invalid) fail(s"invalid aggregate length: '${headerText(pos + 1)}'")
+    else if (count == Invalid) fail(s"${lengthErrorFor(kind)}: '${headerText(pos + 1)}'")
     else if (count == -1) leaf(cursor, Frame.Null)
     else {
       readPos = cursor
@@ -279,10 +279,10 @@ final private[sage] class RespParser {
     }
   }
 
-  private def openPairs(pos: Int, kind: Byte, lengthError: String): Int = {
+  private def openPairs(pos: Int, kind: Byte): Int = {
     val count = readLength(pos + 1, allowNull = false)
     if (count == Incomplete) Incomplete
-    else if (count == Invalid) fail(s"$lengthError: '${headerText(pos + 1)}'")
+    else if (count == Invalid) fail(s"${lengthErrorFor(kind)}: '${headerText(pos + 1)}'")
     else {
       readPos = cursor
       val agg = new Agg(kind, count)
@@ -389,6 +389,15 @@ final private[sage] class RespParser {
   final private val Push: Byte = 2
   final private val Map: Byte  = 3
   final private val Attr: Byte = 4
+
+  private def lengthErrorFor(kind: Byte): String = kind match {
+    case Arr  => "invalid array length"
+    case Set  => "invalid set length"
+    case Push => "invalid push length"
+    case Map  => "invalid map length"
+    case Attr => "invalid attribute length"
+    case _    => "invalid aggregate length"
+  }
 
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8
