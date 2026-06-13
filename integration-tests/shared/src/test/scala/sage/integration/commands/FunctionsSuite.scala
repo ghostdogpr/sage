@@ -32,6 +32,23 @@ abstract class FunctionsSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("FCALL_RO invokes a function flagged no-writes") {
+    withClient { client =>
+      for {
+        _  <- client.functionFlush(Some(FlushMode.Sync))
+        _  <- client.functionLoad(
+                """#!lua name=saregg
+                  |redis.register_function{function_name='saregg_ro', callback=function(keys, args) return args[1] end, flags={'no-writes'}}
+                  |""".stripMargin
+              )
+        ro <- client.fCallRo("saregg_ro", Seq.empty[String], Seq("hi"))
+      } yield ro match {
+        case Frame.BulkString(b) => assertEquals(b.asUtf8String, "hi")
+        case other               => fail(s"expected bulk string, got $other")
+      }
+    }
+  }
+
   test("FUNCTION LIST and STATS describe loaded libraries; DELETE removes them") {
     withClient { client =>
       for {

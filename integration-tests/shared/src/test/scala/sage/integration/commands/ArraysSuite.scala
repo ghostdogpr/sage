@@ -122,6 +122,8 @@ class ArraysSuite extends ServerSuite(Images.redis) {
         min    <- client.arOpMin("ar-op", 0L, 2L)
         max    <- client.arOpMax("ar-op", 0L, 2L)
         and    <- client.arOpAnd("ar-op", 0L, 2L)
+        or     <- client.arOpOr("ar-op", 0L, 2L)
+        xor    <- client.arOpXor("ar-op", 0L, 2L)
         used   <- client.arOpUsed("ar-op", 0L, 2L)
         atMost <- client.arOpMatch("ar-op", 0L, 2L, "20")
       } yield {
@@ -129,6 +131,8 @@ class ArraysSuite extends ServerSuite(Images.redis) {
         assertEquals(min, Some(10.0))
         assertEquals(max, Some(30.0))
         assertEquals(and, Some(0L))
+        assertEquals(or, Some(30L))
+        assertEquals(xor, Some(0L))
         assertEquals(used, 3L)
         assertEquals(atMost, 1L)
       }

@@ -232,6 +232,40 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
       } yield assertEquals(page.items.toMap, Map("a" -> 1.0, "b" -> 2.0, "c" -> 3.0))
     }
   }
+
+  test("ZUNION ZINTER WITHSCORES, ZDIFF WITHSCORES, and ZREVRANK WITHSCORE return members with their scores") {
+    withClient { client =>
+      for {
+        _       <- client.zAdd("zgap-a")(("x", 1.0), ("y", 2.0))
+        _       <- client.zAdd("zgap-b")(("y", 3.0), ("z", 4.0))
+        union   <- client.zUnion[String, String]("zgap-a", "zgap-b")()
+        inter   <- client.zInterWithScores[String, String]("zgap-a", "zgap-b")()
+        diff    <- client.zDiffWithScores[String, String]("zgap-a", "zgap-b")
+        revRank <- client.zRevRankWithScore[String, String]("zgap-a", "x")
+      } yield {
+        assertEquals(union.toSet, Set("x", "y", "z"))
+        assertEquals(inter, Vector("y" -> 5.0))
+        assertEquals(diff, Vector("x" -> 1.0))
+        assertEquals(revRank, Some((1L, 1.0)))
+      }
+    }
+  }
+
+  test("ZPOPMAX with a count and BZPOPMAX pop the highest-scored members") {
+    withClient { client =>
+      for {
+        _      <- client.zAdd("zgap-pop")(("a", 1.0), ("b", 2.0), ("c", 3.0))
+        topTwo <- client.zPopMaxCount[String, String]("zgap-pop", 2L)
+        _      <- client.zAdd("zgap-bz")(("a", 1.0), ("b", 2.0))
+        bzMax  <- client.bzPopMax[String, String]("zgap-bz")(BlockTimeout.After(1.second))
+        none   <- client.bzPopMax[String, String]("zgap-bz-missing")(BlockTimeout.After(100.millis))
+      } yield {
+        assertEquals(topTwo, Vector("c" -> 3.0, "b" -> 2.0))
+        assertEquals(bzMax, Some(("zgap-bz", "b", 2.0)))
+        assertEquals(none, None)
+      }
+    }
+  }
 }
 
 class RedisSortedSetsSuite extends SortedSetsSuite(Images.redis)

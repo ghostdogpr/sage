@@ -93,12 +93,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.docker-images
-          key: docker-images-v1-redis8-valkey8
+          # keep the tags here in sync with integration-tests Images.scala; bump the key when they change
+          key: docker-images-v2-redis8.8.0-valkey9.1.0
       - name: Pull and save server images
         if: steps.images.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.docker-images
-          for img in redis:8 valkey/valkey:8; do
+          for img in redis:8.8.0 valkey/valkey:9.1.0; do
             docker pull "$img"
             docker save "$img" -o ~/.docker-images/"${img//[\/:]/_}".tar
           done

@@ -35,10 +35,12 @@ abstract class ScriptingSuite(image: String) extends ServerSuite(image) {
       for {
         sha    <- client.scriptLoad("return 7")
         ran    <- client.evalSha(sha)
+        ranRo  <- client.evalShaRo(sha)
         exists <- client.scriptExists(sha, absent)
       } yield {
         assertEquals(sha.length, 40)
         assertEquals(ran, Frame.Integer(7L))
+        assertEquals(ranRo, Frame.Integer(7L))
         assertEquals(exists, Vector(true, false))
       }
     }

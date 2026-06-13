@@ -58,6 +58,25 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("HPTTL and HPEXPIRETIME read the millisecond-precision TTL and absolute deadline") {
+    withClient { client =>
+      val at = Instant.ofEpochSecond(Instant.now().getEpochSecond + 3600)
+      for {
+        _    <- client.hSet("hfe-px", ("a", "1"))
+        _    <- client.hExpireAt("hfe-px", at)("a")
+        ttl  <- client.hpTtl("hfe-px")("a", "missing")
+        time <- client.hpExpireTime("hfe-px")("a")
+      } yield {
+        assert(ttl(0) match {
+          case FieldTtl.Expires(d) => d > Duration.Zero
+          case _                   => false
+        })
+        assertEquals(ttl(1), FieldTtl.NoField)
+        assertEquals(time, Vector(FieldExpiryTime.At(at)))
+      }
+    }
+  }
+
   test("HGETDEL returns field values and removes them") {
     withClient { client =>
       for {
