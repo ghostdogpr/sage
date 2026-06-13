@@ -103,6 +103,8 @@ final private[client] class DedicatedPool(
         available.signalAll()
       }
 
+  private[internal] def wakeWaiters(): Unit = locked(available.signalAll())
+
   def close(): Unit = {
     val toClose = locked {
       closing = true
@@ -239,8 +241,8 @@ private[client] object DedicatedPool {
     connection: MultiplexedConnection,
     config: DedicatedPoolConfig,
     connectTimeoutMillis: Long
-  ): DedicatedPool =
-    new DedicatedPool(
+  ): DedicatedPool = {
+    val pool = new DedicatedPool(
       factory,
       bootstrap,
       scheduler,
@@ -250,6 +252,9 @@ private[client] object DedicatedPool {
       config,
       connectTimeoutMillis
     )
+    connection.setOnLivenessLost(() => pool.wakeWaiters())
+    pool
+  }
 
   final case class Idle(connection: DedicatedConnection, idleSinceMillis: Long)
 }

@@ -46,6 +46,9 @@ final private[client] class MultiplexedConnection private (
   private var watchdogHandle: Scheduler.Cancelable = null
   // bumped when a fresh socket becomes live; the dedicated pool stamps borrowed connections with it to detect ones outliving a reconnect
   private var generation: Generation               = Generation.initial
+  @volatile private var onLivenessLost: () => Unit = () => ()
+
+  private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -191,18 +194,23 @@ final private[client] class MultiplexedConnection private (
   }
 
   // Connections that never became `current` (a failed establish) are ignored here; their caller handles them.
-  private def onConnTerminated(conn: Conn): Unit =
+  private def onConnTerminated(conn: Conn): Unit = {
     // Disconnected fires only on the Live edge (a fresh loss, not a failed reconnect attempt), under the lock so it is ordered after the
     // Connected of the connection it ends
-    locked {
+    val lostLiveness = locked {
       if (conn eq current)
         state match {
-          case State.Live         => state = State.Reconnecting; scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node))
-          case State.Reconnecting => scheduleReconnect(0)
-          case State.Draining     => state = State.Closed; stopWatchdog()
-          case State.Closed       => ()
+          case State.Live         =>
+            state = State.Reconnecting; scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node)); true
+          case State.Reconnecting => scheduleReconnect(0); false
+          case State.Draining     => state = State.Closed; stopWatchdog(); false
+          case State.Closed       => false
         }
+      else false
     }
+    // outside the lock: acquire holds the pool lock then calls isLive on this connection's lock, so the reverse order here would deadlock
+    if (lostLiveness) onLivenessLost()
+  }
 
   private def startWatchdog(): Unit =
     if (watchdog.enabled && watchdogHandle == null)

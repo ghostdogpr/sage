@@ -6,7 +6,7 @@ import scala.util.{Failure, Success, Try}
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
-import sage.client.DedicatedPoolConfig
+import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
 import sage.commands.{BlockTimeout, Connection, Lists}
 import sage.protocol.Frame
 
@@ -238,5 +238,39 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val (pool, _, transports) = make(replyWith(Nil), isLive = () => false)
     intercept[NotConnected](pool.acquireForTransaction())
     assertEquals(transports.size, 0)
+  }
+
+  test("a parked acquire is woken to fail fast NotConnected when the multiplexed connection loses liveness") {
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil)); transports += t; t
+    }
+    val connection                                      = MultiplexedConnection.connect(
+      factory,
+      scheduler,
+      Vector(Connection.hello()),
+      BackoffConfig(1.milli, 1.milli, 1.0),
+      WatchdogConfig(enabled = false),
+      1.second,
+      Duration.Zero
+    )
+    val config                                          = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 10.seconds, idleTimeout = Duration.Inf)
+    val pool                                            = DedicatedPool.forConnection(factory, Vector(Connection.hello()), scheduler, connection, config, 1000L)
+
+    val held = pool.acquireForTransaction()
+
+    @volatile var result: Option[Try[DedicatedConnection]] = None
+    val waiter                                             = new Thread(() => result = Some(Try(pool.acquireForTransaction())))
+    waiter.start()
+    Thread.sleep(100) // let the second acquire park in awaitNanos
+
+    transports.head.emit(Frame.SimpleString("stray"))
+    assert(!connection.isLive)
+
+    waiter.join(3000)
+    assert(!waiter.isAlive, "the parked waiter must be woken, not sleep out the 10s acquireTimeout")
+    assert(result.exists(_.failed.toOption.exists(_.isInstanceOf[NotConnected])), s"expected NotConnected, got $result")
+    pool.releaseTransaction(held, reusable = false)
   }
 }
