@@ -76,6 +76,24 @@ class ConnectSpec extends munit.FunSuite {
     }
   }
 
+  test("a non-positive finite dedicatedPool.idleTimeout is rejected by validation, not thrown after connecting") {
+    Client.connect(SageConfig(dedicatedPool = DedicatedPoolConfig(idleTimeout = Duration.Zero))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+    }
+  }
+
+  test("a non-finite, non-Inf dedicatedPool.idleTimeout (MinusInf) is rejected; only Duration.Inf disables the sweep") {
+    Client.connect(SageConfig(dedicatedPool = DedicatedPoolConfig(idleTimeout = Duration.MinusInf))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+    }
+  }
+
+  test("clientCache.maxBytes <= 0 with caching enabled is rejected by validation") {
+    Client.connect(SageConfig(clientCache = CacheConfig(enabled = true, maxBytes = 0L))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+    }
+  }
+
   test("readFrom = ReplicaPreferred on a Standalone topology passes validation (degrades to the one node)") {
     // it may connect (a local server) or fail to connect (none) — either way it must not be rejected by validation
     Client
