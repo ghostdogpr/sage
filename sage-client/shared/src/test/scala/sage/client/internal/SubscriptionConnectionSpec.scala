@@ -210,4 +210,37 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     transports.head.emit(message("a", "from-a"))
     assertChannel(nextBlocking(sub), "a", "from-a")
   }
+
+  test("a socket dying in the establish->live window fires onTerminated in cluster mode instead of going silently Live") {
+    final class DyingAfterBootstrap(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
+      private var bootstrapped             = false
+      def start(): Unit                    = ()
+      def send(item: Transport.Item): Unit = {
+        item.writeAttempted()
+        serverResponder(item.payload).foreach(onFrame)
+        if (!bootstrapped) { bootstrapped = true; onClosed() }
+      }
+      def close(): Unit                    = ()
+    }
+    var terminatedCalled = false
+    val scheduler                                       = new ManualScheduler
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => new DyingAfterBootstrap(onFrame, onClosed)
+    val connection                                      = new SubscriptionConnection(
+      factory,
+      Vector(Connection.ping()),
+      scheduler,
+      fixedBackoff,
+      noWatchdog,
+      1000L,
+      16,
+      () => true,
+      cluster = true,
+      onTerminated = () => terminatedCalled = true
+    )
+
+    val sink = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    connection.attach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)
+
+    assert(terminatedCalled, "a connection that died in the establish->live window must notify the manager, not go silently Live")
+  }
 }

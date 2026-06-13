@@ -151,31 +151,43 @@ final private[client] class SubscriptionConnection(
 
   // bring a freshly-established socket Live, resubscribing everything registered (counters reset to this generation). In cluster mode it runs
   // once per connection with at most one Slot's worth of Shard channels registered, so the single SSUBSCRIBE never spans slots (CROSSSLOT).
-  private def goLive(conn: Conn): Unit = locked {
-    if (state == State.Establishing || state == State.Reconnecting) {
-      current = conn
-      subscribeSent = 0L
-      subscribeConfirmed = 0L
-      pingSentAtMillis = 0L
-      lastReplyAtMillis = scheduler.nowMillis
-      val channels = channelSinks.keys.toVector
-      val patterns = patternSinks.keys.toVector
-      val shards   = shardSinks.keys.toVector
-      if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
-      if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
-      if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
-      if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
-        // everything closed during the establish; tear back down rather than hold an idle socket open
-        conn.close()
-        current = null
-        state = State.Idle
+  private def goLive(conn: Conn): Unit = {
+    var reconnect = false
+    var notify    = false
+    locked {
+      if (state != State.Establishing && state != State.Reconnecting) conn.close()
+      else if (conn.isTerminated) {
+        if (cluster) { stopWatchdog(); current = null; state = State.Closed; notify = true }
+        else { state = State.Reconnecting; reconnect = true }
+        established.signalAll()
+        confirmed.signalAll()
       } else {
-        state = State.Live
-        startWatchdog()
+        current = conn
+        subscribeSent = 0L
+        subscribeConfirmed = 0L
+        pingSentAtMillis = 0L
+        lastReplyAtMillis = scheduler.nowMillis
+        val channels = channelSinks.keys.toVector
+        val patterns = patternSinks.keys.toVector
+        val shards   = shardSinks.keys.toVector
+        if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
+        if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
+        if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
+        if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
+          // everything closed during the establish; tear back down rather than hold an idle socket open
+          conn.close()
+          current = null
+          state = State.Idle
+        } else {
+          state = State.Live
+          startWatchdog()
+        }
+        established.signalAll()
+        confirmed.signalAll()
       }
-      established.signalAll()
-      confirmed.signalAll()
-    } else conn.close()
+    }
+    if (reconnect) scheduleReconnect(0)
+    if (notify) onTerminated()
   }
 
   private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {
@@ -387,10 +399,13 @@ final private[client] class SubscriptionConnection(
 
   final private class Conn {
 
-    private val transportRef = new AtomicReference[Transport]()
+    private val transportRef         = new AtomicReference[Transport]()
+    @volatile private var terminated = false
+
+    def isTerminated: Boolean = terminated
 
     def start(): Unit = {
-      val transport = factory(onFrame, () => onConnClosed(this))
+      val transport = factory(onFrame, () => { terminated = true; onConnClosed(this) })
       transportRef.set(transport)
       transport.start()
     }
