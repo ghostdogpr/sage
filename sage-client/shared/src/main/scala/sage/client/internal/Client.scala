@@ -2143,6 +2143,8 @@ object Client {
       cond(config.reconnect.multiplier >= 1.0, "reconnect.multiplier must be >= 1.0"),
       cond(config.dedicatedPool.maxConnections >= 1, "dedicatedPool.maxConnections must be >= 1"),
       positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout"),
+      positiveOrInfinite(config.dedicatedPool.idleTimeout, "dedicatedPool.idleTimeout"),
+      cond(!config.clientCache.enabled || config.clientCache.maxBytes > 0L, "clientCache.maxBytes must be positive when caching is enabled"),
       cond(config.pubsub.bufferSize >= 1, "pubsub.bufferSize must be >= 1")
     ) ++ watchdog ++ (config.topology match {
       case Topology.Cluster(seeds, cluster)             =>
@@ -2168,9 +2170,11 @@ object Client {
     checks.flatten.headOption
   }
 
-  private def cond(ok: Boolean, problem: String): Option[String]             = if (ok) None else Some(problem)
-  private def port(value: Int, label: String): Option[String]                = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
-  private def positive(value: FiniteDuration, label: String): Option[String] = cond(value.toNanos > 0L, s"$label must be positive")
+  private def cond(ok: Boolean, problem: String): Option[String]                 = if (ok) None else Some(problem)
+  private def port(value: Int, label: String): Option[String]                    = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
+  private def positive(value: FiniteDuration, label: String): Option[String]     = cond(value.toNanos > 0L, s"$label must be positive")
+  private def positiveOrInfinite(value: Duration, label: String): Option[String] =
+    cond(value == Duration.Inf || (value.isFinite && value.toNanos > 0L), s"$label must be positive (or Inf)")
 
   private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
