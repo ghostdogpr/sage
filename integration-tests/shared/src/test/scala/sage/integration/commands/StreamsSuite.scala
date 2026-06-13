@@ -116,6 +116,46 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("XGROUP CREATECONSUMER/DELCONSUMER/SETID/DESTROY and XSETID manage a group and the stream's last id") {
+    withClient { client =>
+      for {
+        _         <- client.xAdd("s-mgmt", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
+        _         <- client.xGroupCreate("s-mgmt", "g", GroupStartId.At(StreamId(0L, 0L)))
+        created   <- client.xGroupCreateConsumer("s-mgmt", "g", "c1")
+        again     <- client.xGroupCreateConsumer("s-mgmt", "g", "c1")
+        delPel    <- client.xGroupDelConsumer("s-mgmt", "g", "c1")
+        _         <- client.xGroupSetId("s-mgmt", "g", GroupStartId.At(StreamId(1L, 0L)))
+        _         <- client.xSetId("s-mgmt", GroupStartId.At(StreamId(5L, 0L)))
+        info      <- client.xInfoStream[String, String, String]("s-mgmt")
+        destroyed <- client.xGroupDestroy("s-mgmt", "g")
+        groups    <- client.xInfoGroups("s-mgmt")
+      } yield {
+        assertEquals(created, true)
+        assertEquals(again, false)
+        assertEquals(delPel, 0L)
+        assertEquals(info.lastGeneratedId, StreamId(5L, 0L))
+        assertEquals(destroyed, true)
+        assert(groups.isEmpty)
+      }
+    }
+  }
+
+  test("XCLAIM and XAUTOCLAIM JUSTID transfer pending ids without the payload") {
+    withClient { client =>
+      for {
+        _       <- client.xAdd("s-justid", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
+        _       <- client.xAdd("s-justid", XAddId.Explicit(StreamId(2L, 0L)))(("f", "2"))
+        _       <- client.xGroupCreate("s-justid", "g", GroupStartId.At(StreamId(0L, 0L)))
+        _       <- client.xReadGroup[String, String, String]("g", "c1")(("s-justid", GroupReadId.New))()
+        claimed <- client.xClaimJustId("s-justid", "g", "c2", Duration.Zero)(StreamId(1L, 0L))()
+        auto    <- client.xAutoClaimJustId("s-justid", "g", "c3", Duration.Zero)
+      } yield {
+        assertEquals(claimed, Vector(StreamId(1L, 0L)))
+        assertEquals(auto.claimed, Vector(StreamId(1L, 0L), StreamId(2L, 0L)))
+      }
+    }
+  }
+
   test("XINFO STREAM FULL decodes the group PEL after a consumer has read but not acked") {
     withClient { client =>
       for {

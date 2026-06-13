@@ -61,6 +61,19 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("RPOP with a count pops several elements from the tail in pop order") {
+    withClient { client =>
+      for {
+        _    <- client.rPush("list-rpopc", "a", "b", "c", "d")
+        tail <- client.rPopCount[String, String]("list-rpopc", 2L)
+        rest <- client.lRange[String, String]("list-rpopc", 0L, -1L)
+      } yield {
+        assertEquals(tail, Vector("d", "c"))
+        assertEquals(rest, Vector("a", "b"))
+      }
+    }
+  }
+
   test("LSET LINSERT LREM and LTRIM edit the list in place") {
     withClient { client =>
       for {

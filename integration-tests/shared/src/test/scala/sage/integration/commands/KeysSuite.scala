@@ -305,6 +305,35 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("OBJECT FREQ reports access frequency under an LFU policy, None for a missing key") {
+    withClient { client =>
+      for {
+        _       <- client.configSet("maxmemory-policy" -> "allkeys-lfu")
+        _       <- client.set("keys-freq", "v")
+        freq    <- client.objectFreq("keys-freq")
+        missing <- client.objectFreq("keys-freq-missing")
+        _       <- client.configSet("maxmemory-policy" -> "noeviction")
+      } yield {
+        assert(freq.exists(_ >= 0L))
+        assertEquals(missing, None)
+      }
+    }
+  }
+
+  test("FLUSHALL empties the keyspace") {
+    withClient { client =>
+      for {
+        _      <- client.set("keys-flush", "v")
+        before <- client.exists("keys-flush")
+        _      <- client.flushAll()
+        after  <- client.exists("keys-flush")
+      } yield {
+        assertEquals(before, 1L)
+        assertEquals(after, 0L)
+      }
+    }
+  }
+
   private def scanAll(
     client: Client[CIO],
     pattern: Option[String],
