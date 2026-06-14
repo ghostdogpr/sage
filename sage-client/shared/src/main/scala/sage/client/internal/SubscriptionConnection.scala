@@ -118,8 +118,10 @@ final private[client] class SubscriptionConnection(
           case State.Establishing => established.await()
           case State.Live         =>
             val fresh = register(sink, names, kind)
-            if (fresh.nonEmpty) sendSubscribe(current, kind, fresh)
-            confirmTarget = subscribeSent
+            // wait for our own SUBSCRIBE's ack; if we sent nothing (names already subscribed), wait only for what's already confirmed, not
+            // an unrelated concurrent attach's pending ack
+            if (fresh.nonEmpty) { sendSubscribe(current, kind, fresh); confirmTarget = subscribeSent }
+            else confirmTarget = subscribeConfirmed
             settled = true
           case State.Reconnecting =>
             register(sink, names, kind) // the next successful reconnect resubscribes everything currently registered
