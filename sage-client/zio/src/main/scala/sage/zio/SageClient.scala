@@ -221,15 +221,37 @@ extension (client: SageClient) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): ZStream[Any, Throwable, Message[V]] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
+  /**
+    * Like [[subscribe]], but the returned effect completes only once the server has confirmed the SUBSCRIBE, so a publish sequenced after it
+    * cannot race the registration. Closing the `Scope` unsubscribes.
+    */
+  def subscribeScoped[V: ValueCodec](channel: String, rest: String*): ZIO[Scope, Throwable, ZStream[Any, Throwable, Message[V]]] =
+    scopedStreamOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Like [[pSubscribe]], but the returned effect completes only once the server has confirmed the PSUBSCRIBE. Closing the `Scope`
+    * unsubscribes.
+    */
+  def pSubscribeScoped[V: ValueCodec](pattern: String, rest: String*): ZIO[Scope, Throwable, ZStream[Any, Throwable, PatternMessage[V]]] =
+    scopedStreamOf(client.subscribePatterns[V](pattern, rest*))
+
+  /**
+    * Like [[sSubscribe]], but the returned effect completes only once the server has confirmed the SSUBSCRIBE. Closing the `Scope`
+    * unsubscribes.
+    */
+  def sSubscribeScoped[V: ValueCodec](channel: String, rest: String*): ZIO[Scope, Throwable, ZStream[Any, Throwable, Message[V]]] =
+    scopedStreamOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](open: Task[Subscription[Task, A]]): ZStream[Any, Throwable, A] =
-    ZStream.unwrapScoped(
-      ZIO.acquireRelease(open)(_.close.ignore).map { sub =>
-        ZStream.repeatZIOOption(sub.next.mapError(Some(_)).flatMap {
-          case Some(a) => ZIO.succeed(a)
-          case None    => ZIO.fail(None)
-        })
-      }
-    )
+    ZStream.unwrapScoped(scopedStreamOf(open))
+
+  private def scopedStreamOf[A](open: Task[Subscription[Task, A]]): ZIO[Scope, Throwable, ZStream[Any, Throwable, A]] =
+    ZIO.acquireRelease(open)(_.close.ignore).map { sub =>
+      ZStream.repeatZIOOption(sub.next.mapError(Some(_)).flatMap {
+        case Some(a) => ZIO.succeed(a)
+        case None    => ZIO.fail(None)
+      })
+    }
 }
 
 object SageClient {

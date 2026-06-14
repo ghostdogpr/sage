@@ -223,13 +223,49 @@ extension (client: SageClient) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*)(using Tag[Message[V]], Frame): Stream[Message[V], Abort[Throwable] & Async & Scope] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
+  /**
+    * Like [[subscribe]], but the returned effect settles only once the server has confirmed the SUBSCRIBE, so a publish sequenced after it
+    * cannot race the registration. Closing the enclosing `Scope` unsubscribes.
+    */
+  def subscribeScoped[V: ValueCodec](channel: String, rest: String*)(
+    using Tag[Message[V]],
+    Frame
+  ): Stream[Message[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+    scopedStreamOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Like [[pSubscribe]], but the returned effect settles only once the server has confirmed the PSUBSCRIBE. Closing the enclosing `Scope`
+    * unsubscribes.
+    */
+  def pSubscribeScoped[V: ValueCodec](pattern: String, rest: String*)(
+    using Tag[PatternMessage[V]],
+    Frame
+  ): Stream[PatternMessage[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+    scopedStreamOf(client.subscribePatterns[V](pattern, rest*))
+
+  /**
+    * Like [[sSubscribe]], but the returned effect settles only once the server has confirmed the SSUBSCRIBE. Closing the enclosing `Scope`
+    * unsubscribes.
+    */
+  def sSubscribeScoped[V: ValueCodec](channel: String, rest: String*)(
+    using Tag[Message[V]],
+    Frame
+  ): Stream[Message[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+    scopedStreamOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](
     open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
   )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
-    // chunkSize = 1: emit each message as it arrives — the default rechunks to 4096, withholding a live stream until that many accumulate
-    Stream
-      .init(Scope.acquireRelease(open)(_.close).map(Seq(_)))
-      .flatMap(sub => Stream.repeatPresent(sub.next.map(opt => Maybe.fromOption(opt.map(Seq(_)))), chunkSize = 1))
+    Stream.init(Scope.acquireRelease(open)(_.close).map(Seq(_))).flatMap(deliveries)
+
+  private def scopedStreamOf[A](
+    open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
+  )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+    Scope.acquireRelease(open)(_.close).map(deliveries)
+
+  // chunkSize = 1: emit each message as it arrives — the default rechunks to 4096, withholding a live stream until that many accumulate
+  private def deliveries[A](sub: Subscription[KyoEff, A])(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
+    Stream.repeatPresent(sub.next.map(opt => Maybe.fromOption(opt.map(Seq(_)))), chunkSize = 1)
 }
 
 object SageClient {

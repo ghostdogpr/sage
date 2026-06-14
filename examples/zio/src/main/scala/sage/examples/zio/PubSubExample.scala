@@ -13,12 +13,14 @@ object PubSubExample {
 
   val run: ZIO[SageClient, Throwable, Unit] =
     ZIO.serviceWithZIO[SageClient] { client =>
-      for {
-        subscriber <- client.subscribe[String]("news").take(3).runCollect.fork
-        _          <- ZIO.sleep(Duration.fromMillis(300)) // let SUBSCRIBE register before publishing
-        _          <- ZIO.foreachDiscard(1 to 3)(i => client.publish("news", s"item-$i"))
-        messages   <- subscriber.join
-        _          <- Console.printLine(s"received=${messages.map(_.payload).toList}")
-      } yield ()
+      ZIO.scoped {
+        for {
+          stream     <- client.subscribeScoped[String]("news")
+          subscriber <- stream.take(3).runCollect.fork
+          _          <- ZIO.foreachDiscard(1 to 3)(i => client.publish("news", s"item-$i"))
+          messages   <- subscriber.join
+          _          <- Console.printLine(s"received=${messages.map(_.payload).toList}")
+        } yield ()
+      }
     }
 }

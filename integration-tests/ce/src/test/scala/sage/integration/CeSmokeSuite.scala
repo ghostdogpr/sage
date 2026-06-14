@@ -1,7 +1,5 @@
 package sage.integration
 
-import scala.concurrent.duration.*
-
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
@@ -90,14 +88,15 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       val program: IO[Unit] =
         SageClient.resource(configOf(server)).use { client =>
-          for {
-            collected <- client.subscribe[String]("smoke").take(3).compile.toVector.start
-            _         <- IO.sleep(300.millis) // let SUBSCRIBE register before publishing
-            _         <- (1 to 3).toList.traverse_(i => client.publish("smoke", s"m$i"))
-            messages  <- collected.joinWithNever
-          } yield {
-            assertEquals(messages.map(_.channel).toSet, Set("smoke"))
-            assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
+          client.subscribeResource[String]("smoke").use { stream =>
+            for {
+              collected <- stream.take(3).compile.toVector.start
+              _         <- (1 to 3).toList.traverse_(i => client.publish("smoke", s"m$i"))
+              messages  <- collected.joinWithNever
+            } yield {
+              assertEquals(messages.map(_.channel).toSet, Set("smoke"))
+              assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
+            }
           }
         }
 

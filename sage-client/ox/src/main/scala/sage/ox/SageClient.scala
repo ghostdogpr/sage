@@ -198,7 +198,8 @@ extension (client: SageClient) {
       .lower
 
   /**
-    * Subscribes to one or more channels; ending the flow unsubscribes. Survives reconnects via auto-resubscribe, dropping messages
+    * Subscribes to one or more channels, returning once the server has confirmed the SUBSCRIBE — a publish issued after this call cannot
+    * race the registration. Closing the enclosing `Ox` scope unsubscribes. Survives reconnects via auto-resubscribe, dropping messages
     * published during the reconnect gap.
     */
   def subscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
@@ -217,18 +218,18 @@ extension (client: SageClient) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
-  private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] =
+  // acquire eagerly so the SUBSCRIBE is server-confirmed before this returns; bind the unsubscribe to the enclosing Ox scope
+  private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] = {
+    val sub = useInScope(open)(_.close)
     Flow.usingEmit { emit =>
-      val sub = open
-      try {
-        var continue = true
-        while (continue)
-          sub.next match {
-            case Some(a) => emit(a)
-            case None    => continue = false
-          }
-      } finally sub.close
+      var continue = true
+      while (continue)
+        sub.next match {
+          case Some(a) => emit(a)
+          case None    => continue = false
+        }
     }
+  }
 }
 
 object SageClient {

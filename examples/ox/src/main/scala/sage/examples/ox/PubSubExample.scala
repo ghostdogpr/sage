@@ -12,12 +12,12 @@ import sage.ox.*
 object PubSubExample {
 
   def run(client: SageClient)(using Ox): Unit = {
-    val collector = fork(client.subscribe[String]("news").take(3).runToList())
-    Thread.sleep(300) // let SUBSCRIBE register before publishing
+    val news      = client.subscribe[String]("news")
+    val collector = fork(news.take(3).runToList())
     (1 to 3).foreach { i =>
       val _ = client.publish("news", s"item-$i")
     }
-    val messages = collector.join()
+    val messages  = collector.join()
     println(s"received=${messages.map(_.payload)}")
   }
 }

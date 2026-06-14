@@ -19,8 +19,8 @@ object ClusterExample {
     ZIO.scoped {
       for {
         client     <- SageClient.scoped(config)
-        subscriber <- client.sSubscribe[String]("orders").take(1).runCollect.fork
-        _          <- ZIO.sleep(Duration.fromMillis(300)) // let SSUBSCRIBE register before publishing
+        stream     <- client.sSubscribeScoped[String]("orders")
+        subscriber <- stream.take(1).runCollect.fork
         _          <- client.sPublish("orders", "placed")
         messages   <- subscriber.join
         _          <- Console.printLine(s"sharded=${messages.map(_.payload).toList}")

@@ -107,7 +107,6 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
             for {
               shard    <- client.subscribeShardChannels[String]("orders")
               classic  <- client.subscribeChannels[String]("news")
-              _        <- CIO.sleep(300.millis) // let both subscriptions register before publishing
               sCount   <- client.sPublish("orders", "placed")
               cCount   <- client.publish("news", "hello")
               sMsg     <- shard.next

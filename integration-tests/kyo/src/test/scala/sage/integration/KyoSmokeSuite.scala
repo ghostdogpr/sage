@@ -87,13 +87,9 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       val program: Unit < (Scope & Abort[Throwable] & Async) =
         for {
           client    <- SageClient.scoped(configOf(server))
-          publisher <- Fiber.init {
-                         for {
-                           _ <- Async.sleep(300.millis)                                          // let SUBSCRIBE register before publishing
-                           _ <- Kyo.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i")) // sequential: preserves order
-                         } yield ()
-                       }
-          chunk     <- client.subscribe[String]("smoke").take(3).run
+          stream    <- client.subscribeScoped[String]("smoke")
+          publisher <- Fiber.init(Kyo.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i")))
+          chunk     <- stream.take(3).run
           _         <- publisher.get
         } yield {
           val messages = chunk.toList

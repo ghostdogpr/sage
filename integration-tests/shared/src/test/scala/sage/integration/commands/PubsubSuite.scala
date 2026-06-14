@@ -7,14 +7,13 @@ import sage.integration.{Images, ServerSuite}
 
 abstract class PubsubSuite(image: String) extends ServerSuite(image) {
 
-  // SUBSCRIBE rides the Subscription Connection while PUBLISH rides the Multiplexed one, so let the subscription register before publishing
+  // a subscribe blocks until the server confirms it, but UNSUBSCRIBE is fire-and-forget, so let it propagate before re-checking PUBSUB
   private def settle: CIO[Unit] = CIO.blocking(Thread.sleep(300))
 
   test("PUBLISH delivers to a channel subscriber; PUBSUB introspection reflects the subscription") {
     withClient { client =>
       for {
         sub      <- client.subscribeChannels[String]("news")
-        _        <- settle
         channels <- client.pubsubChannels()
         numSub   <- client.pubsubNumSub("news")
         numPat   <- client.pubsubNumPat
@@ -38,7 +37,6 @@ abstract class PubsubSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         sub    <- client.subscribePatterns[String]("news.*")
-        _      <- settle
         numPat <- client.pubsubNumPat
         _      <- client.publish("news.sports", "goal")
         msg    <- sub.next
@@ -54,7 +52,6 @@ abstract class PubsubSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         sub      <- client.subscribeShardChannels[String]("orders")
-        _        <- settle
         channels <- client.pubsubShardChannels()
         numSub   <- client.pubsubShardNumSub("orders")
         received <- client.sPublish("orders", "placed")
@@ -73,7 +70,6 @@ abstract class PubsubSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         sub      <- client.subscribeChannels[String]("bye")
-        _        <- settle
         active   <- client.pubsubChannels()
         _        <- sub.close
         _        <- settle
