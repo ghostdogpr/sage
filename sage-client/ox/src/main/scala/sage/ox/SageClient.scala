@@ -1,6 +1,7 @@
 package sage.ox
 
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -198,9 +199,9 @@ extension (client: SageClient) {
       .lower
 
   /**
-    * Subscribes to one or more channels, returning once the server has confirmed the SUBSCRIBE — a publish issued after this call cannot
-    * race the registration. Closing the enclosing `Ox` scope unsubscribes. Survives reconnects via auto-resubscribe, dropping messages
-    * published during the reconnect gap.
+    * Subscribes to one or more channels, returning once the server has confirmed the SUBSCRIBE so a publish issued after this call cannot
+    * race the registration. Ending the flow unsubscribes. Survives reconnects via auto-resubscribe, dropping messages published during the
+    * reconnect gap.
     */
   def subscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
     streamOf(client.subscribeChannels[V](channel, rest*))
@@ -218,16 +219,21 @@ extension (client: SageClient) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
-  // acquire eagerly so the SUBSCRIBE is server-confirmed before this returns; bind the unsubscribe to the enclosing Ox scope
+  // subscribe eagerly so the SUBSCRIBE is confirmed before returning; unsubscribe once, when the flow ends or (if never run) at scope close
   private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] = {
-    val sub = useInScope(open)(_.close)
+    val sub                 = open
+    val closed              = new AtomicBoolean(false)
+    def unsubscribe(): Unit = if (closed.compareAndSet(false, true)) sub.close
+    val _                   = useInScope(sub)(_ => unsubscribe())
     Flow.usingEmit { emit =>
-      var continue = true
-      while (continue)
-        sub.next match {
-          case Some(a) => emit(a)
-          case None    => continue = false
-        }
+      try {
+        var continue = true
+        while (continue)
+          sub.next match {
+            case Some(a) => emit(a)
+            case None    => continue = false
+          }
+      } finally unsubscribe()
     }
   }
 }
