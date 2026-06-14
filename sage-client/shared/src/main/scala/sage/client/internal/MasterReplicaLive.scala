@@ -40,7 +40,7 @@ final private[client] class MasterReplicaLive(
   private val readFrom       = config.readFrom
   private val cachingEnabled = config.clientCache.enabled
 
-  // only the master pool caches: cached reads run on the master, replicas never serve them
+  // only the master multiplexed connection caches: cached reads run on the master, replicas and dedicated connections never serve them
   private val masterPool  = pool(caching = true)
   private val replicaPool = pool(caching = false)
 
@@ -58,7 +58,8 @@ final private[client] class MasterReplicaLive(
       config.closeTimeout,
       config.dedicatedPool,
       cacheMaxBytes,
-      events
+      events,
+      dedicatedBootstrap = Some(bootstrap)
     )
   }
 

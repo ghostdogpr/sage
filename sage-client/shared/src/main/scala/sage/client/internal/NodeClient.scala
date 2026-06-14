@@ -55,11 +55,13 @@ private[client] object NodeClient {
     dedicatedPool: DedicatedPoolConfig,
     cacheMaxBytes: Long = 0L,
     node: Option[Node] = None,
-    events: Events = Events.disabled
+    events: Events = Events.disabled,
+    dedicatedBootstrap: Option[Vector[Command[?]]] = None
   ): NodeClient = {
     val connection =
       MultiplexedConnection.connect(factory, scheduler, bootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, node, events)
-    val pool       = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
+    val pool       =
+      DedicatedPool.forConnection(factory, dedicatedBootstrap.getOrElse(bootstrap), scheduler, connection, dedicatedPool, connectTimeout.toMillis)
     new NodeClient(connection, pool)
   }
 }
