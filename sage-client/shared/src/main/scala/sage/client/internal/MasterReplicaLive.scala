@@ -160,7 +160,7 @@ final private[client] class MasterReplicaLive(
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled) CIO.async[A](complete => offload(sendMaster(command, Events.trackCommand(events, command, complete))))
-    else CIO.async[A](complete => offload(sendMasterCached(command, ttl.toMillis, Events.trackCommand(events, command, complete))))
+    else CIO.async[A](complete => offload(sendMasterCached(command, ttl.toMillis, complete)))
 
   private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =
     onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb))
