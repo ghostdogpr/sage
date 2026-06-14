@@ -60,7 +60,6 @@ final private[client] class MasterReplicaLive(
   private val cursor           = new AtomicInteger()
   @volatile private var closed = false
 
-  // lazily created on the first subscription; re-homes onto the promoted master across a failover (see subs())
   private val subLock                                         = new ReentrantLock()
   @volatile private var subscriptions: SubscriptionConnection = null
 
@@ -307,7 +306,7 @@ final private[client] class MasterReplicaLive(
       subLock.lock()
       try {
         if (subscriptions == null) {
-          // resolves the current master per (re)connect, not once, so onReconnect's refresh lets a failover re-home the subscription
+          // resolves the current master per (re)connect, not once, so onReconnect's refresh re-homes the subscription across a failover
           val rehomingFactory: MultiplexedConnection.TransportFactory =
             (onFrame, onClosed) => nodeFactory(masterNodeRef.get())(onFrame, onClosed)
           subscriptions = new SubscriptionConnection(

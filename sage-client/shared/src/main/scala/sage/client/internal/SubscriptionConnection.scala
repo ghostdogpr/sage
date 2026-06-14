@@ -55,8 +55,7 @@ final private[client] class SubscriptionConnection(
   // waits until `subscribeConfirmed` catches `subscribeSent` before returning — otherwise `subscribe` then `publish` races across the sockets.
   private var subscribeSent: Long      = 0L
   private var subscribeConfirmed: Long = 0L
-  // the resubscribe ack count of the current generation, captured in goLive under the lock before it wakes waiters; a caller re-arming after a
-  // reconnect waits for this, never a later subscribe's inflated subscribeSent
+  // this generation's resubscribe ack count, set in goLive before waiters wake so a re-arming waiter never adopts a later subscribe's count
   private var liveTarget: Long         = -1L
 
   private var watchdogHandle: Scheduler.Cancelable     = null
@@ -106,8 +105,7 @@ final private[client] class SubscriptionConnection(
 
   private def attachInternal(sink: Sink, names: Vector[String], kind: Kind, failIfUnconfirmed: Boolean): Unit = {
     var doEstablish   = false
-    // the SUBSCRIBE-ack count this attach waits for, captured under the same lock as its send so a concurrent attach bumping subscribeSent
-    // can't inflate it; -1 (the send happens later, in goLive's resubscribe) means adopt the generation's liveTarget in awaitActive
+    // the ack count this attach waits for, captured under its send lock; -1 means it sends later (in goLive) and adopts liveTarget
     var confirmTarget = -1L
     lock.lock()
     try {
@@ -118,8 +116,7 @@ final private[client] class SubscriptionConnection(
           case State.Establishing => established.await()
           case State.Live         =>
             val fresh = register(sink, names, kind)
-            // wait for our own SUBSCRIBE's ack; if we sent nothing (names already subscribed), wait only for what's already confirmed, not
-            // an unrelated concurrent attach's pending ack
+            // nothing sent (names already subscribed): target the confirmed count, not subscribeSent, so we don't wait on an unrelated pending ack
             if (fresh.nonEmpty) { sendSubscribe(current, kind, fresh); confirmTarget = subscribeSent }
             else confirmTarget = subscribeConfirmed
             settled = true
@@ -195,7 +192,7 @@ final private[client] class SubscriptionConnection(
         } else {
           state = State.Live
           startWatchdog()
-          liveTarget = subscribeSent // this generation's full resubscribe count, captured before signalAll so a later subscribe can't inflate it
+          liveTarget = subscribeSent
         }
         established.signalAll()
         confirmed.signalAll()
@@ -210,11 +207,8 @@ final private[client] class SubscriptionConnection(
     subscribeSent += names.size
   }
 
-  // Waits (bounded by the connect timeout) until subscribeConfirmed reaches `target`. A Live attach passes its own post-send count (`target0`),
-  // so it waits for its own SUBSCRIBE, not a concurrent attach's; a caller that registered before going Live passes -1 and adopts `liveTarget`,
-  // the generation's full resubscribe count captured in goLive before waiters wake — never a later subscribe's inflated subscribeSent. A
-  // reconnect re-arms to the next generation's liveTarget. When `failIfUnconfirmed` (the owned standalone/master-replica path), an unconfirmed
-  // deadline throws NotConnected so `subscribe` fails loudly instead of returning a stream whose SUBSCRIBE never took effect; cluster passes false.
+  // Waits (bounded by the connect timeout) for subscribeConfirmed to reach `target`; -1 (re)arms to liveTarget, e.g. after a reconnect. When
+  // `failIfUnconfirmed` (owned standalone/master-replica), an unconfirmed deadline throws NotConnected instead of returning an inactive stream.
   private def awaitActive(failIfUnconfirmed: Boolean, target0: Long): Unit = {
     var active = false
     lock.lock()
@@ -230,7 +224,7 @@ final private[client] class SubscriptionConnection(
             if (subscribeConfirmed >= target) { active = true; settled = true }
             else if (awaitOrTimeout(deadline)) settled = true
           case _            =>
-            target = -1L // a reconnect reset the counters: re-arm to the next generation's liveTarget
+            target = -1L // a reconnect reset the counters: re-arm to liveTarget
             if (awaitOrTimeout(deadline)) settled = true
         }
     } finally lock.unlock()
