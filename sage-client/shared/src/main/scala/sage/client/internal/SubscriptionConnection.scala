@@ -131,13 +131,14 @@ final private[client] class SubscriptionConnection(
     } finally lock.unlock()
 
     if (doEstablish)
-      try goLive(establish())
-      catch {
-        case e: Throwable =>
-          // establish failed after the sink was registered; drop it so a later reconnect doesn't resubscribe a phantom name
-          locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
-          throw e
-      }
+      confirmTarget =
+        try goLive(establish())
+        catch {
+          case e: Throwable =>
+            // establish failed after the sink was registered; drop it so a later reconnect doesn't resubscribe a phantom name
+            locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
+            throw e
+        }
     awaitActive(failIfUnconfirmed, confirmTarget)
   }
 
@@ -160,9 +161,12 @@ final private[client] class SubscriptionConnection(
 
   // bring a freshly-established socket Live, resubscribing everything registered (counters reset to this generation). In cluster mode it runs
   // once per connection with at most one Slot's worth of Shard channels registered, so the single SSUBSCRIBE never spans slots (CROSSSLOT).
-  private def goLive(conn: Conn): Unit = {
+  // Returns the ack count to wait for (captured under the lock, before signalAll wakes other attachers, so a later attach can't inflate it),
+  // or -1 when it did not go Live; the establishing caller uses it as its awaitActive target.
+  private def goLive(conn: Conn): Long = {
     var reconnect = false
     var notify    = false
+    var target    = -1L
     locked {
       if (state != State.Establishing && state != State.Reconnecting) conn.close()
       else if (conn.isTerminated) {
@@ -190,6 +194,7 @@ final private[client] class SubscriptionConnection(
         } else {
           state = State.Live
           startWatchdog()
+          target = subscribeSent
         }
         established.signalAll()
         confirmed.signalAll()
@@ -197,6 +202,7 @@ final private[client] class SubscriptionConnection(
     }
     if (reconnect) scheduleReconnect(0)
     if (notify) onTerminated()
+    target
   }
 
   private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {
@@ -270,7 +276,7 @@ final private[client] class SubscriptionConnection(
     val proceed = locked(state == State.Reconnecting)
     if (proceed) {
       onReconnect()
-      try goLive(establish())
+      try { val _ = goLive(establish()) }
       catch { case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1)) }
     }
   }
