@@ -193,34 +193,24 @@ private[sage] object StreamInfo {
         } yield FullConsumerInfo(name, seen, active, pel, pending)
       }
 
-  // a group-level FULL PEL row carries its owning consumer: [id, consumer, delivery-time-ms, delivery-count]
-  private val groupPendingReply: Frame => Either[DecodeError, FullPendingEntry] = {
-    case Frame.Array(Vector(idFrame, consumerFrame, deliveredFrame, countFrame)) =>
-      for {
-        id        <- Streams.streamId(idFrame)
-        consumer  <- Decode.utf8String(consumerFrame)
-        delivered <- millisInstant(deliveredFrame)
-        count     <- Decode.long(countFrame)
-      } yield FullPendingEntry(id, Some(consumer), delivered, count)
-    case other                                                                   => Left(DecodeError("group pending [id, consumer, delivery-time, delivery-count]", Frame.describe(other)))
-  }
-
-  // a consumer-level FULL PEL row omits the (implied) consumer: [id, delivery-time-ms, delivery-count]
-  private val consumerPendingReply: Frame => Either[DecodeError, FullPendingEntry] = {
-    case Frame.Array(Vector(idFrame, deliveredFrame, countFrame)) =>
-      for {
-        id        <- Streams.streamId(idFrame)
-        delivered <- millisInstant(deliveredFrame)
-        count     <- Decode.long(countFrame)
-      } yield FullPendingEntry(id, None, delivered, count)
-    case other                                                    => Left(DecodeError("consumer pending [id, delivery-time, delivery-count]", Frame.describe(other)))
-  }
-
+  // defined before the decoders that compose them: the array combinators force their decoder arguments when those vals initialize
   private val millisDuration: Frame => Either[DecodeError, FiniteDuration] =
     frame => Decode.long(frame).map(ms => FiniteDuration(ms, TimeUnit.MILLISECONDS))
 
   private val millisInstant: Frame => Either[DecodeError, Instant] =
     frame => Decode.long(frame).map(Instant.ofEpochMilli)
+
+  // a group-level FULL PEL row carries its owning consumer: [id, consumer, delivery-time-ms, delivery-count]
+  private val groupPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
+    Decode.array4(Streams.streamId, Decode.utf8String, millisInstant, Decode.long, "group pending [id, consumer, delivery-time, delivery-count]") {
+      (id, consumer, delivered, count) => FullPendingEntry(id, Some(consumer), delivered, count)
+    }
+
+  // a consumer-level FULL PEL row omits the (implied) consumer: [id, delivery-time-ms, delivery-count]
+  private val consumerPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
+    Decode.array3(Streams.streamId, millisInstant, Decode.long, "consumer pending [id, delivery-time, delivery-count]") {
+      (id, delivered, count) => FullPendingEntry(id, None, delivered, count)
+    }
 
   /**
     * A lenient view over an introspection reply map: read fields by known name, ignore the rest.

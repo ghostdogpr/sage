@@ -46,6 +46,9 @@ final private[client] class MultiplexedConnection private (
   private var watchdogHandle: Scheduler.Cancelable = null
   // bumped when a fresh socket becomes live; the dedicated pool stamps borrowed connections with it to detect ones outliving a reconnect
   private var generation: Generation               = Generation.initial
+  // the live epoch (or `notLive`), published so liveness reads are lock-free: the pool reads it under its own lock without crossing into
+  // this lifecycle lock, so there is no pool<->connection lock order to keep
+  private val liveEpoch                            = new AtomicReference[Generation](Generation.notLive)
   @volatile private var onLivenessLost: () => Unit = () => ()
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
@@ -54,6 +57,12 @@ final private[client] class MultiplexedConnection private (
     lock.lock()
     try body
     finally lock.unlock()
+  }
+
+  // the sole mutator of `state`, keeping `liveEpoch` in step. Must hold `lock`; at a Live edge the caller bumps `generation` first.
+  private def transition(to: State): Unit = {
+    state = to
+    liveEpoch.set(if (to == State.Live) generation else Generation.notLive)
   }
 
   // the live connection, or null when not Live so callers fail fast rather than join a dead or reconnecting generation
@@ -104,11 +113,11 @@ final private[client] class MultiplexedConnection private (
       state match {
         case State.Closed | State.Draining => (null, null)
         case State.Reconnecting            =>
-          state = State.Closed
+          transition(State.Closed)
           stopWatchdog()
           (null, establishing)
         case State.Live                    =>
-          state = State.Draining
+          transition(State.Draining)
           (current, null)
       }
     }
@@ -122,15 +131,18 @@ final private[client] class MultiplexedConnection private (
 
   private[internal] def currentState: State = locked(state)
 
-  private[internal] def isLive: Boolean = locked(state == State.Live)
+  private[internal] def isLive: Boolean = liveEpoch.get() != Generation.notLive
 
-  // the Generation to stamp a fresh Dedicated Connection with, captured atomically and only while live; None means a borrower must fail
-  // fast rather than join a connection to a dead or reconnecting epoch
-  private[internal] def liveGeneration(): Option[Generation] = locked(if (state == State.Live) Some(generation) else None)
+  // the Generation to stamp a fresh Dedicated Connection with, read only while live; None means a borrower must fail fast rather than join
+  // a connection to a dead or reconnecting epoch
+  private[internal] def liveGeneration(): Option[Generation] = {
+    val g = liveEpoch.get()
+    if (g == Generation.notLive) None else Some(g)
+  }
 
-  // whether a stamped Generation is still the live one; gated on Live, since the epoch only bumps on the next live socket and would
-  // otherwise still match during a reconnect window
-  private[internal] def isCurrent(g: Generation): Boolean = locked(state == State.Live && generation == g)
+  // whether a stamped Generation is still the live one; the `notLive` sentinel makes a stamp read stale throughout a reconnect window, even
+  // at the same generation number, since the epoch only bumps on the next live socket
+  private[internal] def isCurrent(g: Generation): Boolean = liveEpoch.get() == g
 
   private def connectInitial(): Unit = {
     val conn = establish() // the first connect propagates a handshake failure; only reconnects retry
@@ -140,8 +152,8 @@ final private[client] class MultiplexedConnection private (
       if (conn.isTerminated) scheduleReconnect(0)
       else {
         current = conn
-        state = State.Live
         generation = generation.next
+        transition(State.Live)
         startWatchdog()
         events.emit(SageEvent.Connection.Connected(node))
       }
@@ -153,30 +165,9 @@ final private[client] class MultiplexedConnection private (
     locked { establishing = conn }
     try {
       conn.start()
-      bootstrap.foreach { command =>
-        val latch   = new CountDownLatch(1)
-        val outcome = new AtomicReference[Try[Any]]()
-        conn.reserve(1) // submit no longer self-increments; balance the retire() the reply will trigger
-        conn.submit(
-          command,
-          result => {
-            outcome.set(result)
-            latch.countDown()
-          }
-        )
-        // a half-open peer can accept the socket yet never answer HELLO; bound the wait so the reconnect loop can't stall on it forever
-        val replied = latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS)
-        if (!replied) {
-          conn.close()
-          throw ConnectionLost(mayHaveExecuted = false)
-        }
-        outcome.get() match {
-          case Failure(error) =>
-            conn.close()
-            throw error
-          case Success(_)     => ()
-        }
-      }
+      // reserve(1) per command: submit does not self-increment, so this balances the retire() the reply will trigger. A half-open peer can
+      // accept the socket yet never answer HELLO, so the runner bounds each wait and the reconnect loop can't stall on it forever.
+      Bootstrap.run(bootstrap, connectTimeout.toMillis, (c, cb) => { conn.reserve(1); conn.submit(c, cb) }, () => conn.close())
       conn
     } finally locked { if (establishing eq conn) establishing = null }
   }
@@ -192,8 +183,8 @@ final private[client] class MultiplexedConnection private (
         val live = locked {
           if (state == State.Reconnecting && !conn.isTerminated) {
             current = conn
-            state = State.Live
             generation = generation.next
+            transition(State.Live)
             events.emit(SageEvent.Connection.Connected(node))
             true
           } else false
@@ -215,14 +206,14 @@ final private[client] class MultiplexedConnection private (
       if (conn eq current)
         state match {
           case State.Live         =>
-            state = State.Reconnecting; scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node)); true
+            transition(State.Reconnecting); scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node)); true
           case State.Reconnecting => scheduleReconnect(0); false
-          case State.Draining     => state = State.Closed; stopWatchdog(); false
+          case State.Draining     => transition(State.Closed); stopWatchdog(); false
           case State.Closed       => false
         }
       else false
     }
-    // outside the lock: acquire holds the pool lock then calls isLive on this connection's lock, so the reverse order here would deadlock
+    // fired off the lock so the lifecycle lock is not held across the pool's signal
     if (lostLiveness) onLivenessLost()
   }
 
@@ -430,6 +421,8 @@ private[client] object MultiplexedConnection {
   opaque type Generation = Long
   object Generation {
     val initial: Generation                        = 0L
+    // distinct from every real epoch (they start at 0 and only increase), so a stamped generation never reads as current while not Live
+    val notLive: Generation                        = -1L
     extension (g: Generation) def next: Generation = g + 1L
   }
 

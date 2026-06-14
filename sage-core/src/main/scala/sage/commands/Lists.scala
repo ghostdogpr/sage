@@ -186,26 +186,17 @@ private[sage] object Lists {
       keyIndices = Vector.tabulate(keys.size)(identity),
       args = keys :+ BlockTimeout.wire(timeout),
       decode = {
-        case Frame.Null                                => Right(None)
-        case Frame.Array(Vector(keyFrame, valueFrame)) =>
-          for {
-            key   <- Decode.key[K](keyFrame)
-            value <- Decode.value[V](valueFrame)
-          } yield Some((key, value))
-        case other                                     => Left(DecodeError("array of key and value or null", Frame.describe(other)))
+        case Frame.Null => Right(None)
+        case other      => Decode.array2(Decode.key[K], Decode.value[V], "array of key and value or null")(_ -> _)(other).map(Some(_))
       },
       execution = Execution.Blocking
     )
   }
 
   private def mpopReply[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Option[(K, Vector[V])]] = {
-    case Frame.Null                                 => Right(None)
-    case Frame.Array(Vector(keyFrame, valuesFrame)) =>
-      for {
-        key    <- Decode.key[K](keyFrame)
-        values <- Decode.vector(Decode.value[V])(valuesFrame)
-      } yield Some((key, values))
-    case other                                      => Left(DecodeError("array of key and values or null", Frame.describe(other)))
+    case Frame.Null => Right(None)
+    case other      =>
+      Decode.array2(Decode.key[K], Decode.vector(Decode.value[V]), "array of key and values or null")(_ -> _)(other).map(Some(_))
   }
 
   private def longArg(keyword: Bytes, value: Option[Long]): Vector[Bytes] =

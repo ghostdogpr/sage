@@ -327,37 +327,25 @@ private[sage] object SortedSets {
       keyIndices = Vector.tabulate(keys.size)(identity),
       args = keys :+ BlockTimeout.wire(timeout),
       decode = {
-        case Frame.Null                                             => Right(None)
-        case Frame.Array(Vector(keyFrame, memberFrame, scoreFrame)) =>
-          for {
-            key    <- Decode.key[K](keyFrame)
-            member <- Decode.value[V](memberFrame)
-            s      <- Decode.score(scoreFrame)
-          } yield Some((key, member, s))
-        case other                                                  => Left(DecodeError("key, member and score or null", Frame.describe(other)))
+        case Frame.Null => Right(None)
+        case other      =>
+          Decode.array3(Decode.key[K], Decode.value[V], Decode.score, "key, member and score or null") { (key, member, s) =>
+            (key, member, s)
+          }(other).map(Some(_))
       },
       execution = Execution.Blocking
     )
   }
 
   private def mpopReply[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Option[(K, Vector[(V, Double)])]] = {
-    case Frame.Null                                  => Right(None)
-    case Frame.Array(Vector(keyFrame, membersFrame)) =>
-      for {
-        key     <- Decode.key[K](keyFrame)
-        members <- Decode.scoredMembers[V](membersFrame)
-      } yield Some((key, members))
-    case other                                       => Left(DecodeError("key and members or null", Frame.describe(other)))
+    case Frame.Null => Right(None)
+    case other      =>
+      Decode.array2(Decode.key[K], Decode.scoredMembers[V], "key and members or null")(_ -> _)(other).map(Some(_))
   }
 
   private val rankWithScore: Frame => Either[DecodeError, Option[(Long, Double)]] = {
-    case Frame.Null                                 => Right(None)
-    case Frame.Array(Vector(rankFrame, scoreFrame)) =>
-      for {
-        rank <- Decode.long(rankFrame)
-        s    <- Decode.score(scoreFrame)
-      } yield Some((rank, s))
-    case other                                      => Left(DecodeError("rank/score pair or null", Frame.describe(other)))
+    case Frame.Null => Right(None)
+    case other      => Decode.array2(Decode.long, Decode.score, "rank/score pair or null")(_ -> _)(other).map(Some(_))
   }
 
   private def numKeyed[K](keys: Vector[K])(using keyCodec: KeyCodec[K]): (Vector[Int], Vector[Bytes]) = {

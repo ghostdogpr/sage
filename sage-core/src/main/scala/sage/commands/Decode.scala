@@ -124,6 +124,39 @@ private[commands] object Decode {
     Right(builder.result())
   }
 
+  def each[A, B](items: IterableOnce[A])(f: A => Either[DecodeError, B]): Either[DecodeError, Vector[B]] =
+    buildEach(items, Vector.newBuilder[B])(f)
+
+  // a fixed-arity RESP Array decoded position by position; `label` is the structural description reported on a shape mismatch
+  def array2[A, B, R](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B], label: String)(
+    combine: (A, B) => R
+  ): Frame => Either[DecodeError, R] = {
+    case Frame.Array(Vector(fa, fb)) => for { x <- a(fa); y <- b(fb) } yield combine(x, y)
+    case other                       => Left(DecodeError(label, Frame.describe(other)))
+  }
+
+  def array3[A, B, C, R](
+    a: Frame => Either[DecodeError, A],
+    b: Frame => Either[DecodeError, B],
+    c: Frame => Either[DecodeError, C],
+    label: String
+  )(combine: (A, B, C) => R): Frame => Either[DecodeError, R] = {
+    case Frame.Array(Vector(fa, fb, fc)) => for { x <- a(fa); y <- b(fb); z <- c(fc) } yield combine(x, y, z)
+    case other                           => Left(DecodeError(label, Frame.describe(other)))
+  }
+
+  def array4[A, B, C, D, R](
+    a: Frame => Either[DecodeError, A],
+    b: Frame => Either[DecodeError, B],
+    c: Frame => Either[DecodeError, C],
+    d: Frame => Either[DecodeError, D],
+    label: String
+  )(combine: (A, B, C, D) => R): Frame => Either[DecodeError, R] = {
+    case Frame.Array(Vector(fa, fb, fc, fd)) =>
+      for { w <- a(fa); x <- b(fb); y <- c(fc); z <- d(fd) } yield combine(w, x, y, z)
+    case other                               => Left(DecodeError(label, Frame.describe(other)))
+  }
+
   def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
     case Frame.Array(elements) => buildEach(elements, Vector.newBuilder[A])(element)
     case other                 => Left(DecodeError("array", Frame.describe(other)))
@@ -171,30 +204,21 @@ private[commands] object Decode {
   }
 
   def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
-    case Frame.Array(rows) =>
-      buildEach(rows, Vector.newBuilder[(K, V)]) {
-        case Frame.Array(Vector(fieldFrame, valueFrame)) =>
-          for {
-            field <- key(fieldFrame)
-            value <- this.value(valueFrame)
-          } yield field -> value
-        case other                                       => Left(DecodeError("field/value pair", Frame.describe(other)))
-      }
-    case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
+    val pair = array2(key[K], value[V], "field/value pair")(_ -> _)
+    {
+      case Frame.Array(rows) => each(rows)(pair)
+      case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
+    }
   }
 
-  def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] = {
-    case Frame.Array(Vector(cursorFrame, itemsFrame)) =>
-      for {
-        next    <- cursorFrame match {
-                     case Frame.BulkString(bytes) =>
-                       Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
-                     case other                   => Left(DecodeError("cursor bulk string", Frame.describe(other)))
-                   }
-        decoded <- items(itemsFrame)
-      } yield ScanPage(decoded, next)
-    case other                                        => Left(DecodeError("array of cursor and items", Frame.describe(other)))
+  private val scanCursor: Frame => Either[DecodeError, Option[ScanCursor]] = {
+    case Frame.BulkString(bytes) =>
+      Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
+    case other                   => Left(DecodeError("cursor bulk string", Frame.describe(other)))
   }
+
+  def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] =
+    array2(scanCursor, items, "array of cursor and items")((next, decoded) => ScanPage(decoded, next))
 
   // RESP3 returns set-typed replies (SMEMBERS, SINTER, …) as a Set frame, never an Array
   def set[V](using ValueCodec[V]): Frame => Either[DecodeError, Set[V]] = {
@@ -213,30 +237,21 @@ private[commands] object Decode {
     case other               => Left(DecodeError("double or null", Frame.describe(other)))
   }
 
+  private def memberScore[V](using ValueCodec[V]): Frame => Either[DecodeError, (V, Double)] =
+    array2(value[V], score, "member/score pair")(_ -> _)
+
   // RESP3 nests each member with its Double score in a two-element array (ZRANGE WITHSCORES, ZPOPMIN count, …)
   def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
-    case Frame.Array(rows) =>
-      buildEach(rows, Vector.newBuilder[(V, Double)]) {
-        case Frame.Array(Vector(memberFrame, scoreFrame)) =>
-          for {
-            member <- value(memberFrame)
-            s      <- score(scoreFrame)
-          } yield member -> s
-        case other                                        => Left(DecodeError("member/score pair", Frame.describe(other)))
-      }
+    case Frame.Array(rows) => each(rows)(memberScore[V])
     case other             => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
   }
 
   // ZPOPMIN/ZPOPMAX without a count: a flat [member, score], or an empty array when the key is absent
   def optionalScoredMember[V](using ValueCodec[V]): Frame => Either[DecodeError, Option[(V, Double)]] = {
-    case Frame.Null                                   => Right(None)
-    case Frame.Array(Vector())                        => Right(None)
-    case Frame.Array(Vector(memberFrame, scoreFrame)) =>
-      for {
-        member <- value(memberFrame)
-        s      <- score(scoreFrame)
-      } yield Some(member -> s)
-    case other                                        => Left(DecodeError("member/score pair or empty array", Frame.describe(other)))
+    case Frame.Null                      => Right(None)
+    case Frame.Array(Vector())           => Right(None)
+    case arr @ Frame.Array(Vector(_, _)) => memberScore[V](arr).map(Some(_))
+    case other                           => Left(DecodeError("member/score pair or empty array", Frame.describe(other)))
   }
 
   // ZSCAN's items are a flat member, score, member, score array with scores as bulk strings, not RESP3 doubles

@@ -362,7 +362,7 @@ private[client] object MasterReplicaLive {
     translate: Throwable => Throwable
   ): CIO[Client[CIO]] =
     CIO.blocking[Client[CIO]] {
-      val bootstrap                                               = Client.bootstrapCommands(config.auth, config.database, config.clientName)
+      val bootstrap                                               = Bootstrap.commands(config.auth, config.database, config.clientName)
       val factory: Node => MultiplexedConnection.TransportFactory = node => {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)
         (onFrame, onClosed) => SocketTransport.connect(node.host, node.port, config.connectTimeout, upgrade, onFrame, onClosed)

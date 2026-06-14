@@ -13,7 +13,7 @@ import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
-import sage.client.{AuthConfig, BackoffConfig, BuildInfo, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
+import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
@@ -2196,18 +2196,6 @@ object Client {
       )
     }
 
-  // The setup commands every connection runs after HELLO and re-runs on reconnection. Shared by the standalone and cluster paths so
-  // identification is never applied to one topology and dropped on the other. SELECT lives here, never as a runtime command, because it
-  // would move the db under every fiber sharing the connection.
-  private[client] def bootstrapCommands(auth: Option[AuthConfig], database: Int, clientName: Option[String]): Vector[Command[?]] = {
-    val identification = Vector(
-      Connection.clientSetInfo("LIB-NAME", "sage"),
-      Connection.clientSetInfo("LIB-VER", BuildInfo.version)
-    ) ++ clientName.map(Connection.clientSetName).toVector
-    val selectDb       = if (database > 0) Vector(Connection.select(database)) else Vector.empty
-    (Connection.hello(auth.map(a => a.username -> a.password)) +: identification) ++ selectDb
-  }
-
   // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
   private[client] def connectWith(
     factory: MultiplexedConnection.TransportFactory,
@@ -2225,7 +2213,7 @@ object Client {
     database: Int = 0,
     clientName: Option[String] = None
   ): CIO[Client[CIO]] = {
-    val bootstrap            = bootstrapCommands(auth, database, clientName)
+    val bootstrap            = Bootstrap.commands(auth, database, clientName)
     // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
     // plain bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
     val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
