@@ -1,7 +1,5 @@
 package sage.examples.ce
 
-import scala.concurrent.duration.*
-
 import cats.effect.IO
 import cats.syntax.all.*
 
@@ -15,11 +13,12 @@ import sage.ce.*
 object PubSubExample {
 
   def run(client: SageClient): IO[Unit] =
-    for {
-      subscriber <- client.subscribe[String]("news").take(3).compile.toVector.start
-      _          <- IO.sleep(300.millis) // let SUBSCRIBE register before publishing
-      _          <- (1 to 3).toList.traverse_(i => client.publish("news", s"item-$i"))
-      messages   <- subscriber.joinWithNever
-      _          <- IO.println(s"received=${messages.map(_.payload).toList}")
-    } yield ()
+    client.subscribeResource[String]("news").use { stream =>
+      for {
+        subscriber <- stream.take(3).compile.toVector.start
+        _          <- (1 to 3).toList.traverse_(i => client.publish("news", s"item-$i"))
+        messages   <- subscriber.joinWithNever
+        _          <- IO.println(s"received=${messages.map(_.payload).toList}")
+      } yield ()
+    }
 }

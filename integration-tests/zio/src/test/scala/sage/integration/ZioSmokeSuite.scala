@@ -92,8 +92,8 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
         ZIO.scoped {
           for {
             client    <- SageClient.scoped(configOf(server))
-            collected <- client.subscribe[String]("smoke").take(3).runCollect.fork
-            _         <- ZIO.sleep(Duration.fromMillis(300)) // let SUBSCRIBE register before publishing
+            stream    <- client.subscribeScoped[String]("smoke")
+            collected <- stream.take(3).runCollect.fork
             _         <- ZIO.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
             messages  <- collected.join
           } yield {

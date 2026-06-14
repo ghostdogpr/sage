@@ -74,12 +74,12 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       supervised {
         val client    = SageClient.scoped(configOf(server))
-        val collector = fork(client.subscribe[String]("smoke").take(3).runToList())
-        Thread.sleep(300) // let SUBSCRIBE register before publishing
+        val stream    = client.subscribe[String]("smoke")
+        val collector = fork(stream.take(3).runToList())
         (1 to 3).foreach { i =>
           val _ = client.publish("smoke", s"m$i")
         }
-        val messages = collector.join()
+        val messages  = collector.join()
         assertEquals(messages.map(_.channel).toSet, Set("smoke"))
         assertEquals(messages.map(_.payload), List("m1", "m2", "m3"))
       }

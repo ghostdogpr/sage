@@ -13,13 +13,9 @@ object PubSubExample {
 
   def run(client: SageClient): Unit < (Scope & Abort[Throwable] & Async) =
     for {
-      publisher <- Fiber.init {
-                     for {
-                       _ <- Async.sleep(300.millis)                                             // let SUBSCRIBE register
-                       _ <- Kyo.foreachDiscard(1 to 3)(i => client.publish("news", s"item-$i")) // sequential: preserves order
-                     } yield ()
-                   }
-      chunk     <- client.subscribe[String]("news").take(3).run
+      stream    <- client.subscribeScoped[String]("news")
+      publisher <- Fiber.init(Kyo.foreachDiscard(1 to 3)(i => client.publish("news", s"item-$i")))
+      chunk     <- stream.take(3).run
       _         <- publisher.get
       _         <- Console.printLine(s"received=${chunk.toList.map(_.payload)}")
     } yield ()

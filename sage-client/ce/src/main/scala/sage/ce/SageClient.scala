@@ -215,10 +215,32 @@ extension (client: SageClient) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): fs2.Stream[IO, Message[V]] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
+  /**
+    * Like [[subscribe]], but the `Resource` allocates only once the server has confirmed the SUBSCRIBE, so a publish sequenced after the
+    * acquisition cannot race the registration. Releasing the `Resource` unsubscribes.
+    */
+  def subscribeResource[V: ValueCodec](channel: String, rest: String*): Resource[IO, fs2.Stream[IO, Message[V]]] =
+    resourceOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Like [[pSubscribe]], but the `Resource` allocates only once the server has confirmed the PSUBSCRIBE. Releasing the `Resource`
+    * unsubscribes.
+    */
+  def pSubscribeResource[V: ValueCodec](pattern: String, rest: String*): Resource[IO, fs2.Stream[IO, PatternMessage[V]]] =
+    resourceOf(client.subscribePatterns[V](pattern, rest*))
+
+  /**
+    * Like [[sSubscribe]], but the `Resource` allocates only once the server has confirmed the SSUBSCRIBE. Releasing the `Resource`
+    * unsubscribes.
+    */
+  def sSubscribeResource[V: ValueCodec](channel: String, rest: String*): Resource[IO, fs2.Stream[IO, Message[V]]] =
+    resourceOf(client.subscribeShardChannels[V](channel, rest*))
+
   private def streamOf[A](open: IO[Subscription[IO, A]]): fs2.Stream[IO, A] =
-    fs2.Stream
-      .resource(Resource.make(open)(_.close.voidError))
-      .flatMap(sub => fs2.Stream.repeatEval(sub.next).unNoneTerminate)
+    fs2.Stream.resource(resourceOf(open)).flatten
+
+  private def resourceOf[A](open: IO[Subscription[IO, A]]): Resource[IO, fs2.Stream[IO, A]] =
+    Resource.make(open)(_.close.voidError).map(sub => fs2.Stream.repeatEval(sub.next).unNoneTerminate)
 }
 
 object SageClient {

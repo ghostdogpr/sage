@@ -239,48 +239,51 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, or a Kyo `Stream`. Ending the stream unsubscribes.
 
+Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on cats-effect, and plain `subscribe` on Ox (where the call is already synchronous). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
+
 ::: code-group
 
 ```scala [Ox]
-val collector =
-  fork(client.subscribe[String]("news").take(3).runToList())
+val news      = client.subscribe[String]("news")
+val collector = fork(news.take(3).runToList())
 (1 to 3).foreach(i => client.publish("news", s"item-$i"))
 val messages = collector.join() // the three published payloads
 ```
 
 ```scala [ZIO]
-for {
-  sub      <- client.subscribe[String]("news").take(3).runCollect.fork
-  _        <- ZIO.sleep(300.millis)
-  _        <- ZIO.foreachDiscard(1 to 3) { i =>
-                client.publish("news", s"item-$i")
-              }
-  messages <- sub.join
-} yield messages.map(_.payload).toList
+ZIO.scoped {
+  for {
+    stream   <- client.subscribeScoped[String]("news")
+    sub      <- stream.take(3).runCollect.fork
+    _        <- ZIO.foreachDiscard(1 to 3) { i =>
+                  client.publish("news", s"item-$i")
+                }
+    messages <- sub.join
+  } yield messages.map(_.payload).toList
+}
 ```
 
 ```scala [Cats Effect]
-for {
-  sub      <- client.subscribe[String]("news").take(3).compile.toVector.start
-  _        <- IO.sleep(300.millis)
-  _        <- (1 to 3).toList.traverse_ { i =>
-                client.publish("news", s"item-$i")
-              }
-  messages <- sub.joinWithNever
-} yield messages.map(_.payload).toList
+client.subscribeResource[String]("news").use { stream =>
+  for {
+    sub      <- stream.take(3).compile.toVector.start
+    _        <- (1 to 3).toList.traverse_ { i =>
+                  client.publish("news", s"item-$i")
+                }
+    messages <- sub.joinWithNever
+  } yield messages.map(_.payload).toList
+}
 ```
 
 ```scala [Kyo]
 for {
+  stream    <- client.subscribeScoped[String]("news")
   publisher <- Fiber.init {
-                 for {
-                   _ <- Async.sleep(300.millis)
-                   _ <- Kyo.foreachDiscard(1 to 3) { i =>
-                          client.publish("news", s"item-$i")
-                        }
-                 } yield ()
+                 Kyo.foreachDiscard(1 to 3) { i =>
+                   client.publish("news", s"item-$i")
+                 }
                }
-  chunk     <- client.subscribe[String]("news").take(3).run
+  chunk     <- stream.take(3).run
   _         <- publisher.get
 } yield chunk.toList.map(_.payload)
 ```
