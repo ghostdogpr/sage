@@ -329,9 +329,11 @@ private[sage] object SortedSets {
       decode = {
         case Frame.Null => Right(None)
         case other      =>
-          Decode.array3(Decode.key[K], Decode.value[V], Decode.score, "key, member and score or null") { (key, member, s) =>
-            (key, member, s)
-          }(other).map(Some(_))
+          Decode
+            .array3(Decode.key[K], Decode.value[V], Decode.score, "key, member and score or null") { (key, member, s) =>
+              (key, member, s)
+            }(other)
+            .map(Some(_))
       },
       execution = Execution.Blocking
     )

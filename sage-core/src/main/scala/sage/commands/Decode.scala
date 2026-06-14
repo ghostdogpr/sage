@@ -131,7 +131,11 @@ private[commands] object Decode {
   def array2[A, B, R](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B], label: String)(
     combine: (A, B) => R
   ): Frame => Either[DecodeError, R] = {
-    case Frame.Array(Vector(fa, fb)) => for { x <- a(fa); y <- b(fb) } yield combine(x, y)
+    case Frame.Array(Vector(fa, fb)) =>
+      for {
+        x <- a(fa)
+        y <- b(fb)
+      } yield combine(x, y)
     case other                       => Left(DecodeError(label, Frame.describe(other)))
   }
 
@@ -141,7 +145,12 @@ private[commands] object Decode {
     c: Frame => Either[DecodeError, C],
     label: String
   )(combine: (A, B, C) => R): Frame => Either[DecodeError, R] = {
-    case Frame.Array(Vector(fa, fb, fc)) => for { x <- a(fa); y <- b(fb); z <- c(fc) } yield combine(x, y, z)
+    case Frame.Array(Vector(fa, fb, fc)) =>
+      for {
+        x <- a(fa)
+        y <- b(fb)
+        z <- c(fc)
+      } yield combine(x, y, z)
     case other                           => Left(DecodeError(label, Frame.describe(other)))
   }
 
@@ -153,7 +162,12 @@ private[commands] object Decode {
     label: String
   )(combine: (A, B, C, D) => R): Frame => Either[DecodeError, R] = {
     case Frame.Array(Vector(fa, fb, fc, fd)) =>
-      for { w <- a(fa); x <- b(fb); y <- c(fc); z <- d(fd) } yield combine(w, x, y, z)
+      for {
+        w <- a(fa)
+        x <- b(fb)
+        y <- c(fc)
+        z <- d(fd)
+      } yield combine(w, x, y, z)
     case other                               => Left(DecodeError(label, Frame.describe(other)))
   }
 
@@ -204,8 +218,7 @@ private[commands] object Decode {
   }
 
   def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
-    val pair = array2(key[K], value[V], "field/value pair")(_ -> _)
-    {
+    val pair = array2(key[K], value[V], "field/value pair")(_ -> _) {
       case Frame.Array(rows) => each(rows)(pair)
       case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
     }

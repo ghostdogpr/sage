@@ -208,8 +208,8 @@ private[sage] object StreamInfo {
 
   // a consumer-level FULL PEL row omits the (implied) consumer: [id, delivery-time-ms, delivery-count]
   private val consumerPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
-    Decode.array3(Streams.streamId, millisInstant, Decode.long, "consumer pending [id, delivery-time, delivery-count]") {
-      (id, delivered, count) => FullPendingEntry(id, None, delivered, count)
+    Decode.array3(Streams.streamId, millisInstant, Decode.long, "consumer pending [id, delivery-time, delivery-count]") { (id, delivered, count) =>
+      FullPendingEntry(id, None, delivered, count)
     }
 
   /**
