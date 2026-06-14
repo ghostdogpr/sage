@@ -102,7 +102,10 @@ final private[client] class SubscriptionConnection(
   def attach(sink: Sink, names: Vector[String], kind: Kind): Unit = attachInternal(sink, names, kind, failIfUnconfirmed = false)
 
   private def attachInternal(sink: Sink, names: Vector[String], kind: Kind, failIfUnconfirmed: Boolean): Unit = {
-    var doEstablish = false
+    var doEstablish   = false
+    // the SUBSCRIBE-ack count this attach waits for, captured under the same lock as its send so a concurrent attach bumping subscribeSent
+    // can't inflate it; -1 means capture it lazily on the next Live (the send happens later, in goLive's resubscribe)
+    var confirmTarget = -1L
     lock.lock()
     try {
       var settled = false
@@ -113,6 +116,7 @@ final private[client] class SubscriptionConnection(
           case State.Live         =>
             val fresh = register(sink, names, kind)
             if (fresh.nonEmpty) sendSubscribe(current, kind, fresh)
+            confirmTarget = subscribeSent
             settled = true
           case State.Reconnecting =>
             register(sink, names, kind) // the next successful reconnect resubscribes everything currently registered
@@ -134,7 +138,7 @@ final private[client] class SubscriptionConnection(
           locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
           throw e
       }
-    awaitActive(failIfUnconfirmed)
+    awaitActive(failIfUnconfirmed, confirmTarget)
   }
 
   /**
@@ -200,15 +204,16 @@ final private[client] class SubscriptionConnection(
     subscribeSent += names.size
   }
 
-  // Waits (bounded by the connect timeout) for the server to confirm every SUBSCRIBE sent; re-arms across a reconnect mid-wait. When
-  // `failIfUnconfirmed` (the owned standalone/master-replica path), an unconfirmed deadline throws NotConnected so `subscribe` fails loudly
-  // instead of returning a stream whose SUBSCRIBE never took effect; cluster passes false (its manager owns re-home/retry).
-  private def awaitActive(failIfUnconfirmed: Boolean): Unit = {
+  // Waits (bounded by the connect timeout) until subscribeConfirmed reaches `target` — the ack count captured under this attach's send lock,
+  // so it waits for its own SUBSCRIBE, not a concurrent attach's. A reconnect resets the counters, so it re-arms to the full resubscribe count
+  // of the new generation. When `failIfUnconfirmed` (the owned standalone/master-replica path), an unconfirmed deadline throws NotConnected so
+  // `subscribe` fails loudly instead of returning a stream whose SUBSCRIBE never took effect; cluster passes false (its manager owns retry).
+  private def awaitActive(failIfUnconfirmed: Boolean, target0: Long): Unit = {
     var active = false
     lock.lock()
     try {
       val deadline = scheduler.nowMillis + connectTimeoutMillis
-      var target   = -1L
+      var target   = target0
       var settled  = false
       while (!settled)
         state match {
@@ -218,7 +223,7 @@ final private[client] class SubscriptionConnection(
             if (subscribeConfirmed >= target) { active = true; settled = true }
             else if (awaitOrTimeout(deadline)) settled = true
           case _            =>
-            target = -1L // re-arm against the next live generation
+            target = -1L // a reconnect reset the counters: re-arm against the next generation's full resubscribe
             if (awaitOrTimeout(deadline)) settled = true
         }
     } finally lock.unlock()
