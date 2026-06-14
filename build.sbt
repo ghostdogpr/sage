@@ -3,7 +3,7 @@ import sbt.VirtualAxis
 val scala3Version     = "3.3.7"
 val scala3NextVersion = "3.8.3" // Kyo requires Scala 3.8.x (Next)
 
-val kyoCompatVersion      = "1.0.0-RC2+64-9487771b-SNAPSHOT"
+val kyoCompatVersion      = "1.0.0-RC2+99-6f012d83-SNAPSHOT"
 val munitVersion          = "1.3.2"
 val testcontainersVersion = "0.44.1"
 
