@@ -60,8 +60,7 @@ final private[client] class MasterReplicaLive(
   private val cursor           = new AtomicInteger()
   @volatile private var closed = false
 
-  // lazily created on the first subscription, pinned to the master discovered then; classic pub/sub re-homing across a master failover is a
-  // follow-up (the connection re-issues its subscriptions on reconnect to the same address, which a stable endpoint repoints)
+  // lazily created on the first subscription; re-homes onto the promoted master across a failover (see subs())
   private val subLock                                         = new ReentrantLock()
   @volatile private var subscriptions: SubscriptionConnection = null
 
@@ -124,6 +123,9 @@ final private[client] class MasterReplicaLive(
   }
 
   private def triggerRefresh(): Unit = offload(refreshThrottle(force = false)(rediscover()))
+
+  // forced + synchronous so masterNodeRef names the promoted master before the reconnect's establish() reads it via the factory
+  private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
   private def rediscover(): Unit = {
     val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
@@ -305,16 +307,19 @@ final private[client] class MasterReplicaLive(
       subLock.lock()
       try {
         if (subscriptions == null) {
-          val master = masterNodeRef.get()
+          // resolves the current master per (re)connect, not once, so onReconnect's refresh lets a failover re-home the subscription
+          val rehomingFactory: MultiplexedConnection.TransportFactory =
+            (onFrame, onClosed) => nodeFactory(masterNodeRef.get())(onFrame, onClosed)
           subscriptions = new SubscriptionConnection(
-            nodeFactory(master),
+            rehomingFactory,
             bootstrap,
             scheduler,
             config.reconnect,
             config.watchdog,
             config.connectTimeout.toMillis,
             config.pubsub.bufferSize,
-            () => masterPool.existingLive(masterNodeRef.get()).isDefined
+            () => masterPool.existingLive(masterNodeRef.get()).isDefined,
+            onReconnect = () => refreshRolesBeforeRehome()
           )
         }
         s = subscriptions

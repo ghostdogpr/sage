@@ -22,7 +22,8 @@ import sage.protocol.Frame
   * connection but never commands; the watchdog therefore skips its liveness kill while the reader is so blocked.
   *
   * Two lifecycles share this one machinery. Standalone (`cluster = false`): the connection owns its sinks, runs its own reconnect loop, and
-  * re-issues every active subscription on reconnect. Cluster (`cluster = true`): the [[ClusterSubscriptions]] manager owns the sinks and
+  * re-issues every active subscription on reconnect; each attempt first calls `onReconnect`, which a master-replica subscription uses to
+  * re-discover roles and re-home onto a promoted master. Cluster (`cluster = true`): the [[ClusterSubscriptions]] manager owns the sinks and
   * attaches them per Node; a socket loss is terminal for the connection — it fires `onTerminated` and the manager re-homes the surviving
   * sinks onto the current owner rather than blindly reconnecting to a node that may no longer own the slot.
   */
@@ -36,7 +37,8 @@ final private[client] class SubscriptionConnection(
   bufferSize: Int,
   isLive: () => Boolean,
   cluster: Boolean = false,
-  onTerminated: () => Unit = () => ()
+  onTerminated: () => Unit = () => (),
+  onReconnect: () => Unit = () => ()
 ) extends Placement.ShardConn {
   import SubscriptionConnection.*
 
@@ -85,7 +87,7 @@ final private[client] class SubscriptionConnection(
     val sink = new Sink(names, kind, bufferSize)
     // closeOwned, not bare terminate: if attach registered the sink but awaitActive then threw, fully unwind it so no phantom channel is
     // resubscribed on the next reconnect
-    try attach(sink, names, kind)
+    try attachInternal(sink, names, kind, failIfUnconfirmed = true)
     catch { case e: Throwable => closeOwned(sink); throw e }
     new RawSubscription(sink, () => closeOwned(sink))
   }
@@ -97,7 +99,9 @@ final private[client] class SubscriptionConnection(
     * timeout) until the server confirms. The caller must pass names that hash to a single Slot for the Shard kind in cluster mode, so the
     * one `SSUBSCRIBE` this emits never spans slots (`CROSSSLOT`).
     */
-  def attach(sink: Sink, names: Vector[String], kind: Kind): Unit = {
+  def attach(sink: Sink, names: Vector[String], kind: Kind): Unit = attachInternal(sink, names, kind, failIfUnconfirmed = false)
+
+  private def attachInternal(sink: Sink, names: Vector[String], kind: Kind, failIfUnconfirmed: Boolean): Unit = {
     var doEstablish = false
     lock.lock()
     try {
@@ -130,7 +134,7 @@ final private[client] class SubscriptionConnection(
           locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
           throw e
       }
-    awaitActive()
+    awaitActive(failIfUnconfirmed)
   }
 
   /**
@@ -196,9 +200,11 @@ final private[client] class SubscriptionConnection(
     subscribeSent += names.size
   }
 
-  // Best-effort, bounded by the connect timeout: a down or backpressured connection degrades to fire-and-forget rather than blocking forever.
-  // The target is (re)captured whenever the connection is Live, so a reconnect mid-wait re-arms against the new generation's resubscribe.
-  private def awaitActive(): Unit = {
+  // Waits (bounded by the connect timeout) for the server to confirm every SUBSCRIBE sent; re-arms across a reconnect mid-wait. When
+  // `failIfUnconfirmed` (the owned standalone/master-replica path), an unconfirmed deadline throws NotConnected so `subscribe` fails loudly
+  // instead of returning a stream whose SUBSCRIBE never took effect; cluster passes false (its manager owns re-home/retry).
+  private def awaitActive(failIfUnconfirmed: Boolean): Unit = {
+    var active = false
     lock.lock()
     try {
       val deadline = scheduler.nowMillis + connectTimeoutMillis
@@ -209,13 +215,14 @@ final private[client] class SubscriptionConnection(
           case State.Closed => settled = true
           case State.Live   =>
             if (target < 0) target = subscribeSent
-            if (subscribeConfirmed >= target) settled = true
-            else settled = awaitOrTimeout(deadline)
+            if (subscribeConfirmed >= target) { active = true; settled = true }
+            else if (awaitOrTimeout(deadline)) settled = true
           case _            =>
             target = -1L // re-arm against the next live generation
-            settled = awaitOrTimeout(deadline)
+            if (awaitOrTimeout(deadline)) settled = true
         }
     } finally lock.unlock()
+    if (failIfUnconfirmed && !active) throw NotConnected()
   }
 
   // true (stop) on timeout; must hold `lock`
@@ -256,9 +263,11 @@ final private[client] class SubscriptionConnection(
 
   private def attemptReconnect(attempt: Int): Unit = {
     val proceed = locked(state == State.Reconnecting)
-    if (proceed)
+    if (proceed) {
+      onReconnect()
       try goLive(establish())
       catch { case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1)) }
+    }
   }
 
   private def onConnClosed(conn: Conn): Unit =
