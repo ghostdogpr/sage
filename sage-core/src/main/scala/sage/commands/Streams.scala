@@ -578,15 +578,11 @@ private[sage] object Streams {
 
   // an entry is `[id, [field, value, …]]`; a tombstone (claimed entry whose data was deleted) is `[id, nil]`
   private[commands] def streamEntry[F, V](using KeyCodec[F], ValueCodec[V]): Frame => Either[DecodeError, StreamEntry[F, V]] = {
-    case Frame.Array(Vector(idFrame, fieldsFrame)) =>
-      for {
-        id     <- streamId(idFrame)
-        fields <- fieldsFrame match {
-                    case Frame.Null => Right(Vector.empty[(F, V)])
-                    case other      => Decode.flatPairs[F, V](other)
-                  }
-      } yield StreamEntry(id, fields)
-    case other                                     => Left(DecodeError("stream entry [id, fields]", Frame.describe(other)))
+    val fields: Frame => Either[DecodeError, Vector[(F, V)]] = {
+      case Frame.Null => Right(Vector.empty)
+      case other      => Decode.flatPairs[F, V](other)
+    }
+    Decode.array2(streamId, fields, "stream entry [id, fields]")(StreamEntry(_, _))
   }
 
   // XREAD/XREADGROUP reply: RESP3 map of stream-name -> entries (RESP2 array of [name, entries] pairs); null when nothing is ready
@@ -604,9 +600,9 @@ private[sage] object Streams {
     frame =>
       frame match {
         case Frame.Null        => Right(Vector.empty)
-        case Frame.Map(rows)   => collectPairs(rows) { case (n, e) => pair(n, e) }
+        case Frame.Map(rows)   => Decode.each(rows) { case (n, e) => pair(n, e) }
         case Frame.Array(rows) =>
-          collect(rows) {
+          Decode.each(rows) {
             case Frame.Array(Vector(n, e)) => pair(n, e)
             case other                     => Left(DecodeError("stream [name, entries] pair", Frame.describe(other)))
           }
@@ -654,40 +650,23 @@ private[sage] object Streams {
 
   // XPENDING summary: [total, min-id, max-id, [[consumer, count], …]]; an empty group replies [0, nil, nil, nil]
   private val pendingSummaryReply: Frame => Either[DecodeError, PendingSummary] = {
-    case Frame.Array(Vector(totalFrame, minFrame, maxFrame, consumersFrame)) =>
-      for {
-        total     <- Decode.long(totalFrame)
-        min       <- optionalStreamId(minFrame)
-        max       <- optionalStreamId(maxFrame)
-        consumers <- consumersFrame match {
-                       case Frame.Null        => Right(Vector.empty[(String, Long)])
-                       case Frame.Array(rows) => collect(rows)(consumerCount)
-                       case other             => Left(DecodeError("consumer counts array or null", Frame.describe(other)))
-                     }
-      } yield PendingSummary(total, min, max, consumers)
-    case other                                                               => Left(DecodeError("xpending summary", Frame.describe(other)))
+    val consumers: Frame => Either[DecodeError, Vector[(String, Long)]] = {
+      case Frame.Null        => Right(Vector.empty)
+      case Frame.Array(rows) => Decode.each(rows)(consumerCount)
+      case other             => Left(DecodeError("consumer counts array or null", Frame.describe(other)))
+    }
+    Decode.array4(Decode.long, optionalStreamId, optionalStreamId, consumers, "xpending summary")(PendingSummary(_, _, _, _))
   }
 
-  private val consumerCount: Frame => Either[DecodeError, (String, Long)] = {
-    case Frame.Array(Vector(nameFrame, countFrame)) =>
-      for {
-        name  <- Decode.utf8String(nameFrame)
-        count <- countText(countFrame)
-      } yield name -> count
-    case other                                      => Left(DecodeError("[consumer, count] pair", Frame.describe(other)))
-  }
+  private val consumerCount: Frame => Either[DecodeError, (String, Long)] =
+    Decode.array2(Decode.utf8String, countText, "[consumer, count] pair")(_ -> _)
 
   // XPENDING extended row: [id, consumer, idle-ms, delivery-count]
-  private val pendingEntryElement: Frame => Either[DecodeError, PendingEntry] = {
-    case Frame.Array(Vector(idFrame, consumerFrame, idleFrame, deliveriesFrame)) =>
-      for {
-        id         <- streamId(idFrame)
-        consumer   <- Decode.utf8String(consumerFrame)
-        idle       <- Decode.long(idleFrame)
-        deliveries <- Decode.long(deliveriesFrame)
-      } yield PendingEntry(id, consumer, FiniteDuration(idle, java.util.concurrent.TimeUnit.MILLISECONDS), deliveries)
-    case other                                                                   => Left(DecodeError("xpending entry [id, consumer, idle, count]", Frame.describe(other)))
-  }
+  private val pendingEntryElement: Frame => Either[DecodeError, PendingEntry] =
+    Decode.array4(streamId, Decode.utf8String, Decode.long, Decode.long, "xpending entry [id, consumer, idle, count]") {
+      (id, consumer, idle, deliveries) =>
+        PendingEntry(id, consumer, FiniteDuration(idle, java.util.concurrent.TimeUnit.MILLISECONDS), deliveries)
+    }
 
   // XPENDING per-consumer counts come back as bulk-string integers
   private def countText(frame: Frame): Either[DecodeError, Long] =
@@ -697,29 +676,4 @@ private[sage] object Streams {
       case other                   => Left(DecodeError("integer", Frame.describe(other)))
     }
 
-  private def collect[A](frames: Vector[Frame])(f: Frame => Either[DecodeError, A]): Either[DecodeError, Vector[A]] = {
-    val builder = Vector.newBuilder[A]
-    builder.sizeHint(frames.length)
-    val it      = frames.iterator
-    while (it.hasNext)
-      f(it.next()) match {
-        case Right(value) => builder += value
-        case Left(error)  => return Left(error)
-      }
-    Right(builder.result())
-  }
-
-  private def collectPairs[A](pairs: Vector[(Frame, Frame)])(f: (Frame, Frame) => Either[DecodeError, A]): Either[DecodeError, Vector[A]] = {
-    val builder = Vector.newBuilder[A]
-    builder.sizeHint(pairs.length)
-    val it      = pairs.iterator
-    while (it.hasNext) {
-      val (a, b) = it.next()
-      f(a, b) match {
-        case Right(value) => builder += value
-        case Left(error)  => return Left(error)
-      }
-    }
-    Right(builder.result())
-  }
 }

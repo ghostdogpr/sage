@@ -214,14 +214,8 @@ private[sage] object Geo {
 
   private def coordArg(value: Double): Bytes = Bytes.utf8(Doubles.format(value))
 
-  private val coordinates: Frame => Either[DecodeError, GeoCoordinates] = {
-    case Frame.Array(Vector(lon, lat)) =>
-      for {
-        x <- Decode.lenientDouble(lon)
-        y <- Decode.lenientDouble(lat)
-      } yield GeoCoordinates(x, y)
-    case other                         => Left(DecodeError("longitude/latitude pair", Frame.describe(other)))
-  }
+  private val coordinates: Frame => Either[DecodeError, GeoCoordinates] =
+    Decode.array2(Decode.lenientDouble, Decode.lenientDouble, "longitude/latitude pair")(GeoCoordinates(_, _))
 
   private val optionalCoordinates: Frame => Either[DecodeError, Option[GeoCoordinates]] = {
     case Frame.Null => Right(None)

@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference, AtomicReferenceArray}
 
 import scala.util.{Failure, Success, Try}
@@ -67,29 +67,8 @@ final private[client] class DedicatedConnection private (
     transport.start()
   }
 
-  // blocks on each reply in turn; throws on failure so the caller discards the half-built connection
   private def runBootstrap(bootstrap: Vector[Command[?]]): Unit =
-    bootstrap.foreach { command =>
-      val latch   = new CountDownLatch(1)
-      val outcome = new AtomicReference[Try[Any]]()
-      submit(
-        command,
-        result => {
-          outcome.set(result)
-          latch.countDown()
-        }
-      )
-      if (!latch.await(connectTimeoutMillis, TimeUnit.MILLISECONDS)) {
-        close()
-        throw ConnectionLost(mayHaveExecuted = false)
-      }
-      outcome.get() match {
-        case Failure(error) =>
-          close()
-          throw error
-        case Success(_)     => ()
-      }
-    }
+    Bootstrap.run(bootstrap, connectTimeoutMillis, (c, cb) => submit(c, cb), () => close())
 
   private def onFrame(frame: Frame): Unit =
     frame match {

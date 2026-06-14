@@ -5,7 +5,7 @@ import sage.client.AuthConfig
 class BootstrapSpec extends munit.FunSuite {
 
   private def lines(auth: Option[AuthConfig], database: Int, clientName: Option[String]): Vector[String] =
-    Client.bootstrapCommands(auth, database, clientName).map(c => (c.name +: c.args.map(_.asUtf8String)).mkString(" "))
+    Bootstrap.commands(auth, database, clientName).map(c => (c.name +: c.args.map(_.asUtf8String)).mkString(" "))
 
   test("the default bootstrap is HELLO then library identification, no SELECT") {
     val cmds = lines(None, 0, None)
@@ -26,7 +26,7 @@ class BootstrapSpec extends munit.FunSuite {
   }
 
   test("HELLO carries AUTH when credentials are configured") {
-    val first = Client.bootstrapCommands(Some(AuthConfig("pw", "alice")), 0, None).head
+    val first = Bootstrap.commands(Some(AuthConfig("pw", "alice")), 0, None).head
     assertEquals(first.name, "HELLO")
     assert(first.args.map(_.asUtf8String).containsSlice(Vector("AUTH", "alice", "pw")))
   }

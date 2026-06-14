@@ -1,15 +1,16 @@
 package sage.client.internal
 
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
+import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
 
 import sage.Bytes
-import sage.SageException.{ConnectionLost, NotConnected}
+import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.commands.{Command, Connection, Pubsub, Reply}
 import sage.protocol.Frame
@@ -231,23 +232,24 @@ final private[client] class SubscriptionConnection(
     conn
   }
 
+  // the subscription connection has no pending-command queue, so each bootstrap command parks the single `bootstrapWaiter` for its reply;
+  // the finally clears it so a later watchdog PONG is not misrouted to a stale waiter (which would never reset pingSentAtMillis)
   private def runBootstrap(conn: Conn): Unit =
-    bootstrap.foreach { command =>
-      val latch   = new CountDownLatch(1)
-      val box     = new AtomicReference[Frame]()
-      bootstrapWaiter = frame => { box.set(frame); latch.countDown() }
-      conn.send(command.encode)
-      val replied = latch.await(connectTimeoutMillis, TimeUnit.MILLISECONDS)
-      bootstrapWaiter = null
-      if (!replied) {
-        conn.close()
-        throw ConnectionLost(mayHaveExecuted = false)
-      }
-      Reply.run(command, box.get()) match {
-        case Left(error) => conn.close(); throw error
-        case Right(_)    => ()
-      }
-    }
+    try
+      Bootstrap.run(
+        bootstrap,
+        connectTimeoutMillis,
+        (command, cb) => {
+          bootstrapWaiter = frame =>
+            cb(Reply.run(command, frame) match {
+              case Right(value) => Success(value)
+              case Left(error)  => Failure(error)
+            })
+          conn.send(command.encode)
+        },
+        () => conn.close()
+      )
+    finally bootstrapWaiter = null
 
   private def scheduleReconnect(attempt: Int): Unit =
     scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
