@@ -15,7 +15,7 @@ import sage.SageException.{ConnectionLost, NotConnected, ServerError, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
-import sage.commands.{Command, Pipeline, Role, Server}
+import sage.commands.{Command, Connection, Pipeline, Role, Server}
 
 /**
   * The master-replica runtime: a non-cluster deployment of one master and its replicas, discovered from seeds by asking each its `ROLE`.
@@ -37,23 +37,30 @@ final private[client] class MasterReplicaLive(
   events: Events = Events.disabled
 ) extends Client[CIO] {
 
-  private val readFrom = config.readFrom
+  private val readFrom       = config.readFrom
+  private val cachingEnabled = config.clientCache.enabled
 
-  private val masterPool  = pool()
-  private val replicaPool = pool() // non-cluster replicas serve reads without READONLY, so the same plain bootstrap as the master
+  // only the master pool caches: cached reads run on the master, replicas never serve them
+  private val masterPool  = pool(caching = true)
+  private val replicaPool = pool(caching = false)
 
-  private def pool(): NodePool =
+  private def pool(caching: Boolean): NodePool = {
+    val cached        = caching && cachingEnabled
+    val poolBootstrap = if (cached) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
+    val cacheMaxBytes = if (cached) config.clientCache.maxBytes else 0L
     new NodePool(
       nodeFactory,
       scheduler,
-      bootstrap,
+      poolBootstrap,
       config.reconnect,
       config.watchdog,
       config.connectTimeout,
       config.closeTimeout,
       config.dedicatedPool,
+      cacheMaxBytes,
       events
     )
+  }
 
   private val masterNodeRef    = new AtomicReference[Node](null)
   private val replicasRef      = new AtomicReference[Vector[Node]](Vector.empty)
@@ -109,8 +116,8 @@ final private[client] class MasterReplicaLive(
       config.connectTimeout,
       config.closeTimeout,
       config.dedicatedPool,
-      Some(node),
-      events
+      node = Some(node),
+      events = events
     )
     try {
       val latch   = new CountDownLatch(1)
@@ -150,13 +157,19 @@ final private[client] class MasterReplicaLive(
       offload(if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked) else sendMaster(command, tracked))
     }
 
-  // cached reads always go to the master (caching is anchored to its tracking stream); the cache itself is a follow-up, so the read runs
-  // uncached but stays on the master to keep the call portable
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
-    else CIO.async[A](complete => offload(sendMaster(command, Events.trackCommand(events, command, complete))))
+    else if (!cachingEnabled) CIO.async[A](complete => offload(sendMaster(command, Events.trackCommand(events, command, complete))))
+    else CIO.async[A](complete => offload(sendMasterCached(command, ttl.toMillis, Events.trackCommand(events, command, complete))))
 
-  private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit = {
+  private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =
+    onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb))
+
+  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit): Unit =
+    onMaster(complete)((nc, _, cb) => nc.cachedSubmit[A](command, ttlMillis, cb))
+
+  // run `submit` on the master, completing with node attribution; an ownership fault (a demoted master) kicks a re-discovery
+  private def onMaster[A](complete: Try[A] => Unit)(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {
     if (closed) { complete(Failure(NotConnected())); return }
     val node = masterNodeRef.get()
     val nc   =
@@ -164,9 +177,9 @@ final private[client] class MasterReplicaLive(
       catch { case NonFatal(_) => null }
     if (nc == null) { triggerRefresh(); complete(Failure(NotConnected())) }
     else
-      nc.submit[A](
-        command,
-        asking = false,
+      submit(
+        nc,
+        node,
         {
           case s @ Success(_) => Events.attributeNode(complete, node); complete(s)
           case f @ Failure(e) => if (isOwnershipFault(e)) triggerRefresh(); Events.attributeNode(complete, node); complete(f)

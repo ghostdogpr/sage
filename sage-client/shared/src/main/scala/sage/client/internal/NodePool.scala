@@ -28,6 +28,7 @@ final private[client] class NodePool(
   connectTimeout: FiniteDuration,
   closeTimeout: FiniteDuration,
   dedicatedPool: DedicatedPoolConfig,
+  cacheMaxBytes: Long = 0L,
   events: Events = Events.disabled
 ) {
 
@@ -72,6 +73,7 @@ final private[client] class NodePool(
           connectTimeout,
           closeTimeout,
           dedicatedPool,
+          cacheMaxBytes,
           Some(node),
           events
         )

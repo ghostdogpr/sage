@@ -36,3 +36,7 @@ Only reads whose result is a pure function of the named keys' current state are 
 :::
 
 Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configuration).
+
+## Topology
+
+Caching works on a standalone client and on a master-replica client (cached reads run on the master, which holds the tracking-backed cache; a failover starts the new master's cache cold). On a cluster client, `cached` currently runs the read without caching so the call stays portable; per-node tracking through redirects and failover is a planned follow-up. In every case the result is correct, you only forgo the local hit where caching is not active.

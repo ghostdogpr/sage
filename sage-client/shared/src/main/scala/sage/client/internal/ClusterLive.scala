@@ -59,7 +59,7 @@ final private[client] class ClusterLive(
     connectTimeout,
     closeTimeout,
     dedicatedPool,
-    events
+    events = events
   )
   // per-master round-robin cursor over its shard's replicas
   private val replicaCursors = new java.util.concurrent.ConcurrentHashMap[Node, java.util.concurrent.atomic.AtomicInteger]()
@@ -730,8 +730,8 @@ final private[client] class ClusterLive(
             connectTimeout,
             closeTimeout,
             dedicatedPool,
-            Some(node),
-            events
+            node = Some(node),
+            events = events
           )
         // a close that landed during the blocking connect must not re-publish this bundle into a closed client
         val stale = lockedNodes { pendingEstablish.remove(node); if (closed) true else { established.put(node, nc); false } }
