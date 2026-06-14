@@ -90,7 +90,7 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | `connectTimeout` | wait for a connection and its `HELLO 3` setup | `10.seconds` |
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
 | `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
-| `closeTimeout` | how long `close` waits for in-flight commands to drain | `5.seconds` |
+| `closeTimeout` | how long `close` waits for in-flight commands on the multiplexed connection to drain (blocking commands and transactions on the dedicated pool are force-closed at once) | `5.seconds` |
 | `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
