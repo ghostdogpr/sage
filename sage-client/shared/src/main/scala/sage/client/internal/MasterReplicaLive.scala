@@ -35,7 +35,7 @@ final private[client] class MasterReplicaLive(
   seeds: Vector[Node],
   minRefreshInterval: FiniteDuration,
   events: Events = Events.disabled
-) extends Client[CIO] {
+) extends Client[CIO, String] {
 
   private val readFrom       = config.readFrom
   private val cachingEnabled = config.clientCache.enabled
@@ -288,7 +288,7 @@ final private[client] class MasterReplicaLive(
 
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
 
-  def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
+  def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(lease => body(lease.scope))
 
   private def refreshOnTxFault(error: Throwable): Unit = if (isOwnershipFault(error)) triggerRefresh()
@@ -378,8 +378,8 @@ private[client] object MasterReplicaLive {
     masterReplica: sage.client.MasterReplicaConfig,
     scheduler: Scheduler,
     translate: Throwable => Throwable
-  ): CIO[Client[CIO]] =
-    CIO.blocking[Client[CIO]] {
+  ): CIO[Client[CIO, String]] =
+    CIO.blocking[Client[CIO, String]] {
       val bootstrap                                               = Bootstrap.commands(config.auth, config.database, config.clientName)
       val factory: Node => MultiplexedConnection.TransportFactory = node => {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)

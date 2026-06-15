@@ -16,7 +16,7 @@ abstract class ScriptingSuite(image: String) extends ServerSuite(image) {
         one   <- client.eval("return 1")
         keys  <- client.eval("return #KEYS", Seq("a", "b"))
         arg   <- client.eval("return redis.call('set', KEYS[1], ARGV[1])", Seq("eval-k"), Seq("v"))
-        value <- client.get[String, String]("eval-k")
+        value <- client.get[String]("eval-k")
       } yield {
         assertEquals(one, Frame.Integer(1L))
         assertEquals(keys, Frame.Integer(2L))

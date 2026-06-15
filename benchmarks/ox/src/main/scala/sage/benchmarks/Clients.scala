@@ -59,7 +59,7 @@ final class SageOxBench(host: String, port: Int) extends BenchClient {
     Payloads
       .groups(keys, concurrency)
       .toList
-      .map(g => fork(g.foldLeft(0L)((t, k) => t + client.get[String, String](k).fold(0L)(_.length.toLong))))
+      .map(g => fork(g.foldLeft(0L)((t, k) => t + client.get[String](k).fold(0L)(_.length.toLong))))
       .map(_.join())
       .sum
   }
@@ -77,9 +77,9 @@ final class SageOxBench(host: String, port: Int) extends BenchClient {
       .sum
   }
 
-  def mget(keys: Array[String]): Long = supervised(client.mGet[String, String](keys.head, keys.tail*).flatten.map(_.length.toLong).sum)
+  def mget(keys: Array[String]): Long = supervised(client.mGet[String](keys.head, keys.tail*).flatten.map(_.length.toLong).sum)
 
-  def hgetall(key: String): Long = supervised(client.hGetAll[String, String, String](key).size.toLong)
+  def hgetall(key: String): Long = supervised(client.hGetAll[String, String](key).size.toLong)
 
   def close(): Unit = {
     shutdown.countDown()

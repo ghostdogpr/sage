@@ -41,7 +41,7 @@ final class SageCeBench(host: String, port: Int) extends BenchClient {
     Payloads
       .groups(keys, concurrency)
       .toList
-      .parTraverse(_.toList.traverse(client.get[String, String]))
+      .parTraverse(_.toList.traverse(client.get[String]))
       .map(_.flatten.flatten.map(_.length.toLong).sum)
       .unsafeRunSync()
 
@@ -54,9 +54,9 @@ final class SageCeBench(host: String, port: Int) extends BenchClient {
       .unsafeRunSync()
 
   def mget(keys: Array[String]): Long =
-    client.mGet[String, String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum).unsafeRunSync()
+    client.mGet[String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum).unsafeRunSync()
 
-  def hgetall(key: String): Long = client.hGetAll[String, String, String](key).map(_.size.toLong).unsafeRunSync()
+  def hgetall(key: String): Long = client.hGetAll[String, String](key).map(_.size.toLong).unsafeRunSync()
 
   def close(): Unit = client.close.unsafeRunSync()
 }

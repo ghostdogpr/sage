@@ -20,7 +20,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
         fresh     <- client.copy("keys-copy-src", "keys-copy-dst")
         ontoTaken <- client.copy("keys-copy-src", "keys-copy-taken")
         replaced  <- client.copy("keys-copy-src", "keys-copy-taken", replace = true)
-        copied    <- client.get[String, String]("keys-copy-dst")
+        copied    <- client.get[String]("keys-copy-dst")
       } yield {
         assertEquals(fresh, true)
         assertEquals(ontoTaken, false)
@@ -135,7 +135,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.mSet(("keys-glob:1", "a"), ("keys-glob:2", "b"), ("keys-other", "c"))
-        matched <- client.keys[String]("keys-glob:*")
+        matched <- client.keys("keys-glob:*")
       } yield assertEquals(matched.toSet, Set("keys-glob:1", "keys-glob:2"))
     }
   }
@@ -144,7 +144,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.set("keys-random", "v")
-        random <- client.randomKey[String]
+        random <- client.randomKey
       } yield assert(random.isDefined)
     }
   }
@@ -155,7 +155,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
         _        <- client.set("keys-ren-a", "v")
         _        <- client.set("keys-ren-taken", "w")
         _        <- client.rename("keys-ren-a", "keys-ren-b")
-        moved    <- client.get[String, String]("keys-ren-b")
+        moved    <- client.get[String]("keys-ren-b")
         refused  <- client.renameNx("keys-ren-b", "keys-ren-taken")
         accepted <- client.renameNx("keys-ren-b", "keys-ren-c")
       } yield {
@@ -206,9 +206,9 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.rPush("keys-sort", "3", "1", "2")
-        numeric <- client.sort[String, String]("keys-sort")
-        desc    <- client.sort[String, String]("keys-sort", order = SortOrder.Desc, limit = Some(Limit(0L, 2L)))
-        alpha   <- client.sort[String, String]("keys-sort", alpha = true, order = SortOrder.Desc)
+        numeric <- client.sort[String]("keys-sort")
+        desc    <- client.sort[String]("keys-sort", order = SortOrder.Desc, limit = Some(Limit(0L, 2L)))
+        alpha   <- client.sort[String]("keys-sort", alpha = true, order = SortOrder.Desc)
       } yield {
         assertEquals(numeric, Vector(Some("1"), Some("2"), Some("3")))
         assertEquals(desc, Vector(Some("3"), Some("2")))
@@ -223,7 +223,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
         _   <- client.rPush("keys-sortby", "1", "2", "3")
         _   <- client.mSet(("keys-w-1", "30"), ("keys-w-2", "10"), ("keys-w-3", "20"))
         _   <- client.mSet(("keys-d-1", "A"), ("keys-d-3", "C"))
-        got <- client.sort[String, String]("keys-sortby", by = Some("keys-w-*"), get = Vector("keys-d-*", "#"))
+        got <- client.sort[String]("keys-sortby", by = Some("keys-w-*"), get = Vector("keys-d-*", "#"))
       } yield assertEquals(got, Vector(None, Some("2"), Some("C"), Some("3"), Some("A"), Some("1")))
     }
   }
@@ -232,9 +232,9 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.rPush("keys-sortstore", "b", "a", "c")
-        ro     <- client.sortRo[String, String]("keys-sortstore", alpha = true)
+        ro     <- client.sortRo[String]("keys-sortstore", alpha = true)
         stored <- client.sortStore("keys-sortstore-dst", "keys-sortstore", alpha = true)
-        dst    <- client.lRange[String, String]("keys-sortstore-dst", 0L, -1L)
+        dst    <- client.lRange[String]("keys-sortstore-dst", 0L, -1L)
       } yield {
         assertEquals(ro, Vector(Some("a"), Some("b"), Some("c")))
         assertEquals(stored, 3L)
@@ -264,7 +264,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
         _        <- client.set("keys-dump", "payload")
         dumped   <- client.dump("keys-dump")
         restored <- dumped.fold(CIO.value(()))(bytes => client.restore("keys-restore", bytes))
-        value    <- client.get[String, String]("keys-restore")
+        value    <- client.get[String]("keys-restore")
         replaced <- dumped.fold(CIO.value(false))(bytes => client.restore("keys-restore", bytes, replace = true).map(_ => true))
         missing  <- client.dump("keys-dump-missing")
       } yield {
@@ -335,13 +335,13 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
   }
 
   private def scanAll(
-    client: Client[CIO],
+    client: Client[CIO, String],
     pattern: Option[String],
     count: Option[Long],
     ofType: Option[RedisType]
   ): CIO[Set[String]] = {
     def loop(cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
-      client.scan[String](cursor, pattern, count, ofType).flatMap { page =>
+      client.scan(cursor, pattern, count, ofType).flatMap { page =>
         val collected = found ++ page.items
         page.next match {
           case Some(next) => loop(next, collected)

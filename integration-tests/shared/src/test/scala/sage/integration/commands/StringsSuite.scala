@@ -16,7 +16,7 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
       for {
         _      <- client.set("str-append", "abc")
         length <- client.append("str-append", "def")
-        value  <- client.get[String, String]("str-append")
+        value  <- client.get[String]("str-append")
       } yield {
         assertEquals(length, 6L)
         assertEquals(value, Some("abcdef"))
@@ -54,9 +54,9 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.set("str-getdel", "gone")
-        value   <- client.getDel[String, String]("str-getdel")
-        after   <- client.get[String, String]("str-getdel")
-        missing <- client.getDel[String, String]("str-getdel-missing")
+        value   <- client.getDel[String]("str-getdel")
+        after   <- client.get[String]("str-getdel")
+        missing <- client.getDel[String]("str-getdel-missing")
       } yield {
         assertEquals(value, Some("gone"))
         assertEquals(after, None)
@@ -69,11 +69,11 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _         <- client.set("str-getex", "v")
-        value     <- client.getEx[String, String]("str-getex", GetExpiry.In(60.seconds))
+        value     <- client.getEx[String]("str-getex", GetExpiry.In(60.seconds))
         withTtl   <- client.ttl("str-getex")
-        kept      <- client.getEx[String, String]("str-getex")
+        kept      <- client.getEx[String]("str-getex")
         stillTtl  <- client.ttl("str-getex")
-        persisted <- client.getEx[String, String]("str-getex", GetExpiry.Persist)
+        persisted <- client.getEx[String]("str-getex", GetExpiry.Persist)
         noTtl     <- client.ttl("str-getex")
       } yield {
         assertEquals(value, Some("v"))
@@ -90,9 +90,9 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.set("str-range", "Hello World")
-        head   <- client.getRange[String, String]("str-range", 0L, 4L)
+        head   <- client.getRange[String]("str-range", 0L, 4L)
         length <- client.setRange("str-range", 6L, "Redis")
-        value  <- client.get[String, String]("str-range")
+        value  <- client.get[String]("str-range")
         len    <- client.strLen("str-range")
       } yield {
         assertEquals(head, "Hello")
@@ -107,7 +107,7 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.mSet(("str-mget-a", "1"), ("str-mget-b", "2"))
-        values <- client.mGet[String, String]("str-mget-a", "str-mget-missing", "str-mget-b")
+        values <- client.mGet[String]("str-mget-a", "str-mget-missing", "str-mget-b")
       } yield assertEquals(values, Vector(Some("1"), None, Some("2")))
     }
   }
@@ -117,7 +117,7 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
       for {
         first  <- client.mSetNx(("str-msetnx-a", "1"), ("str-msetnx-b", "2"))
         second <- client.mSetNx(("str-msetnx-b", "x"), ("str-msetnx-c", "3"))
-        c      <- client.get[String, String]("str-msetnx-c")
+        c      <- client.get[String]("str-msetnx-c")
       } yield {
         assertEquals(first, true)
         assertEquals(second, false)
@@ -133,7 +133,7 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
         duplicate <- client.set("str-cond", "two", condition = SetCondition.IfNotExists)
         updated   <- client.set("str-cond", "three", condition = SetCondition.IfExists)
         ghost     <- client.set("str-cond-missing", "x", condition = SetCondition.IfExists)
-        value     <- client.get[String, String]("str-cond")
+        value     <- client.get[String]("str-cond")
       } yield {
         assertEquals(created, true)
         assertEquals(duplicate, false)
@@ -147,9 +147,9 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
   test("setGet returns the previous value") {
     withClient { client =>
       for {
-        before <- client.setGet[String, String]("str-setget", "one")
-        after  <- client.setGet[String, String]("str-setget", "two")
-        value  <- client.get[String, String]("str-setget")
+        before <- client.setGet[String]("str-setget", "one")
+        after  <- client.setGet[String]("str-setget", "two")
+        value  <- client.get[String]("str-setget")
       } yield {
         assertEquals(before, None)
         assertEquals(after, Some("one"))
@@ -189,7 +189,7 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _        <- client.mSet(("str-lcs-1", "ohmytext"), ("str-lcs-2", "mynewtext"))
-        sequence <- client.lcs[String, String]("str-lcs-1", "str-lcs-2")
+        sequence <- client.lcs[String]("str-lcs-1", "str-lcs-2")
         length   <- client.lcsLen("str-lcs-1", "str-lcs-2")
         idx      <- client.lcsIdx("str-lcs-1", "str-lcs-2", minMatchLen = Some(4L), withMatchLen = true)
       } yield {

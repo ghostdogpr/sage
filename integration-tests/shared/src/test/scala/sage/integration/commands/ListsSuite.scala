@@ -14,9 +14,9 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
       for {
         _      <- client.rPush("list-build", "b", "c")
         _      <- client.lPush("list-build", "a")
-        all    <- client.lRange[String, String]("list-build", 0L, -1L)
+        all    <- client.lRange[String]("list-build", 0L, -1L)
         len    <- client.lLen("list-build")
-        second <- client.lIndex[String, String]("list-build", 1L)
+        second <- client.lIndex[String]("list-build", 1L)
       } yield {
         assertEquals(all, Vector("a", "b", "c"))
         assertEquals(len, 3L)
@@ -32,7 +32,7 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
         _       <- client.rPush("list-x", "a")
         present <- client.rPushX("list-x", "b")
         head    <- client.lPushX("list-x", "z")
-        all     <- client.lRange[String, String]("list-x", 0L, -1L)
+        all     <- client.lRange[String]("list-x", 0L, -1L)
       } yield {
         assertEquals(absent, 0L)
         assertEquals(present, 2L)
@@ -46,11 +46,11 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.rPush("list-pop", "a", "b", "c", "d")
-        head    <- client.lPop[String, String]("list-pop")
-        tail    <- client.rPop[String, String]("list-pop")
-        twoHead <- client.lPopCount[String, String]("list-pop", 2L)
-        drained <- client.lPopCount[String, String]("list-pop", 2L)
-        none    <- client.lPop[String, String]("list-pop")
+        head    <- client.lPop[String]("list-pop")
+        tail    <- client.rPop[String]("list-pop")
+        twoHead <- client.lPopCount[String]("list-pop", 2L)
+        drained <- client.lPopCount[String]("list-pop", 2L)
+        none    <- client.lPop[String]("list-pop")
       } yield {
         assertEquals(head, Some("a"))
         assertEquals(tail, Some("d"))
@@ -65,8 +65,8 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _    <- client.rPush("list-rpopc", "a", "b", "c", "d")
-        tail <- client.rPopCount[String, String]("list-rpopc", 2L)
-        rest <- client.lRange[String, String]("list-rpopc", 0L, -1L)
+        tail <- client.rPopCount[String]("list-rpopc", 2L)
+        rest <- client.lRange[String]("list-rpopc", 0L, -1L)
       } yield {
         assertEquals(tail, Vector("d", "c"))
         assertEquals(rest, Vector("a", "b"))
@@ -83,7 +83,7 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
         noPivot  <- client.lInsert("list-edit", InsertPosition.After, "zzz", "y")
         removed  <- client.lRem("list-edit", 0L, "b")
         _        <- client.lTrim("list-edit", 0L, 1L)
-        all      <- client.lRange[String, String]("list-edit", 0L, -1L)
+        all      <- client.lRange[String]("list-edit", 0L, -1L)
       } yield {
         assertEquals(inserted, 5L)
         assertEquals(noPivot, -1L)
@@ -114,10 +114,10 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.rPush("list-src", "a", "b", "c")
-        moved   <- client.lMove[String, String]("list-src", "list-dst", ListSide.Left, ListSide.Right)
-        dst     <- client.lRange[String, String]("list-dst", 0L, -1L)
-        popped  <- client.lMpop[String, String]("list-empty", "list-src")(ListSide.Left, count = Some(2L))
-        emptyOk <- client.lMpop[String, String]("list-empty")(ListSide.Left)
+        moved   <- client.lMove[String]("list-src", "list-dst", ListSide.Left, ListSide.Right)
+        dst     <- client.lRange[String]("list-dst", 0L, -1L)
+        popped  <- client.lMpop[String]("list-empty", "list-src")(ListSide.Left, count = Some(2L))
+        emptyOk <- client.lMpop[String]("list-empty")(ListSide.Left)
       } yield {
         assertEquals(moved, Some("a"))
         assertEquals(dst, Vector("a"))
@@ -131,9 +131,9 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _     <- client.rPush("blpop-data", "a", "b")
-        head  <- client.blPop[String, String]("blpop-data")(BlockTimeout.After(1.second))
-        tail  <- client.brPop[String, String]("blpop-data")(BlockTimeout.After(1.second))
-        empty <- client.blPop[String, String]("blpop-empty")(BlockTimeout.After(100.millis))
+        head  <- client.blPop[String]("blpop-data")(BlockTimeout.After(1.second))
+        tail  <- client.brPop[String]("blpop-data")(BlockTimeout.After(1.second))
+        empty <- client.blPop[String]("blpop-empty")(BlockTimeout.After(100.millis))
       } yield {
         assertEquals(head, Some(("blpop-data", "a")))
         assertEquals(tail, Some(("blpop-data", "b")))
@@ -146,10 +146,10 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.rPush("blmove-src", "a", "b")
-        moved  <- client.blMove[String, String]("blmove-src", "blmove-dst", ListSide.Left, ListSide.Right, BlockTimeout.After(1.second))
-        dst    <- client.lRange[String, String]("blmove-dst", 0L, -1L)
-        popped <- client.blMpop[String, String]("blmpop-empty", "blmove-src")(ListSide.Left, BlockTimeout.After(1.second), count = Some(2L))
-        none   <- client.blMpop[String, String]("blmpop-empty")(ListSide.Left, BlockTimeout.After(100.millis))
+        moved  <- client.blMove[String]("blmove-src", "blmove-dst", ListSide.Left, ListSide.Right, BlockTimeout.After(1.second))
+        dst    <- client.lRange[String]("blmove-dst", 0L, -1L)
+        popped <- client.blMpop[String]("blmpop-empty", "blmove-src")(ListSide.Left, BlockTimeout.After(1.second), count = Some(2L))
+        none   <- client.blMpop[String]("blmpop-empty")(ListSide.Left, BlockTimeout.After(100.millis))
       } yield {
         assertEquals(moved, Some("a"))
         assertEquals(dst, Vector("a"))
@@ -163,7 +163,7 @@ abstract class ListsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       CIO
         .zip(
-          client.blPop[String, String]("nonstall-queue")(BlockTimeout.After(5.seconds)),
+          client.blPop[String]("nonstall-queue")(BlockTimeout.After(5.seconds)),
           for {
             pong <- client.ping()
             _    <- client.rPush("nonstall-queue", "payload")

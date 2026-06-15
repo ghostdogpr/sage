@@ -14,7 +14,7 @@ import sage.commands.{Command, Pipeline}
   * expressed in terms of them. The native streaming sugar (`scanAll`, `subscribe`, …) stays per Backend, since it returns that ecosystem's
   * own stream type.
   */
-abstract class LoweredClient[F[_]](underlying: Client[CIO]) extends Client[F] {
+abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Client[F, String] {
 
   protected def lower[A](c: CIO[A]): F[A]
 
@@ -28,7 +28,7 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO]) extends Client[F] {
 
   final def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R] = lower(underlying.pipelineAttempt(p))
 
-  final def transaction[A](body: TransactionScope[F] => F[A]): F[A] =
+  final def transaction[A](body: TransactionScope[F, String] => F[A]): F[A] =
     lower(underlying.transaction[A](scope => lift(body(lowerScope(scope)))))
 
   final def subscribeChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]] =
@@ -46,8 +46,8 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO]) extends Client[F] {
 
   final def close: F[Unit] = lower(underlying.close)
 
-  private def lowerScope(scope: TransactionScope[CIO]): TransactionScope[F] =
-    new TransactionScope[F] {
+  private def lowerScope(scope: TransactionScope[CIO, String]): TransactionScope[F, String] =
+    new TransactionScope[F, String] {
       def watch[K: KeyCodec](key: K, rest: K*): F[Unit]          = lower(scope.watch(key, rest*))
       def run[A](command: Command[A]): F[A]                      = lower(scope.run(command))
       def exec[Out, R](p: Pipeline[Out, R]): F[Option[Out]]      = lower(scope.exec(p))

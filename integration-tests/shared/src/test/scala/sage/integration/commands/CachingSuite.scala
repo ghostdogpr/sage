@@ -13,14 +13,14 @@ import sage.integration.{Images, ServerSuite}
 abstract class CachingSuite(image: String) extends ServerSuite(image) {
 
   // a reader (whose cache we observe) plus a writer on a separate connection, so a write is a genuine server-side change
-  private def withReaderAndWriter[A](body: (Client[CIO], Client[CIO]) => CIO[A]): Future[A] =
+  private def withReaderAndWriter[A](body: (Client[CIO, String], Client[CIO, String]) => CIO[A]): Future[A] =
     withContainers { server =>
       val config = configOf(server)
       connectAndUse(config)(reader => connectAndUse(config)(writer => body(reader, writer))).unsafeRun
     }
 
   // cached reads served locally never re-contact the server, so an external write only shows up once its invalidation push lands; poll
-  private def awaitCached(client: Client[CIO], key: String, expected: String, attempts: Int): CIO[Option[String]] =
+  private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
     client.cached(Commands.get[String, String](key), 1.minute).flatMap { value =>
       if (value.contains(expected) || attempts <= 1) CIO.value(value)
       else CIO.sleep(100.millis).flatMap(_ => awaitCached(client, key, expected, attempts - 1))

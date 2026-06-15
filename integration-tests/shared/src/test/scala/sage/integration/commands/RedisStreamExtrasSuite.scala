@@ -44,7 +44,7 @@ class RedisStreamExtrasSuite extends ServerSuite(Images.redis) {
       for {
         _      <- client.xAdd("sx-ackdel", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _      <- client.xGroupCreate("sx-ackdel", "g", GroupStartId.At(StreamId(0L, 0L)))
-        _      <- client.xReadGroup[String, String, String]("g", "c1")(("sx-ackdel", GroupReadId.New))()
+        _      <- client.xReadGroup[String, String]("g", "c1")(("sx-ackdel", GroupReadId.New))()
         status <- client.xAckDel("sx-ackdel", "g")(StreamId(1L, 0L))
         len    <- client.xLen("sx-ackdel")
         pend   <- client.xPending("sx-ackdel", "g")
@@ -61,7 +61,7 @@ class RedisStreamExtrasSuite extends ServerSuite(Images.redis) {
       for {
         _        <- client.xAdd("sx-nack", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _        <- client.xGroupCreate("sx-nack", "g", GroupStartId.At(StreamId(0L, 0L)))
-        _        <- client.xReadGroup[String, String, String]("g", "c1")(("sx-nack", GroupReadId.New))()
+        _        <- client.xReadGroup[String, String]("g", "c1")(("sx-nack", GroupReadId.New))()
         released <- client.xNack("sx-nack", "g", NackMode.Fail)(StreamId(1L, 0L))()
         pend     <- client.xPending("sx-nack", "g")
       } yield {

@@ -35,7 +35,7 @@ abstract class GeoSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.geoAdd("Sicily2")(("Palermo", palermo), ("Catania", catania))
-        members <- client.geoSearch[String, String](
+        members <- client.geoSearch[String](
                      "Sicily2",
                      GeoOrigin.FromLonLat(GeoCoordinates(15.0, 37.0)),
                      GeoShape.ByRadius(200.0, GeoUnit.Kilometers),
@@ -79,13 +79,13 @@ abstract class GeoSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.geoAdd("Sicily4")(("Palermo", palermo), ("Catania", catania))
-        stored  <- client.geoSearchStore[String, String](
+        stored  <- client.geoSearchStore[String](
                      "Sicily4Store",
                      "Sicily4",
                      GeoOrigin.FromLonLat(GeoCoordinates(15.0, 37.0)),
                      GeoShape.ByRadius(200.0, GeoUnit.Kilometers)
                    )
-        members <- client.geoSearch[String, String](
+        members <- client.geoSearch[String](
                      "Sicily4Store",
                      GeoOrigin.FromLonLat(GeoCoordinates(15.0, 37.0)),
                      GeoShape.ByRadius(200.0, GeoUnit.Kilometers)

@@ -23,12 +23,25 @@ import sage.protocol.Frame
   * The command surface shared by [[Client]] and [[TransactionScope]]: every command as a concrete method delegating to [[run]], so anything
   * implementing `run` — a fake, or a backend adapter lowering `F` to its native effect — gets the whole catalogue.
   */
-trait CommandRunner[F[_]] {
+trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Runs a [[sage.commands.Command]] and returns its decoded result. Every method on this trait is sugar over this one call.
     */
   def run[A](command: Command[A]): F[A]
+
+  /**
+    * Re-types this command surface to another key type, reusing the same connection — no new connection is opened. The runner is
+    * key-agnostic (keys are encoded to bytes in the command builders before `run`), so this is a zero-cost view: `client.as[Array[Byte]]`
+    * yields a command surface over binary keys, and it composes inside a transaction too (`tx.as[Array[Byte]].get(k)`).
+    * [[Client]] and [[TransactionScope]] override this with a narrower return so the re-typed view keeps their full surface.
+    */
+  def as[K2](using KeyCodec[K2]): CommandRunner[F, K2] = {
+    val self = this
+    new CommandRunner[F, K2] {
+      def run[A](command: Command[A]): F[A] = self.run(command)
+    }
+  }
 
   /**
     * Pings the server, returning `PONG` or the echoed `message` when one is given.
@@ -38,73 +51,73 @@ trait CommandRunner[F[_]] {
   /**
     * Appends `value` to the string at `key`, returning the new length.
     */
-  final def append[K: KeyCodec, V: ValueCodec](key: K, value: V): F[Long] = run(Strings.append(key, value))
+  final def append[V: ValueCodec](key: K, value: V): F[Long] = run(Strings.append(key, value))
 
   /**
     * Decrements the integer at `key` by one, returning the new value.
     */
-  final def decr[K: KeyCodec](key: K): F[Long] = run(Strings.decr(key))
+  final def decr(key: K): F[Long] = run(Strings.decr(key))
 
   /**
     * Decrements the integer at `key` by `decrement`, returning the new value.
     */
-  final def decrBy[K: KeyCodec](key: K, decrement: Long): F[Long] = run(Strings.decrBy(key, decrement))
+  final def decrBy(key: K, decrement: Long): F[Long] = run(Strings.decrBy(key, decrement))
 
   /**
     * Gets the value at `key`, or `None` if it does not exist.
     */
-  final def get[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Strings.get(key))
+  final def get[V: ValueCodec](key: K): F[Option[V]] = run(Strings.get(key))
 
   /**
     * Gets the value at `key` and deletes it atomically, returning the value (or `None`).
     */
-  final def getDel[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Strings.getDel(key))
+  final def getDel[V: ValueCodec](key: K): F[Option[V]] = run(Strings.getDel(key))
 
   /**
     * Gets the value at `key`, optionally updating its expiry per `expiry`.
     */
-  final def getEx[K: KeyCodec, V: ValueCodec](key: K, expiry: GetExpiry = GetExpiry.Keep): F[Option[V]] =
+  final def getEx[V: ValueCodec](key: K, expiry: GetExpiry = GetExpiry.Keep): F[Option[V]] =
     run(Strings.getEx(key, expiry))
 
   /**
     * Returns the substring of the value at `key` between `start` and `end`, inclusive; negative indices count from the end.
     */
-  final def getRange[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long): F[V] = run(Strings.getRange(key, start, end))
+  final def getRange[V: ValueCodec](key: K, start: Long, end: Long): F[V] = run(Strings.getRange(key, start, end))
 
   /**
     * Increments the integer at `key` by one, returning the new value.
     */
-  final def incr[K: KeyCodec](key: K): F[Long] = run(Strings.incr(key))
+  final def incr(key: K): F[Long] = run(Strings.incr(key))
 
   /**
     * Increments the integer at `key` by `increment`, returning the new value.
     */
-  final def incrBy[K: KeyCodec](key: K, increment: Long): F[Long] = run(Strings.incrBy(key, increment))
+  final def incrBy(key: K, increment: Long): F[Long] = run(Strings.incrBy(key, increment))
 
   /**
     * Increments the floating-point value at `key` by `increment`, returning the new value.
     */
-  final def incrByFloat[K: KeyCodec](key: K, increment: Double): F[Double] = run(Strings.incrByFloat(key, increment))
+  final def incrByFloat(key: K, increment: Double): F[Double] = run(Strings.incrByFloat(key, increment))
 
   /**
     * Gets the values at several keys in request order, each `None` if that key is absent.
     */
-  final def mGet[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Vector[Option[V]]] = run(Strings.mGet(first, rest*))
+  final def mGet[V: ValueCodec](first: K, rest: K*): F[Vector[Option[V]]] = run(Strings.mGet(first, rest*))
 
   /**
     * Sets several key/value pairs atomically.
     */
-  final def mSet[K: KeyCodec, V: ValueCodec](first: (K, V), rest: (K, V)*): F[Unit] = run(Strings.mSet(first, rest*))
+  final def mSet[V: ValueCodec](first: (K, V), rest: (K, V)*): F[Unit] = run(Strings.mSet(first, rest*))
 
   /**
     * Sets several key/value pairs only if none of the keys already exist, returning whether it applied.
     */
-  final def mSetNx[K: KeyCodec, V: ValueCodec](first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.mSetNx(first, rest*))
+  final def mSetNx[V: ValueCodec](first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.mSetNx(first, rest*))
 
   /**
     * Sets `key` to `value` with optional `expiry` and a set `condition`, returning whether the write was applied.
     */
-  final def set[K: KeyCodec, V: ValueCodec](
+  final def set[V: ValueCodec](
     key: K,
     value: V,
     expiry: SetExpiry = SetExpiry.Clear,
@@ -114,7 +127,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[set]], but returns the previous value (`SET … GET`).
     */
-  final def setGet[K: KeyCodec, V: ValueCodec](
+  final def setGet[V: ValueCodec](
     key: K,
     value: V,
     expiry: SetExpiry = SetExpiry.Clear,
@@ -124,44 +137,44 @@ trait CommandRunner[F[_]] {
   /**
     * Overwrites part of the string at `key` starting at `offset`, zero-padding if needed, returning the new length.
     */
-  final def setRange[K: KeyCodec, V: ValueCodec](key: K, offset: Long, value: V): F[Long] = run(Strings.setRange(key, offset, value))
+  final def setRange[V: ValueCodec](key: K, offset: Long, value: V): F[Long] = run(Strings.setRange(key, offset, value))
 
   /**
     * Returns the length of the string at `key`, or 0 if it is absent.
     */
-  final def strLen[K: KeyCodec](key: K): F[Long] = run(Strings.strLen(key))
+  final def strLen(key: K): F[Long] = run(Strings.strLen(key))
 
   /**
     * Returns the longest common subsequence of the strings at `key1` and `key2`.
     */
-  final def lcs[K: KeyCodec, V: ValueCodec](key1: K, key2: K): F[V] = run(Strings.lcs(key1, key2))
+  final def lcs[V: ValueCodec](key1: K, key2: K): F[V] = run(Strings.lcs(key1, key2))
 
   /**
     * Returns the length of the longest common subsequence of the strings at `key1` and `key2`.
     */
-  final def lcsLen[K: KeyCodec](key1: K, key2: K): F[Long] = run(Strings.lcsLen(key1, key2))
+  final def lcsLen(key1: K, key2: K): F[Long] = run(Strings.lcsLen(key1, key2))
 
   /**
     * Returns the matched ranges of the longest common subsequence; see [[sage.commands.LcsMatches]].
     */
-  final def lcsIdx[K: KeyCodec](key1: K, key2: K, minMatchLen: Option[Long] = None, withMatchLen: Boolean = false): F[LcsMatches] =
+  final def lcsIdx(key1: K, key2: K, minMatchLen: Option[Long] = None, withMatchLen: Boolean = false): F[LcsMatches] =
     run(Strings.lcsIdx(key1, key2, minMatchLen, withMatchLen))
 
   /**
     * Returns a digest of the value at `key` (Valkey `DIGEST`), or `None` if the key is absent.
     */
-  final def digest[K: KeyCodec](key: K): F[Option[String]] = run(Strings.digest(key))
+  final def digest(key: K): F[Option[String]] = run(Strings.digest(key))
 
   /**
     * Deletes `key` only if `condition` holds against its current value (Valkey `DELEX`), returning whether it was deleted.
     */
-  final def delex[K: KeyCodec, V: ValueCodec](key: K, condition: DelexCondition[V] = DelexCondition.Always): F[Boolean] =
+  final def delex[V: ValueCodec](key: K, condition: DelexCondition[V] = DelexCondition.Always): F[Boolean] =
     run(Strings.delex(key, condition))
 
   /**
     * Atomically sets several key/value pairs with a shared `expiry` and set `condition` (Valkey `MSETEX`), returning whether applied.
     */
-  final def msetEx[K: KeyCodec, V: ValueCodec](
+  final def msetEx[V: ValueCodec](
     expiry: SetExpiry = SetExpiry.Clear,
     condition: SetCondition = SetCondition.Always
   )(first: (K, V), rest: (K, V)*): F[Boolean] = run(Strings.msetEx(expiry, condition)(first, rest*))
@@ -169,7 +182,7 @@ trait CommandRunner[F[_]] {
   /**
     * Increments the integer at `key` (Valkey `INCREX`), optionally clamping to bounds and updating expiry; see [[sage.commands.IncrExResult]].
     */
-  final def increxBy[K: KeyCodec](
+  final def increxBy(
     key: K,
     increment: Long = 1,
     saturate: Boolean = false,
@@ -181,7 +194,7 @@ trait CommandRunner[F[_]] {
   /**
     * The floating-point form of [[increxBy]] (Valkey `INCREX`).
     */
-  final def increxByFloat[K: KeyCodec](
+  final def increxByFloat(
     key: K,
     increment: Double,
     saturate: Boolean = false,
@@ -193,80 +206,80 @@ trait CommandRunner[F[_]] {
   /**
     * Copies the value at `source` to `destination`; `replace` overwrites an existing destination. Returns whether it copied.
     */
-  final def copy[K: KeyCodec](source: K, destination: K, replace: Boolean = false): F[Boolean] =
+  final def copy(source: K, destination: K, replace: Boolean = false): F[Boolean] =
     run(Keys.copy(source, destination, replace))
 
   /**
     * Deletes the given keys, returning how many existed.
     */
-  final def del[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.del(first, rest*))
+  final def del(first: K, rest: K*): F[Long] = run(Keys.del(first, rest*))
 
   /**
     * Deletes `key` only if its current value equals `value` (Valkey `DELIFEQ`), returning whether it was deleted.
     */
-  final def delIfEq[K: KeyCodec, V: ValueCodec](key: K, value: V): F[Boolean] = run(Keys.delIfEq(key, value))
+  final def delIfEq[V: ValueCodec](key: K, value: V): F[Boolean] = run(Keys.delIfEq(key, value))
 
   /**
     * Returns how many of the given keys exist (counting duplicates).
     */
-  final def exists[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.exists(first, rest*))
+  final def exists(first: K, rest: K*): F[Long] = run(Keys.exists(first, rest*))
 
   /**
     * Sets a TTL of `in` on `key`, guarded by `condition`, returning whether the expiry was set.
     */
-  final def expire[K: KeyCodec](key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always): F[Boolean] =
+  final def expire(key: K, in: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always): F[Boolean] =
     run(Keys.expire(key, in, condition))
 
   /**
     * Sets `key` to expire at the absolute instant `at`, guarded by `condition`, returning whether the expiry was set.
     */
-  final def expireAt[K: KeyCodec](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always): F[Boolean] =
+  final def expireAt(key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always): F[Boolean] =
     run(Keys.expireAt(key, at, condition))
 
   /**
     * Returns when `key` expires; see [[sage.commands.ExpiryTime]].
     */
-  final def expireTime[K: KeyCodec](key: K): F[ExpiryTime] = run(Keys.expireTime(key))
+  final def expireTime(key: K): F[ExpiryTime] = run(Keys.expireTime(key))
 
   /**
     * Like [[expireTime]], in milliseconds (`PEXPIRETIME`).
     */
-  final def pExpireTime[K: KeyCodec](key: K): F[ExpiryTime] = run(Keys.pExpireTime(key))
+  final def pExpireTime(key: K): F[ExpiryTime] = run(Keys.pExpireTime(key))
 
   /**
     * Returns all keys matching the glob `pattern`. O(n) over the keyspace — prefer [[scan]] on large databases.
     */
-  final def keys[K: KeyCodec](pattern: String): F[Vector[K]] = run(Keys.keys(pattern))
+  final def keys(pattern: String): F[Vector[K]] = run(Keys.keys(pattern))
 
   /**
     * Removes any expiry from `key`, returning whether one was removed.
     */
-  final def persist[K: KeyCodec](key: K): F[Boolean] = run(Keys.persist(key))
+  final def persist(key: K): F[Boolean] = run(Keys.persist(key))
 
   /**
     * Returns the remaining TTL of `key` in millisecond precision; see [[sage.commands.Ttl]].
     */
-  final def pTtl[K: KeyCodec](key: K): F[Ttl] = run(Keys.pTtl(key))
+  final def pTtl(key: K): F[Ttl] = run(Keys.pTtl(key))
 
   /**
     * Returns a random key from the current database, or `None` if it is empty.
     */
-  final def randomKey[K: KeyCodec]: F[Option[K]] = run(Keys.randomKey)
+  final def randomKey: F[Option[K]] = run(Keys.randomKey)
 
   /**
     * Renames `source` to `destination`, overwriting it if it exists.
     */
-  final def rename[K: KeyCodec](source: K, destination: K): F[Unit] = run(Keys.rename(source, destination))
+  final def rename(source: K, destination: K): F[Unit] = run(Keys.rename(source, destination))
 
   /**
     * Renames `source` to `destination` only if `destination` does not exist, returning whether it renamed.
     */
-  final def renameNx[K: KeyCodec](source: K, destination: K): F[Boolean] = run(Keys.renameNx(source, destination))
+  final def renameNx(source: K, destination: K): F[Boolean] = run(Keys.renameNx(source, destination))
 
   /**
     * One `SCAN` page over the keyspace from `cursor`, optionally filtered by `pattern`/`ofType` with a `count` hint; see [[sage.commands.ScanPage]].
     */
-  final def scan[K: KeyCodec](
+  final def scan(
     cursor: ScanCursor,
     pattern: Option[String] = None,
     count: Option[Long] = None,
@@ -276,27 +289,27 @@ trait CommandRunner[F[_]] {
   /**
     * Updates the last-access time of the given keys without reading them, returning how many existed.
     */
-  final def touch[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.touch(first, rest*))
+  final def touch(first: K, rest: K*): F[Long] = run(Keys.touch(first, rest*))
 
   /**
     * Returns the remaining TTL of `key` in second precision; see [[sage.commands.Ttl]].
     */
-  final def ttl[K: KeyCodec](key: K): F[Ttl] = run(Keys.ttl(key))
+  final def ttl(key: K): F[Ttl] = run(Keys.ttl(key))
 
   /**
     * Returns the data type held at `key`, or `None` if it is absent; see [[sage.commands.RedisType]].
     */
-  final def typeOf[K: KeyCodec](key: K): F[Option[RedisType]] = run(Keys.typeOf(key))
+  final def typeOf(key: K): F[Option[RedisType]] = run(Keys.typeOf(key))
 
   /**
     * Deletes the given keys, reclaiming memory asynchronously, returning how many existed.
     */
-  final def unlink[K: KeyCodec](first: K, rest: K*): F[Long] = run(Keys.unlink(first, rest*))
+  final def unlink(first: K, rest: K*): F[Long] = run(Keys.unlink(first, rest*))
 
   /**
     * Sorts the list/set/sorted-set at `key`, optionally by an external pattern and projecting via `get`; see [[sage.commands.SortOrder]].
     */
-  final def sort[K: KeyCodec, V: ValueCodec](
+  final def sort[V: ValueCodec](
     key: K,
     by: Option[String] = None,
     limit: Option[Limit] = None,
@@ -308,7 +321,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[sort]], but stores the result in `destination` and returns its length.
     */
-  final def sortStore[K: KeyCodec](
+  final def sortStore(
     destination: K,
     key: K,
     by: Option[String] = None,
@@ -321,7 +334,7 @@ trait CommandRunner[F[_]] {
   /**
     * The read-only form of [[sort]] (`SORT_RO`), eligible for replica routing.
     */
-  final def sortRo[K: KeyCodec, V: ValueCodec](
+  final def sortRo[V: ValueCodec](
     key: K,
     by: Option[String] = None,
     limit: Option[Limit] = None,
@@ -333,17 +346,17 @@ trait CommandRunner[F[_]] {
   /**
     * Moves `key` to database `db` on the same server, returning whether it was moved. Not available on a cluster.
     */
-  final def move[K: KeyCodec](key: K, db: Int): F[Boolean] = run(Keys.move(key, db))
+  final def move(key: K, db: Int): F[Boolean] = run(Keys.move(key, db))
 
   /**
     * Returns the serialized form of the value at `key` for use with [[restore]], or `None` if absent.
     */
-  final def dump[K: KeyCodec](key: K): F[Option[Bytes]] = run(Keys.dump(key))
+  final def dump(key: K): F[Option[Bytes]] = run(Keys.dump(key))
 
   /**
     * Recreates `key` from a [[dump]] `payload`, with optional expiry/idle/freq metadata; `replace` overwrites an existing key.
     */
-  final def restore[K: KeyCodec](
+  final def restore(
     key: K,
     payload: Bytes,
     expiry: RestoreExpiry = RestoreExpiry.NoExpiry,
@@ -355,7 +368,7 @@ trait CommandRunner[F[_]] {
   /**
     * Transfers the given keys to another server, optionally keeping them locally (`copy`); see [[sage.commands.MigrateResult]].
     */
-  final def migrate[K: KeyCodec](
+  final def migrate(
     host: String,
     port: Int,
     destinationDb: Int,
@@ -368,113 +381,113 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the internal encoding of the value at `key` (`OBJECT ENCODING`), e.g. `listpack`/`skiplist`, or `None` if absent.
     */
-  final def objectEncoding[K: KeyCodec](key: K): F[Option[String]] = run(Keys.objectEncoding(key))
+  final def objectEncoding(key: K): F[Option[String]] = run(Keys.objectEncoding(key))
 
   /**
     * Returns the reference count of the value at `key` (`OBJECT REFCOUNT`), or `None` if absent.
     */
-  final def objectRefCount[K: KeyCodec](key: K): F[Option[Long]] = run(Keys.objectRefCount(key))
+  final def objectRefCount(key: K): F[Option[Long]] = run(Keys.objectRefCount(key))
 
   /**
     * Returns the access frequency counter of `key` (`OBJECT FREQ`, requires an LFU eviction policy), or `None` if absent.
     */
-  final def objectFreq[K: KeyCodec](key: K): F[Option[Long]] = run(Keys.objectFreq(key))
+  final def objectFreq(key: K): F[Option[Long]] = run(Keys.objectFreq(key))
 
   /**
     * Returns how long `key` has been idle (`OBJECT IDLETIME`), or `None` if absent.
     */
-  final def objectIdleTime[K: KeyCodec](key: K): F[Option[FiniteDuration]] = run(Keys.objectIdleTime(key))
+  final def objectIdleTime(key: K): F[Option[FiniteDuration]] = run(Keys.objectIdleTime(key))
 
   /**
     * Sets one or more fields in the hash at `key`, returning how many were newly added.
     */
-  final def hSet[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, first: (F0, V), rest: (F0, V)*): F[Long] =
+  final def hSet[F0: KeyCodec, V: ValueCodec](key: K, first: (F0, V), rest: (F0, V)*): F[Long] =
     run(Hashes.hSet(key, first, rest*))
 
   /**
     * Sets `field` in the hash at `key` only if it does not already exist, returning whether it was set.
     */
-  final def hSetNx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, field: F0, value: V): F[Boolean] =
+  final def hSetNx[F0: KeyCodec, V: ValueCodec](key: K, field: F0, value: V): F[Boolean] =
     run(Hashes.hSetNx(key, field, value))
 
   /**
     * Gets the value of `field` in the hash at `key`, or `None` if the field or key is absent.
     */
-  final def hGet[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, field: F0): F[Option[V]] = run(Hashes.hGet(key, field))
+  final def hGet[F0: KeyCodec, V: ValueCodec](key: K, field: F0): F[Option[V]] = run(Hashes.hGet(key, field))
 
   /**
     * Gets several fields' values from the hash at `key`, in request order, each `None` if absent.
     */
-  final def hmGet[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, first: F0, rest: F0*): F[Vector[Option[V]]] =
+  final def hmGet[F0: KeyCodec, V: ValueCodec](key: K, first: F0, rest: F0*): F[Vector[Option[V]]] =
     run(Hashes.hmGet(key, first, rest*))
 
   /**
     * Deletes the given fields from the hash at `key`, returning how many existed.
     */
-  final def hDel[K: KeyCodec, F0: KeyCodec](key: K, first: F0, rest: F0*): F[Long] = run(Hashes.hDel(key, first, rest*))
+  final def hDel[F0: KeyCodec](key: K, first: F0, rest: F0*): F[Long] = run(Hashes.hDel(key, first, rest*))
 
   /**
     * Returns whether `field` exists in the hash at `key`.
     */
-  final def hExists[K: KeyCodec, F0: KeyCodec](key: K, field: F0): F[Boolean] = run(Hashes.hExists(key, field))
+  final def hExists[F0: KeyCodec](key: K, field: F0): F[Boolean] = run(Hashes.hExists(key, field))
 
   /**
     * Returns the number of fields in the hash at `key`.
     */
-  final def hLen[K: KeyCodec](key: K): F[Long] = run(Hashes.hLen(key))
+  final def hLen(key: K): F[Long] = run(Hashes.hLen(key))
 
   /**
     * Returns the string length of `field`'s value in the hash at `key`, or 0 if absent.
     */
-  final def hStrLen[K: KeyCodec, F0: KeyCodec](key: K, field: F0): F[Long] = run(Hashes.hStrLen(key, field))
+  final def hStrLen[F0: KeyCodec](key: K, field: F0): F[Long] = run(Hashes.hStrLen(key, field))
 
   /**
     * Returns all field names in the hash at `key`.
     */
-  final def hKeys[K: KeyCodec, F0: KeyCodec](key: K): F[Vector[F0]] = run(Hashes.hKeys(key))
+  final def hKeys[F0: KeyCodec](key: K): F[Vector[F0]] = run(Hashes.hKeys(key))
 
   /**
     * Returns all values in the hash at `key`.
     */
-  final def hVals[K: KeyCodec, V: ValueCodec](key: K): F[Vector[V]] = run(Hashes.hVals(key))
+  final def hVals[V: ValueCodec](key: K): F[Vector[V]] = run(Hashes.hVals(key))
 
   /**
     * Returns the whole hash at `key` as a map.
     */
-  final def hGetAll[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K): F[Map[F0, V]] = run(Hashes.hGetAll(key))
+  final def hGetAll[F0: KeyCodec, V: ValueCodec](key: K): F[Map[F0, V]] = run(Hashes.hGetAll(key))
 
   /**
     * Increments the integer field `field` in the hash at `key` by `increment`, returning the new value.
     */
-  final def hIncrBy[K: KeyCodec, F0: KeyCodec](key: K, field: F0, increment: Long): F[Long] =
+  final def hIncrBy[F0: KeyCodec](key: K, field: F0, increment: Long): F[Long] =
     run(Hashes.hIncrBy(key, field, increment))
 
   /**
     * Increments the floating-point field `field` in the hash at `key` by `increment`, returning the new value.
     */
-  final def hIncrByFloat[K: KeyCodec, F0: KeyCodec](key: K, field: F0, increment: Double): F[Double] =
+  final def hIncrByFloat[F0: KeyCodec](key: K, field: F0, increment: Double): F[Double] =
     run(Hashes.hIncrByFloat(key, field, increment))
 
   /**
     * Returns a random field name from the hash at `key`, or `None` if it is empty.
     */
-  final def hRandField[K: KeyCodec, F0: KeyCodec](key: K): F[Option[F0]] = run(Hashes.hRandField(key))
+  final def hRandField[F0: KeyCodec](key: K): F[Option[F0]] = run(Hashes.hRandField(key))
 
   /**
     * Returns `count` random field names from the hash at `key`; a negative `count` allows repeats.
     */
-  final def hRandField[K: KeyCodec, F0: KeyCodec](key: K, count: Long): F[Vector[F0]] = run(Hashes.hRandField(key, count))
+  final def hRandField[F0: KeyCodec](key: K, count: Long): F[Vector[F0]] = run(Hashes.hRandField(key, count))
 
   /**
     * Like [[hRandField]], but returns each field paired with its value.
     */
-  final def hRandFieldWithValues[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(F0, V)]] =
+  final def hRandFieldWithValues[F0: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(F0, V)]] =
     run(Hashes.hRandFieldWithValues(key, count))
 
   /**
     * One `HSCAN` page of field/value pairs over the hash at `key`; see [[sage.commands.ScanPage]].
     */
-  final def hScan[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def hScan[F0: KeyCodec, V: ValueCodec](
     key: K,
     cursor: ScanCursor,
     pattern: Option[String] = None,
@@ -484,7 +497,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[hScan]], but returns field names only (`HSCAN … NOVALUES`).
     */
-  final def hScanNoValues[K: KeyCodec, F0: KeyCodec](
+  final def hScanNoValues[F0: KeyCodec](
     key: K,
     cursor: ScanCursor,
     pattern: Option[String] = None,
@@ -494,7 +507,7 @@ trait CommandRunner[F[_]] {
   /**
     * Sets a TTL on the given hash fields, guarded by `condition`; one [[sage.commands.FieldExpiry]] per field, in request order.
     */
-  final def hExpire[K: KeyCodec, F0: KeyCodec](key: K, ttl: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(
+  final def hExpire[F0: KeyCodec](key: K, ttl: FiniteDuration, condition: ExpireCondition = ExpireCondition.Always)(
     first: F0,
     rest: F0*
   ): F[Vector[FieldExpiry]] = run(Hashes.hExpire(key, ttl, condition)(first, rest*))
@@ -502,7 +515,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[hExpire]], but at the absolute instant `at`.
     */
-  final def hExpireAt[K: KeyCodec, F0: KeyCodec](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(
+  final def hExpireAt[F0: KeyCodec](key: K, at: Instant, condition: ExpireCondition = ExpireCondition.Always)(
     first: F0,
     rest: F0*
   ): F[Vector[FieldExpiry]] = run(Hashes.hExpireAt(key, at, condition)(first, rest*))
@@ -510,43 +523,43 @@ trait CommandRunner[F[_]] {
   /**
     * Returns when each given hash field expires; one [[sage.commands.FieldExpiryTime]] per field.
     */
-  final def hExpireTime[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
+  final def hExpireTime[F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
     run(Hashes.hExpireTime(key)(first, rest*))
 
   /**
     * Like [[hExpireTime]], in milliseconds (`HPEXPIRETIME`).
     */
-  final def hpExpireTime[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
+  final def hpExpireTime[F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldExpiryTime]] =
     run(Hashes.hpExpireTime(key)(first, rest*))
 
   /**
     * Returns the remaining TTL of each given hash field in seconds; one [[sage.commands.FieldTtl]] per field.
     */
-  final def hTtl[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
+  final def hTtl[F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
     run(Hashes.hTtl(key)(first, rest*))
 
   /**
     * Like [[hTtl]], in milliseconds (`HPTTL`).
     */
-  final def hpTtl[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
+  final def hpTtl[F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldTtl]] =
     run(Hashes.hpTtl(key)(first, rest*))
 
   /**
     * Removes any expiry from the given hash fields; one [[sage.commands.FieldPersist]] per field.
     */
-  final def hPersist[K: KeyCodec, F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldPersist]] =
+  final def hPersist[F0: KeyCodec](key: K)(first: F0, rest: F0*): F[Vector[FieldPersist]] =
     run(Hashes.hPersist(key)(first, rest*))
 
   /**
     * Gets and deletes the given hash fields atomically (`HGETDEL`), each `None` if absent.
     */
-  final def hGetDel[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K)(first: F0, rest: F0*): F[Vector[Option[V]]] =
+  final def hGetDel[F0: KeyCodec, V: ValueCodec](key: K)(first: F0, rest: F0*): F[Vector[Option[V]]] =
     run(Hashes.hGetDel(key)(first, rest*))
 
   /**
     * Gets the given hash fields, optionally updating their expiry (`HGETEX`), each `None` if absent.
     */
-  final def hGetEx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, expiry: GetExpiry = GetExpiry.Keep)(
+  final def hGetEx[F0: KeyCodec, V: ValueCodec](key: K, expiry: GetExpiry = GetExpiry.Keep)(
     first: F0,
     rest: F0*
   ): F[Vector[Option[V]]] = run(Hashes.hGetEx(key, expiry)(first, rest*))
@@ -554,7 +567,7 @@ trait CommandRunner[F[_]] {
   /**
     * Sets hash fields with a shared expiry and a set `condition` (`HSETEX`), returning whether the write applied.
     */
-  final def hSetEx[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def hSetEx[F0: KeyCodec, V: ValueCodec](
     key: K,
     expiry: SetExpiry = SetExpiry.Clear,
     condition: HSetExCondition = HSetExCondition.Always
@@ -563,89 +576,89 @@ trait CommandRunner[F[_]] {
   /**
     * Prepends the given values to the list at `key` (left), returning the new length.
     */
-  final def lPush[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.lPush(key, first, rest*))
+  final def lPush[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.lPush(key, first, rest*))
 
   /**
     * Appends the given values to the list at `key` (right), returning the new length.
     */
-  final def rPush[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.rPush(key, first, rest*))
+  final def rPush[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.rPush(key, first, rest*))
 
   /**
     * Like [[lPush]], but only if the list already exists.
     */
-  final def lPushX[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.lPushX(key, first, rest*))
+  final def lPushX[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.lPushX(key, first, rest*))
 
   /**
     * Like [[rPush]], but only if the list already exists.
     */
-  final def rPushX[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.rPushX(key, first, rest*))
+  final def rPushX[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Lists.rPushX(key, first, rest*))
 
   /**
     * Removes and returns the first (leftmost) element of the list at `key`, or `None` if empty.
     */
-  final def lPop[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Lists.lPop(key))
+  final def lPop[V: ValueCodec](key: K): F[Option[V]] = run(Lists.lPop(key))
 
   /**
     * Removes and returns the last (rightmost) element of the list at `key`, or `None` if empty.
     */
-  final def rPop[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Lists.rPop(key))
+  final def rPop[V: ValueCodec](key: K): F[Option[V]] = run(Lists.rPop(key))
 
   /**
     * Removes and returns up to `count` elements from the left of the list at `key`.
     */
-  final def lPopCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Lists.lPopCount(key, count))
+  final def lPopCount[V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Lists.lPopCount(key, count))
 
   /**
     * Removes and returns up to `count` elements from the right of the list at `key`.
     */
-  final def rPopCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Lists.rPopCount(key, count))
+  final def rPopCount[V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Lists.rPopCount(key, count))
 
   /**
     * Returns the length of the list at `key`.
     */
-  final def lLen[K: KeyCodec](key: K): F[Long] = run(Lists.lLen(key))
+  final def lLen(key: K): F[Long] = run(Lists.lLen(key))
 
   /**
     * Returns the elements of the list at `key` between `start` and `stop`, inclusive; negative indices count from the end.
     */
-  final def lRange[K: KeyCodec, V: ValueCodec](key: K, start: Long, stop: Long): F[Vector[V]] = run(Lists.lRange(key, start, stop))
+  final def lRange[V: ValueCodec](key: K, start: Long, stop: Long): F[Vector[V]] = run(Lists.lRange(key, start, stop))
 
   /**
     * Returns the element at `index` in the list at `key` (negative counts from the end), or `None` if out of range.
     */
-  final def lIndex[K: KeyCodec, V: ValueCodec](key: K, index: Long): F[Option[V]] = run(Lists.lIndex(key, index))
+  final def lIndex[V: ValueCodec](key: K, index: Long): F[Option[V]] = run(Lists.lIndex(key, index))
 
   /**
     * Sets the element at `index` in the list at `key`; fails if the index is out of range.
     */
-  final def lSet[K: KeyCodec, V: ValueCodec](key: K, index: Long, value: V): F[Unit] = run(Lists.lSet(key, index, value))
+  final def lSet[V: ValueCodec](key: K, index: Long, value: V): F[Unit] = run(Lists.lSet(key, index, value))
 
   /**
     * Inserts `value` before or after the first occurrence of `pivot` in the list at `key`; returns the new length, or -1 if `pivot` is absent.
     */
-  final def lInsert[K: KeyCodec, V: ValueCodec](key: K, position: InsertPosition, pivot: V, value: V): F[Long] =
+  final def lInsert[V: ValueCodec](key: K, position: InsertPosition, pivot: V, value: V): F[Long] =
     run(Lists.lInsert(key, position, pivot, value))
 
   /**
     * Removes occurrences of `value` from the list at `key`; `count` > 0 from head, < 0 from tail, 0 all. Returns how many were removed.
     */
-  final def lRem[K: KeyCodec, V: ValueCodec](key: K, count: Long, value: V): F[Long] = run(Lists.lRem(key, count, value))
+  final def lRem[V: ValueCodec](key: K, count: Long, value: V): F[Long] = run(Lists.lRem(key, count, value))
 
   /**
     * Trims the list at `key` to the inclusive range `[start, stop]`, discarding the rest.
     */
-  final def lTrim[K: KeyCodec](key: K, start: Long, stop: Long): F[Unit] = run(Lists.lTrim(key, start, stop))
+  final def lTrim(key: K, start: Long, stop: Long): F[Unit] = run(Lists.lTrim(key, start, stop))
 
   /**
     * Returns the index of the first match of `element` in the list at `key`, honoring `rank`/`maxLen`, or `None`.
     */
-  final def lPos[K: KeyCodec, V: ValueCodec](key: K, element: V, rank: Option[Long] = None, maxLen: Option[Long] = None): F[Option[Long]] =
+  final def lPos[V: ValueCodec](key: K, element: V, rank: Option[Long] = None, maxLen: Option[Long] = None): F[Option[Long]] =
     run(Lists.lPos(key, element, rank, maxLen))
 
   /**
     * Like [[lPos]], but returns up to `count` matching indices (`count` 0 means all).
     */
-  final def lPosCount[K: KeyCodec, V: ValueCodec](
+  final def lPosCount[V: ValueCodec](
     key: K,
     element: V,
     count: Long,
@@ -656,37 +669,37 @@ trait CommandRunner[F[_]] {
   /**
     * Atomically pops an element from one end of `source` and pushes it to one end of `destination`, returning the moved element.
     */
-  final def lMove[K: KeyCodec, V: ValueCodec](source: K, destination: K, from: ListSide, to: ListSide): F[Option[V]] =
+  final def lMove[V: ValueCodec](source: K, destination: K, from: ListSide, to: ListSide): F[Option[V]] =
     run(Lists.lMove(source, destination, from, to))
 
   /**
     * Pops up to `count` elements from the given side of the first non-empty list among the keys, returning that key and the elements.
     */
-  final def lMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(side: ListSide, count: Option[Long] = None): F[Option[(K, Vector[V])]] =
+  final def lMpop[V: ValueCodec](first: K, rest: K*)(side: ListSide, count: Option[Long] = None): F[Option[(K, Vector[V])]] =
     run(Lists.lMpop(first, rest*)(side, count))
 
   /**
     * Blocking [[lPop]] over several keys: waits up to `timeout` for an element on the left of any key.
     */
-  final def blPop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
+  final def blPop[V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
     run(Lists.blPop(first, rest*)(timeout))
 
   /**
     * Blocking [[rPop]] over several keys: waits up to `timeout` for an element on the right of any key.
     */
-  final def brPop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
+  final def brPop[V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V)]] =
     run(Lists.brPop(first, rest*)(timeout))
 
   /**
     * Blocking [[lMove]]: waits up to `timeout` for an element in `source` to move.
     */
-  final def blMove[K: KeyCodec, V: ValueCodec](source: K, destination: K, from: ListSide, to: ListSide, timeout: BlockTimeout): F[Option[V]] =
+  final def blMove[V: ValueCodec](source: K, destination: K, from: ListSide, to: ListSide, timeout: BlockTimeout): F[Option[V]] =
     run(Lists.blMove(source, destination, from, to, timeout))
 
   /**
     * Blocking [[lMpop]]: waits up to `timeout` for an element on any of the keys.
     */
-  final def blMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def blMpop[V: ValueCodec](first: K, rest: K*)(
     side: ListSide,
     timeout: BlockTimeout,
     count: Option[Long] = None
@@ -695,99 +708,99 @@ trait CommandRunner[F[_]] {
   /**
     * Adds the given members to the set at `key`, returning how many were newly added.
     */
-  final def sAdd[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sAdd(key, first, rest*))
+  final def sAdd[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sAdd(key, first, rest*))
 
   /**
     * Removes the given members from the set at `key`, returning how many were present.
     */
-  final def sRem[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sRem(key, first, rest*))
+  final def sRem[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Sets.sRem(key, first, rest*))
 
   /**
     * Returns the number of members in the set at `key`.
     */
-  final def sCard[K: KeyCodec](key: K): F[Long] = run(Sets.sCard(key))
+  final def sCard(key: K): F[Long] = run(Sets.sCard(key))
 
   /**
     * Returns whether `member` is in the set at `key`.
     */
-  final def sIsMember[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Boolean] = run(Sets.sIsMember(key, member))
+  final def sIsMember[V: ValueCodec](key: K, member: V): F[Boolean] = run(Sets.sIsMember(key, member))
 
   /**
     * Returns, for each given member, whether it is in the set at `key`, in request order.
     */
-  final def sMisMember[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Boolean]] =
+  final def sMisMember[V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Boolean]] =
     run(Sets.sMisMember(key, first, rest*))
 
   /**
     * Returns all members of the set at `key`.
     */
-  final def sMembers[K: KeyCodec, V: ValueCodec](key: K): F[Set[V]] = run(Sets.sMembers(key))
+  final def sMembers[V: ValueCodec](key: K): F[Set[V]] = run(Sets.sMembers(key))
 
   /**
     * Atomically moves `member` from the set at `source` to the set at `destination`, returning whether it was present.
     */
-  final def sMove[K: KeyCodec, V: ValueCodec](source: K, destination: K, member: V): F[Boolean] =
+  final def sMove[V: ValueCodec](source: K, destination: K, member: V): F[Boolean] =
     run(Sets.sMove(source, destination, member))
 
   /**
     * Removes and returns one random member of the set at `key`, or `None` if empty.
     */
-  final def sPop[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Sets.sPop(key))
+  final def sPop[V: ValueCodec](key: K): F[Option[V]] = run(Sets.sPop(key))
 
   /**
     * Removes and returns up to `count` random members of the set at `key`.
     */
-  final def sPopCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Set[V]] = run(Sets.sPopCount(key, count))
+  final def sPopCount[V: ValueCodec](key: K, count: Long): F[Set[V]] = run(Sets.sPopCount(key, count))
 
   /**
     * Returns one random member of the set at `key` without removing it, or `None` if empty.
     */
-  final def sRandMember[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(Sets.sRandMember(key))
+  final def sRandMember[V: ValueCodec](key: K): F[Option[V]] = run(Sets.sRandMember(key))
 
   /**
     * Returns `count` random members of the set at `key` without removing them; a negative `count` allows repeats.
     */
-  final def sRandMemberCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Sets.sRandMemberCount(key, count))
+  final def sRandMemberCount[V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(Sets.sRandMemberCount(key, count))
 
   /**
     * Returns the members in the first set that are not in any of the others.
     */
-  final def sDiff[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sDiff(first, rest*))
+  final def sDiff[V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sDiff(first, rest*))
 
   /**
     * Like [[sDiff]], but stores the result in `destination` and returns its cardinality.
     */
-  final def sDiffStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sDiffStore(destination, first, rest*))
+  final def sDiffStore(destination: K, first: K, rest: K*): F[Long] = run(Sets.sDiffStore(destination, first, rest*))
 
   /**
     * Returns the members common to all the given sets.
     */
-  final def sInter[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sInter(first, rest*))
+  final def sInter[V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sInter(first, rest*))
 
   /**
     * Like [[sInter]], but stores the result in `destination` and returns its cardinality.
     */
-  final def sInterStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sInterStore(destination, first, rest*))
+  final def sInterStore(destination: K, first: K, rest: K*): F[Long] = run(Sets.sInterStore(destination, first, rest*))
 
   /**
     * Returns the cardinality of the intersection of the given sets, capped at `limit` if set (`SINTERCARD`).
     */
-  final def sInterCard[K: KeyCodec](first: K, rest: K*)(limit: Option[Long] = None): F[Long] = run(Sets.sInterCard(first, rest*)(limit))
+  final def sInterCard(first: K, rest: K*)(limit: Option[Long] = None): F[Long] = run(Sets.sInterCard(first, rest*)(limit))
 
   /**
     * Returns the union of all the given sets.
     */
-  final def sUnion[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sUnion(first, rest*))
+  final def sUnion[V: ValueCodec](first: K, rest: K*): F[Set[V]] = run(Sets.sUnion(first, rest*))
 
   /**
     * Like [[sUnion]], but stores the result in `destination` and returns its cardinality.
     */
-  final def sUnionStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Sets.sUnionStore(destination, first, rest*))
+  final def sUnionStore(destination: K, first: K, rest: K*): F[Long] = run(Sets.sUnionStore(destination, first, rest*))
 
   /**
     * One `SSCAN` page over the members of the set at `key`; see [[sage.commands.ScanPage]].
     */
-  final def sScan[K: KeyCodec, V: ValueCodec](
+  final def sScan[V: ValueCodec](
     key: K,
     cursor: ScanCursor,
     pattern: Option[String] = None,
@@ -797,7 +810,7 @@ trait CommandRunner[F[_]] {
   /**
     * Adds the given members with scores to the sorted set at `key`, guarded by `condition`; returns how many were added (or changed, if `changed`).
     */
-  final def zAdd[K: KeyCodec, V: ValueCodec](key: K, condition: ZAddCondition = ZAddCondition.Always, changed: Boolean = false)(
+  final def zAdd[V: ValueCodec](key: K, condition: ZAddCondition = ZAddCondition.Always, changed: Boolean = false)(
     first: (V, Double),
     rest: (V, Double)*
   ): F[Long] = run(SortedSets.zAdd(key, condition, changed)(first, rest*))
@@ -805,7 +818,7 @@ trait CommandRunner[F[_]] {
   /**
     * Adds or updates one member and returns its new score (`ZADD … INCR`), or `None` when `condition` blocks the write.
     */
-  final def zAddIncr[K: KeyCodec, V: ValueCodec](
+  final def zAddIncr[V: ValueCodec](
     key: K,
     condition: ZAddCondition = ZAddCondition.Always
   )(member: V, score: Double): F[Option[Double]] =
@@ -814,139 +827,139 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the number of members in the sorted set at `key`.
     */
-  final def zCard[K: KeyCodec](key: K): F[Long] = run(SortedSets.zCard(key))
+  final def zCard(key: K): F[Long] = run(SortedSets.zCard(key))
 
   /**
     * Returns the score of `member` in the sorted set at `key`, or `None` if absent.
     */
-  final def zScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Double]] = run(SortedSets.zScore(key, member))
+  final def zScore[V: ValueCodec](key: K, member: V): F[Option[Double]] = run(SortedSets.zScore(key, member))
 
   /**
     * Returns the scores of several members in request order, each `None` if absent.
     */
-  final def zMScore[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[Double]]] =
+  final def zMScore[V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[Double]]] =
     run(SortedSets.zMScore(key, first, rest*))
 
   /**
     * Increments the score of `member` in the sorted set at `key` by `increment`, returning the new score.
     */
-  final def zIncrBy[K: KeyCodec, V: ValueCodec](key: K, member: V, increment: Double): F[Double] =
+  final def zIncrBy[V: ValueCodec](key: K, member: V, increment: Double): F[Double] =
     run(SortedSets.zIncrBy(key, member, increment))
 
   /**
     * Returns the rank of `member` (0-based, lowest score first), or `None` if absent.
     */
-  final def zRank[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRank(key, member))
+  final def zRank[V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRank(key, member))
 
   /**
     * Like [[zRank]], but also returns the member's score.
     */
-  final def zRankWithScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
+  final def zRankWithScore[V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
     run(SortedSets.zRankWithScore(key, member))
 
   /**
     * Returns the rank of `member` counting from the highest score (`ZREVRANK`), or `None` if absent.
     */
-  final def zRevRank[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRevRank(key, member))
+  final def zRevRank[V: ValueCodec](key: K, member: V): F[Option[Long]] = run(SortedSets.zRevRank(key, member))
 
   /**
     * Like [[zRevRank]], but also returns the member's score.
     */
-  final def zRevRankWithScore[K: KeyCodec, V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
+  final def zRevRankWithScore[V: ValueCodec](key: K, member: V): F[Option[(Long, Double)]] =
     run(SortedSets.zRevRankWithScore(key, member))
 
   /**
     * Counts members of the sorted set at `key` whose score is within `[min, max]`; see [[sage.commands.ScoreBoundary]].
     */
-  final def zCount[K: KeyCodec](key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] = run(SortedSets.zCount(key, min, max))
+  final def zCount(key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] = run(SortedSets.zCount(key, min, max))
 
   /**
     * Counts members within a lexicographic range (`ZLEXCOUNT`); meaningful only when all members share the same score.
     */
-  final def zLexCount[K: KeyCodec, V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
+  final def zLexCount[V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
     run(SortedSets.zLexCount(key, min, max))
 
   /**
     * Returns members of the sorted set at `key` for the given range (by index, score, or lex); see [[sage.commands.ZRange]].
     */
-  final def zRange[K: KeyCodec, V: ValueCodec](key: K, range: ZRange[V]): F[Vector[V]] = run(SortedSets.zRange(key, range))
+  final def zRange[V: ValueCodec](key: K, range: ZRange[V]): F[Vector[V]] = run(SortedSets.zRange(key, range))
 
   /**
     * Like [[zRange]], but returns each member paired with its score.
     */
-  final def zRangeWithScores[K: KeyCodec, V: ValueCodec](key: K, range: ZRange[V]): F[Vector[(V, Double)]] =
+  final def zRangeWithScores[V: ValueCodec](key: K, range: ZRange[V]): F[Vector[(V, Double)]] =
     run(SortedSets.zRangeWithScores(key, range))
 
   /**
     * Like [[zRange]], but stores the selected members in `destination` and returns its cardinality.
     */
-  final def zRangeStore[K: KeyCodec, V: ValueCodec](destination: K, source: K, range: ZRange[V]): F[Long] =
+  final def zRangeStore[V: ValueCodec](destination: K, source: K, range: ZRange[V]): F[Long] =
     run(SortedSets.zRangeStore(destination, source, range))
 
   /**
     * Removes the given members from the sorted set at `key`, returning how many were present.
     */
-  final def zRem[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(SortedSets.zRem(key, first, rest*))
+  final def zRem[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(SortedSets.zRem(key, first, rest*))
 
   /**
     * Removes members of the sorted set at `key` whose rank is within `[start, stop]`, returning how many were removed.
     */
-  final def zRemRangeByRank[K: KeyCodec](key: K, start: Long, stop: Long): F[Long] = run(SortedSets.zRemRangeByRank(key, start, stop))
+  final def zRemRangeByRank(key: K, start: Long, stop: Long): F[Long] = run(SortedSets.zRemRangeByRank(key, start, stop))
 
   /**
     * Removes members whose score is within `[min, max]`, returning how many were removed.
     */
-  final def zRemRangeByScore[K: KeyCodec](key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] =
+  final def zRemRangeByScore(key: K, min: ScoreBoundary, max: ScoreBoundary): F[Long] =
     run(SortedSets.zRemRangeByScore(key, min, max))
 
   /**
     * Removes members within a lexicographic range, returning how many were removed.
     */
-  final def zRemRangeByLex[K: KeyCodec, V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
+  final def zRemRangeByLex[V: ValueCodec](key: K, min: LexBoundary[V], max: LexBoundary[V]): F[Long] =
     run(SortedSets.zRemRangeByLex(key, min, max))
 
   /**
     * Removes and returns the lowest-scored member of the sorted set at `key`, or `None` if empty.
     */
-  final def zPopMin[K: KeyCodec, V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMin(key))
+  final def zPopMin[V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMin(key))
 
   /**
     * Removes and returns the highest-scored member of the sorted set at `key`, or `None` if empty.
     */
-  final def zPopMax[K: KeyCodec, V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMax(key))
+  final def zPopMax[V: ValueCodec](key: K): F[Option[(V, Double)]] = run(SortedSets.zPopMax(key))
 
   /**
     * Removes and returns up to `count` lowest-scored members of the sorted set at `key`.
     */
-  final def zPopMinCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMinCount(key, count))
+  final def zPopMinCount[V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMinCount(key, count))
 
   /**
     * Removes and returns up to `count` highest-scored members of the sorted set at `key`.
     */
-  final def zPopMaxCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMaxCount(key, count))
+  final def zPopMaxCount[V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] = run(SortedSets.zPopMaxCount(key, count))
 
   /**
     * Pops up to `count` members from the min or max end of the first non-empty sorted set among the keys; see [[sage.commands.MinMax]].
     */
-  final def zMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(minMax: MinMax, count: Option[Long] = None): F[Option[(K, Vector[(V, Double)])]] =
+  final def zMpop[V: ValueCodec](first: K, rest: K*)(minMax: MinMax, count: Option[Long] = None): F[Option[(K, Vector[(V, Double)])]] =
     run(SortedSets.zMpop(first, rest*)(minMax, count))
 
   /**
     * Blocking [[zPopMin]] over several keys: waits up to `timeout` for the lowest-scored member of any key.
     */
-  final def bzPopMin[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
+  final def bzPopMin[V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
     run(SortedSets.bzPopMin(first, rest*)(timeout))
 
   /**
     * Blocking [[zPopMax]] over several keys: waits up to `timeout` for the highest-scored member of any key.
     */
-  final def bzPopMax[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
+  final def bzPopMax[V: ValueCodec](first: K, rest: K*)(timeout: BlockTimeout): F[Option[(K, V, Double)]] =
     run(SortedSets.bzPopMax(first, rest*)(timeout))
 
   /**
     * Blocking [[zMpop]]: waits up to `timeout` for a member on any of the keys.
     */
-  final def bzMpop[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def bzMpop[V: ValueCodec](first: K, rest: K*)(
     minMax: MinMax,
     timeout: BlockTimeout,
     count: Option[Long] = None
@@ -955,23 +968,23 @@ trait CommandRunner[F[_]] {
   /**
     * Returns one random member of the sorted set at `key` without removing it, or `None` if empty.
     */
-  final def zRandMember[K: KeyCodec, V: ValueCodec](key: K): F[Option[V]] = run(SortedSets.zRandMember(key))
+  final def zRandMember[V: ValueCodec](key: K): F[Option[V]] = run(SortedSets.zRandMember(key))
 
   /**
     * Returns `count` random members of the sorted set at `key`; a negative `count` allows repeats.
     */
-  final def zRandMemberCount[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(SortedSets.zRandMemberCount(key, count))
+  final def zRandMemberCount[V: ValueCodec](key: K, count: Long): F[Vector[V]] = run(SortedSets.zRandMemberCount(key, count))
 
   /**
     * Like [[zRandMemberCount]], but returns each member paired with its score.
     */
-  final def zRandMemberWithScores[K: KeyCodec, V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] =
+  final def zRandMemberWithScores[V: ValueCodec](key: K, count: Long): F[Vector[(V, Double)]] =
     run(SortedSets.zRandMemberWithScores(key, count))
 
   /**
     * Returns the union of the given sorted sets, combining scores per `aggregate` (and optional `weights`); see [[sage.commands.Aggregate]].
     */
-  final def zUnion[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def zUnion[V: ValueCodec](first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Vector[V]] = run(SortedSets.zUnion(first, rest*)(weights, aggregate))
@@ -979,7 +992,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[zUnion]], but returns each member paired with its combined score.
     */
-  final def zUnionWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def zUnionWithScores[V: ValueCodec](first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Vector[(V, Double)]] = run(SortedSets.zUnionWithScores(first, rest*)(weights, aggregate))
@@ -987,7 +1000,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[zUnion]], but stores the result in `destination` and returns its cardinality.
     */
-  final def zUnionStore[K: KeyCodec](destination: K, first: K, rest: K*)(
+  final def zUnionStore(destination: K, first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Long] = run(SortedSets.zUnionStore(destination, first, rest*)(weights, aggregate))
@@ -995,7 +1008,7 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the intersection of the given sorted sets, combining scores per `aggregate` (and optional `weights`).
     */
-  final def zInter[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def zInter[V: ValueCodec](first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Vector[V]] = run(SortedSets.zInter(first, rest*)(weights, aggregate))
@@ -1003,7 +1016,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[zInter]], but returns each member paired with its combined score.
     */
-  final def zInterWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*)(
+  final def zInterWithScores[V: ValueCodec](first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Vector[(V, Double)]] = run(SortedSets.zInterWithScores(first, rest*)(weights, aggregate))
@@ -1011,7 +1024,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[zInter]], but stores the result in `destination` and returns its cardinality.
     */
-  final def zInterStore[K: KeyCodec](destination: K, first: K, rest: K*)(
+  final def zInterStore(destination: K, first: K, rest: K*)(
     weights: Option[Vector[Double]] = None,
     aggregate: Aggregate = Aggregate.Sum
   ): F[Long] = run(SortedSets.zInterStore(destination, first, rest*)(weights, aggregate))
@@ -1019,29 +1032,29 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the cardinality of the intersection of the given sorted sets, capped at `limit` if set (`ZINTERCARD`).
     */
-  final def zInterCard[K: KeyCodec](first: K, rest: K*)(limit: Option[Long] = None): F[Long] =
+  final def zInterCard(first: K, rest: K*)(limit: Option[Long] = None): F[Long] =
     run(SortedSets.zInterCard(first, rest*)(limit))
 
   /**
     * Returns the members of the first sorted set that are not in any of the others.
     */
-  final def zDiff[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Vector[V]] = run(SortedSets.zDiff(first, rest*))
+  final def zDiff[V: ValueCodec](first: K, rest: K*): F[Vector[V]] = run(SortedSets.zDiff(first, rest*))
 
   /**
     * Like [[zDiff]], but returns each member paired with its score.
     */
-  final def zDiffWithScores[K: KeyCodec, V: ValueCodec](first: K, rest: K*): F[Vector[(V, Double)]] =
+  final def zDiffWithScores[V: ValueCodec](first: K, rest: K*): F[Vector[(V, Double)]] =
     run(SortedSets.zDiffWithScores(first, rest*))
 
   /**
     * Like [[zDiff]], but stores the result in `destination` and returns its cardinality.
     */
-  final def zDiffStore[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(SortedSets.zDiffStore(destination, first, rest*))
+  final def zDiffStore(destination: K, first: K, rest: K*): F[Long] = run(SortedSets.zDiffStore(destination, first, rest*))
 
   /**
     * One `ZSCAN` page of member/score pairs over the sorted set at `key`; see [[sage.commands.ScanPage]].
     */
-  final def zScan[K: KeyCodec, V: ValueCodec](
+  final def zScan[V: ValueCodec](
     key: K,
     cursor: ScanCursor,
     pattern: Option[String] = None,
@@ -1086,7 +1099,7 @@ trait CommandRunner[F[_]] {
   /**
     * Adds the given members at their coordinates to the geo set at `key`; returns how many were added (or changed, if `changed`).
     */
-  final def geoAdd[K: KeyCodec, V: ValueCodec](key: K, condition: GeoAddCondition = GeoAddCondition.Always, changed: Boolean = false)(
+  final def geoAdd[V: ValueCodec](key: K, condition: GeoAddCondition = GeoAddCondition.Always, changed: Boolean = false)(
     first: (V, GeoCoordinates),
     rest: (V, GeoCoordinates)*
   ): F[Long] = run(Geo.geoAdd(key, condition, changed)(first, rest*))
@@ -1094,25 +1107,25 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the distance between two members of the geo set at `key` in `unit`, or `None` if either is absent.
     */
-  final def geoDist[K: KeyCodec, V: ValueCodec](key: K, member1: V, member2: V, unit: GeoUnit = GeoUnit.Meters): F[Option[Double]] =
+  final def geoDist[V: ValueCodec](key: K, member1: V, member2: V, unit: GeoUnit = GeoUnit.Meters): F[Option[Double]] =
     run(Geo.geoDist(key, member1, member2, unit))
 
   /**
     * Returns the Geohash string of each given member, or `None` if absent.
     */
-  final def geoHash[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[String]]] =
+  final def geoHash[V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[String]]] =
     run(Geo.geoHash(key, first, rest*))
 
   /**
     * Returns the coordinates of each given member, or `None` if absent.
     */
-  final def geoPos[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[GeoCoordinates]]] =
+  final def geoPos[V: ValueCodec](key: K, first: V, rest: V*): F[Vector[Option[GeoCoordinates]]] =
     run(Geo.geoPos(key, first, rest*))
 
   /**
     * Returns members within `shape` of `origin`; see [[sage.commands.GeoOrigin]]/[[sage.commands.GeoShape]].
     */
-  final def geoSearch[K: KeyCodec, V: ValueCodec](
+  final def geoSearch[V: ValueCodec](
     key: K,
     origin: GeoOrigin[V],
     shape: GeoShape,
@@ -1123,7 +1136,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[geoSearch]], but also returns the requested projections (distance/coordinates/hash); see [[sage.commands.GeoSearchResult]].
     */
-  final def geoSearchWith[K: KeyCodec, V: ValueCodec](
+  final def geoSearchWith[V: ValueCodec](
     key: K,
     origin: GeoOrigin[V],
     shape: GeoShape,
@@ -1137,7 +1150,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[geoSearch]], but stores the matches in `destination` (or their distances, if `storeDist`) and returns the count.
     */
-  final def geoSearchStore[K: KeyCodec, V: ValueCodec](
+  final def geoSearchStore[V: ValueCodec](
     destination: K,
     source: K,
     origin: GeoOrigin[V],
@@ -1150,74 +1163,74 @@ trait CommandRunner[F[_]] {
   /**
     * Sets the bit at `offset` in the string at `key`, returning its previous value.
     */
-  final def setBit[K: KeyCodec](key: K, offset: Long, value: Boolean): F[Boolean] = run(Bitmaps.setBit(key, offset, value))
+  final def setBit(key: K, offset: Long, value: Boolean): F[Boolean] = run(Bitmaps.setBit(key, offset, value))
 
   /**
     * Returns the bit at `offset` in the string at `key`.
     */
-  final def getBit[K: KeyCodec](key: K, offset: Long): F[Boolean] = run(Bitmaps.getBit(key, offset))
+  final def getBit(key: K, offset: Long): F[Boolean] = run(Bitmaps.getBit(key, offset))
 
   /**
     * Counts the set bits in the string at `key`, optionally within a [[sage.commands.BitRange]].
     */
-  final def bitCount[K: KeyCodec](key: K, range: Option[BitRange] = None): F[Long] = run(Bitmaps.bitCount(key, range))
+  final def bitCount(key: K, range: Option[BitRange] = None): F[Long] = run(Bitmaps.bitCount(key, range))
 
   /**
     * Returns the position of the first `bit` (set/clear) in the string at `key`, optionally within a [[sage.commands.BitPosRange]].
     */
-  final def bitPos[K: KeyCodec](key: K, bit: Boolean, range: Option[BitPosRange] = None): F[Long] = run(Bitmaps.bitPos(key, bit, range))
+  final def bitPos(key: K, bit: Boolean, range: Option[BitPosRange] = None): F[Long] = run(Bitmaps.bitPos(key, bit, range))
 
   /**
     * Stores the bitwise AND of the source keys into `destination`, returning the result's byte length.
     */
-  final def bitOpAnd[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpAnd(destination, first, rest*))
+  final def bitOpAnd(destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpAnd(destination, first, rest*))
 
   /**
     * Stores the bitwise OR of the source keys into `destination`, returning the result's byte length.
     */
-  final def bitOpOr[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpOr(destination, first, rest*))
+  final def bitOpOr(destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpOr(destination, first, rest*))
 
   /**
     * Stores the bitwise XOR of the source keys into `destination`, returning the result's byte length.
     */
-  final def bitOpXor[K: KeyCodec](destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpXor(destination, first, rest*))
+  final def bitOpXor(destination: K, first: K, rest: K*): F[Long] = run(Bitmaps.bitOpXor(destination, first, rest*))
 
   /**
     * Stores the bitwise NOT of `source` into `destination`, returning the result's byte length.
     */
-  final def bitOpNot[K: KeyCodec](destination: K, source: K): F[Long] = run(Bitmaps.bitOpNot(destination, source))
+  final def bitOpNot(destination: K, source: K): F[Long] = run(Bitmaps.bitOpNot(destination, source))
 
   /**
     * Runs a sequence of bitfield operations on `key`; one result per non-`Overflow` op. See [[sage.commands.BitFieldOp]].
     */
-  final def bitField[K: KeyCodec](key: K, first: BitFieldOp, rest: BitFieldOp*): F[Vector[Option[Long]]] =
+  final def bitField(key: K, first: BitFieldOp, rest: BitFieldOp*): F[Vector[Option[Long]]] =
     run(Bitmaps.bitField(key, first, rest*))
 
   /**
     * The read-only form of [[bitField]] (`BITFIELD_RO`), accepting only `Get` operations.
     */
-  final def bitFieldRo[K: KeyCodec](key: K, first: BitFieldOp.Get, rest: BitFieldOp.Get*): F[Vector[Long]] =
+  final def bitFieldRo(key: K, first: BitFieldOp.Get, rest: BitFieldOp.Get*): F[Vector[Long]] =
     run(Bitmaps.bitFieldRo(key, first, rest*))
 
   /**
     * Adds elements to the HyperLogLog at `key`, returning whether its estimate likely changed.
     */
-  final def pfAdd[K: KeyCodec, V: ValueCodec](key: K, elements: V*): F[Boolean] = run(HyperLogLog.pfAdd(key, elements*))
+  final def pfAdd[V: ValueCodec](key: K, elements: V*): F[Boolean] = run(HyperLogLog.pfAdd(key, elements*))
 
   /**
     * Returns the estimated cardinality of the union of the given HyperLogLogs.
     */
-  final def pfCount[K: KeyCodec](first: K, rest: K*): F[Long] = run(HyperLogLog.pfCount(first, rest*))
+  final def pfCount(first: K, rest: K*): F[Long] = run(HyperLogLog.pfCount(first, rest*))
 
   /**
     * Merges the source HyperLogLogs into `destination`.
     */
-  final def pfMerge[K: KeyCodec](destination: K, sources: K*): F[Unit] = run(HyperLogLog.pfMerge(destination, sources*))
+  final def pfMerge(destination: K, sources: K*): F[Unit] = run(HyperLogLog.pfMerge(destination, sources*))
 
   /**
     * Appends an entry of field/value pairs to the Stream at `key`, optionally trimming; returns the assigned ID. See [[sage.commands.XAddId]].
     */
-  final def xAdd[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def xAdd[F0: KeyCodec, V: ValueCodec](
     key: K,
     id: XAddId = XAddId.Auto,
     trim: Option[Trimming] = None,
@@ -1227,7 +1240,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[xAdd]], but does not create the Stream if it is absent (`XADD … NOMKSTREAM`); returns `None` in that case.
     */
-  final def xAddNoMkStream[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def xAddNoMkStream[F0: KeyCodec, V: ValueCodec](
     key: K,
     id: XAddId = XAddId.Auto,
     trim: Option[Trimming] = None,
@@ -1237,35 +1250,35 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the number of entries in the Stream at `key`.
     */
-  final def xLen[K: KeyCodec](key: K): F[Long] = run(Streams.xLen(key))
+  final def xLen(key: K): F[Long] = run(Streams.xLen(key))
 
   /**
     * Deletes the given entry IDs from the Stream at `key`, returning how many were removed.
     */
-  final def xDel[K: KeyCodec](key: K)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xDel(key)(first, rest*))
+  final def xDel(key: K)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xDel(key)(first, rest*))
 
   /**
     * Trims the Stream at `key` per `trim` (by max length or min ID); returns how many entries were removed. See [[sage.commands.Trimming]].
     */
-  final def xTrim[K: KeyCodec](key: K, trim: Trimming, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef): F[Long] =
+  final def xTrim(key: K, trim: Trimming, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef): F[Long] =
     run(Streams.xTrim(key, trim, policy))
 
   /**
     * Sets the Stream's last-generated ID and optional bookkeeping counters (`XSETID`).
     */
-  final def xSetId[K: KeyCodec](key: K, id: GroupStartId, entriesAdded: Option[Long] = None, maxDeletedId: Option[StreamId] = None): F[Unit] =
+  final def xSetId(key: K, id: GroupStartId, entriesAdded: Option[Long] = None, maxDeletedId: Option[StreamId] = None): F[Unit] =
     run(Streams.xSetId(key, id, entriesAdded, maxDeletedId))
 
   /**
     * Configures the Stream's idempotency window (`XCFGSET`).
     */
-  final def xCfgSet[K: KeyCodec](key: K, idmpDuration: Option[FiniteDuration] = None, idmpMaxSize: Option[Long] = None): F[Unit] =
+  final def xCfgSet(key: K, idmpDuration: Option[FiniteDuration] = None, idmpMaxSize: Option[Long] = None): F[Unit] =
     run(Streams.xCfgSet(key, idmpDuration, idmpMaxSize))
 
   /**
     * Returns Stream entries in the ID range `[start, end]`, up to `count`; see [[sage.commands.StreamRangeId]]/[[sage.commands.StreamEntry]].
     */
-  final def xRange[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def xRange[F0: KeyCodec, V: ValueCodec](
     key: K,
     start: StreamRangeId = StreamRangeId.Min,
     end: StreamRangeId = StreamRangeId.Max,
@@ -1275,7 +1288,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[xRange]], but in reverse order from `end` down to `start`.
     */
-  final def xRevRange[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def xRevRange[F0: KeyCodec, V: ValueCodec](
     key: K,
     end: StreamRangeId = StreamRangeId.Max,
     start: StreamRangeId = StreamRangeId.Min,
@@ -1285,7 +1298,7 @@ trait CommandRunner[F[_]] {
   /**
     * Reads new entries from one or more Streams past each given [[sage.commands.ReadId]], optionally blocking up to `block`.
     */
-  final def xRead[K: KeyCodec, F0: KeyCodec, V: ValueCodec](first: (K, ReadId), rest: (K, ReadId)*)(
+  final def xRead[F0: KeyCodec, V: ValueCodec](first: (K, ReadId), rest: (K, ReadId)*)(
     count: Option[Long] = None,
     block: Option[BlockTimeout] = None
   ): F[Vector[(K, Vector[StreamEntry[F0, V]])]] = run(Streams.xRead(first, rest*)(count, block))
@@ -1293,7 +1306,7 @@ trait CommandRunner[F[_]] {
   /**
     * Reads entries for a Consumer Group as `consumer`, advancing the group on `>` or re-reading pending history otherwise; see [[sage.commands.GroupReadId]].
     */
-  final def xReadGroup[K: KeyCodec, F0: KeyCodec, V: ValueCodec](group: String, consumer: String)(first: (K, GroupReadId), rest: (K, GroupReadId)*)(
+  final def xReadGroup[F0: KeyCodec, V: ValueCodec](group: String, consumer: String)(first: (K, GroupReadId), rest: (K, GroupReadId)*)(
     count: Option[Long] = None,
     block: Option[BlockTimeout] = None,
     noAck: Boolean = false
@@ -1302,12 +1315,12 @@ trait CommandRunner[F[_]] {
   /**
     * Acknowledges the given entry IDs for a Consumer Group, removing them from its Pending Entries List; returns how many were acknowledged.
     */
-  final def xAck[K: KeyCodec](key: K, group: String)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xAck(key, group)(first, rest*))
+  final def xAck(key: K, group: String)(first: StreamId, rest: StreamId*): F[Long] = run(Streams.xAck(key, group)(first, rest*))
 
   /**
     * Creates a Consumer Group on the Stream at `key`, starting from `id`; `mkStream` creates the Stream if absent.
     */
-  final def xGroupCreate[K: KeyCodec](
+  final def xGroupCreate(
     key: K,
     group: String,
     id: GroupStartId = GroupStartId.Last,
@@ -1318,30 +1331,30 @@ trait CommandRunner[F[_]] {
   /**
     * Repositions a Consumer Group's last-delivered ID.
     */
-  final def xGroupSetId[K: KeyCodec](key: K, group: String, id: GroupStartId = GroupStartId.Last, entriesRead: Option[Long] = None): F[Unit] =
+  final def xGroupSetId(key: K, group: String, id: GroupStartId = GroupStartId.Last, entriesRead: Option[Long] = None): F[Unit] =
     run(Streams.xGroupSetId(key, group, id, entriesRead))
 
   /**
     * Destroys a Consumer Group and its pending state, returning whether it existed.
     */
-  final def xGroupDestroy[K: KeyCodec](key: K, group: String): F[Boolean] = run(Streams.xGroupDestroy(key, group))
+  final def xGroupDestroy(key: K, group: String): F[Boolean] = run(Streams.xGroupDestroy(key, group))
 
   /**
     * Explicitly creates a Consumer in a group, returning whether it was newly created.
     */
-  final def xGroupCreateConsumer[K: KeyCodec](key: K, group: String, consumer: String): F[Boolean] =
+  final def xGroupCreateConsumer(key: K, group: String, consumer: String): F[Boolean] =
     run(Streams.xGroupCreateConsumer(key, group, consumer))
 
   /**
     * Removes a Consumer from a group, returning how many pending entries it still owned.
     */
-  final def xGroupDelConsumer[K: KeyCodec](key: K, group: String, consumer: String): F[Long] =
+  final def xGroupDelConsumer(key: K, group: String, consumer: String): F[Long] =
     run(Streams.xGroupDelConsumer(key, group, consumer))
 
   /**
     * Transfers ownership of the given pending entries to `consumer`, if idle at least `minIdle`; returns the claimed entries.
     */
-  final def xClaim[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, group: String, consumer: String, minIdle: FiniteDuration)(
+  final def xClaim[F0: KeyCodec, V: ValueCodec](key: K, group: String, consumer: String, minIdle: FiniteDuration)(
     first: StreamId,
     rest: StreamId*
   )(idle: Option[ClaimIdle] = None, retryCount: Option[Long] = None, force: Boolean = false): F[Vector[StreamEntry[F0, V]]] =
@@ -1350,7 +1363,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[xClaim]], but returns only the claimed entry IDs (`XCLAIM … JUSTID`).
     */
-  final def xClaimJustId[K: KeyCodec](key: K, group: String, consumer: String, minIdle: FiniteDuration)(first: StreamId, rest: StreamId*)(
+  final def xClaimJustId(key: K, group: String, consumer: String, minIdle: FiniteDuration)(first: StreamId, rest: StreamId*)(
     idle: Option[ClaimIdle] = None,
     retryCount: Option[Long] = None,
     force: Boolean = false
@@ -1359,7 +1372,7 @@ trait CommandRunner[F[_]] {
   /**
     * Scans a group's pending entries from `start`, claiming idle ones for `consumer`; see [[sage.commands.XAutoClaimResult]].
     */
-  final def xAutoClaim[K: KeyCodec, F0: KeyCodec, V: ValueCodec](
+  final def xAutoClaim[F0: KeyCodec, V: ValueCodec](
     key: K,
     group: String,
     consumer: String,
@@ -1371,7 +1384,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[xAutoClaim]], but returns only the claimed entry IDs; see [[sage.commands.XAutoClaimJustIdResult]].
     */
-  final def xAutoClaimJustId[K: KeyCodec](
+  final def xAutoClaimJustId(
     key: K,
     group: String,
     consumer: String,
@@ -1383,12 +1396,12 @@ trait CommandRunner[F[_]] {
   /**
     * Returns a group-level summary of the Pending Entries List; see [[sage.commands.PendingSummary]].
     */
-  final def xPending[K: KeyCodec](key: K, group: String): F[PendingSummary] = run(Streams.xPending(key, group))
+  final def xPending(key: K, group: String): F[PendingSummary] = run(Streams.xPending(key, group))
 
   /**
     * Returns per-entry pending detail over an ID range, optionally filtered by `consumer`/`idle`; see [[sage.commands.PendingEntry]].
     */
-  final def xPendingExtended[K: KeyCodec](
+  final def xPendingExtended(
     key: K,
     group: String,
     start: StreamRangeId = StreamRangeId.Min,
@@ -1401,28 +1414,28 @@ trait CommandRunner[F[_]] {
   /**
     * Returns summary metadata about the Stream at `key`; see [[sage.commands.StreamInfo]].
     */
-  final def xInfoStream[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K): F[StreamInfo[F0, V]] = run(StreamInfo.xInfoStream(key))
+  final def xInfoStream[F0: KeyCodec, V: ValueCodec](key: K): F[StreamInfo[F0, V]] = run(StreamInfo.xInfoStream(key))
 
   /**
     * Returns the full Stream introspection, including groups and PEL entries; see [[sage.commands.StreamInfoFull]].
     */
-  final def xInfoStreamFull[K: KeyCodec, F0: KeyCodec, V: ValueCodec](key: K, count: Option[Long] = None): F[StreamInfoFull[F0, V]] =
+  final def xInfoStreamFull[F0: KeyCodec, V: ValueCodec](key: K, count: Option[Long] = None): F[StreamInfoFull[F0, V]] =
     run(StreamInfo.xInfoStreamFull(key, count))
 
   /**
     * Returns one entry per Consumer Group on the Stream at `key`; see [[sage.commands.GroupInfo]].
     */
-  final def xInfoGroups[K: KeyCodec](key: K): F[Vector[GroupInfo]] = run(StreamInfo.xInfoGroups(key))
+  final def xInfoGroups(key: K): F[Vector[GroupInfo]] = run(StreamInfo.xInfoGroups(key))
 
   /**
     * Returns one entry per Consumer in a group; see [[sage.commands.ConsumerInfo]].
     */
-  final def xInfoConsumers[K: KeyCodec](key: K, group: String): F[Vector[ConsumerInfo]] = run(StreamInfo.xInfoConsumers(key, group))
+  final def xInfoConsumers(key: K, group: String): F[Vector[ConsumerInfo]] = run(StreamInfo.xInfoConsumers(key, group))
 
   /**
     * Deletes the given entries with an explicit deletion `policy`; one [[sage.commands.StreamEntryDeletion]] per ID (`XDELEX`).
     */
-  final def xDelEx[K: KeyCodec](key: K, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
+  final def xDelEx(key: K, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
     first: StreamId,
     rest: StreamId*
   ): F[Vector[StreamEntryDeletion]] =
@@ -1431,7 +1444,7 @@ trait CommandRunner[F[_]] {
   /**
     * Acknowledges and deletes the given entries in one step (`XACKDEL`); one [[sage.commands.StreamEntryDeletion]] per ID.
     */
-  final def xAckDel[K: KeyCodec](key: K, group: String, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
+  final def xAckDel(key: K, group: String, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
     first: StreamId,
     rest: StreamId*
   ): F[Vector[StreamEntryDeletion]] = run(Streams.xAckDel(key, group, policy)(first, rest*))
@@ -1439,7 +1452,7 @@ trait CommandRunner[F[_]] {
   /**
     * Negatively-acknowledges the given pending entries (`XNACK`), per `mode`; returns how many were affected. See [[sage.commands.NackMode]].
     */
-  final def xNack[K: KeyCodec](key: K, group: String, mode: NackMode)(first: StreamId, rest: StreamId*)(
+  final def xNack(key: K, group: String, mode: NackMode)(first: StreamId, rest: StreamId*)(
     retryCount: Option[Long] = None,
     force: Boolean = false
   ): F[Long] = run(Streams.xNack(key, group, mode)(first, rest*)(retryCount, force))
@@ -1454,12 +1467,12 @@ trait CommandRunner[F[_]] {
   /**
     * Evaluates the Lua `script` with the given keys.
     */
-  final def eval[K: KeyCodec](script: String, keys: Seq[K]): F[Frame] = run(Scripting.eval(script, keys))
+  final def eval(script: String, keys: Seq[K]): F[Frame] = run(Scripting.eval(script, keys))
 
   /**
     * Evaluates the Lua `script` with the given keys and arguments.
     */
-  final def eval[K: KeyCodec, V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def eval[V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Scripting.eval(script, keys, args))
 
   /**
@@ -1470,12 +1483,12 @@ trait CommandRunner[F[_]] {
   /**
     * Read-only [[eval]] with the given keys (`EVAL_RO`).
     */
-  final def evalRo[K: KeyCodec](script: String, keys: Seq[K]): F[Frame] = run(Scripting.evalRo(script, keys))
+  final def evalRo(script: String, keys: Seq[K]): F[Frame] = run(Scripting.evalRo(script, keys))
 
   /**
     * Read-only [[eval]] with the given keys and arguments (`EVAL_RO`).
     */
-  final def evalRo[K: KeyCodec, V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def evalRo[V: ValueCodec](script: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Scripting.evalRo(script, keys, args))
 
   /**
@@ -1486,12 +1499,12 @@ trait CommandRunner[F[_]] {
   /**
     * Evaluates a cached script by `sha` with the given keys (`EVALSHA`).
     */
-  final def evalSha[K: KeyCodec](sha: String, keys: Seq[K]): F[Frame] = run(Scripting.evalSha(sha, keys))
+  final def evalSha(sha: String, keys: Seq[K]): F[Frame] = run(Scripting.evalSha(sha, keys))
 
   /**
     * Evaluates a cached script by `sha` with the given keys and arguments (`EVALSHA`).
     */
-  final def evalSha[K: KeyCodec, V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def evalSha[V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Scripting.evalSha(sha, keys, args))
 
   /**
@@ -1502,12 +1515,12 @@ trait CommandRunner[F[_]] {
   /**
     * Read-only [[evalSha]] with the given keys (`EVALSHA_RO`).
     */
-  final def evalShaRo[K: KeyCodec](sha: String, keys: Seq[K]): F[Frame] = run(Scripting.evalShaRo(sha, keys))
+  final def evalShaRo(sha: String, keys: Seq[K]): F[Frame] = run(Scripting.evalShaRo(sha, keys))
 
   /**
     * Read-only [[evalSha]] with the given keys and arguments (`EVALSHA_RO`).
     */
-  final def evalShaRo[K: KeyCodec, V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def evalShaRo[V: ValueCodec](sha: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Scripting.evalShaRo(sha, keys, args))
 
   /**
@@ -1545,12 +1558,12 @@ trait CommandRunner[F[_]] {
   /**
     * Calls the named Function with the given keys (`FCALL`).
     */
-  final def fCall[K: KeyCodec](function: String, keys: Seq[K]): F[Frame] = run(Functions.fCall(function, keys))
+  final def fCall(function: String, keys: Seq[K]): F[Frame] = run(Functions.fCall(function, keys))
 
   /**
     * Calls the named Function with the given keys and arguments (`FCALL`).
     */
-  final def fCall[K: KeyCodec, V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def fCall[V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Functions.fCall(function, keys, args))
 
   /**
@@ -1561,12 +1574,12 @@ trait CommandRunner[F[_]] {
   /**
     * Read-only [[fCall]] with the given keys (`FCALL_RO`).
     */
-  final def fCallRo[K: KeyCodec](function: String, keys: Seq[K]): F[Frame] = run(Functions.fCallRo(function, keys))
+  final def fCallRo(function: String, keys: Seq[K]): F[Frame] = run(Functions.fCallRo(function, keys))
 
   /**
     * Read-only [[fCall]] with the given keys and arguments (`FCALL_RO`).
     */
-  final def fCallRo[K: KeyCodec, V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
+  final def fCallRo[V: ValueCodec](function: String, keys: Seq[K], args: Seq[V]): F[Frame] =
     run(Functions.fCallRo(function, keys, args))
 
   /**
@@ -1667,7 +1680,7 @@ trait CommandRunner[F[_]] {
   /**
     * Returns the approximate memory used by the value at `key` in bytes, or `None` if absent.
     */
-  final def memoryUsage[K: KeyCodec](key: K, samples: Option[Long] = None): F[Option[Long]] = run(Server.memoryUsage(key, samples))
+  final def memoryUsage(key: K, samples: Option[Long] = None): F[Option[Long]] = run(Server.memoryUsage(key, samples))
 
   /**
     * Asks the allocator to release memory back to the OS.
@@ -1844,85 +1857,85 @@ trait CommandRunner[F[_]] {
   /**
     * Writes the given values into the Array at `key` from `index` onward, returning the new used count.
     */
-  final def arSet[K: KeyCodec, V: ValueCodec](key: K, index: Long, first: V, rest: V*): F[Long] = run(Arrays.arSet(key, index, first, rest*))
+  final def arSet[V: ValueCodec](key: K, index: Long, first: V, rest: V*): F[Long] = run(Arrays.arSet(key, index, first, rest*))
 
   /**
     * Writes values at explicit indices in the Array at `key`, returning the new used count.
     */
-  final def arMSet[K: KeyCodec, V: ValueCodec](key: K, first: (Long, V), rest: (Long, V)*): F[Long] = run(Arrays.arMSet(key, first, rest*))
+  final def arMSet[V: ValueCodec](key: K, first: (Long, V), rest: (Long, V)*): F[Long] = run(Arrays.arMSet(key, first, rest*))
 
   /**
     * Returns the value at `index` in the Array at `key`, or `None` if that slot is empty.
     */
-  final def arGet[K: KeyCodec, V: ValueCodec](key: K, index: Long): F[Option[V]] = run(Arrays.arGet(key, index))
+  final def arGet[V: ValueCodec](key: K, index: Long): F[Option[V]] = run(Arrays.arGet(key, index))
 
   /**
     * Returns the values at the given indices in the Array at `key`, each `None` if its slot is empty.
     */
-  final def arMGet[K: KeyCodec, V: ValueCodec](key: K, first: Long, rest: Long*): F[Vector[Option[V]]] = run(Arrays.arMGet(key, first, rest*))
+  final def arMGet[V: ValueCodec](key: K, first: Long, rest: Long*): F[Vector[Option[V]]] = run(Arrays.arMGet(key, first, rest*))
 
   /**
     * Returns the logical length of the Array at `key` (highest index + 1).
     */
-  final def arLen[K: KeyCodec](key: K): F[Long] = run(Arrays.arLen(key))
+  final def arLen(key: K): F[Long] = run(Arrays.arLen(key))
 
   /**
     * Returns the number of populated slots in the Array at `key`.
     */
-  final def arCount[K: KeyCodec](key: K): F[Long] = run(Arrays.arCount(key))
+  final def arCount(key: K): F[Long] = run(Arrays.arCount(key))
 
   /**
     * Returns the values in the index range `[start, end]` of the Array at `key`, each `None` if its slot is empty.
     */
-  final def arGetRange[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long): F[Vector[Option[V]]] =
+  final def arGetRange[V: ValueCodec](key: K, start: Long, end: Long): F[Vector[Option[V]]] =
     run(Arrays.arGetRange(key, start, end))
 
   /**
     * Appends values to the Array at `key` in ring-buffer mode of capacity `size`, overwriting the oldest; returns the new used count.
     */
-  final def arRing[K: KeyCodec, V: ValueCodec](key: K, size: Long, first: V, rest: V*): F[Long] = run(Arrays.arRing(key, size, first, rest*))
+  final def arRing[V: ValueCodec](key: K, size: Long, first: V, rest: V*): F[Long] = run(Arrays.arRing(key, size, first, rest*))
 
   /**
     * Returns the last `count` populated values of the Array at `key`, newest-first when `rev`.
     */
-  final def arLastItems[K: KeyCodec, V: ValueCodec](key: K, count: Long, rev: Boolean = false): F[Vector[V]] =
+  final def arLastItems[V: ValueCodec](key: K, count: Long, rev: Boolean = false): F[Vector[V]] =
     run(Arrays.arLastItems(key, count, rev))
 
   /**
     * Clears the given indices of the Array at `key`, returning how many were populated.
     */
-  final def arDel[K: KeyCodec](key: K, first: Long, rest: Long*): F[Long] = run(Arrays.arDel(key, first, rest*))
+  final def arDel(key: K, first: Long, rest: Long*): F[Long] = run(Arrays.arDel(key, first, rest*))
 
   /**
     * Clears the given inclusive index ranges of the Array at `key`, returning how many slots were cleared.
     */
-  final def arDelRange[K: KeyCodec](key: K, first: (Long, Long), rest: (Long, Long)*): F[Long] = run(Arrays.arDelRange(key, first, rest*))
+  final def arDelRange(key: K, first: (Long, Long), rest: (Long, Long)*): F[Long] = run(Arrays.arDelRange(key, first, rest*))
 
   /**
     * Writes the given values at the Array's write cursor and advances it, returning the new used count.
     */
-  final def arInsert[K: KeyCodec, V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Arrays.arInsert(key, first, rest*))
+  final def arInsert[V: ValueCodec](key: K, first: V, rest: V*): F[Long] = run(Arrays.arInsert(key, first, rest*))
 
   /**
     * Returns the next populated index at or after the write cursor, or `None` if none.
     */
-  final def arNext[K: KeyCodec](key: K): F[Option[Long]] = run(Arrays.arNext(key))
+  final def arNext(key: K): F[Option[Long]] = run(Arrays.arNext(key))
 
   /**
     * Moves the Array's write cursor to `index`, returning whether it moved.
     */
-  final def arSeek[K: KeyCodec](key: K, index: Long): F[Boolean] = run(Arrays.arSeek(key, index))
+  final def arSeek(key: K, index: Long): F[Boolean] = run(Arrays.arSeek(key, index))
 
   /**
     * Returns populated (index, value) pairs in `[start, end]`, up to `limit`.
     */
-  final def arScan[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long, limit: Option[Long] = None): F[Vector[(Long, V)]] =
+  final def arScan[V: ValueCodec](key: K, start: Long, end: Long, limit: Option[Long] = None): F[Vector[(Long, V)]] =
     run(Arrays.arScan(key, start, end, limit))
 
   /**
     * Returns the indices in `[start, end]` whose values match the given criteria, combined per `combine`; see [[sage.commands.ArMatch]].
     */
-  final def arGrep[K: KeyCodec](
+  final def arGrep(
     key: K,
     start: Long,
     end: Long,
@@ -1934,7 +1947,7 @@ trait CommandRunner[F[_]] {
   /**
     * Like [[arGrep]], but returns each matching index paired with its value.
     */
-  final def arGrepWithValues[K: KeyCodec, V: ValueCodec](
+  final def arGrepWithValues[V: ValueCodec](
     key: K,
     start: Long,
     end: Long,
@@ -1946,53 +1959,53 @@ trait CommandRunner[F[_]] {
   /**
     * Sums the values in `[start, end]` of the Array at `key`, or `None` if the range is empty.
     */
-  final def arOpSum[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpSum(key, start, end))
+  final def arOpSum(key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpSum(key, start, end))
 
   /**
     * Returns the minimum value in `[start, end]`, or `None` if the range is empty.
     */
-  final def arOpMin[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMin(key, start, end))
+  final def arOpMin(key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMin(key, start, end))
 
   /**
     * Returns the maximum value in `[start, end]`, or `None` if the range is empty.
     */
-  final def arOpMax[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMax(key, start, end))
+  final def arOpMax(key: K, start: Long, end: Long): F[Option[Double]] = run(Arrays.arOpMax(key, start, end))
 
   /**
     * Returns the bitwise AND of the integer values in `[start, end]`, or `None` if the range is empty.
     */
-  final def arOpAnd[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpAnd(key, start, end))
+  final def arOpAnd(key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpAnd(key, start, end))
 
   /**
     * Returns the bitwise OR of the integer values in `[start, end]`, or `None` if the range is empty.
     */
-  final def arOpOr[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpOr(key, start, end))
+  final def arOpOr(key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpOr(key, start, end))
 
   /**
     * Returns the bitwise XOR of the integer values in `[start, end]`, or `None` if the range is empty.
     */
-  final def arOpXor[K: KeyCodec](key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpXor(key, start, end))
+  final def arOpXor(key: K, start: Long, end: Long): F[Option[Long]] = run(Arrays.arOpXor(key, start, end))
 
   /**
     * Returns how many slots in `[start, end]` are populated.
     */
-  final def arOpUsed[K: KeyCodec](key: K, start: Long, end: Long): F[Long] = run(Arrays.arOpUsed(key, start, end))
+  final def arOpUsed(key: K, start: Long, end: Long): F[Long] = run(Arrays.arOpUsed(key, start, end))
 
   /**
     * Returns how many slots in `[start, end]` hold `value`.
     */
-  final def arOpMatch[K: KeyCodec, V: ValueCodec](key: K, start: Long, end: Long, value: V): F[Long] =
+  final def arOpMatch[V: ValueCodec](key: K, start: Long, end: Long, value: V): F[Long] =
     run(Arrays.arOpMatch(key, start, end, value))
 
   /**
     * Returns summary metadata about the Array at `key`; see [[sage.commands.ArrayInfo]].
     */
-  final def arInfo[K: KeyCodec](key: K): F[ArrayInfo] = run(Arrays.arInfo(key))
+  final def arInfo(key: K): F[ArrayInfo] = run(Arrays.arInfo(key))
 
   /**
     * Returns the full introspection of the Array at `key`; see [[sage.commands.ArrayInfoFull]].
     */
-  final def arInfoFull[K: KeyCodec](key: K): F[ArrayInfoFull] = run(Arrays.arInfoFull(key))
+  final def arInfoFull(key: K): F[ArrayInfoFull] = run(Arrays.arInfoFull(key))
 }
 
 /**
@@ -2022,7 +2035,7 @@ private[sage] enum ScanStep {
   * blocking commands, and pub/sub acquire other connections, transparently. Constructed with a backend's `connect`/`scoped` and released with
   * [[close]].
   */
-trait Client[F[_]] extends CommandRunner[F] {
+trait Client[F[_], K] extends CommandRunner[F, K] {
 
   /**
     * Runs a read with client-side caching: served from the local cache until a server invalidation push or `ttl` evicts it. Only a
@@ -2046,7 +2059,7 @@ trait Client[F[_]] extends CommandRunner[F] {
   /**
     * Opens a [[TransactionScope]] on a leased Dedicated Connection for `MULTI`/`EXEC`, optionally guarded by `WATCH`.
     */
-  def transaction[A](body: TransactionScope[F] => F[A]): F[A]
+  def transaction[A](body: TransactionScope[F, K] => F[A]): F[A]
 
   /**
     * Subscribes to classic channels, returning a [[Subscription]] handle the backend wraps into its native stream of [[Message]]s.
@@ -2073,6 +2086,29 @@ trait Client[F[_]] extends CommandRunner[F] {
     * Releases all connections and the client's resources.
     */
   def close: F[Unit]
+
+  /**
+    * Re-types the whole client surface to another key type over the same connection — no new connection is opened. Everything but the command
+    * sugar is key-independent and simply forwards (`cached`, `pipeline`, `subscribe*`, `runOn`, `close`); `transaction` re-types its scope. This
+    * is what makes `client.as[Array[Byte]]` keep the full surface (and the backend `…All`/`subscribe` helpers, which extend `Client[F, K]`),
+    * not just the command methods.
+    */
+  override def as[K2](using KeyCodec[K2]): Client[F, K2] = {
+    val self = this
+    new Client[F, K2] {
+      def run[A](command: Command[A]): F[A]                                     = self.run(command)
+      def cached[A](command: Command[A], ttl: FiniteDuration): F[A]             = self.cached(command, ttl)
+      def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                         = self.pipeline(p)
+      def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                    = self.pipelineAttempt(p)
+      def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]           = self.transaction(scope => body(scope.as[K2]))
+      def subscribeChannels[V: ValueCodec](channel: String, rest: String*)      = self.subscribeChannels(channel, rest*)
+      def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)      = self.subscribePatterns(pattern, rest*)
+      def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*) = self.subscribeShardChannels(channel, rest*)
+      private[sage] def scanTargets: F[Vector[ScanTarget]]                      = self.scanTargets
+      private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = self.runOn(target, command)
+      def close: F[Unit]                                                        = self.close
+    }
+  }
 }
 
 object Client {
@@ -2108,7 +2144,7 @@ object Client {
   /**
     * The construction seam each backend's `connect`/`scoped` builds on: validates `config`, then connects per its [[Topology]].
     */
-  def connect(config: SageConfig): CIO[Client[CIO]] =
+  def connect(config: SageConfig): CIO[Client[CIO, String]] =
     validate(config) match {
       case Some(problem) => CIO.fail(new IllegalArgumentException(problem))
       case None          =>
@@ -2174,7 +2210,7 @@ object Client {
   private def positiveOrInfinite(value: Duration, label: String): Option[String] =
     cond(value == Duration.Inf || (value.isFinite && value.toNanos > 0L), s"$label must be positive (or Inf)")
 
-  private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO]] =
+  private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO, String]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
     // multiplexed one and each dedicated one — is upgraded identically
     CIO.blocking(Tls.buildUpgrade(config.tls, endpoint.host, endpoint.port)).flatMap { upgrade =>
@@ -2212,7 +2248,7 @@ object Client {
     events: Events = Events.disabled,
     database: Int = 0,
     clientName: Option[String] = None
-  ): CIO[Client[CIO]] = {
+  ): CIO[Client[CIO, String]] = {
     val bootstrap            = Bootstrap.commands(auth, database, clientName)
     // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
     // plain bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
@@ -2258,7 +2294,7 @@ object Client {
     subscriptions: SubscriptionConnection,
     cachingEnabled: Boolean,
     events: Events
-  ) extends Client[CIO] {
+  ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
       command.execution match {
@@ -2284,7 +2320,7 @@ object Client {
     // The lease is bracketed: release runs on success, failure, and interruption (IO.bracket). A clean exit (exec/discard cleared the
     // connection's WATCH/MULTI state, no reply outstanding) recycles the connection; a scope left armed or interrupted mid-command is
     // discarded rather than handed to the next borrower dirty.
-    def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
+    def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
       CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
 
     private def acquireScope: CIO[TxScope] =
@@ -2353,7 +2389,7 @@ object Client {
       case Left(error)  => throw error
     }
 
-  final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => ()) extends TransactionScope[CIO] {
+  final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => ()) extends TransactionScope[CIO, String] {
 
     // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
     val armed = new AtomicBoolean(false)

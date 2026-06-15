@@ -81,8 +81,8 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
     withClient { client =>
       for {
         _    <- client.hSet("hfe-getdel", ("a", "1"), ("b", "2"))
-        got  <- client.hGetDel[String, String, String]("hfe-getdel")("a", "missing")
-        left <- client.hGetAll[String, String, String]("hfe-getdel")
+        got  <- client.hGetDel[String, String]("hfe-getdel")("a", "missing")
+        left <- client.hGetAll[String, String]("hfe-getdel")
       } yield {
         assertEquals(got, Vector(Some("1"), None))
         assertEquals(left, Map("b" -> "2"))
@@ -94,7 +94,7 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
     withClient { client =>
       for {
         _   <- client.hSet("hfe-getex", ("a", "1"))
-        got <- client.hGetEx[String, String, String]("hfe-getex", GetExpiry.In(100.seconds))("a")
+        got <- client.hGetEx[String, String]("hfe-getex", GetExpiry.In(100.seconds))("a")
         ttl <- client.hTtl("hfe-getex")("a")
       } yield {
         assertEquals(got, Vector(Some("1")))
@@ -112,9 +112,9 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
         created <- client.hSetEx("hfe-setex", SetExpiry.In(100.seconds), HSetExCondition.IfNoneExist)(("a", "1"), ("b", "2"))
         ttl     <- client.hTtl("hfe-setex")("a")
         blocked <- client.hSetEx("hfe-setex", condition = HSetExCondition.IfNoneExist)(("a", "9"))
-        aStill  <- client.hGet[String, String, String]("hfe-setex", "a")
+        aStill  <- client.hGet[String, String]("hfe-setex", "a")
         updated <- client.hSetEx("hfe-setex", SetExpiry.KeepTtl, HSetExCondition.IfAllExist)(("a", "10"))
-        aNew    <- client.hGet[String, String, String]("hfe-setex", "a")
+        aNew    <- client.hGet[String, String]("hfe-setex", "a")
       } yield {
         assertEquals(created, true)
         assert(ttl(0) match {

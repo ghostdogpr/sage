@@ -18,7 +18,7 @@ object TransactionsExample {
         result <- client.transaction { tx =>
                     for {
                       _   <- tx.watch("tx:n")
-                      _   <- tx.get[String, Int]("tx:n")
+                      _   <- tx.get[Int]("tx:n")
                       res <- tx.exec((Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline)
                     } yield res
                   }

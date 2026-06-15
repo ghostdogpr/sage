@@ -15,7 +15,7 @@ class ValkeyServerExtrasSuite extends ServerSuite(Images.valkey) {
       for {
         _      <- client.configSet(("slowlog-log-slower-than", "0"))
         _      <- client.commandLogReset(CommandLogType.Slow)
-        _      <- client.get[String, String]("cl-probe")
+        _      <- client.get[String]("cl-probe")
         len    <- client.commandLogLen(CommandLogType.Slow)
         recent <- client.commandLogGet(5L, CommandLogType.Slow)
         _      <- client.configSet(("slowlog-log-slower-than", "10000"))

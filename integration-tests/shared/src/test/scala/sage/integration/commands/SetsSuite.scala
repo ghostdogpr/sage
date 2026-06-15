@@ -13,12 +13,12 @@ abstract class SetsSuite(image: String) extends ServerSuite(image) {
         added   <- client.sAdd("set-basic", "a", "b", "c")
         dup     <- client.sAdd("set-basic", "a")
         card    <- client.sCard("set-basic")
-        members <- client.sMembers[String, String]("set-basic")
+        members <- client.sMembers[String]("set-basic")
         isA     <- client.sIsMember("set-basic", "a")
         isZ     <- client.sIsMember("set-basic", "z")
         multi   <- client.sMisMember("set-basic", "a", "z", "c")
         removed <- client.sRem("set-basic", "a", "z")
-        after   <- client.sMembers[String, String]("set-basic")
+        after   <- client.sMembers[String]("set-basic")
       } yield {
         assertEquals(added, 3L)
         assertEquals(dup, 0L)
@@ -37,11 +37,11 @@ abstract class SetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _        <- client.sAdd("set-draw", "a", "b", "c", "d")
-        popOne   <- client.sPop[String, String]("set-draw")
-        popTwo   <- client.sPopCount[String, String]("set-draw", 2L)
-        rndOne   <- client.sRandMember[String, String]("set-draw")
-        rndDup   <- client.sRandMemberCount[String, String]("set-draw", -5L)
-        emptyPop <- client.sPop[String, String]("set-missing")
+        popOne   <- client.sPop[String]("set-draw")
+        popTwo   <- client.sPopCount[String]("set-draw", 2L)
+        rndOne   <- client.sRandMember[String]("set-draw")
+        rndDup   <- client.sRandMemberCount[String]("set-draw", -5L)
+        emptyPop <- client.sPop[String]("set-missing")
       } yield {
         assert(popOne.exists(Set("a", "b", "c", "d")))
         assertEquals(popTwo.size, 2)
@@ -60,8 +60,8 @@ abstract class SetsSuite(image: String) extends ServerSuite(image) {
         _      <- client.sAdd("set-dst", "z")
         moved  <- client.sMove("set-src", "set-dst", "x")
         absent <- client.sMove("set-src", "set-dst", "nope")
-        src    <- client.sMembers[String, String]("set-src")
-        dst    <- client.sMembers[String, String]("set-dst")
+        src    <- client.sMembers[String]("set-src")
+        dst    <- client.sMembers[String]("set-dst")
       } yield {
         assertEquals(moved, true)
         assertEquals(absent, false)
@@ -76,15 +76,15 @@ abstract class SetsSuite(image: String) extends ServerSuite(image) {
       for {
         _       <- client.sAdd("ops-a", "1", "2", "3")
         _       <- client.sAdd("ops-b", "2", "3", "4")
-        diff    <- client.sDiff[String, String]("ops-a", "ops-b")
-        inter   <- client.sInter[String, String]("ops-a", "ops-b")
-        union   <- client.sUnion[String, String]("ops-a", "ops-b")
+        diff    <- client.sDiff[String]("ops-a", "ops-b")
+        inter   <- client.sInter[String]("ops-a", "ops-b")
+        union   <- client.sUnion[String]("ops-a", "ops-b")
         card    <- client.sInterCard("ops-a", "ops-b")()
         cardLim <- client.sInterCard("ops-a", "ops-b")(limit = Some(1L))
         diffN   <- client.sDiffStore("ops-diff", "ops-a", "ops-b")
         interN  <- client.sInterStore("ops-inter", "ops-a", "ops-b")
         unionN  <- client.sUnionStore("ops-union", "ops-a", "ops-b")
-        stored  <- client.sMembers[String, String]("ops-union")
+        stored  <- client.sMembers[String]("ops-union")
       } yield {
         assertEquals(diff, Set("1"))
         assertEquals(inter, Set("2", "3"))
@@ -103,7 +103,7 @@ abstract class SetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _    <- client.sAdd("set-scan", "a", "b", "c")
-        page <- client.sScan[String, String]("set-scan", ScanCursor.start)
+        page <- client.sScan[String]("set-scan", ScanCursor.start)
       } yield assertEquals(page.items.toSet, Set("a", "b", "c"))
     }
   }

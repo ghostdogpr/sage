@@ -13,7 +13,7 @@ client.del("stream:orders")
 client.xAdd("stream:orders")(("item", "book"), ("qty", "2"))
 client.xAdd("stream:orders")(("item", "pen"), ("qty", "5"))
 val len     = client.xLen("stream:orders") // 2
-val entries = client.xRange[String, String, String]("stream:orders")
+val entries = client.xRange[String, String]("stream:orders")
 // Vector(StreamEntry(id, Vector(("item","book"), ("qty","2"))), ...)
 ```
 
@@ -23,7 +23,7 @@ for {
   _       <- client.xAdd("stream:orders")(("item", "book"), ("qty", "2"))
   _       <- client.xAdd("stream:orders")(("item", "pen"), ("qty", "5"))
   len     <- client.xLen("stream:orders")
-  entries <- client.xRange[String, String, String]("stream:orders")
+  entries <- client.xRange[String, String]("stream:orders")
 } yield (len, entries)
 ```
 
@@ -44,7 +44,7 @@ client.xGroupCreate(
   "workers",
   id = GroupStartId.At(StreamId.Zero)
 )
-val batches = client.xReadGroup[String, String, String]("workers", "w1")(
+val batches = client.xReadGroup[String, String]("workers", "w1")(
   ("stream:orders", GroupReadId.New)
 )()
 val ids = batches.flatMap(_._2).map(_.id)
@@ -58,7 +58,7 @@ for {
                "workers",
                id = GroupStartId.At(StreamId.Zero)
              )
-  batches <- client.xReadGroup[String, String, String]("workers", "w1")(
+  batches <- client.xReadGroup[String, String]("workers", "w1")(
                ("stream:orders", GroupReadId.New)
              )()
   ids      = batches.flatMap(_._2).map(_.id)

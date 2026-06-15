@@ -15,7 +15,7 @@ object TransactionsExample {
     val _      = client.set("tx:n", 1)
     val result = client.transaction { tx =>
       val _ = tx.watch("tx:n")
-      val _ = tx.get[String, Int]("tx:n")
+      val _ = tx.get[Int]("tx:n")
       tx.exec((Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline)
     }
     println(s"transaction result=$result")

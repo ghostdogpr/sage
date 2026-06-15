@@ -49,7 +49,7 @@ import sage.ox.*
     )
     val client   = SageClient.scoped(config)
     client.set("greeting", "hello")
-    val greeting = client.get[String, String]("greeting")
+    val greeting = client.get[String]("greeting")
     println(s"greeting=$greeting") // Some("hello")
   }
 ```
@@ -69,7 +69,7 @@ object Main extends ZIOAppDefault {
     ZIO.serviceWithZIO[SageClient] { client =>
       for {
         _        <- client.set("greeting", "hello")
-        greeting <- client.get[String, String]("greeting")
+        greeting <- client.get[String]("greeting")
       } yield greeting
     }.provide(SageClient.layer(config))
 }
@@ -90,7 +90,7 @@ object Main extends IOApp.Simple {
     SageClient.resource(config).use { client =>
       for {
         _        <- client.set("greeting", "hello")
-        greeting <- client.get[String, String]("greeting")
+        greeting <- client.get[String]("greeting")
       } yield ()
     }
 }
@@ -112,7 +112,7 @@ object Main extends KyoApp {
       for {
         client   <- SageClient.scoped(config)
         _        <- client.set("greeting", "hello")
-        greeting <- client.get[String, String]("greeting")
+        greeting <- client.get[String]("greeting")
       } yield greeting
     }
   }
@@ -133,32 +133,32 @@ The snippets below show the same operations on each backend: pick your tab. In O
 
 ### Commands
 
-Methods are named one-for-one with Redis commands, grouped by family (strings, hashes, lists, sets, sorted sets, and so on). Keys and values are typed, with the codec selected by the type parameters. Any type with a `ValueCodec` (here, a `User`) rides over the wire the same way as a `String`.
+Methods are named one-for-one with Redis commands, grouped by family (strings, hashes, lists, sets, sorted sets, and so on). Keys and values are typed: the key type is fixed on the client (String by default), so a read only names its value type. Any type with a `ValueCodec` (here, a `User`) rides over the wire the same way as a `String`.
 
 ::: code-group
 
 ```scala [Ox]
 client.set("greeting", "hello")
-val greeting = client.get[String, String]("greeting") // Some("hello")
+val greeting = client.get[String]("greeting") // Some("hello")
 client.incrBy("counter", 10)
 
 client.hSet("user:1", ("name", "Ada"), ("age", "36"))
-val profile = client.hGetAll[String, String, String]("user:1")
+val profile = client.hGetAll[String, String]("user:1")
 // Map("name" -> "Ada", "age" -> "36")
 
 client.set("user:ada", User("Ada", 36))
-val ada = client.get[String, User]("user:ada") // Some(User("Ada", 36))
+val ada = client.get[User]("user:ada") // Some(User("Ada", 36))
 ```
 
 ```scala [ZIO · Cats Effect · Kyo]
 for {
   _        <- client.set("greeting", "hello")
-  greeting <- client.get[String, String]("greeting")
+  greeting <- client.get[String]("greeting")
   _        <- client.incrBy("counter", 10)
   _        <- client.hSet("user:1", ("name", "Ada"), ("age", "36"))
-  profile  <- client.hGetAll[String, String, String]("user:1")
+  profile  <- client.hGetAll[String, String]("user:1")
   _        <- client.set("user:ada", User("Ada", 36))
-  ada      <- client.get[String, User]("user:ada")
+  ada      <- client.get[User]("user:ada")
 } yield (greeting, profile, ada)
 ```
 
@@ -206,7 +206,7 @@ A **transaction** runs a pipeline atomically via `MULTI`/`EXEC`, optionally guar
 client.set("tx:n", 1)
 val result = client.transaction { tx =>
   tx.watch("tx:n")
-  tx.get[String, Int]("tx:n")
+  tx.get[Int]("tx:n")
   tx.exec(
     (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline
   )
@@ -219,7 +219,7 @@ for {
   result <- client.transaction { tx =>
               for {
                 _   <- tx.watch("tx:n")
-                _   <- tx.get[String, Int]("tx:n")
+                _   <- tx.get[Int]("tx:n")
                 res <- tx.exec(
                          (
                            Commands.incr("tx:n"),

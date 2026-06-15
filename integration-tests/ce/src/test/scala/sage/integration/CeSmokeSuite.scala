@@ -18,7 +18,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
           for {
             pong   <- client.ping()
             _      <- (1 to 50).toList.parTraverse_(i => client.set(s"key-$i", s"value-$i"))
-            values <- (1 to 50).toList.parTraverse(i => client.get[String, String](s"key-$i"))
+            values <- (1 to 50).toList.parTraverse(i => client.get[String](s"key-$i"))
           } yield {
             assertEquals(pong, "PONG")
             assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
@@ -59,7 +59,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
             out <- client.transaction { tx =>
                      for {
                        _   <- tx.watch("tx:n")
-                       _   <- tx.get[String, Int]("tx:n")
+                       _   <- tx.get[Int]("tx:n")
                        res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
                      } yield res
                    }
@@ -76,7 +76,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
         SageClient.resource(configOf(server)).use { client =>
           for {
             _    <- (1 to 50).toList.parTraverse_(i => client.set(s"scan-$i", "v"))
-            keys <- client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).compile.toVector
+            keys <- client.scanAll(pattern = Some("scan-*"), count = Some(10L)).compile.toVector
           } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
         }
 
@@ -109,7 +109,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
         SageClient.resource(configOf(server)).use { client =>
           for {
             _     <- (1 to 50).toList.parTraverse_(i => client.hSet("hscan", (s"f$i", s"v$i")))
-            pairs <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).compile.toVector
+            pairs <- client.hScanAll[String, String]("hscan", count = Some(10L)).compile.toVector
           } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
         }
 
@@ -123,7 +123,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
         SageClient.resource(configOf(server)).use { client =>
           for {
             _       <- (1 to 50).toList.parTraverse_(i => client.sAdd("sscan", s"m$i"))
-            members <- client.sScanAll[String, String]("sscan", count = Some(10L)).compile.toVector
+            members <- client.sScanAll[String]("sscan", count = Some(10L)).compile.toVector
           } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
         }
 
@@ -137,7 +137,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
         SageClient.resource(configOf(server)).use { client =>
           for {
             _     <- (1 to 50).toList.parTraverse_(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
-            pairs <- client.zScanAll[String, String]("zscan", count = Some(10L)).compile.toVector
+            pairs <- client.zScanAll[String]("zscan", count = Some(10L)).compile.toVector
           } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
         }
 
