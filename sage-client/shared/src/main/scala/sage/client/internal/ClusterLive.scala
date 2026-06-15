@@ -44,7 +44,7 @@ final private[client] class ClusterLive(
   seeds: Vector[Node],
   readFrom: ReadFrom = ReadFrom.Master,
   events: Events = Events.disabled
-) extends Client[CIO] {
+) extends Client[CIO, String] {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
 
@@ -141,7 +141,7 @@ final private[client] class ClusterLive(
   def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
   def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 
-  def transaction[A](body: TransactionScope[CIO] => CIO[A]): CIO[A] =
+  def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
 
   // classic subscriptions ride one connection pinned to an arbitrary master (classic PUBLISH broadcasts cluster-wide); the manager re-homes it
@@ -509,7 +509,7 @@ final private[client] class ClusterLive(
     * connection (or, before any key, an arbitrary master). Redirects and losses are never followed — they surface and refresh the topology
     * in the background — so the caller retries the whole block, as it already must for a `WATCH` abort.
     */
-  final private class ClusterTxScope extends TransactionScope[CIO] {
+  final private class ClusterTxScope extends TransactionScope[CIO, String] {
 
     private val lock                      = new ReentrantLock()
     private var released                  = false
@@ -842,8 +842,8 @@ private[client] object ClusterLive {
     cluster: ClusterConfig,
     scheduler: Scheduler,
     translate: Throwable => Throwable
-  ): CIO[Client[CIO]] =
-    CIO.blocking[Client[CIO]] {
+  ): CIO[Client[CIO, String]] =
+    CIO.blocking[Client[CIO, String]] {
       // cluster validation forces database 0, so this adds no SELECT
       val bootstrap                                               = Bootstrap.commands(config.auth, config.database, config.clientName)
       val factory: Node => MultiplexedConnection.TransportFactory = node => {

@@ -34,7 +34,7 @@ class RedisStringExtrasSuite extends ServerSuite(Images.redis) {
         noMatch <- client.delex("sx-delex", DelexCondition.IfEq("other"))
         present <- client.exists("sx-delex")
         digest  <- client.digest("sx-delex")
-        notNe   <- client.delex[String, String]("sx-delex", DelexCondition.IfDigestNe(digest.get))
+        notNe   <- client.delex[String]("sx-delex", DelexCondition.IfDigestNe(digest.get))
         matched <- client.delex("sx-delex", DelexCondition.IfEq("v1"))
         gone    <- client.exists("sx-delex")
       } yield {
@@ -51,10 +51,10 @@ class RedisStringExtrasSuite extends ServerSuite(Images.redis) {
     withClient { client =>
       for {
         set     <- client.msetEx(expiry = SetExpiry.In(100.seconds))(("sx-ms-a", "1"), ("sx-ms-b", "2"))
-        a       <- client.get[String, String]("sx-ms-a")
+        a       <- client.get[String]("sx-ms-a")
         ttl     <- client.ttl("sx-ms-a")
         blocked <- client.msetEx(condition = SetCondition.IfNotExists)(("sx-ms-a", "9"))
-        aStill  <- client.get[String, String]("sx-ms-a")
+        aStill  <- client.get[String]("sx-ms-a")
       } yield {
         assertEquals(set, true)
         assertEquals(a, Some("1"))

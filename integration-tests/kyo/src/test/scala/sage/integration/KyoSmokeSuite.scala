@@ -16,7 +16,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
           client <- SageClient.scoped(config)
           pong   <- client.ping()
           _      <- Async.foreachDiscard(1 to 50)(i => client.set(s"key-$i", s"value-$i"))
-          values <- Async.foreach((1 to 50).toList)(i => client.get[String, String](s"key-$i"))
+          values <- Async.foreach((1 to 50).toList)(i => client.get[String](s"key-$i"))
         } yield {
           assertEquals(pong, "PONG")
           assertEquals(values.toList, (1 to 50).toList.map(i => Some(s"value-$i")))
@@ -57,7 +57,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
           out    <- client.transaction { tx =>
                       for {
                         _   <- tx.watch("tx:n")
-                        _   <- tx.get[String, Int]("tx:n")
+                        _   <- tx.get[Int]("tx:n")
                         res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
                       } yield res
                     }
@@ -74,7 +74,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
         for {
           client <- SageClient.scoped(configOf(server))
           _      <- Async.foreachDiscard(1 to 50)(i => client.set(s"scan-$i", "v"))
-          keys   <- client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).run
+          keys   <- client.scanAll(pattern = Some("scan-*"), count = Some(10L)).run
         } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
 
       import AllowUnsafe.embrace.danger
@@ -107,7 +107,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
         for {
           client <- SageClient.scoped(configOf(server))
           _      <- Async.foreachDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
-          pairs  <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).run
+          pairs  <- client.hScanAll[String, String]("hscan", count = Some(10L)).run
         } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
 
       import AllowUnsafe.embrace.danger
@@ -121,7 +121,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
         for {
           client  <- SageClient.scoped(configOf(server))
           _       <- Async.foreachDiscard(1 to 50)(i => client.sAdd("sscan", s"m$i"))
-          members <- client.sScanAll[String, String]("sscan", count = Some(10L)).run
+          members <- client.sScanAll[String]("sscan", count = Some(10L)).run
         } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
 
       import AllowUnsafe.embrace.danger
@@ -135,7 +135,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
         for {
           client <- SageClient.scoped(configOf(server))
           _      <- Async.foreachDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
-          pairs  <- client.zScanAll[String, String]("zscan", count = Some(10L)).run
+          pairs  <- client.zScanAll[String]("zscan", count = Some(10L)).run
         } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
 
       import AllowUnsafe.embrace.danger

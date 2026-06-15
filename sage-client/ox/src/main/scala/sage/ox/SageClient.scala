@@ -3,6 +3,7 @@ package sage.ox
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+import scala.annotation.unused
 import scala.concurrent.duration.FiniteDuration
 
 import _root_.ox.{useInScope, Ox}
@@ -18,15 +19,15 @@ import sage.commands.*
 /**
   * The Ox-native surface: direct style, every method usable inside an Ox scope.
   */
-type SageClient = Client[[A] =>> Ox ?=> A]
+type SageClient = Client[[A] =>> Ox ?=> A, String]
 
-extension (client: SageClient) {
+extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]) {
 
   /**
     * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once. In cluster
     * mode it walks every slot-owning master in turn, each with its own node-local cursor, so the sweep covers the whole keyspace.
     */
-  def scanAll[K: KeyCodec](
+  def scanAll(
     pattern: Option[String] = None,
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
@@ -36,7 +37,7 @@ extension (client: SageClient) {
   /**
     * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
     */
-  def hScanAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  def hScanAll[F: KeyCodec, V: ValueCodec](
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
@@ -46,7 +47,7 @@ extension (client: SageClient) {
   /**
     * The full SSCAN iteration over set members: stops on the server's zero cursor, never on an empty page.
     */
-  def sScanAll[K: KeyCodec, V: ValueCodec](
+  def sScanAll[V: ValueCodec](
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
@@ -56,7 +57,7 @@ extension (client: SageClient) {
   /**
     * The full ZSCAN iteration over member/score pairs: stops on the server's zero cursor, never on an empty page.
     */
-  def zScanAll[K: KeyCodec, V: ValueCodec](
+  def zScanAll[V: ValueCodec](
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
@@ -95,7 +96,7 @@ extension (client: SageClient) {
   /**
     * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
     */
-  def xRangeAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  def xRangeAll[F: KeyCodec, V: ValueCodec](
     key: K,
     start: StreamRangeId = StreamRangeId.Min,
     end: StreamRangeId = StreamRangeId.Max,
@@ -118,7 +119,7 @@ extension (client: SageClient) {
     * entries — claimed ids whose data was already deleted, which the decoder surfaces with no fields — are skipped, so every emitted entry
     * carries data.
     */
-  def xAutoClaimAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  def xAutoClaimAll[F: KeyCodec, V: ValueCodec](
     key: K,
     group: String,
     consumer: String,
@@ -142,7 +143,7 @@ extension (client: SageClient) {
     * last id each round. Blocking on an explicit id (never `$`) leaves no gap for entries arriving mid-loop. No acknowledgement, unlike
     * [[xConsume]]. `from` defaults to the start; pass a later id to tail from there.
     */
-  def xTail[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  def xTail[F: KeyCodec, V: ValueCodec](
     key: K,
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
@@ -163,20 +164,20 @@ extension (client: SageClient) {
     * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
     * recovery.
     */
-  def xConsume[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  def xConsume[F: KeyCodec, V: ValueCodec](
     group: String,
     consumer: String,
     key: K,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
   )(handle: StreamEntry[F, V] => (Ox ?=> Unit)): Ox ?=> Unit =
-    consumeStream[K, F, V](group, consumer, key, count, block).runForeach { entry =>
+    consumeStream[F, V](group, consumer, key, count, block).runForeach { entry =>
       handle(entry)
       client.run(Streams.xAck(key, group)(entry.id))
       ()
     }
 
-  private def consumeStream[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+  private def consumeStream[F: KeyCodec, V: ValueCodec](
     group: String,
     consumer: String,
     key: K,
@@ -240,6 +241,12 @@ extension (client: SageClient) {
 
 object SageClient {
 
+  /**
+    * A command surface re-typed to a non-String key, as returned by `client.as[K]`. The unqualified [[SageClient]] is String-keyed;
+    * use `as` to reach any other key type over the same connection.
+    */
+  type Keyed[K] = Client[[A] =>> Ox ?=> A, K]
+
   // bounded poll so xConsume's blocking read returns periodically, keeping cancellation responsive
   private[ox] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
@@ -252,7 +259,7 @@ object SageClient {
       catch { case _: Throwable => () }
     }
 
-  final private class Lowered(underlying: Client[CIO]) extends LoweredClient[[X] =>> Ox ?=> X](underlying) {
+  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[X] =>> Ox ?=> X](underlying) {
     protected def lower[A](c: CIO[A]): Ox ?=> A = c.lower
     protected def lift[A](fa: Ox ?=> A): CIO[A] = CIO.lift(fa)
   }

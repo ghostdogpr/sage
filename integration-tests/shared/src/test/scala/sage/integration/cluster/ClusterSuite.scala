@@ -44,7 +44,7 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
     )
 
   // a single node owning every slot, announcing the host-mapped endpoint so the address it reports is reachable from the test
-  private def formSingleNodeCluster(admin0: Client[CIO], host: String, port: Int): CIO[Unit] =
+  private def formSingleNodeCluster(admin0: Client[CIO, String], host: String, port: Int): CIO[Unit] =
     for {
       _    <- admin0.run(admin("CONFIG", "SET", "cluster-announce-ip", host))
       _    <- admin0.run(admin("CONFIG", "SET", "cluster-announce-port", port.toString))
@@ -54,7 +54,7 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
       _    <- awaitClusterOk(admin0, 50)
     } yield ()
 
-  private def awaitClusterOk(admin0: Client[CIO], attempts: Int): CIO[Unit] =
+  private def awaitClusterOk(admin0: Client[CIO, String], attempts: Int): CIO[Unit] =
     admin0.run(clusterInfo).flatMap { info =>
       if (info.contains("cluster_state:ok")) CIO.value(())
       else if (attempts <= 0) CIO.fail(new RuntimeException(s"cluster did not converge: $info"))
@@ -74,7 +74,7 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
           connectAndUse(clustered) { client =>
             for {
               _      <- client.set("greeting", "hello")
-              value  <- client.get[String, String]("greeting")
+              value  <- client.get[String]("greeting")
               count  <- client.incr("counter")
               _      <- client.set("{t}a", "1")
               _      <- client.set("{t}b", "2")
@@ -136,10 +136,10 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
       val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
       val expected   = (1 to 50).map(i => s"cscan:$i").toSet
 
-      def writeKeys(client: Client[CIO], i: Int): CIO[Unit] =
+      def writeKeys(client: Client[CIO, String], i: Int): CIO[Unit] =
         if (i > 50) CIO.value(()) else client.set(s"cscan:$i", i.toString).flatMap(_ => writeKeys(client, i + 1))
 
-      def scanNode(client: Client[CIO], target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
+      def scanNode(client: Client[CIO, String], target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
         client.runOn(target, Commands.scan[String](cursor, pattern = Some("cscan:*"), count = Some(10L))).flatMap { page =>
           page.next match {
             case Some(next) => scanNode(client, target, next, found ++ page.items)
@@ -147,7 +147,7 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
           }
         }
 
-      def sweep(client: Client[CIO], targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
+      def sweep(client: Client[CIO, String], targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
         targets match {
           case head +: tail => scanNode(client, head, ScanCursor.start, found).flatMap(sweep(client, tail, _))
           case _            => CIO.value(found)

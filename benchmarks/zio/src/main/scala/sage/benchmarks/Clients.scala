@@ -45,7 +45,7 @@ final class SageZioBench(host: String, port: Int) extends BenchClient {
   def getAll(keys: Array[String], concurrency: Int): Long =
     Run(
       ZIO
-        .foreachPar(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreach(g.toList)(k => client.get[String, String](k)))
+        .foreachPar(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreach(g.toList)(k => client.get[String](k)))
         .map(_.flatten.flatten.map(_.length.toLong).sum)
     )
 
@@ -57,9 +57,9 @@ final class SageZioBench(host: String, port: Int) extends BenchClient {
     )
 
   def mget(keys: Array[String]): Long =
-    Run(client.mGet[String, String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum))
+    Run(client.mGet[String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum))
 
-  def hgetall(key: String): Long = Run(client.hGetAll[String, String, String](key).map(_.size.toLong))
+  def hgetall(key: String): Long = Run(client.hGetAll[String, String](key).map(_.size.toLong))
 
   def close(): Unit = Run(client.close)
 }

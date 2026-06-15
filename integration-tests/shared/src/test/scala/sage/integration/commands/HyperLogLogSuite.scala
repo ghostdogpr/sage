@@ -12,7 +12,7 @@ abstract class HyperLogLogSuite(image: String) extends ServerSuite(image) {
         first <- client.pfAdd("hll", "a", "b", "c")
         again <- client.pfAdd("hll", "a")
         count <- client.pfCount("hll")
-        empty <- client.pfAdd[String, String]("hll-empty")
+        empty <- client.pfAdd[String]("hll-empty")
       } yield {
         assertEquals(first, true)
         assertEquals(again, false)

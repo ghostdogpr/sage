@@ -93,7 +93,7 @@ abstract class TlsAuthSuite(image: String) extends munit.FunSuite with TestConta
       connectAndUse(configWith(server, TrustSource.Pem(caPath))) { client =>
         for {
           _     <- client.set("tls:key", "value")
-          value <- client.get[String, String]("tls:key")
+          value <- client.get[String]("tls:key")
         } yield value
       }.unsafeRun.map(value => assertEquals(value, Some("value")))
     }

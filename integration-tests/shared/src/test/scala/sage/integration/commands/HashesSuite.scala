@@ -11,8 +11,8 @@ abstract class HashesSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         added   <- client.hSet("hash-basic", ("f1", "v1"), ("f2", "v2"))
-        one     <- client.hGet[String, String, String]("hash-basic", "f1")
-        many    <- client.hmGet[String, String, String]("hash-basic", "f1", "missing", "f2")
+        one     <- client.hGet[String, String]("hash-basic", "f1")
+        many    <- client.hmGet[String, String]("hash-basic", "f1", "missing", "f2")
         present <- client.hExists("hash-basic", "f1")
         removed <- client.hDel("hash-basic", "f1", "missing")
         gone    <- client.hExists("hash-basic", "f1")
@@ -32,7 +32,7 @@ abstract class HashesSuite(image: String) extends ServerSuite(image) {
       for {
         first  <- client.hSetNx("hash-setnx", "f", "one")
         second <- client.hSetNx("hash-setnx", "f", "two")
-        value  <- client.hGet[String, String, String]("hash-setnx", "f")
+        value  <- client.hGet[String, String]("hash-setnx", "f")
       } yield {
         assertEquals(first, true)
         assertEquals(second, false)
@@ -45,9 +45,9 @@ abstract class HashesSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.hSet("hash-view", ("a", "1"), ("b", "22"))
-        all    <- client.hGetAll[String, String, String]("hash-view")
-        keys   <- client.hKeys[String, String]("hash-view")
-        vals   <- client.hVals[String, String]("hash-view")
+        all    <- client.hGetAll[String, String]("hash-view")
+        keys   <- client.hKeys[String]("hash-view")
+        vals   <- client.hVals[String]("hash-view")
         len    <- client.hLen("hash-view")
         strLen <- client.hStrLen("hash-view", "b")
       } yield {
@@ -77,10 +77,10 @@ abstract class HashesSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.hSet("hash-rand", ("a", "1"), ("b", "2"), ("c", "3"))
-        single <- client.hRandField[String, String]("hash-rand")
-        few    <- client.hRandField[String, String]("hash-rand", 2L)
-        pairs  <- client.hRandFieldWithValues[String, String, String]("hash-rand", -5L)
-        empty  <- client.hRandField[String, String]("hash-rand-missing")
+        single <- client.hRandField[String]("hash-rand")
+        few    <- client.hRandField[String]("hash-rand", 2L)
+        pairs  <- client.hRandFieldWithValues[String, String]("hash-rand", -5L)
+        empty  <- client.hRandField[String]("hash-rand-missing")
       } yield {
         assert(single.exists(Set("a", "b", "c")))
         assertEquals(few.size, 2)
@@ -96,8 +96,8 @@ abstract class HashesSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _         <- client.hSet("hash-scan", ("a", "1"), ("b", "2"), ("c", "3"))
-        page      <- client.hScan[String, String, String]("hash-scan", ScanCursor.start)
-        fieldPage <- client.hScanNoValues[String, String]("hash-scan", ScanCursor.start)
+        page      <- client.hScan[String, String]("hash-scan", ScanCursor.start)
+        fieldPage <- client.hScanNoValues[String]("hash-scan", ScanCursor.start)
       } yield {
         assertEquals(page.items.toMap, Map("a" -> "1", "b" -> "2", "c" -> "3"))
         assertEquals(fieldPage.items.toSet, Set("a", "b", "c"))

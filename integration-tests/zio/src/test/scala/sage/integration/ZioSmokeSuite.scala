@@ -17,7 +17,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
             client <- SageClient.scoped(config)
             pong   <- client.ping()
             _      <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"key-$i", s"value-$i"))
-            values <- ZIO.foreachPar((1 to 50).toList)(i => client.get[String, String](s"key-$i"))
+            values <- ZIO.foreachPar((1 to 50).toList)(i => client.get[String](s"key-$i"))
           } yield {
             assertEquals(pong, "PONG")
             assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
@@ -60,7 +60,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
             out    <- client.transaction { tx =>
                         for {
                           _   <- tx.watch("tx:n")
-                          _   <- tx.get[String, Int]("tx:n")
+                          _   <- tx.get[Int]("tx:n")
                           res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
                         } yield res
                       }
@@ -78,7 +78,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client <- SageClient.scoped(configOf(server))
             _      <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"scan-$i", "v"))
-            keys   <- client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).runCollect
+            keys   <- client.scanAll(pattern = Some("scan-*"), count = Some(10L)).runCollect
           } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
         }
 
@@ -112,7 +112,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client <- SageClient.scoped(configOf(server))
             _      <- ZIO.foreachParDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
-            pairs  <- client.hScanAll[String, String, String]("hscan", count = Some(10L)).runCollect
+            pairs  <- client.hScanAll[String, String]("hscan", count = Some(10L)).runCollect
           } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
         }
 
@@ -127,7 +127,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client  <- SageClient.scoped(configOf(server))
             _       <- ZIO.foreachParDiscard(1 to 50)(i => client.sAdd("sscan", s"m$i"))
-            members <- client.sScanAll[String, String]("sscan", count = Some(10L)).runCollect
+            members <- client.sScanAll[String]("sscan", count = Some(10L)).runCollect
           } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
         }
 
@@ -142,7 +142,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client <- SageClient.scoped(configOf(server))
             _      <- ZIO.foreachParDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
-            pairs  <- client.zScanAll[String, String]("zscan", count = Some(10L)).runCollect
+            pairs  <- client.zScanAll[String]("zscan", count = Some(10L)).runCollect
           } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
         }
 
@@ -157,7 +157,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
           for {
             client  <- SageClient.scoped(configOf(server))
             _       <- ZIO.foreachDiscard(1 to 50)(i => client.xAdd("xrangeall", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
-            entries <- client.xRangeAll[String, String, String]("xrangeall", batch = 10L).runCollect
+            entries <- client.xRangeAll[String, String]("xrangeall", batch = 10L).runCollect
           } yield assertEquals(entries.map(_.id).toList, (1 to 50).map(i => StreamId(i.toLong, 0L)).toList)
         }
 
@@ -175,7 +175,7 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
             _      <- client.xGroupCreate("xconsume", "g", GroupStartId.At(StreamId(0L, 0L)))
             seen   <- Ref.make(Vector.empty[String])
             fiber  <- client
-                        .xConsume[String, String, String](
+                        .xConsume[String, String](
                           "g",
                           "c",
                           "xconsume",

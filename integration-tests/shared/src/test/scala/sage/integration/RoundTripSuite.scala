@@ -21,7 +21,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _     <- client.set("greeting", "hello")
-        value <- client.get[String, String]("greeting")
+        value <- client.get[String]("greeting")
       } yield assertEquals(value, Some("hello"))
     }
   }
@@ -31,8 +31,8 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
       for {
         _     <- client.set("count", 42)
         _     <- client.set("flag", true)
-        count <- client.get[String, Int]("count")
-        flag  <- client.get[String, Boolean]("flag")
+        count <- client.get[Int]("count")
+        flag  <- client.get[Boolean]("flag")
       } yield {
         assertEquals(count, Some(42))
         assertEquals(flag, Some(true))
@@ -41,7 +41,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
   }
 
   test("get of a missing key is None") {
-    withClient(client => client.get[String, String]("missing-key").map(value => assertEquals(value, None)))
+    withClient(client => client.get[String]("missing-key").map(value => assertEquals(value, None)))
   }
 
   test("concurrent fibers pipeline onto the Multiplexed Connection and match FIFO") {
@@ -50,7 +50,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         .foreach(1 to 200) { i =>
           for {
             _     <- client.set(s"key-$i", s"value-$i")
-            value <- client.get[String, String](s"key-$i")
+            value <- client.get[String](s"key-$i")
           } yield assertEquals(value, Some(s"value-$i"))
         }
         .unit
@@ -58,7 +58,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
   }
 
   test("no reply misattribution under high fiber concurrency") {
-    def pingLoop(client: Client[CIO], fiber: Int, i: Int): CIO[Unit] =
+    def pingLoop(client: Client[CIO, String], fiber: Int, i: Int): CIO[Unit] =
       if (i > 100) CIO.value(())
       else {
         val token = s"$fiber-$i"
@@ -104,7 +104,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       val n = 200
       client.pipeline(Pipeline.sequence(Vector.fill(n)(Commands.incr[String]("p:rtt")))).flatMap { results =>
-        client.get[String, Int]("p:rtt").map { stored =>
+        client.get[Int]("p:rtt").map { stored =>
           assertEquals(results.length, n)
           assertEquals(results, (1 to n).map(_.toLong).toVector)
           assertEquals(stored, Some(n))
@@ -129,11 +129,11 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         out    <- client.transaction { tx =>
                     for {
                       _   <- tx.watch("t:rmw")
-                      cur <- tx.get[String, Int]("t:rmw")
+                      cur <- tx.get[Int]("t:rmw")
                       res <- tx.exec(Pipeline.sequence(Vector(Commands.set[String, Int]("t:rmw", cur.getOrElse(0) + 1))))
                     } yield res
                   }
-        stored <- client.get[String, Int]("t:rmw")
+        stored <- client.get[Int]("t:rmw")
       } yield {
         assert(out.isDefined, s"expected a committed transaction, got $out")
         assertEquals(stored, Some(6))
@@ -150,13 +150,13 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
           out    <- client.transaction { tx =>
                       for {
                         _   <- tx.watch("t:w")
-                        _   <- tx.get[String, Int]("t:w")
+                        _   <- tx.get[Int]("t:w")
                         _   <- other.set("t:w", 99) // a different connection changes the watched key before EXEC
                         res <- tx.exec(Pipeline.sequence(Vector(Commands.incr[String]("t:w"))))
                       } yield res
                     }
           _      <- other.close
-          stored <- client.get[String, Int]("t:w")
+          stored <- client.get[Int]("t:w")
         } yield {
           assertEquals(out, None)        // aborted
           assertEquals(stored, Some(99)) // the INCR never ran
@@ -170,7 +170,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
       for {
         _   <- client.set("t:str", "x")
         res <- client.transaction(tx => tx.execAttempt((Commands.incr[String]("t:fresh"), Commands.incr[String]("t:str")).pipeline))
-        ok  <- client.get[String, Int]("t:fresh")
+        ok  <- client.get[Int]("t:fresh")
       } yield {
         val (a, b) = res.getOrElse(fail("expected a committed transaction"))
         assertEquals(a, Right(1L))
@@ -205,10 +205,10 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
       }
     )
 
-  private def connectionCount(client: Client[CIO]): CIO[Int] =
+  private def connectionCount(client: Client[CIO, String]): CIO[Int] =
     client.run(clientList).map(_.linesIterator.count(_.nonEmpty))
 
-  private def awaitConnectionCount(client: Client[CIO], expected: Int, attempts: Int): CIO[Unit] =
+  private def awaitConnectionCount(client: Client[CIO, String], expected: Int, attempts: Int): CIO[Unit] =
     connectionCount(client).flatMap { count =>
       if (count == expected) CIO.value(())
       else if (attempts <= 1) CIO.fail(new AssertionError(s"expected $expected connections, still $count"))

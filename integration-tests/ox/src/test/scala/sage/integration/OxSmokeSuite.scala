@@ -17,7 +17,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
           .map(i =>
             fork {
               val _ = client.set(s"key-$i", s"value-$i")
-              client.get[String, String](s"key-$i")
+              client.get[String](s"key-$i")
             }
           )
           .map(_.join())
@@ -49,7 +49,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val _      = client.set("tx:n", 1)
         val out    = client.transaction { tx =>
           val _ = tx.watch("tx:n")
-          val _ = tx.get[String, Int]("tx:n")
+          val _ = tx.get[Int]("tx:n")
           tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
         }
         assertEquals(out, Some((2L, 6L)))
@@ -64,7 +64,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         (1 to 50).foreach { i =>
           val _ = client.set(s"scan-$i", "v")
         }
-        val keys   = client.scanAll[String](pattern = Some("scan-*"), count = Some(10L)).runToList()
+        val keys   = client.scanAll(pattern = Some("scan-*"), count = Some(10L)).runToList()
         assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
       }
     }
@@ -92,7 +92,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         (1 to 50).foreach { i =>
           val _ = client.hSet("hscan", (s"f$i", s"v$i"))
         }
-        val pairs  = client.hScanAll[String, String, String]("hscan", count = Some(10L)).runToList()
+        val pairs  = client.hScanAll[String, String]("hscan", count = Some(10L)).runToList()
         assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
       }
     }
@@ -105,7 +105,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         (1 to 50).foreach { i =>
           val _ = client.sAdd("sscan", s"m$i")
         }
-        val members = client.sScanAll[String, String]("sscan", count = Some(10L)).runToList()
+        val members = client.sScanAll[String]("sscan", count = Some(10L)).runToList()
         assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
       }
     }
@@ -118,7 +118,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         (1 to 50).foreach { i =>
           val _ = client.zAdd("zscan")((s"m$i", i.toDouble))
         }
-        val pairs  = client.zScanAll[String, String]("zscan", count = Some(10L)).runToList()
+        val pairs  = client.zScanAll[String]("zscan", count = Some(10L)).runToList()
         assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
       }
     }

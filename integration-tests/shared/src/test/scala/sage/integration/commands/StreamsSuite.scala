@@ -15,9 +15,9 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
         id1 <- client.xAdd("s-range", XAddId.Explicit(StreamId(1L, 0L)))(("a", "1"), ("b", "2"))
         id2 <- client.xAdd("s-range", XAddId.Explicit(StreamId(2L, 0L)))(("c", "3"))
         len <- client.xLen("s-range")
-        all <- client.xRange[String, String, String]("s-range")
-        rev <- client.xRevRange[String, String, String]("s-range")
-        one <- client.xRange[String, String, String]("s-range", StreamRangeId.Exclusive(StreamId(1L, 0L)))
+        all <- client.xRange[String, String]("s-range")
+        rev <- client.xRevRange[String, String]("s-range")
+        one <- client.xRange[String, String]("s-range", StreamRangeId.Exclusive(StreamId(1L, 0L)))
       } yield {
         assertEquals(id1, StreamId(1L, 0L))
         assertEquals(id2, StreamId(2L, 0L))
@@ -66,7 +66,7 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
       for {
         _    <- client.xAdd("s-info", XAddId.Explicit(StreamId(1L, 0L)))(("f", "v"))
         _    <- client.xAdd("s-info", XAddId.Explicit(StreamId(5L, 0L)))(("g", "w"))
-        info <- client.xInfoStream[String, String, String]("s-info")
+        info <- client.xInfoStream[String, String]("s-info")
       } yield {
         assertEquals(info.length, 2L)
         assertEquals(info.lastGeneratedId, StreamId(5L, 0L))
@@ -81,7 +81,7 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
         _       <- client.xAdd("s-grp", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _       <- client.xAdd("s-grp", XAddId.Explicit(StreamId(2L, 0L)))(("f", "2"))
         _       <- client.xGroupCreate("s-grp", "g", GroupStartId.At(StreamId(0L, 0L)))
-        read    <- client.xReadGroup[String, String, String]("g", "c1")(("s-grp", GroupReadId.New))(count = Some(10L))
+        read    <- client.xReadGroup[String, String]("g", "c1")(("s-grp", GroupReadId.New))(count = Some(10L))
         pending <- client.xPending("s-grp", "g")
         acked   <- client.xAck("s-grp", "g")(StreamId(1L, 0L), StreamId(2L, 0L))
         drained <- client.xPending("s-grp", "g")
@@ -104,9 +104,9 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
       for {
         _       <- client.xAdd("s-claim", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _       <- client.xGroupCreate("s-claim", "g", GroupStartId.At(StreamId(0L, 0L)))
-        _       <- client.xReadGroup[String, String, String]("g", "c1")(("s-claim", GroupReadId.New))()
-        claimed <- client.xClaim[String, String, String]("s-claim", "g", "c2", Duration.Zero)(StreamId(1L, 0L))()
-        auto    <- client.xAutoClaim[String, String, String]("s-claim", "g", "c3", Duration.Zero)
+        _       <- client.xReadGroup[String, String]("g", "c1")(("s-claim", GroupReadId.New))()
+        claimed <- client.xClaim[String, String]("s-claim", "g", "c2", Duration.Zero)(StreamId(1L, 0L))()
+        auto    <- client.xAutoClaim[String, String]("s-claim", "g", "c3", Duration.Zero)
         owners  <- client.xPendingExtended("s-claim", "g")
       } yield {
         assertEquals(claimed, Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "1"))))
@@ -126,7 +126,7 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
         delPel    <- client.xGroupDelConsumer("s-mgmt", "g", "c1")
         _         <- client.xGroupSetId("s-mgmt", "g", GroupStartId.At(StreamId(1L, 0L)))
         _         <- client.xSetId("s-mgmt", GroupStartId.At(StreamId(5L, 0L)))
-        info      <- client.xInfoStream[String, String, String]("s-mgmt")
+        info      <- client.xInfoStream[String, String]("s-mgmt")
         destroyed <- client.xGroupDestroy("s-mgmt", "g")
         groups    <- client.xInfoGroups("s-mgmt")
       } yield {
@@ -146,7 +146,7 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
         _       <- client.xAdd("s-justid", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _       <- client.xAdd("s-justid", XAddId.Explicit(StreamId(2L, 0L)))(("f", "2"))
         _       <- client.xGroupCreate("s-justid", "g", GroupStartId.At(StreamId(0L, 0L)))
-        _       <- client.xReadGroup[String, String, String]("g", "c1")(("s-justid", GroupReadId.New))()
+        _       <- client.xReadGroup[String, String]("g", "c1")(("s-justid", GroupReadId.New))()
         claimed <- client.xClaimJustId("s-justid", "g", "c2", Duration.Zero)(StreamId(1L, 0L))()
         auto    <- client.xAutoClaimJustId("s-justid", "g", "c3", Duration.Zero)
       } yield {
@@ -161,8 +161,8 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
       for {
         _    <- client.xAdd("s-full", XAddId.Explicit(StreamId(1L, 0L)))(("f", "1"))
         _    <- client.xGroupCreate("s-full", "g", GroupStartId.At(StreamId(0L, 0L)))
-        _    <- client.xReadGroup[String, String, String]("g", "c1")(("s-full", GroupReadId.New))()
-        full <- client.xInfoStreamFull[String, String, String]("s-full")
+        _    <- client.xReadGroup[String, String]("g", "c1")(("s-full", GroupReadId.New))()
+        full <- client.xInfoStreamFull[String, String]("s-full")
       } yield {
         assertEquals(full.length, 1L)
         assertEquals(full.groups.map(_.name), Vector("g"))
@@ -178,7 +178,7 @@ abstract class StreamsSuite(image: String) extends ServerSuite(image) {
       for {
         _   <- client.xAdd("s-block", XAddId.Explicit(StreamId(1L, 0L)))(("f", "0"))
         out <- CIO.zip(
-                 client.xRead[String, String, String](("s-block", ReadId.After(StreamId(1L, 0L))))(block = Some(BlockTimeout.After(5.seconds))),
+                 client.xRead[String, String](("s-block", ReadId.After(StreamId(1L, 0L))))(block = Some(BlockTimeout.After(5.seconds))),
                  for {
                    pong <- client.ping()
                    _    <- client.xAdd("s-block", XAddId.Explicit(StreamId(2L, 0L)))(("f", "1"))

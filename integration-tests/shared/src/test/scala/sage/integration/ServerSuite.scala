@@ -15,6 +15,6 @@ abstract class ServerSuite(image: String) extends munit.FunSuite with TestContai
   // not private: only the Ox cell's unsafeRun consumes it, and a private given would be flagged unused on the other cells
   given ExecutionContext = munitExecutionContext
 
-  protected def withClient[A](body: Client[CIO] => CIO[A]): Future[A] =
+  protected def withClient[A](body: Client[CIO, String] => CIO[A]): Future[A] =
     withContainers(server => connectAndUse(configOf(server))(body).unsafeRun)
 }

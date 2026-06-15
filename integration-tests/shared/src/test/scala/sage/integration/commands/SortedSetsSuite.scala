@@ -14,8 +14,8 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
       for {
         added   <- client.zAdd("zset-basic")(("a", 1.0), ("b", 2.0), ("c", 3.0))
         card    <- client.zCard("zset-basic")
-        score   <- client.zScore[String, String]("zset-basic", "b")
-        scores  <- client.zMScore[String, String]("zset-basic", "a", "missing", "c")
+        score   <- client.zScore[String]("zset-basic", "b")
+        scores  <- client.zMScore[String]("zset-basic", "a", "missing", "c")
         bumped  <- client.zIncrBy("zset-basic", "a", 1.5)
         removed <- client.zRem("zset-basic", "c", "missing")
       } yield {
@@ -52,10 +52,10 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _         <- client.zAdd("zset-rank")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        rank      <- client.zRank[String, String]("zset-rank", "b")
-        rev       <- client.zRevRank[String, String]("zset-rank", "b")
-        withScore <- client.zRankWithScore[String, String]("zset-rank", "c")
-        missing   <- client.zRank[String, String]("zset-rank", "z")
+        rank      <- client.zRank[String]("zset-rank", "b")
+        rev       <- client.zRevRank[String]("zset-rank", "b")
+        withScore <- client.zRankWithScore[String]("zset-rank", "c")
+        missing   <- client.zRank[String]("zset-rank", "z")
       } yield {
         assertEquals(rank, Some(1L))
         assertEquals(rev, Some(1L))
@@ -69,14 +69,14 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _          <- client.zAdd("zset-range")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        byRank     <- client.zRange[String, String]("zset-range", ZRange.ByRank(0L, -1L))
-        revRank    <- client.zRange[String, String]("zset-range", ZRange.ByRank(0L, -1L, rev = true))
-        byScore    <- client.zRange[String, String]("zset-range", ZRange.ByScore(ScoreBoundary.Inclusive(2.0), ScoreBoundary.PosInf))
+        byRank     <- client.zRange[String]("zset-range", ZRange.ByRank(0L, -1L))
+        revRank    <- client.zRange[String]("zset-range", ZRange.ByRank(0L, -1L, rev = true))
+        byScore    <- client.zRange[String]("zset-range", ZRange.ByScore(ScoreBoundary.Inclusive(2.0), ScoreBoundary.PosInf))
         revScore   <-
-          client.zRange[String, String]("zset-range", ZRange.ByScore(ScoreBoundary.Inclusive(1.0), ScoreBoundary.Inclusive(2.0), rev = true))
-        withScores <- client.zRangeWithScores[String, String]("zset-range", ZRange.ByRank(0L, 1L))
+          client.zRange[String]("zset-range", ZRange.ByScore(ScoreBoundary.Inclusive(1.0), ScoreBoundary.Inclusive(2.0), rev = true))
+        withScores <- client.zRangeWithScores[String]("zset-range", ZRange.ByRank(0L, 1L))
         limited    <-
-          client.zRange[String, String]("zset-range", ZRange.ByScore(ScoreBoundary.NegInf, ScoreBoundary.PosInf, limit = Some(Limit(1L, 1L))))
+          client.zRange[String]("zset-range", ZRange.ByScore(ScoreBoundary.NegInf, ScoreBoundary.PosInf, limit = Some(Limit(1L, 1L))))
       } yield {
         assertEquals(byRank, Vector("a", "b", "c"))
         assertEquals(revRank, Vector("c", "b", "a"))
@@ -92,9 +92,9 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _     <- client.zAdd("zset-lex")(("a", 0.0), ("b", 0.0), ("c", 0.0))
-        all   <- client.zRange[String, String]("zset-lex", ZRange.ByLex(LexBoundary.Min, LexBoundary.Max))
-        range <- client.zRange[String, String]("zset-lex", ZRange.ByLex(LexBoundary.Inclusive("a"), LexBoundary.Exclusive("c")))
-        count <- client.zLexCount[String, String]("zset-lex", LexBoundary.Min, LexBoundary.Max)
+        all   <- client.zRange[String]("zset-lex", ZRange.ByLex(LexBoundary.Min, LexBoundary.Max))
+        range <- client.zRange[String]("zset-lex", ZRange.ByLex(LexBoundary.Inclusive("a"), LexBoundary.Exclusive("c")))
+        count <- client.zLexCount[String]("zset-lex", LexBoundary.Min, LexBoundary.Max)
       } yield {
         assertEquals(all, Vector("a", "b", "c"))
         assertEquals(range, Vector("a", "b"))
@@ -107,8 +107,8 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.zAdd("zrs-src")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        n      <- client.zRangeStore[String, String]("zrs-dst", "zrs-src", ZRange.ByScore(ScoreBoundary.Inclusive(2.0), ScoreBoundary.PosInf))
-        stored <- client.zRange[String, String]("zrs-dst", ZRange.ByRank(0L, -1L))
+        n      <- client.zRangeStore[String]("zrs-dst", "zrs-src", ZRange.ByScore(ScoreBoundary.Inclusive(2.0), ScoreBoundary.PosInf))
+        stored <- client.zRange[String]("zrs-dst", ZRange.ByRank(0L, -1L))
       } yield {
         assertEquals(n, 2L)
         assertEquals(stored, Vector("b", "c"))
@@ -133,12 +133,12 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _       <- client.zAdd("zset-pop")(("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0))
-        min     <- client.zPopMin[String, String]("zset-pop")
-        max     <- client.zPopMax[String, String]("zset-pop")
-        twoMin  <- client.zPopMinCount[String, String]("zset-pop", 2L)
-        emptied <- client.zPopMin[String, String]("zset-pop")
+        min     <- client.zPopMin[String]("zset-pop")
+        max     <- client.zPopMax[String]("zset-pop")
+        twoMin  <- client.zPopMinCount[String]("zset-pop", 2L)
+        emptied <- client.zPopMin[String]("zset-pop")
         _       <- client.zAdd("zset-mpop")(("x", 1.0), ("y", 2.0))
-        mpopped <- client.zMpop[String, String]("zset-empty", "zset-mpop")(MinMax.Min, count = Some(2L))
+        mpopped <- client.zMpop[String]("zset-empty", "zset-mpop")(MinMax.Min, count = Some(2L))
       } yield {
         assertEquals(min, Some(("a", 1.0)))
         assertEquals(max, Some(("d", 4.0)))
@@ -153,9 +153,9 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.zAdd("bz-data")(("a", 1.0), ("b", 2.0))
-        popped <- client.bzPopMin[String, String]("bz-data")(BlockTimeout.After(1.second))
-        mpop   <- client.bzMpop[String, String]("bz-empty", "bz-data")(MinMax.Max, BlockTimeout.After(1.second))
-        none   <- client.bzPopMin[String, String]("bz-missing")(BlockTimeout.After(100.millis))
+        popped <- client.bzPopMin[String]("bz-data")(BlockTimeout.After(1.second))
+        mpop   <- client.bzMpop[String]("bz-empty", "bz-data")(MinMax.Max, BlockTimeout.After(1.second))
+        none   <- client.bzPopMin[String]("bz-missing")(BlockTimeout.After(100.millis))
       } yield {
         assertEquals(popped, Some(("bz-data", "a", 1.0)))
         assertEquals(mpop, Some(("bz-data", Vector("b" -> 2.0))))
@@ -168,9 +168,9 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.zAdd("zset-rand")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        one    <- client.zRandMember[String, String]("zset-rand")
-        dup    <- client.zRandMemberCount[String, String]("zset-rand", -5L)
-        scored <- client.zRandMemberWithScores[String, String]("zset-rand", 3L)
+        one    <- client.zRandMember[String]("zset-rand")
+        dup    <- client.zRandMemberCount[String]("zset-rand", -5L)
+        scored <- client.zRandMemberWithScores[String]("zset-rand", 3L)
       } yield {
         assert(one.exists(Set("a", "b", "c")))
         assertEquals(dup.size, 5)
@@ -184,11 +184,11 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
       for {
         _        <- client.zAdd("zops-a")(("x", 1.0), ("y", 2.0))
         _        <- client.zAdd("zops-b")(("y", 3.0), ("z", 4.0))
-        union    <- client.zUnionWithScores[String, String]("zops-a", "zops-b")()
-        weighted <- client.zUnionWithScores[String, String]("zops-a", "zops-b")(weights = Some(Vector(1.0, 2.0)))
-        maxAgg   <- client.zUnionWithScores[String, String]("zops-a", "zops-b")(aggregate = Aggregate.Max)
-        inter    <- client.zInter[String, String]("zops-a", "zops-b")()
-        diff     <- client.zDiff[String, String]("zops-a", "zops-b")
+        union    <- client.zUnionWithScores[String]("zops-a", "zops-b")()
+        weighted <- client.zUnionWithScores[String]("zops-a", "zops-b")(weights = Some(Vector(1.0, 2.0)))
+        maxAgg   <- client.zUnionWithScores[String]("zops-a", "zops-b")(aggregate = Aggregate.Max)
+        inter    <- client.zInter[String]("zops-a", "zops-b")()
+        diff     <- client.zDiff[String]("zops-a", "zops-b")
         card     <- client.zInterCard("zops-a", "zops-b")()
         unionN   <- client.zUnionStore("zops-union", "zops-a", "zops-b")()
         interN   <- client.zInterStore("zops-inter", "zops-a", "zops-b")()
@@ -215,7 +215,7 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
         _       <- client.zAdd("zrem-score")(("a", 1.0), ("b", 2.0), ("c", 3.0))
         byScore <- client.zRemRangeByScore("zrem-score", ScoreBoundary.Inclusive(2.0), ScoreBoundary.PosInf)
         _       <- client.zAdd("zrem-lex")(("a", 0.0), ("b", 0.0), ("c", 0.0))
-        byLex   <- client.zRemRangeByLex[String, String]("zrem-lex", LexBoundary.Inclusive("a"), LexBoundary.Inclusive("b"))
+        byLex   <- client.zRemRangeByLex[String]("zrem-lex", LexBoundary.Inclusive("a"), LexBoundary.Inclusive("b"))
       } yield {
         assertEquals(byRank, 1L)
         assertEquals(byScore, 2L)
@@ -228,7 +228,7 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _    <- client.zAdd("zset-scan")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        page <- client.zScan[String, String]("zset-scan", ScanCursor.start)
+        page <- client.zScan[String]("zset-scan", ScanCursor.start)
       } yield assertEquals(page.items.toMap, Map("a" -> 1.0, "b" -> 2.0, "c" -> 3.0))
     }
   }
@@ -238,10 +238,10 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
       for {
         _       <- client.zAdd("zgap-a")(("x", 1.0), ("y", 2.0))
         _       <- client.zAdd("zgap-b")(("y", 3.0), ("z", 4.0))
-        union   <- client.zUnion[String, String]("zgap-a", "zgap-b")()
-        inter   <- client.zInterWithScores[String, String]("zgap-a", "zgap-b")()
-        diff    <- client.zDiffWithScores[String, String]("zgap-a", "zgap-b")
-        revRank <- client.zRevRankWithScore[String, String]("zgap-a", "x")
+        union   <- client.zUnion[String]("zgap-a", "zgap-b")()
+        inter   <- client.zInterWithScores[String]("zgap-a", "zgap-b")()
+        diff    <- client.zDiffWithScores[String]("zgap-a", "zgap-b")
+        revRank <- client.zRevRankWithScore[String]("zgap-a", "x")
       } yield {
         assertEquals(union.toSet, Set("x", "y", "z"))
         assertEquals(inter, Vector("y" -> 5.0))
@@ -255,10 +255,10 @@ abstract class SortedSetsSuite(image: String) extends ServerSuite(image) {
     withClient { client =>
       for {
         _      <- client.zAdd("zgap-pop")(("a", 1.0), ("b", 2.0), ("c", 3.0))
-        topTwo <- client.zPopMaxCount[String, String]("zgap-pop", 2L)
+        topTwo <- client.zPopMaxCount[String]("zgap-pop", 2L)
         _      <- client.zAdd("zgap-bz")(("a", 1.0), ("b", 2.0))
-        bzMax  <- client.bzPopMax[String, String]("zgap-bz")(BlockTimeout.After(1.second))
-        none   <- client.bzPopMax[String, String]("zgap-bz-missing")(BlockTimeout.After(100.millis))
+        bzMax  <- client.bzPopMax[String]("zgap-bz")(BlockTimeout.After(1.second))
+        none   <- client.bzPopMax[String]("zgap-bz-missing")(BlockTimeout.After(100.millis))
       } yield {
         assertEquals(topTwo, Vector("c" -> 3.0, "b" -> 2.0))
         assertEquals(bzMax, Some(("zgap-bz", "b", 2.0)))

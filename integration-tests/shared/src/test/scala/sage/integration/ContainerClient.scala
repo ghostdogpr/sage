@@ -15,8 +15,8 @@ trait ContainerClient {
   protected def configOf(server: GenericContainer): SageConfig =
     SageConfig(topology = Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
 
-  // CIO.acquireReleaseWith fails to compile on the Ox/Future cells when its type argument nests CIO (Client[CIO]); fold instead
-  protected def connectAndUse[A](config: SageConfig)(body: Client[CIO] => CIO[A]): CIO[A] =
+  // CIO.acquireReleaseWith fails to compile on the Ox/Future cells when its type argument nests CIO (Client[CIO, String]); fold instead
+  protected def connectAndUse[A](config: SageConfig)(body: Client[CIO, String] => CIO[A]): CIO[A] =
     Client.connect(config).flatMap { client =>
       body(client).fold(
         result => client.close.map(_ => result),

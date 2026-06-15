@@ -14,8 +14,8 @@ class ArraysSuite extends ServerSuite(Images.redis) {
     withClient { client =>
       for {
         filled  <- client.arSet("ar-basic", 0L, "a", "b", "c")
-        b       <- client.arGet[String, String]("ar-basic", 1L)
-        missing <- client.arGet[String, String]("ar-basic", 99L)
+        b       <- client.arGet[String]("ar-basic", 1L)
+        missing <- client.arGet[String]("ar-basic", 99L)
         len     <- client.arLen("ar-basic")
         count   <- client.arCount("ar-basic")
       } yield {
@@ -33,8 +33,8 @@ class ArraysSuite extends ServerSuite(Images.redis) {
       for {
         _     <- client.arSet("ar-sparse", 0L, "a", "b", "c")
         _     <- client.arMSet("ar-sparse", 10L -> "x", 20L -> "y")
-        got   <- client.arMGet[String, String]("ar-sparse", 10L, 11L, 20L)
-        range <- client.arGetRange[String, String]("ar-sparse", 0L, 2L)
+        got   <- client.arMGet[String]("ar-sparse", 10L, 11L, 20L)
+        range <- client.arGetRange[String]("ar-sparse", 0L, 2L)
       } yield {
         assertEquals(got, Vector(Some("x"), None, Some("y")))
         assertEquals(range, Vector(Some("a"), Some("b"), Some("c")))
@@ -47,8 +47,8 @@ class ArraysSuite extends ServerSuite(Images.redis) {
       for {
         last  <- client.arRing("ar-ring", 3L, "a", "b", "c", "d", "e")
         len   <- client.arLen("ar-ring")
-        items <- client.arLastItems[String, String]("ar-ring", 2L)
-        rev   <- client.arLastItems[String, String]("ar-ring", 2L, rev = true)
+        items <- client.arLastItems[String]("ar-ring", 2L)
+        rev   <- client.arLastItems[String]("ar-ring", 2L, rev = true)
       } yield {
         assertEquals(last, 1L)
         assertEquals(len, 3L)
@@ -79,7 +79,7 @@ class ArraysSuite extends ServerSuite(Images.redis) {
       for {
         _    <- client.arSet("ar-scan", 0L, "a")
         _    <- client.arSet("ar-scan", 5L, "f")
-        scan <- client.arScan[String, String]("ar-scan", 0L, 10L)
+        scan <- client.arScan[String]("ar-scan", 0L, 10L)
       } yield assertEquals(scan, Vector(0L -> "a", 5L -> "f"))
     }
   }
@@ -90,7 +90,7 @@ class ArraysSuite extends ServerSuite(Images.redis) {
         _       <- client.arSet("ar-del", 0L, "a", "b", "c", "d", "e", "f", "g", "h")
         deleted <- client.arDelRange("ar-del", 0L -> 1L, 4L -> 5L)
         one     <- client.arDel("ar-del", 2L)
-        scan    <- client.arScan[String, String]("ar-del", 0L, 10L)
+        scan    <- client.arScan[String]("ar-del", 0L, 10L)
       } yield {
         assertEquals(deleted, 4L)
         assertEquals(one, 1L)
@@ -104,7 +104,7 @@ class ArraysSuite extends ServerSuite(Images.redis) {
       for {
         _       <- client.arSet("ar-grep", 0L, "apple", "banana", "apricot", "cherry")
         glob    <- client.arGrep("ar-grep", 0L, 10L)(ArMatch.Glob("ap*"))
-        withVal <- client.arGrepWithValues[String, String]("ar-grep", 0L, 10L)(ArMatch.Glob("ap*"))
+        withVal <- client.arGrepWithValues[String]("ar-grep", 0L, 10L)(ArMatch.Glob("ap*"))
         anded   <- client.arGrep("ar-grep", 0L, 10L, combine = ArGrepCombine.And)(ArMatch.Glob("a*"), ArMatch.Glob("*e"))
       } yield {
         assertEquals(glob, Vector(0L, 2L))

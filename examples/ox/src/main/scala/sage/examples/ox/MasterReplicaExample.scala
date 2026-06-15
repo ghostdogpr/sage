@@ -20,8 +20,8 @@ object MasterReplicaExample {
 
   def run(using Ox): Unit = {
     val client = SageClient.scoped(config)
-    val _      = client.set("k", "v")            // writes always go to the master
-    val value  = client.get[String, String]("k") // reads may be served by a replica, per the policy
+    val _      = client.set("k", "v")    // writes always go to the master
+    val value  = client.get[String]("k") // reads may be served by a replica, per the policy
     println(s"value=$value")
   }
 }

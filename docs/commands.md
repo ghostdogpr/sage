@@ -10,7 +10,7 @@ A `Command[Out]` is a pure description of one server command: its name, its argu
 
 ```scala [Ox]
 // per-command sugar
-val greeting = client.get[String, String]("greeting")
+val greeting = client.get[String]("greeting")
 
 // the same command, built as a value and run explicitly
 val same = client.run(Commands.get[String, String]("greeting"))
@@ -18,7 +18,7 @@ val same = client.run(Commands.get[String, String]("greeting"))
 
 ```scala [ZIO · Cats Effect · Kyo]
 for {
-  greeting <- client.get[String, String]("greeting")
+  greeting <- client.get[String]("greeting")
   // the same command, built as a value and run explicitly
   same     <- client.run(Commands.get[String, String]("greeting"))
 } yield (greeting, same)
@@ -45,12 +45,14 @@ The full surface lives on the client and on `Commands`; the API docs list every 
 
 ## Typed keys and values
 
-Keys and values are typed. The type parameters select which codec converts them to and from wire bytes:
+Keys and values are typed, and a codec converts each to and from wire bytes. The **key type is fixed on the client**: the default `SageClient` is String-keyed, so a command only ever needs the value type at the call site:
 
 ```scala
-client.set("user:1", 42)                    // value typed as Int
-val n = client.get[String, Int]("user:1")   // key String, value Int
+client.set("user:1", 42)            // value inferred as Int
+val n = client.get[Int]("user:1")   // value Int; the key is the client's String
 ```
+
+A read like `get` returns the value, so its type cannot be inferred and is named explicitly; a write infers the value from its argument and needs no type parameter.
 
 There are two separate typeclasses, by design:
 
@@ -58,6 +60,18 @@ There are two separate typeclasses, by design:
 - `ValueCodec[A]` for **payloads**.
 
 They are deliberately unrelated, which keeps `given` resolution unambiguous and lets key positions carry the cluster-slot hashing that value positions do not need.
+
+### Non-String keys
+
+Redis keys are binary-safe, so any type with a `KeyCodec` (`Int`, `Long`, raw bytes, your own newtype) is a valid key. Re-type the client with `as[K]` to work over one on the same connection, with no new connection opened:
+
+```scala
+val binary = client.as[Array[Byte]]
+binary.set(idBytes, 42)
+val n = binary.get[Int](idBytes)
+```
+
+`as[K]` returns a full client over `K`, so its whole surface follows the new key type: commands, pipelines, transactions, subscriptions, and the streaming helpers (`scanAll`, `hScanAll`, and so on). It also composes inside a transaction (`tx.as[Array[Byte]].get(k)`). The `Commands.*` builder facade used for pipelines names both type parameters explicitly (`Commands.get[K, V]`), since it is keyless on its own.
 
 ### Built-in codecs
 
@@ -108,7 +122,7 @@ With that `given` in scope, a `User` is read and written exactly like a `String`
 
 ```scala
 client.set("user:ada", User("Ada", 36))
-val ada = client.get[String, User]("user:ada") // Some(User("Ada", 36))
+val ada = client.get[User]("user:ada") // Some(User("Ada", 36))
 ```
 
 You can also build a codec from scratch with `ValueCodec.from` (or `KeyCodec.from`), supplying an encode function and a decode that returns `Either`.
