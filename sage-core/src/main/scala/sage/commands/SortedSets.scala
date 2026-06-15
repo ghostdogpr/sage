@@ -61,6 +61,19 @@ enum LexBoundary[+V] {
   */
 final case class Limit(offset: Long, count: Long)
 
+object Limit {
+
+  /**
+    * The first match only: `LIMIT 0 1`.
+    */
+  val first: Limit = Limit(0, 1)
+
+  /**
+    * The first `count` matches from the start: `LIMIT 0 count`.
+    */
+  def take(count: Long): Limit = Limit(0, count)
+}
+
 /**
   * A `ZRANGE` query. The three modes carry exactly their legal options — a by-rank query has no `LIMIT` — and `min`/`max` are always given
   * low-to-high: under `rev` the encoder emits them in the descending wire order `BYSCORE`/`BYLEX` require, so the bound-swap foot-gun is
@@ -70,6 +83,39 @@ enum ZRange[+V] {
   case ByRank(start: Long, stop: Long, rev: Boolean = false)
   case ByScore(min: ScoreBoundary, max: ScoreBoundary, limit: Option[Limit] = None, rev: Boolean = false)
   case ByLex[V](min: LexBoundary[V], max: LexBoundary[V], limit: Option[Limit] = None, rev: Boolean = false) extends ZRange[V]
+}
+
+object ZRange {
+
+  /**
+    * An inclusive score band `[min, max]`, ascending unless `rev` — the common `BYSCORE` case without naming [[ScoreBoundary]].
+    */
+  def scores(min: Double, max: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
+    ByScore(ScoreBoundary.Inclusive(min), ScoreBoundary.Inclusive(max), limit, rev)
+
+  /**
+    * Every member holding exactly `value` — the inclusive band `[value, value]`.
+    */
+  def score(value: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
+    scores(value, value, limit, rev)
+
+  /**
+    * Scores of at least `min` — the band `[min, +inf]`, ascending unless `rev`.
+    */
+  def atLeast(min: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
+    ByScore(ScoreBoundary.Inclusive(min), ScoreBoundary.PosInf, limit, rev)
+
+  /**
+    * Scores of at most `max` — the band `[-inf, max]`, ascending unless `rev`.
+    */
+  def atMost(max: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
+    ByScore(ScoreBoundary.NegInf, ScoreBoundary.Inclusive(max), limit, rev)
+
+  /**
+    * An inclusive lexicographic band `[min, max]`, ascending unless `rev`. Valid only when every member shares one score.
+    */
+  def lex[V](min: V, max: V, limit: Option[Limit] = None, rev: Boolean = false): ZRange[V] =
+    ByLex(LexBoundary.Inclusive(min), LexBoundary.Inclusive(max), limit, rev)
 }
 
 private[sage] object SortedSets {
