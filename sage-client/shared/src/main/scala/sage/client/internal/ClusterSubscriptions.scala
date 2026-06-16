@@ -69,14 +69,15 @@ final private[client] class ClusterSubscriptions(
   private def classic(names: Vector[String], kind: Kind): RawSubscription = {
     val sink = new Sink(names, kind, bufferSize)
     val sub  = ClassicSub(sink, names, kind)
-    val conn =
-      locked {
-        if (closed) throw NotConnected()
-        classicSubs += sub
-        ensureClassicConn()
-      }
-    try conn.attach(sink, names, kind)
-    catch {
+    try {
+      val conn =
+        locked {
+          if (closed) throw NotConnected()
+          classicSubs += sub
+          ensureClassicConn()
+        }
+      conn.attach(sink, names, kind)
+    } catch {
       case e: Throwable => locked(classicSubs -= sub); sink.terminate(); throw e
     }
     new RawSubscription(sink, () => closeClassic(sub))
