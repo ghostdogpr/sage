@@ -42,6 +42,10 @@ private[codec] object Primitives {
   def decodeNumber[A](expected: String, parse: String => Option[A])(bytes: Bytes): Either[DecodeError, A] =
     parse(bytes.asUtf8String).toRight(DecodeError(expected, preview(bytes)))
 
+  // reject a leading '+' so "5"/"+5" don't decode to the same key
+  def parseInt(text: String): Option[Int]   = if (text.startsWith("+")) None else text.toIntOption
+  def parseLong(text: String): Option[Long] = if (text.startsWith("+")) None else text.toLongOption
+
   def preview(bytes: Bytes): String = {
     // MaxPreview code points never need more than 4 bytes each, so decoding a bounded window avoids
     // materializing a huge payload just to show its head

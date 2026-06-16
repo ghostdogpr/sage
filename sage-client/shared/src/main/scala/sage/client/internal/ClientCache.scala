@@ -55,15 +55,16 @@ final private[client] class ClientCache(maxBytes: Long) {
   def store(commandBytes: Bytes, trackedKeys: Vector[Bytes], frame: Frame, now: Long, ttlMillis: Long): Unit = {
     val key                                              = new Key(commandBytes)
     val size                                             = frameSize(frame) // walked outside the lock so a large reply can't stall acquire/invalidate
-    val tracked                                          = trackedKeys.map(new Key(_))
     var waiters: mutable.ArrayBuffer[Try[Frame] => Unit] = null
     lock.lock()
     try {
       val inFlight = pending.remove(key)
       waiters = inFlight.map(_.waiters).orNull
       val dirty    = inFlight.exists(_.dirty)
+      // reuse the keys the matching acquire already wrapped; re-derive only on the no-in-flight path
       // an entry larger than the whole cap would evict everything then itself; skip caching it and just deliver the reply
-      if (!dirty && size <= maxBytes) insert(key, new Entry(frame, size, now + ttlMillis, tracked))
+      if (!dirty && size <= maxBytes)
+        insert(key, new Entry(frame, size, now + ttlMillis, inFlight.map(_.keys).getOrElse(trackedKeys.map(new Key(_)))))
     } finally lock.unlock()
     if (waiters != null) waiters.foreach(_.apply(Success(frame)))
   }

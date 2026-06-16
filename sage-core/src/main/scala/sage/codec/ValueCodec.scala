@@ -57,21 +57,21 @@ object ValueCodec {
   /**
     * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
     */
-  given int: ValueCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", _.toIntOption))
+  given int: ValueCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", Primitives.parseInt))
 
   /**
     * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
     */
-  given long: ValueCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
+  given long: ValueCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", Primitives.parseLong))
 
   /**
-    * `Double` in Redis's number format (including `inf`/`-inf`/`nan`); decoding rejects anything else.
+    * `Double` in Redis's number format, including `inf`/`-inf`/`nan`.
     */
   given double: ValueCodec[Double] =
     instance(d => Bytes.utf8(Doubles.format(d)), Primitives.decodeNumber("Double", Doubles.parse))
 
   /**
-    * `Float` in Redis's number format; decoding rejects anything else.
+    * `Float` in Redis's number format, including `inf`/`-inf`/`nan`.
     */
   given float: ValueCodec[Float] =
     instance(f => Bytes.utf8(Doubles.formatFloat(f)), Primitives.decodeNumber("Float", Doubles.parseFloat))

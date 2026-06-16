@@ -1,9 +1,9 @@
 package sage.codec
 
 /**
-  * The canonical RESP wire form for doubles: infinities and NaN are spelled `inf`/`-inf`/`nan` the way Redis writes and accepts
-  * them, never Java's `Infinity`/`NaN`. The single source of truth shared by the value codec, the score/range/coordinate
-  * encoders, and the bulk-string reply decoders. The RESP3 parser keeps its own wire-level grammar by design — it is not a codec.
+  * The canonical RESP wire form for doubles: infinities and NaN are spelled `inf`/`-inf`/`nan` the way Redis writes them. The
+  * single source of truth shared by the value codec, the score/range/coordinate encoders, and the bulk-string reply decoders.
+  * The RESP3 parser keeps its own wire-level grammar by design — it is not a codec.
   */
 private[sage] object Doubles {
 

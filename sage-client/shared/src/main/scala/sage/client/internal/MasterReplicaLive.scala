@@ -131,7 +131,7 @@ final private[client] class MasterReplicaLive(
 
   private def triggerRefresh(): Unit = offload(refreshThrottle(force = false)(rediscover()))
 
-  // forced + synchronous so masterNodeRef names the promoted master before the reconnect's establish() reads it via the factory
+  // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
   private def rediscover(): Unit = {

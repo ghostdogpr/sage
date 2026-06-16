@@ -57,12 +57,12 @@ object KeyCodec {
   /**
     * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
     */
-  given int: KeyCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", _.toIntOption))
+  given int: KeyCodec[Int] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Int", Primitives.parseInt))
 
   /**
     * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
     */
-  given long: KeyCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", _.toLongOption))
+  given long: KeyCodec[Long] = instance(Primitives.encodeNumber, Primitives.decodeNumber("Long", Primitives.parseLong))
 
   /**
     * Raw [[sage.Bytes]], passed through unchanged in both directions.
