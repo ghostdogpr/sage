@@ -38,14 +38,16 @@ final class SageKyoBench(host: String, port: Int) extends BenchClient {
   def getAll(keys: Array[String], concurrency: Int): Long =
     Run(
       Async
-        .foreach(Payloads.groups(keys, concurrency).toList)(g => Kyo.foreach(g.toList)(k => client.get[String](k)).map(_.toList))
+        .foreach(Payloads.groups(keys, concurrency).toList, concurrency)(g =>
+          Kyo.foreach(g.toList)(k => client.get[String](k)).map(_.toList)
+        )
         .map(_.toList.flatten.flatten.map(_.length.toLong).sum)
     )
 
   def setAll(keys: Array[String], value: String, concurrency: Int): Long =
     Run(
       Async
-        .foreachDiscard(Payloads.groups(keys, concurrency).toList)(g => Kyo.foreachDiscard(g.toList)(k => client.set(k, value)))
+        .foreachDiscard(Payloads.groups(keys, concurrency).toList, concurrency)(g => Kyo.foreachDiscard(g.toList)(k => client.set(k, value)))
         .map(_ => keys.length.toLong)
     )
 
