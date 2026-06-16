@@ -56,14 +56,15 @@ class PlacementSpec extends munit.FunSuite {
     assert(!placement.fullyPlaced, "b's owner was unavailable, so coverage is incomplete")
   }
 
-  test("place is fail-fast: an attach failure propagates, but what landed is recorded for roll-back") {
+  test("place leaves a failed attach unplaced instead of propagating, recording what landed for roll-back") {
     val pool      = new FakePool
     val placement = new Placement(sink("a", "b"), Vector("a", "b"))
     pool.byNode.getOrElseUpdate(n1, new FakeConn).failOn = Set("b")
 
-    intercept[RuntimeException](placement.place(Map(n1 -> groups(Vector("a"), Vector("b"))), pool))
+    placement.place(Map(n1 -> groups(Vector("a"), Vector("b"))), pool)
 
-    assertEquals(pool.byNode(n1).subscribed.toSet, Set("a"))
+    assertEquals(pool.byNode(n1).subscribed.toSet, Set("a"), "a landed; b's attach failed but did not propagate")
+    assert(!placement.fullyPlaced, "b is unplaced, so coverage is incomplete and the caller retries")
     // roll-back: reconcile to the empty plan detaches exactly what was placed
     placement.reconcile(Map.empty, pool)
     assert(pool.byNode(n1).subscribed.isEmpty, "the empty plan detaches the landed channel")

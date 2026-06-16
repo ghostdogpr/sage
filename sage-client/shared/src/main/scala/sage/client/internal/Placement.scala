@@ -14,9 +14,10 @@ import sage.cluster.Node
   * is the single place that keeps that record in step with the wire. A Node owning several slot ranges needs one `SSUBSCRIBE` per Slot (a
   * batched cross-slot subscribe returns `CROSSSLOT`), so a plan groups a Node's channels into the groups that each become one `SSUBSCRIBE`.
   *
-  * Two ways to apply a plan, differing only in their failure handling:
-  *   - [[place]] is fail-fast for the initial subscribe — an attach failure propagates so the caller can roll back — and records each group
-  *     as it lands, so a roll-back ([[reconcile]] to the empty plan) detaches exactly what was already placed.
+  * Two ways to apply a plan:
+  *   - [[place]] is the initial subscribe: it records each group as it lands and leaves a failed attach unplaced for the caller to retry
+  *     (see `fullyPlaced`), so a transient owner/connection failure converges instead of surfacing to the subscriber; `placedAt` still
+  *     reflects exactly what landed, so a roll-back ([[reconcile]] to the empty plan) detaches it.
   *   - [[reconcile]] is best-effort for re-homing — it detaches channels that left the plan, attaches the rest, records only what actually
   *     lands, and reports whether any attach failed so the caller can retry.
   */
@@ -35,8 +36,11 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
     plan.foreach { case (node, groups) =>
       conns.ensure(node).foreach { conn =>
         groups.foreach { group =>
-          conn.attach(sink, group, Kind.Shard)
-          locked { placedAt = placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group)) }
+          // a concurrent eviction can close `conn` before attach; leave it unplaced to retry, don't propagate
+          try {
+            conn.attach(sink, group, Kind.Shard)
+            locked { placedAt = placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group)) }
+          } catch { case NonFatal(_) => () }
         }
       }
     }
