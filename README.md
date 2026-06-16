@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-**Sage** is a **modern [Scala 3](https://www.scala-lang.org/) client** for **[Redis](https://redis.io)** and **[Valkey](https://valkey.io)**.
+**Sage** is a **modern Scala 3 client** for **[Redis](https://redis.io)** and **[Valkey](https://valkey.io)**.
 
 It is designed to be **native**, meaning there is no Java client wrapped underneath: the wire protocol, commands, and codecs are implemented directly in Scala.
 
