@@ -2,7 +2,7 @@
 
 **Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). There is no Java client wrapped underneath: the RESP3 protocol, the commands, and the codecs are implemented directly in Scala, on a zero-dependency, effect-free core.
 
-That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [cats-effect](https://typelevel.org/cats-effect/), and [Kyo](https://getkyo.io), so you use sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
+That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), and [Kyo](https://getkyo.io), so you use sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
 
 ## Installation
 
@@ -32,7 +32,7 @@ Two imports cover everything: `import sage.*` for the command vocabulary and con
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, and a `Resource` for cats-effect. The command surface is identical across all four; only this wiring differs.
+A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, and a `Resource` for Cats Effect. The command surface is identical across all four; only this wiring differs.
 
 ::: code-group
 
@@ -129,7 +129,7 @@ Two cases step off that connection automatically. Commands that hold per-connect
 
 ## A short tour
 
-The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; in ZIO, cats-effect, and Kyo they are steps in a for-comprehension over that ecosystem's effect type. Each assumes a `client` in scope and the usual imports for your effect type (plus `import scala.concurrent.duration.*` where a duration appears).
+The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; in ZIO, Cats Effect, and Kyo they are steps in a for-comprehension over that ecosystem's effect type. Each assumes a `client` in scope and the usual imports for your effect type (plus `import scala.concurrent.duration.*` where a duration appears).
 
 ### Commands
 
@@ -239,7 +239,7 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, or a Kyo `Stream`. Ending the stream, or closing its scope, unsubscribes.
 
-Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on cats-effect, and plain `subscribe` on Ox (where the call is already synchronous). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
+Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on Cats Effect, and plain `subscribe` on Ox (where the call is already synchronous). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
 
 ::: code-group
 

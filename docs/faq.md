@@ -15,7 +15,7 @@ In practice sage matches or beats the established Scala clients on concurrent wo
 One per effect system, all sharing the same runtime:
 
 - ZIO: `sage-client-zio`
-- cats-effect: `sage-client-ce`
+- Cats Effect: `sage-client-ce`
 - Kyo: `sage-client-kyo`
 - Ox: `sage-client-ox`
 

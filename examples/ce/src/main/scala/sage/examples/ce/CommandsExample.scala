@@ -9,7 +9,7 @@ import sage.backend.*
 import sage.examples.User
 
 /**
-  * Commands across several families, each returning a cats-effect `IO`.
+  * Commands across several families, each returning a Cats Effect `IO`.
   */
 object CommandsExample {
 

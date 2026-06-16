@@ -130,7 +130,7 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
 
-// Runnable, never-published usage examples — one cell per backend so each compiles against its own native artifact (ZIO Task, cats-effect
+// Runnable, never-published usage examples — one cell per backend so each compiles against its own native artifact (ZIO Task, Cats Effect
 // IO, Ox direct style, Kyo). Aggregated by root and compiled in CI via the testUnit alias; the forced future anchor cell carries no example
 // of its own and just compiles examples/shared. Run by hand against a local server, e.g. `sbt examplesZio/run` — see examples/README.md.
 lazy val examples = (projectMatrix in file("examples"))
@@ -139,7 +139,7 @@ lazy val examples = (projectMatrix in file("examples"))
   .settings(commonSettings)
   .settings(publish / skip := true)
   // never-published runnable samples: no API docs to generate, and doc'ing them only surfaces broken links inside third-party sources
-  // (e.g. cats-effect's IOApp) that an example extends
+  // (e.g. Cats Effect's IOApp) that an example extends
   .settings(Compile / doc / sources := Seq.empty)
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))

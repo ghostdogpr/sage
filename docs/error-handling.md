@@ -1,6 +1,6 @@
 # Error handling
 
-Every sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. How a failure reaches you depends on your backend: a failed ZIO `Task`, a raised cats-effect `IO`, a Kyo `Abort[Throwable]`, or a thrown exception in Ox direct style. In every case the value is the same `SageException`.
+Every sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. How a failure reaches you depends on your backend: a failed ZIO `Task`, a raised Cats Effect `IO`, a Kyo `Abort[Throwable]`, or a thrown exception in Ox direct style. In every case the value is the same `SageException`.
 
 ## The hierarchy
 
@@ -54,6 +54,6 @@ When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command:
 The same `SageException` is delivered through each ecosystem's normal failure channel:
 
 - **ZIO**: a failed `Task`; recover with `catchAll` / `catchSome`.
-- **cats-effect**: a raised `IO`; recover with `handleErrorWith` / `recoverWith`.
+- **Cats Effect**: a raised `IO`; recover with `handleErrorWith` / `recoverWith`.
 - **Kyo**: an `Abort[Throwable]`; handle with the `Abort` combinators.
 - **Ox**: thrown in direct style; handle with an ordinary `try`/`catch`.

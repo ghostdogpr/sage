@@ -15,7 +15,7 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
 /**
-  * The cats-effect-native surface: the same client, with every method returning `IO`.
+  * The Cats Effect-native surface: the same client, with every method returning `IO`.
   */
 type SageClient = Client[IO, String]
 

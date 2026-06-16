@@ -11,7 +11,7 @@ import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
 /**
-  * The cats-effect cell's benchmark clients: sage (native) and redis4cats (which wraps Lettuce).
+  * The Cats Effect cell's benchmark clients: sage (native) and redis4cats (which wraps Lettuce).
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {

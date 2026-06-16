@@ -9,7 +9,7 @@ import sage.backend.*
 
 class CeSmokeSuite extends ServerSuite(Images.redis) {
 
-  test("an end user connects and round-trips with native cats-effect") {
+  test("an end user connects and round-trips with native Cats Effect") {
     withContainers { server =>
       val config = configOf(server)
 
@@ -50,7 +50,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
-  test("a transaction commits atomically with native cats-effect, guarded by WATCH") {
+  test("a transaction commits atomically with native Cats Effect, guarded by WATCH") {
     withContainers { server =>
       val program: IO[Unit] =
         SageClient.resource(configOf(server)).use { client =>
