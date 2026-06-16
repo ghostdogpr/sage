@@ -69,34 +69,32 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
   )(using Tag[V]): Stream[(V, Double), Abort[Throwable] & Async] =
     scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
+  // chunkSize = 1: emit each page as it arrives — the default rechunks to 4096, withholding an infinite tail (xTail/xConsume) until then
+  private def paged[S, A](start: S)(step: S => Maybe[(Vector[A], S)] < (Abort[Throwable] & Async))(
+    using Tag[A]
+  ): Stream[A, Abort[Throwable] & Async] =
+    Stream.unfold[S, Vector[A], Abort[Throwable] & Async](start, chunkSize = 1)(step).flatMap(items => Stream.init(items))
+
   private def scanStream[A](fetch: ScanCursor => KyoEff[ScanPage[A]])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
-    CStream
-      .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start)) {
-        case None         => CIO.value(None)
-        case Some(cursor) => CIO.lift(fetch(cursor)).map(page => Some((page.items, page.next)))
-      }
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[ScanCursor], A](Some(ScanCursor.start)) {
+      case None         => Maybe.empty
+      case Some(cursor) => fetch(cursor).map(page => Maybe((page.items, page.next)))
+    }
 
   // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
   private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => KyoEff[ScanPage[A]])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
-    CStream
-      .unfold[ScanStep, Vector[A]](ScanStep.Begin) {
-        case ScanStep.Begin                 =>
-          CIO
-            .lift(client.scanTargets)
-            .map(targets => if (targets.isEmpty) None else Some((Vector.empty[A], ScanStep.Visit(ScanCursor.start, targets))))
-        case ScanStep.Visit(cursor, remain) =>
-          CIO.lift(fetch(remain.head)(cursor)).map { page =>
-            page.next match {
-              case Some(next) => Some((page.items, ScanStep.Visit(next, remain)))
-              case None       => Some((page.items, if (remain.tail.isEmpty) ScanStep.End else ScanStep.Visit(ScanCursor.start, remain.tail)))
-            }
+    paged[ScanStep, A](ScanStep.Begin) {
+      case ScanStep.Begin                 =>
+        client.scanTargets.map(targets => if (targets.isEmpty) Maybe.empty else Maybe((Vector.empty[A], ScanStep.Visit(ScanCursor.start, targets))))
+      case ScanStep.Visit(cursor, remain) =>
+        fetch(remain.head)(cursor).map { page =>
+          page.next match {
+            case Some(next) => Maybe((page.items, ScanStep.Visit(next, remain)))
+            case None       => Maybe((page.items, if (remain.tail.isEmpty) ScanStep.End else ScanStep.Visit(ScanCursor.start, remain.tail)))
           }
-        case ScanStep.End                   => CIO.value(None)
-      }
-      .flatMap(items => CStream.init(items))
-      .lower
+        }
+      case ScanStep.End                   => Maybe.empty
+    }
 
   /**
     * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
@@ -107,17 +105,14 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     end: StreamRangeId = StreamRangeId.Max,
     batch: Long = 100L
   )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
-    CStream
-      .unfold[Option[StreamRangeId], Vector[StreamEntry[F, V]]](Some(start)) {
-        case None       => CIO.value(None)
-        case Some(from) =>
-          CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))).map { entries =>
-            if (entries.isEmpty) None
-            else Some((entries, if (entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
-          }
-      }
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[StreamRangeId], StreamEntry[F, V]](Some(start)) {
+      case None       => Maybe.empty
+      case Some(from) =>
+        client.run(Streams.xRange[K, F, V](key, from, end, Some(batch))).map { entries =>
+          if (entries.isEmpty) Maybe.empty
+          else Maybe((entries, if (entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
+        }
+    }
 
   /**
     * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Tombstone
@@ -132,16 +127,13 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     start: StreamId = StreamId.Zero,
     count: Option[Long] = None
   )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
-    CStream
-      .unfold[Option[StreamId], Vector[StreamEntry[F, V]]](Some(start)) {
-        case None       => CIO.value(None)
-        case Some(from) =>
-          CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))).map { result =>
-            Some((result.entries.filter(_.fields.nonEmpty), if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
-          }
-      }
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[StreamId], StreamEntry[F, V]](Some(start)) {
+      case None       => Maybe.empty
+      case Some(from) =>
+        client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count)).map { result =>
+          Maybe((result.entries.filter(_.fields.nonEmpty), if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
+        }
+    }
 
   /**
     * Follows a stream without a consumer group: replays every entry after `from`, then blocks for new entries forever, advancing past the
@@ -154,15 +146,12 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
   )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
-    CStream
-      .unfold[StreamId, Vector[StreamEntry[F, V]]](from) { last =>
-        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map { result =>
-          val entries = result.flatMap(_._2)
-          Some((entries, if (entries.isEmpty) last else entries.last.id))
-        }
+    paged[StreamId, StreamEntry[F, V]](from) { last =>
+      client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block))).map { result =>
+        val entries = result.flatMap(_._2)
+        Maybe((entries, if (entries.isEmpty) last else entries.last.id))
       }
-      .flatMap(items => CStream.init(items))
-      .lower
+    }
 
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
@@ -186,20 +175,17 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     count: Option[Long],
     block: BlockTimeout
   )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
-    CStream
-      .unfold[Either[StreamId, Unit], Vector[StreamEntry[F, V]]](Left(StreamId.Zero)) {
-        case Left(after) =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map { result =>
-            val entries = result.flatMap(_._2)
-            if (entries.isEmpty) Some((Vector.empty, Right(()))) else Some((entries, Left(entries.last.id)))
-          }
-        case Right(_)    =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block)))).map { result =>
-            Some((result.flatMap(_._2), Right(())))
-          }
-      }
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Either[StreamId, Unit], StreamEntry[F, V]](Left(StreamId.Zero)) {
+      case Left(after) =>
+        client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count)).map { result =>
+          val entries = result.flatMap(_._2)
+          if (entries.isEmpty) Maybe((Vector.empty, Right(()))) else Maybe((entries, Left(entries.last.id)))
+        }
+      case Right(_)    =>
+        client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))).map { result =>
+          Maybe((result.flatMap(_._2), Right(())))
+        }
+    }
 
   /**
     * Subscribes to one or more channels; closing the enclosing `Scope` unsubscribes. Survives reconnects via auto-resubscribe, dropping
