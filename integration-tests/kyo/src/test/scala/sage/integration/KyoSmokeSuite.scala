@@ -142,4 +142,19 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       KyoApp.Unsafe.runAndBlock(Duration.Infinity)(program).getOrThrow
     }
   }
+
+  // Regression for the 4096-page rechunk that buffered infinite tails; bounded run so a reintroduced regression fails fast, not hangs.
+  test("xTail emits replayed entries immediately instead of buffering them") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client  <- SageClient.scoped(configOf(server))
+          _       <- Kyo.foreachDiscard(1 to 3)(i => client.xAdd("xtail", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
+          entries <- client.xTail[String, String]("xtail").take(3).run
+        } yield assertEquals(entries.toList.map(_.fields.head._2), List("v1", "v2", "v3"))
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(15L.seconds)(program).getOrThrow
+    }
+  }
 }
