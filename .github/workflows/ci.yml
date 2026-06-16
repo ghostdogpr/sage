@@ -89,7 +89,7 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Restore server images
         id: images
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.docker-images
           # keep the tags here in sync with integration-tests Images.scala; bump the key when they change
