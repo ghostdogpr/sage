@@ -1,6 +1,10 @@
 package sage.client.internal
 
+import scala.util.{Failure, Success}
+
+import sage.SageException.{ConnectionLost, ServerError}
 import sage.client.AuthConfig
+import sage.commands.{Command, Connection}
 
 class BootstrapSpec extends munit.FunSuite {
 
@@ -29,5 +33,45 @@ class BootstrapSpec extends munit.FunSuite {
     val first = Bootstrap.commands(Some(AuthConfig("pw", "alice")), 0, None).head
     assertEquals(first.name, "HELLO")
     assert(first.args.map(_.asUtf8String).containsSlice(Vector("AUTH", "alice", "pw")))
+  }
+
+  test("a CLIENT SETINFO error does not abort setup, so a pre-7.2 server still connects") {
+    val unknown = Failure(ServerError("ERR", "Unknown subcommand or wrong number of arguments for 'SETINFO'."))
+    var closed  = false
+    Bootstrap.run(
+      Bootstrap.commands(None, 0, None),
+      connectTimeoutMillis = 1000,
+      submit = (c, cb) => cb(if (c.name == "CLIENT" && c.args.head.asUtf8String == "SETINFO") unknown else Success(())),
+      close = () => closed = true
+    )
+    assert(!closed, "connection must stay open when only library identification fails")
+  }
+
+  test("a CLIENT SETINFO connection loss is NOT tolerated: it closes and throws") {
+    var closed = false
+    val thrown = intercept[ConnectionLost] {
+      Bootstrap.run(
+        Bootstrap.commands(None, 0, None),
+        connectTimeoutMillis = 1000,
+        submit = (c, cb) =>
+          cb(
+            if (c.name == "CLIENT" && c.args.head.asUtf8String == "SETINFO") Failure(ConnectionLost(mayHaveExecuted = false))
+            else Success(())
+          ),
+        close = () => closed = true
+      )
+    }
+    assertEquals(thrown.mayHaveExecuted, false)
+    assert(closed, "a broken connection must be discarded even on a best-effort command")
+  }
+
+  test("a load-bearing command error aborts setup and closes the connection") {
+    val error  = ServerError("NOAUTH", "Authentication required.")
+    var closed = false
+    val thrown = intercept[ServerError] {
+      Bootstrap.run(Vector(Connection.hello(None)), 1000, (_, cb) => cb(Failure(error)), () => closed = true)
+    }
+    assertEquals(thrown, error)
+    assert(closed, "connection must be closed when a load-bearing command fails")
   }
 }

@@ -27,7 +27,7 @@ No. Ordinary commands are auto-pipelined onto one multiplexed connection per nod
 
 ## Redis or Valkey? Which versions?
 
-Both. Sage targets RESP3 and modern Redis 8+ and Valkey 8+.
+Both. Sage targets RESP3 and modern Redis 8+ and Valkey 8+, where every command it exposes is available. It connects to any RESP3-capable server (Redis 6.0+), so an older server works for the subset of commands that version supports; commands added later (hash-field TTL in 7.4, `HGETEX`/`HGETDEL`/`HSETEX` in 8.0) simply error on a server that predates them.
 
 ## What Scala and JDK versions are required?
 

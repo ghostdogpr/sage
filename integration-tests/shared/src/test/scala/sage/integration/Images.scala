@@ -9,4 +9,7 @@ object Images {
   val redis: String = "redis:8.8.0"
 
   val valkey: String = "valkey/valkey:9.1.0"
+
+  // a pre-7.2 server (lacks `CLIENT SETINFO`), used only by the bootstrap version-floor test, not by command coverage
+  val legacyRedis: String = "redis:6.2"
 }

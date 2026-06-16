@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 import scala.util.{Failure, Success, Try}
 
-import sage.SageException.ConnectionLost
+import sage.SageException.{ConnectionLost, ServerError}
 import sage.client.{AuthConfig, BuildInfo}
 import sage.commands.{Command, Connection}
 
@@ -29,7 +29,8 @@ private[client] object Bootstrap {
     * Runs the connection-setup handshake on a freshly opened connection: submits each command in turn and blocks for its reply up to
     * `connectTimeoutMillis`, then closes the half-built connection and throws on a timeout or a failed reply so the caller discards it.
     * `submit` enqueues one command and delivers its decoded reply; replies are FIFO, so each command is awaited before the next is sent.
-    * Used by the Multiplexed, Dedicated, and Subscription connections, which differ only in how a single command's reply is obtained.
+    * A [[bestEffort]] command whose reply is a `ServerError` is tolerated rather than fatal; a `ConnectionLost`/`DecodeError` stays fatal
+    * even for it. Used by the Multiplexed, Dedicated, and Subscription connections, which differ only in how a reply is obtained.
     */
   def run(
     commands: Vector[Command[?]],
@@ -46,8 +47,17 @@ private[client] object Bootstrap {
         throw ConnectionLost(mayHaveExecuted = false)
       }
       outcome.get() match {
-        case Failure(error) => close(); throw error
-        case Success(_)     => ()
+        case Failure(_: ServerError) if bestEffort(command) => ()
+        case Failure(error)                                 => close(); throw error
+        case Success(_)                                     => ()
       }
     }
+
+  /**
+    * Whether a server-error reply to this command may be tolerated during bootstrap. Only `CLIENT SETINFO` qualifies: it is library
+    * identification added in Redis 7.2, so an older server rejects it with an error every client ignores. Every other bootstrap command is
+    * load-bearing, so its failure stays fatal.
+    */
+  private def bestEffort(command: Command[?]): Boolean =
+    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "SETINFO")
 }
