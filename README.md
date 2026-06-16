@@ -11,3 +11,5 @@ It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs) 
 It targets **RESP3** and modern **Redis 8+ / Valkey 8+**, with automatic pipelining, typed commands composable into pipelines and `MULTI`/`EXEC` transactions, standalone and cluster behind one client type, pub/sub (including sharded), client-side caching, and TLS and ACL auth.
 
 It is available for Scala 3.3.x LTS and later versions, and requires JDK 21+.
+
+### Consult the [Documentation](https://ghostdogpr.github.io/sage/) to learn how to use Sage.
