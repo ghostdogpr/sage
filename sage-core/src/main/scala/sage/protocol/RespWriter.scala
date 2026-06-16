@@ -7,30 +7,70 @@ import sage.Bytes
   */
 private[sage] object RespWriter {
 
-  def writeCommand(name: String, args: Vector[Bytes]): Bytes = {
-    val sink = new Sink(256)
+  // Sizes the buffer exactly, so a command encodes into one right-sized array: no oversized scratch and result() returns it without a copy.
+  def writeCommand(name: String, args: Vector[Bytes]): Bytes =
     if (name.indexOf(' ') < 0) { // single-word fast path: no split allocation
+      val nameBytes = Bytes.utf8(name)
+      val count     = 1L + args.length
+      val sink      = new Sink(headerSize(count) + bulkSize(nameBytes.length) + argsSize(args))
       sink.writeByte('*')
-      sink.writeLong(1L + args.length)
+      sink.writeLong(count)
       sink.writeCrlf()
-      writeBulk(Bytes.utf8(name), sink)
+      writeBulk(nameBytes, sink)
+      writeArgs(args, sink)
+      sink.result()
     } else {
-      val words = name.split(' ').filter(_.nonEmpty)
+      val words     = name.split(' ').filter(_.nonEmpty)
+      val wordBytes = words.map(Bytes.utf8)
+      val count     = wordBytes.length.toLong + args.length
+      var bodySize  = 0
+      var s         = 0
+      while (s < wordBytes.length) { bodySize += bulkSize(wordBytes(s).length); s += 1 }
+      val sink      = new Sink(headerSize(count) + bodySize + argsSize(args))
       sink.writeByte('*')
-      sink.writeLong(words.length.toLong + args.length)
+      sink.writeLong(count)
       sink.writeCrlf()
-      var w     = 0
-      while (w < words.length) {
-        writeBulk(Bytes.utf8(words(w)), sink)
+      var w         = 0
+      while (w < wordBytes.length) {
+        writeBulk(wordBytes(w), sink)
         w += 1
       }
+      writeArgs(args, sink)
+      sink.result()
     }
-    var i    = 0
+
+  private def writeArgs(args: Vector[Bytes], sink: Sink): Unit = {
+    var i = 0
     while (i < args.length) {
       writeBulk(args(i), sink)
       i += 1
     }
-    sink.result()
+  }
+
+  // mirror writeBulk/the array header in RespWriter so the precomputed size matches the bytes actually written
+  private def headerSize(count: Long): Int = 1 + digitCount(count) + 2
+
+  private def bulkSize(length: Int): Int = 1 + digitCount(length.toLong) + 2 + length + 2
+
+  private def argsSize(args: Vector[Bytes]): Int = {
+    var total = 0
+    var i     = 0
+    while (i < args.length) {
+      total += bulkSize(args(i).length)
+      i += 1
+    }
+    total
+  }
+
+  // shared with Sink.writeDigits so the precomputed size and the written digit count never disagree
+  private def digitCount(value: Long): Int = {
+    var digits  = 1
+    var ceiling = 10L
+    while (digits < 19 && value >= ceiling) {
+      digits += 1
+      ceiling *= 10
+    }
+    digits
   }
 
   private def writeBulk(value: Bytes, sink: Sink): Unit = {
@@ -68,15 +108,13 @@ private[sage] object RespWriter {
     // only ever called with non-negative lengths and element counts
     def writeLong(value: Long): Unit = writeDigits(value)
 
-    def result(): Bytes = Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOf(buf, len)))
+    // zero-copy on the exact-size common path; the copy only covers a growth over-allocation
+    def result(): Bytes =
+      if (len == buf.length) Bytes.wrap(IArray.unsafeFromArray(buf))
+      else Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOf(buf, len)))
 
     private def writeDigits(value: Long): Unit = {
-      var digits    = 1
-      var ceiling   = 10L
-      while (digits < 19 && value >= ceiling) {
-        digits += 1
-        ceiling *= 10
-      }
+      val digits    = digitCount(value)
       ensure(digits)
       var i         = len + digits - 1
       var remaining = value
