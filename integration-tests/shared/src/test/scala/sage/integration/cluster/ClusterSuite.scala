@@ -11,8 +11,7 @@ import sage.{Bytes, Message}
 import sage.SageException.DecodeError
 import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.{Client, ScanTarget}
-import sage.commands.{Command, Commands, FlushMode, Pipeline, ScanCursor}
-import sage.commands.Pipeline.pipeline
+import sage.commands.{Command, Commands, FlushMode, ScanCursor}
 import sage.integration.{ContainerClient, Images}
 import sage.protocol.Frame
 
@@ -78,8 +77,8 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
               count  <- client.incr("counter")
               _      <- client.set("{t}a", "1")
               _      <- client.set("{t}b", "2")
-              piped  <- client.pipeline((Commands.get[String, String]("{t}a"), Commands.get[String, String]("{t}b")).pipeline)
-              commit <- client.transaction(tx => tx.exec(Pipeline.sequence(Vector(Commands.incr[String]("{t}c"), Commands.incr[String]("{t}c")))))
+              piped  <- client.pipeline((Commands.get[String, String]("{t}a"), Commands.get[String, String]("{t}b")))
+              commit <- client.transaction(tx => tx.exec(Vector(Commands.incr[String]("{t}c"), Commands.incr[String]("{t}c"))))
             } yield {
               assertEquals(value, Some("hello"))
               assertEquals(count, 1L)

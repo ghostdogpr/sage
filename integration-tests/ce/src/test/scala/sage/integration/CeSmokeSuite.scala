@@ -36,9 +36,9 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
           for {
             _       <- client.set("pipe:a", "x")
             _       <- client.set("pipe:n", 10)
-            out     <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)).pipeline)
+            out     <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)))
             _       <- client.set("pipe:str", "hello")
-            attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")).pipeline)
+            attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")))
           } yield {
             assertEquals(out, (Some("x"), 15L))
             assert(attempt._1 == Right(Some("hello")), attempt._1)
@@ -60,7 +60,7 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
                      for {
                        _   <- tx.watch("tx:n")
                        _   <- tx.get[Int]("tx:n")
-                       res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
+                       res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)))
                      } yield res
                    }
           } yield assertEquals(out, Some((2L, 6L)))

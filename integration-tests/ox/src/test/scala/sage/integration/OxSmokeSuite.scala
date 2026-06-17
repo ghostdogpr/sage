@@ -32,10 +32,10 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val client  = SageClient.scoped(configOf(server))
         val _       = client.set("pipe:a", "x")
         val _       = client.set("pipe:n", 10)
-        val out     = client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)).pipeline)
+        val out     = client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)))
         assertEquals(out, (Some("x"), 15L))
         val _       = client.set("pipe:str", "hello")
-        val attempt = client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")).pipeline)
+        val attempt = client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")))
         assert(attempt._1 == Right(Some("hello")), attempt._1)
         assert(attempt._2.isLeft, attempt._2)
       }
@@ -50,7 +50,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val out    = client.transaction { tx =>
           val _ = tx.watch("tx:n")
           val _ = tx.get[Int]("tx:n")
-          tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)).pipeline)
+          tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)))
         }
         assertEquals(out, Some((2L, 6L)))
       }

@@ -10,8 +10,7 @@ import sage.Bytes
 import sage.SageException.{CrossSlot, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
-import sage.commands.{Command, Connection, Pipeline, Strings}
-import sage.commands.Pipeline.pipeline
+import sage.commands.{Command, Connection, Strings}
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -250,7 +249,7 @@ class ClusterClientSpec extends munit.FunSuite {
       (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
-    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB)).pipeline).unsafeRun.map { result =>
+    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB))).unsafeRun.map { result =>
       assertEquals(result, (Right(Some(nodeA.host)), Right(Some(nodeB.host))))
       assert(fixture.written(nodeA).exists(_.contains("GET")), "nodeA did not receive its GET")
       assert(fixture.written(nodeB).exists(_.contains("GET")), "nodeB did not receive its GET")
@@ -264,10 +263,9 @@ class ClusterClientSpec extends munit.FunSuite {
       else Seq(Frame.BulkString(Bytes.utf8("ok")))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
-    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB)).pipeline).unsafeRun.map {
-      case (first, second) =>
-        assertEquals(first, Right(Some("ok")))
-        assert(second.fold(_.isInstanceOf[ServerError], _ => false), s"second position should be a ServerError: $second")
+    fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB))).unsafeRun.map { case (first, second) =>
+      assertEquals(first, Right(Some("ok")))
+      assert(second.fold(_.isInstanceOf[ServerError], _ => false), s"second position should be a ServerError: $second")
     }
   }
 
@@ -277,7 +275,7 @@ class ClusterClientSpec extends munit.FunSuite {
       else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
-    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2")).pipeline).unsafeRun.map { result =>
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
       assertEquals(result, (Some("v1"), Some("v2")))
     }
   }
@@ -304,7 +302,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live
-      .pipeline((Strings.get[String, String]("{a}1"), Connection.ping(None), Strings.get[String, String]("{a}2")).pipeline)
+      .pipeline((Strings.get[String, String]("{a}1"), Connection.ping(None), Strings.get[String, String]("{a}2")))
       .unsafeRun
       .map { result =>
         assertEquals(result, (Some("v1"), "PONG", Some("v2")))
@@ -326,7 +324,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live
-      .transaction(_.exec(Pipeline.sequence(Vector(Strings.get[String, String]("{a}1")))))
+      .transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
       .unsafeRun
       .failed
       .map { _ =>
@@ -346,7 +344,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val fixture   = new Fixture(behaviour, Vector(nodeA)) // default minRefreshInterval (5s) far exceeds this test's duration
 
     // two faults within the throttle window: a throttled refresh would run only once (CLUSTER stays at 2), a forced one runs on each
-    val tx = fixture.live.transaction(_.exec(Pipeline.sequence(Vector(Strings.get[String, String]("{a}1")))))
+    val tx = fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
     for {
       _ <- tx.unsafeRun.failed
       _  = Thread.sleep(150) // let the first forced refresh complete and stamp the throttle window
@@ -368,7 +366,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live
-      .transaction(tx => tx.watch(key).flatMap(_ => tx.exec(Pipeline.sequence(Vector(Strings.get[String, String](key))))))
+      .transaction(tx => tx.watch(key).flatMap(_ => tx.exec(Vector(Strings.get[String, String](key)))))
       .unsafeRun
       .map(result => assertEquals(result, Some(Vector(Some("v")))))
   }

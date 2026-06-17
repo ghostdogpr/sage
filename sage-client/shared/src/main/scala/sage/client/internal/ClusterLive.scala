@@ -138,8 +138,8 @@ final private[client] class ClusterLive(
       case None       => run(command)
     }
 
-  def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
-  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
+  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
+  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
@@ -563,13 +563,13 @@ final private[client] class ClusterLive(
       if (fault) forceRefresh()
     }
 
-    def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
+    private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
       runExec(p).flatMap {
         case None          => CIO.value(None)
         case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
       }
 
-    def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
+    private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
       runExec(p).map(_.map(p.toResults))
 
     private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =

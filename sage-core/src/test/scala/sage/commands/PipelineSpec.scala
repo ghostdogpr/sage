@@ -1,23 +1,22 @@
 package sage.commands
 
 import sage.SageException.{DecodeError, ServerError}
-import sage.commands.Pipeline.pipeline
 
 class PipelineSpec extends munit.FunSuite {
 
   test("tuple syntax preserves command order and arity") {
-    val p = (Connection.ping(), Strings.get[String, String]("k"), Strings.incr[String]("n")).pipeline
+    val p = Pipeline.fromTuple((Connection.ping(), Strings.get[String, String]("k"), Strings.incr[String]("n")))
     assertEquals(p.commands.map(_.name), Vector("PING", "GET", "INCR"))
   }
 
   test("tuple pipeline assembles the all-success tuple") {
-    val p   = (Connection.ping(), Strings.get[String, String]("k")).pipeline
+    val p   = Pipeline.fromTuple((Connection.ping(), Strings.get[String, String]("k")))
     val out = p.toOut(Vector("PONG", Some("v")))
     assertEquals(out, ("PONG", Some("v")))
   }
 
   test("tuple pipeline shapes per-position results, mixing success and failure") {
-    val p       = (Connection.ping(), Strings.incr[String]("n")).pipeline
+    val p       = Pipeline.fromTuple((Connection.ping(), Strings.incr[String]("n")))
     val results = p.toResults(Vector(Right("PONG"), Left(ServerError("WRONGTYPE", ""))))
     assertEquals(results, (Right("PONG"), Left(ServerError("WRONGTYPE", ""))))
   }

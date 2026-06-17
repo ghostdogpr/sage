@@ -7,8 +7,7 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.{ServerError, TransactionDiscarded}
 import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
-import sage.commands.{Command, Commands, Execution, Pipeline}
-import sage.commands.Pipeline.pipeline
+import sage.commands.{Command, Commands, Execution}
 import sage.protocol.Frame
 
 class TransactionSpec extends munit.FunSuite {
@@ -56,9 +55,9 @@ class TransactionSpec extends munit.FunSuite {
     (wrapped, () => last)
   }
 
-  private val twoIncrements = (Commands.incr[String]("a"), Commands.incr[String]("b")).pipeline
+  private val twoIncrements = (Commands.incr[String]("a"), Commands.incr[String]("b"))
 
-  private val emptyPipeline = Pipeline.sequence(Vector.empty[Command[Long]])
+  private val noCommands = Vector.empty[Command[Long]]
 
   test("a transaction commits and returns the typed tuple") {
     val factory = scripted(Seq(ok, queued, queued, Frame.Array(Vector(Frame.Integer(1), Frame.Integer(2)))))
@@ -80,7 +79,7 @@ class TransactionSpec extends munit.FunSuite {
     val factory = scripted(
       Seq(ok, Frame.SimpleError("ERR unknown command 'FOO'"), Frame.SimpleError("EXECABORT Transaction discarded because of previous errors"))
     )
-    val single  = Pipeline.sequence(Vector(Commands.incr[String]("a")))
+    val single  = Vector(Commands.incr[String]("a"))
     Client.connectWith(factory).flatMap(_.transaction(_.exec(single))).unsafeRun.failed.map { error =>
       assertEquals(error, TransactionDiscarded("ERR unknown command 'FOO'"))
     }
@@ -128,7 +127,7 @@ class TransactionSpec extends munit.FunSuite {
     val factory = scripted(Seq(ok))
     Client
       .connectWith(factory)
-      .flatMap(client => client.transaction(tx => CIO.value(tx)).flatMap(escaped => escaped.exec(emptyPipeline)))
+      .flatMap(client => client.transaction(tx => CIO.value(tx)).flatMap(escaped => escaped.exec(noCommands)))
       .unsafeRun
       .failed
       .map(error => assert(error.isInstanceOf[IllegalStateException], s"unexpected error: $error"))
@@ -138,7 +137,7 @@ class TransactionSpec extends munit.FunSuite {
     val (factory, transport) = capturing(scripted(Seq(ok, Frame.Null))) // MULTI ok, EXEC null = watched key changed
     Client
       .connectWith(factory)
-      .flatMap(client => client.transaction(tx => tx.watch("a").flatMap(_ => tx.exec(emptyPipeline))))
+      .flatMap(client => client.transaction(tx => tx.watch("a").flatMap(_ => tx.exec(noCommands))))
       .unsafeRun
       .map { result =>
         assertEquals(result, None)
@@ -150,7 +149,7 @@ class TransactionSpec extends munit.FunSuite {
     val (factory, transport) = capturing(scripted(Seq(ok)))
     Client
       .connectWith(factory)
-      .flatMap(_.transaction(_.exec(emptyPipeline)))
+      .flatMap(_.transaction(_.exec(noCommands)))
       .unsafeRun
       .map { result =>
         assertEquals(result, Some(Vector.empty[Long]))
@@ -160,7 +159,7 @@ class TransactionSpec extends munit.FunSuite {
 
   test("a transaction carrying a blocking command fails fast without reaching the socket") {
     val factory  = scripted(Seq(ok))
-    val blocking = Pipeline.sequence(Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking)))
+    val blocking = Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking))
     Client.connectWith(factory).flatMap(_.transaction(_.exec(blocking))).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
     }

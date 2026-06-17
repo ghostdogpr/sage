@@ -15,7 +15,7 @@ val tuple = client.pipeline(
   (
     Commands.get[String, String]("pipe:a"),
     Commands.incrBy("pipe:n", 5)
-  ).pipeline
+  )
 )
 // tuple: (Option[String], Long)
 ```
@@ -28,12 +28,19 @@ for {
              (
                Commands.get[String, String]("pipe:a"),
                Commands.incrBy("pipe:n", 5)
-             ).pipeline
+             )
            )
 } yield tuple // (Option[String], Long)
 ```
 
 :::
+
+A tuple gives a fixed-arity, heterogeneous result. When the commands are built dynamically and share a result type, pass a `Seq[Command[A]]` instead and get back a `Vector[A]` in the same order (an empty `Seq` is a no-op that never touches the socket):
+
+```scala
+val ids = List("a", "b", "c")
+client.pipeline(ids.map(id => Commands.get[String, String](id))) // F[Vector[Option[String]]]
+```
 
 By default a pipeline fails as a whole if any position fails. Use `pipelineAttempt` to keep each position's outcome separate, so one failing command does not sink the others:
 
@@ -47,7 +54,7 @@ val attempt = client.pipelineAttempt(
   (
     Commands.get[String, String]("pipe:str"),
     Commands.incr("pipe:str")
-  ).pipeline
+  )
 )
 ```
 
@@ -60,7 +67,7 @@ for {
                (
                  Commands.get[String, String]("pipe:str"),
                  Commands.incr("pipe:str")
-               ).pipeline
+               )
              )
 } yield attempt
 ```
@@ -81,7 +88,7 @@ val result = client.transaction { tx =>
   tx.watch("tx:n")
   tx.get[Int]("tx:n")
   tx.exec(
-    (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline
+    (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4))
   )
 }
 // result: Some((2, 6)), or None if "tx:n" changed before EXEC
@@ -98,7 +105,7 @@ for {
                          (
                            Commands.incr("tx:n"),
                            Commands.incrBy("tx:n", 4)
-                         ).pipeline
+                         )
                        )
               } yield res
             }
