@@ -179,7 +179,7 @@ val tuple = client.pipeline(
   (
     Commands.get[String, String]("pipe:a"),
     Commands.incrBy("pipe:n", 5)
-  ).pipeline
+  )
 )
 ```
 
@@ -191,7 +191,7 @@ for {
              (
                Commands.get[String, String]("pipe:a"),
                Commands.incrBy("pipe:n", 5)
-             ).pipeline
+             )
            )
 } yield tuple
 ```
@@ -208,7 +208,7 @@ val result = client.transaction { tx =>
   tx.watch("tx:n")
   tx.get[Int]("tx:n")
   tx.exec(
-    (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)).pipeline
+    (Commands.incr("tx:n"), Commands.incrBy("tx:n", 4))
   )
 }
 ```
@@ -224,7 +224,7 @@ for {
                          (
                            Commands.incr("tx:n"),
                            Commands.incrBy("tx:n", 4)
-                         ).pipeline
+                         )
                        )
               } yield res
             }

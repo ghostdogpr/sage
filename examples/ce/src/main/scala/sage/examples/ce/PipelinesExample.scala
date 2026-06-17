@@ -15,10 +15,10 @@ object PipelinesExample {
     for {
       _       <- client.set("pipe:a", "x")
       _       <- client.set("pipe:n", 10)
-      tuple   <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy("pipe:n", 5)).pipeline)
+      tuple   <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy("pipe:n", 5)))
       _       <- client.set("pipe:str", "hello")
       // INCR on a non-numeric string fails only at its own position; the GET still succeeds
-      attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr("pipe:str")).pipeline)
+      attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr("pipe:str")))
       _       <- IO.println(s"tuple=$tuple attempt=$attempt")
     } yield ()
 }

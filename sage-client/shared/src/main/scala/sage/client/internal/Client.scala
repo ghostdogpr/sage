@@ -2009,8 +2009,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 }
 
 /**
-  * The user-facing handle owning all connections to one server: the command surface, plus pipelines and transactions. Commands compose into
-  * a [[Pipeline]] value (built from [[sage.commands.Commands]]) that `pipeline` sends in one round-trip, yielding a typed result per command.
+  * The user-facing handle owning all connections to one server: the command surface, plus pipelines and transactions. A batch of
+  * [[sage.commands.Commands]] handed to `pipeline` is sent in one round-trip, yielding a typed result per command.
   */
 // one independent keyspace a full SCAN sweep visits: a single node standalone, one per slot-owning master in cluster. `node` is None when
 // the backend has no node to pin to (standalone, or a not-yet-discovered cluster topology), in which case the command runs through normal routing.
@@ -2046,15 +2046,35 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     */
   def cached[A](command: Command[A], ttl: FiniteDuration): F[A]
 
-  /**
-    * Runs a [[sage.commands.Pipeline]] in one round-trip, yielding its typed result tuple. Fails if any position fails.
-    */
-  def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
+  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
+
+  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
 
   /**
-    * Like [[pipeline]], but yields the per-position results, each slot a `Right`/`Left`, instead of failing on the first error.
+    * Runs a fixed-arity batch of commands in one round-trip, yielding a result tuple that mirrors the argument tuple element-for-element
+    * (`pipeline((get, incr))` → `F[(Option[V], Long)]`). Fails if any position fails; use [[pipelineAttempt]] to keep per-position errors.
     */
-  def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
+  def pipeline[T <: NonEmptyTuple](commands: T)(using Tuple.IsMappedBy[Command][T]): F[Tuple.InverseMap[T, Command]] =
+    pipeline(Pipeline.fromTuple(commands))
+
+  /**
+    * Runs a dynamic, homogeneous batch of commands in one round-trip, yielding one result per command in order. An empty batch is a no-op
+    * that yields an empty `Vector` without touching the socket.
+    */
+  def pipeline[A](commands: Seq[Command[A]]): F[Vector[A]] =
+    pipeline(Pipeline.sequence(commands))
+
+  /**
+    * Like the tuple [[pipeline]], but yields the per-position results, each slot a `Right`/`Left`, instead of failing on the first error.
+    */
+  def pipelineAttempt[T <: NonEmptyTuple](commands: T)(using Tuple.IsMappedBy[Command][T]): F[Tuple.Map[Tuple.InverseMap[T, Command], Attempt]] =
+    pipelineAttempt(Pipeline.fromTuple(commands))
+
+  /**
+    * Like the `Seq` [[pipeline]], but yields the per-position results, each slot a `Right`/`Left`, instead of failing on the first error.
+    */
+  def pipelineAttempt[A](commands: Seq[Command[A]]): F[Vector[Attempt[A]]] =
+    pipelineAttempt(Pipeline.sequence(commands))
 
   /**
     * Opens a [[TransactionScope]] on a leased Dedicated Connection for `MULTI`/`EXEC`, optionally guarded by `WATCH`.
@@ -2098,8 +2118,8 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     new Client[F, K2] {
       def run[A](command: Command[A]): F[A]                                     = self.run(command)
       def cached[A](command: Command[A], ttl: FiniteDuration): F[A]             = self.cached(command, ttl)
-      def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                         = self.pipeline(p)
-      def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                    = self.pipelineAttempt(p)
+      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]           = self.pipeline(p)
+      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]      = self.pipelineAttempt(p)
       def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]           = self.transaction(scope => body(scope.as[K2]))
       def subscribeChannels[V: ValueCodec](channel: String, rest: String*)      = self.subscribeChannels(channel, rest*)
       def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)      = self.subscribePatterns(pattern, rest*)
@@ -2311,10 +2331,10 @@ object Client {
 
     def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] = run(command)
 
-    def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
+    private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
 
-    def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
+    private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
       submitPipeline(p).map(p.toResults)
 
     // The lease is bracketed: release runs on success, failure, and interruption (IO.bracket). A clean exit (exec/discard cleared the
@@ -2456,13 +2476,13 @@ object Client {
         }
       }
 
-    def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
+    private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
       runExec(p).flatMap {
         case None          => CIO.value(None)
         case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
       }
 
-    def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
+    private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
       runExec(p).map(_.map(p.toResults))
 
     // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).

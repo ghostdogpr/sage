@@ -8,7 +8,7 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.{ConnectionLost, ServerError}
 import sage.client.DedicatedPoolConfig
-import sage.commands.{Connection, Pipeline, Strings}
+import sage.commands.{Connection, Strings}
 import sage.protocol.Frame
 
 class TxScopeFaultSpec extends munit.FunSuite {
@@ -56,7 +56,7 @@ class TxScopeFaultSpec extends munit.FunSuite {
       else if (p.asUtf8String.contains("MULTI")) Seq(Frame.SimpleString("OK"), readonly, Frame.SimpleError("EXECABORT discarded"))
       else Seq(Frame.SimpleString("OK"))
     val (scope, faults)              = txScope(respond)
-    scope.exec(Pipeline.sequence(Vector(Strings.set("k", "v")))).unsafeRun.failed.map { _ =>
+    scope.exec(Vector(Strings.set("k", "v"))).unsafeRun.failed.map { _ =>
       assert(faults.exists(isOwnershipFault), s"expected an ownership fault, got $faults")
     }
   }

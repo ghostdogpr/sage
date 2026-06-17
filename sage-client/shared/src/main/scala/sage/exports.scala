@@ -129,7 +129,6 @@ export sage.commands.{
   ZRange
 }
 export sage.commands.{as, asArray, asArrayOf, asLong, asString}
-export sage.commands.{Command, Commands, Execution, Pipeline}
-export sage.commands.Pipeline.pipeline
+export sage.commands.{Attempt, Command, Commands, Execution}
 // raw-Frame escape hatch for eval/fcall replies
 export sage.protocol.Frame

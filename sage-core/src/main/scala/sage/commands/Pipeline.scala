@@ -3,12 +3,20 @@ package sage.commands
 import sage.SageException
 
 /**
-  * An applicative composition of Commands sent in one round-trip, yielding one typed result per command. Not a transaction — no
-  * atomicity. `Out` is the all-success shape; `Results` is the per-position shape, each slot an `Either[SageException, _]`. The runtime
-  * decodes every position independently into a `Vector[Either[SageException, Any]]`, then either collapses it to `Out` (strict) or shapes
-  * it to `Results` (attempt); the `Any` is confined to the assemblers below and never reaches a caller.
+  * One pipeline (or transaction) position's outcome: `Right` on success, `Left` carrying the per-position error. This is the element type of
+  * the `*Attempt` result shapes (`Vector[Attempt[A]]` for a homogeneous batch, a tuple of `Attempt`s for a fixed-arity one).
   */
-final class Pipeline[Out, Results] private[commands] (
+type Attempt[A] = Either[SageException, A]
+
+/**
+  * The internal assembler behind the `pipeline`/`exec` command-batch sugar: an applicative composition of Commands sent in one round-trip,
+  * yielding one typed result per command. Not a transaction, so no atomicity. Callers never name this type; they hand `pipeline`/`exec` a tuple
+  * of Commands (fixed arity, heterogeneous results) or a `Seq[Command[A]]` (dynamic arity, homogeneous), and the runtime builds one of these.
+  * `Out` is the all-success shape; `Results` is the per-position shape, each slot an [[Attempt]]. The runtime decodes every position
+  * independently into a `Vector[Either[SageException, Any]]`, then either collapses it to `Out` (strict) or shapes it to `Results` (attempt);
+  * the `Any` is confined to the assemblers below and never reaches a caller.
+  */
+final private[sage] class Pipeline[Out, Results] private[commands] (
   /**
     * The composed commands, in send order.
     */
@@ -17,12 +25,7 @@ final class Pipeline[Out, Results] private[commands] (
   private[sage] val toResults: Vector[Either[SageException, Any]] => Results
 )
 
-object Pipeline {
-
-  /**
-    * One pipeline position's outcome: `Right` on success, `Left` carrying the per-position error.
-    */
-  type Attempt[A] = Either[SageException, A]
+private[sage] object Pipeline {
 
   /**
     * A dynamic, homogeneous pipeline. An empty sequence is a no-op that yields an empty result without touching the socket.
@@ -35,17 +38,17 @@ object Pipeline {
     )
 
   /**
-    * Tuple syntax: a tuple of `Command`s composes into a pipeline whose result tuple mirrors it element-for-element. `(get, incr).pipeline`
-    * yields `Pipeline[(Option[V], Long), (Attempt[Option[V]], Attempt[Long])]`.
+    * A fixed-arity pipeline from a tuple of `Command`s, whose result tuple mirrors it element-for-element. `(get, incr)` yields
+    * `Pipeline[(Option[V], Long), (Attempt[Option[V]], Attempt[Long])]`.
     */
-  extension [T <: NonEmptyTuple](commands: T) {
-    def pipeline(using Tuple.IsMappedBy[Command][T]): Pipeline[Tuple.InverseMap[T, Command], Tuple.Map[Tuple.InverseMap[T, Command], Attempt]] = {
-      val cmds = commands.toList.asInstanceOf[List[Command[?]]].toVector
-      new Pipeline(
-        cmds,
-        values => Tuple.fromArray(values.toArray).asInstanceOf[Tuple.InverseMap[T, Command]],
-        results => Tuple.fromArray(results.toArray).asInstanceOf[Tuple.Map[Tuple.InverseMap[T, Command], Attempt]]
-      )
-    }
+  def fromTuple[T <: NonEmptyTuple](
+    commands: T
+  )(using Tuple.IsMappedBy[Command][T]): Pipeline[Tuple.InverseMap[T, Command], Tuple.Map[Tuple.InverseMap[T, Command], Attempt]] = {
+    val cmds = commands.toList.asInstanceOf[List[Command[?]]].toVector
+    new Pipeline(
+      cmds,
+      values => Tuple.fromArray(values.toArray).asInstanceOf[Tuple.InverseMap[T, Command]],
+      results => Tuple.fromArray(results.toArray).asInstanceOf[Tuple.Map[Tuple.InverseMap[T, Command], Attempt]]
+    )
   }
 }

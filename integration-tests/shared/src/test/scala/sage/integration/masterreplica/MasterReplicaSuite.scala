@@ -11,7 +11,7 @@ import sage.{Bytes, Message}
 import sage.SageException.DecodeError
 import sage.client.{Endpoint, MasterReplicaConfig, ReadFrom, SageConfig, Topology}
 import sage.client.internal.Client
-import sage.commands.{Command, Commands, Pipeline}
+import sage.commands.{Command, Commands}
 import sage.integration.{ContainerClient, Images}
 import sage.protocol.Frame
 
@@ -151,7 +151,7 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
         connectAndUse(replicaCfg)(ensureReplicating(_, host, pr)).flatMap { _ =>
           connectAndUse(masterReplica(host, pm, ReadFrom.ReplicaPreferred)) { client =>
             for {
-              commit  <- client.transaction(tx => tx.exec(Pipeline.sequence(Vector(Commands.incr[String]("mr:c"), Commands.incr[String]("mr:c")))))
+              commit  <- client.transaction(tx => tx.exec(Vector(Commands.incr[String]("mr:c"), Commands.incr[String]("mr:c"))))
               sub     <- client.subscribeChannels[String]("mr:news")
               count   <- client.publish("mr:news", "hello")
               message <- sub.next

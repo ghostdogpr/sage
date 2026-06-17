@@ -11,7 +11,7 @@ import kyo.compat.*
 import sage.{Bytes, Outcome, SageEvent, SageListener}
 import sage.SageException.{NotConnected, UnsupportedServer}
 import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
-import sage.commands.{Command, Execution, Pipeline}
+import sage.commands.{Command, Execution}
 import sage.protocol.Frame
 
 class ConnectSpec extends munit.FunSuite {
@@ -115,7 +115,7 @@ class ConnectSpec extends munit.FunSuite {
 
   test("a pipeline carrying a blocking command fails fast without reaching the socket") {
     val (factory, transport) = scripted(helloThenPong)
-    val blocking             = Pipeline.sequence(Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking)))
+    val blocking             = Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking))
     Client.connectWith(factory).flatMap(_.pipeline(blocking)).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
       assertEquals(transport().written.count(_.asUtf8String.contains("BLPOP")), 0)
@@ -134,7 +134,7 @@ class ConnectSpec extends munit.FunSuite {
       }
     }
     val get                  = Command("GET", Command.NoKeys, Vector.empty, (_: Frame) => Right(0L))
-    val twoGets              = Pipeline.sequence(Vector(get, get))
+    val twoGets              = Vector(get, get)
     Client
       .connectWith(factory, scheduler, events = Events(Vector(listener)))
       .flatMap { client =>
@@ -154,7 +154,7 @@ class ConnectSpec extends munit.FunSuite {
 
   test("an empty pipeline succeeds without a round-trip") {
     val (factory, transport) = scripted(helloThenPong)
-    val empty                = Pipeline.sequence(Vector.empty[Command[Long]])
+    val empty                = Vector.empty[Command[Long]]
     Client.connectWith(factory).flatMap(_.pipeline(empty)).unsafeRun.map { result =>
       assertEquals(result, Vector.empty[Long])
       // exclude the bootstrap commands (HELLO, CLIENT SETINFO/TRACKING); the empty pipeline itself causes no write
