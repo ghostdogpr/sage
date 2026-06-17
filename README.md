@@ -2,13 +2,13 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-**Sage** is a **modern Scala 3 client** for **[Redis](https://redis.io)** and **[Valkey](https://valkey.io)**.
+**Sage** is a **Redis & Valkey client for Scala 3**: one client for any effect system, built on a from-scratch native Redis protocol implementation.
 
-It is designed to be **native**, meaning there is no Java client wrapped underneath: the wire protocol, commands, and codecs are implemented directly in Scala.
+**Use any effect system.** First-class [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com) artifacts, each with its ecosystem's native types and no wrapper visible.
 
-It is built as a **pure sans-IO core** (RESP3 protocol, typed commands, codecs) with **zero dependencies**, plus a **runtime written once** against [kyo-compat](https://github.com/getkyo/kyo/tree/main/kyo-compat) and cross-published per backend. This makes it usable from **multiple effect ecosystems** ([ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com)), each with its own native types and no wrapper visible.
+**Fast, native Redis protocol.** RESP3, commands, and codecs implemented directly in Scala 3, with no Java client wrapped underneath and fast by design.
 
-It targets **RESP3** and modern **Redis 8+ / Valkey 8+**, with automatic pipelining, typed commands composable into pipelines and `MULTI`/`EXEC` transactions, standalone and cluster behind one client type, pub/sub (including sharded), client-side caching, and TLS and ACL auth.
+**Modern and feature-rich.** [Redis](https://redis.io) 8+ and [Valkey](https://valkey.io) 8+ with auto-pipelining, transactions, cluster, sharded pub/sub, client-side caching, and TLS.
 
 It is available for Scala 3.3.x LTS and later versions, and requires JDK 21+.
 
