@@ -11,9 +11,32 @@ private[codec] object Primitives {
 
   private val True       = Bytes.utf8("1")
   private val False      = Bytes.utf8("0")
+  private val Zero       = Bytes.utf8("0")
   private val MaxPreview = 64
 
-  def encodeNumber[A](value: A): Bytes = Bytes.utf8(value.toString)
+  def encodeInt(value: Int): Bytes = encodeLong(value.toLong)
+
+  // digits come from the negative magnitude (`value % 10` is <= 0), so Long.MinValue, which has no positive counterpart, is safe
+  def encodeLong(value: Long): Bytes =
+    if (value == 0L) Zero
+    else {
+      val negative  = value < 0
+      var counter   = value
+      var digits    = 0
+      while (counter != 0L) { counter /= 10; digits += 1 }
+      val start     = if (negative) 1 else 0
+      val out       = new Array[Byte](start + digits)
+      var i         = out.length - 1
+      var remaining = value
+      while (i >= start) {
+        val digit = if (negative) -(remaining % 10) else remaining % 10
+        out(i) = ('0' + digit).toByte
+        remaining /= 10
+        i -= 1
+      }
+      if (negative) out(0) = '-'
+      Bytes.wrap(IArray.unsafeFromArray(out))
+    }
 
   def encodeBoolean(value: Boolean): Bytes = if (value) True else False
 
