@@ -100,7 +100,7 @@ final private[client] class DedicatedPool(
     else
       locked {
         discardLocked(connection)
-        available.signalAll()
+        available.signal()
       }
 
   private[internal] def wakeWaiters(): Unit = locked(available.signalAll())
@@ -146,7 +146,7 @@ final private[client] class DedicatedPool(
       try DedicatedConnection.establish(factory, bootstrap, connectTimeoutMillis)
       catch {
         case e: Throwable =>
-          locked { reserved -= 1; available.signalAll() }
+          locked { reserved -= 1; available.signal() }
           lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
           throw e
       }
@@ -154,13 +154,13 @@ final private[client] class DedicatedPool(
     reserved -= 1
     // stamp with the epoch live the moment it joins the pool, so a connection built across a reconnect is born current, never stale
     if (closing) {
-      available.signalAll()
+      available.signal()
       scheduleClose(connection)
       throw NotConnected()
     }
     liveGeneration() match {
       case None      =>
-        available.signalAll()
+        available.signal()
         scheduleClose(connection)
         throw NotConnected()
       case Some(gen) =>
@@ -187,7 +187,7 @@ final private[client] class DedicatedPool(
     locked {
       if (closing || !healthyAndCurrent(connection)) discardLocked(connection)
       else idle.append(DedicatedPool.Idle(connection, scheduler.nowMillis))
-      available.signalAll()
+      available.signal()
     }
 
   private def sweepExpired(): Unit = {

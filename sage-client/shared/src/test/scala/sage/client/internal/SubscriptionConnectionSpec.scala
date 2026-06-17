@@ -202,6 +202,29 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assertChannel(nextBlocking(sub), "news", "after-reconnect")
   }
 
+  test("a steady stream of message pushes does not suppress the keepalive PING (push proves only the read path)") {
+    val silentToPing: Bytes => Seq[Frame]   = { payload =>
+      val s = payload.asUtf8String
+      if (s.contains("\r\nSELECT\r\n")) Seq(Frame.SimpleString("OK"))
+      else if (s.contains("\r\nSUBSCRIBE\r\n")) confirmations("subscribe", s)
+      else Nil // silent to PING, so a fired keepalive goes unanswered and the watchdog must eventually kill the socket
+    }
+    val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
+    val (connection, scheduler, transports) = make(watchdog = watchdog, respond = silentToPing, bootstrap = Vector(Connection.select(0)))
+    val _                                   = connection.subscribeChannels(Vector("news"))
+    assertEquals(transports.size, 1)
+
+    var iteration = 0
+    while (iteration < 3) {
+      transports.head.emit(message("news", "tick"))
+      scheduler.advance(90.millis)
+      iteration += 1
+    }
+
+    assertEquals(transports.head.closeCount, 1, "the watchdog killed the socket despite continuous inbound pushes")
+    assertEquals(transports.size, 2, "the killed connection reconnected")
+  }
+
   test("subscribing to multiple channels in one call delivers messages from any of them") {
     val (connection, _, transports) = make()
     val sub                         = connection.subscribeChannels(Vector("a", "b"))

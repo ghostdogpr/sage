@@ -53,11 +53,18 @@ object TrustSource {
 
   case object System extends TrustSource
 
+  /**
+    * Server-trust only: the trust store supplies the certificates the client verifies the server against, never client key material. A
+    * server that demands a client certificate (mutual TLS) fails the handshake under this source — use [[Custom]] to supply key managers.
+    */
   final case class TrustStore(path: Path, password: Option[String] = None) extends TrustSource {
     // keep the keystore password out of logs and error messages that print a SageConfig
     override def toString: String = s"TrustStore($path, password=${password.fold("None")(_ => "<redacted>")})"
   }
 
+  /**
+    * Server-trust only, like [[TrustStore]]: a PEM of trusted certificates, never client key material. Mutual TLS must go through [[Custom]].
+    */
   final case class Pem(path: Path) extends TrustSource
 
   // the escape hatch, and the path for mutual TLS via the caller's own key managers

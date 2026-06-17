@@ -302,10 +302,10 @@ final private[client] class SubscriptionConnection(
       if (reconnect) scheduleReconnect(0)
     }
 
-  private def onFrame(frame: Frame): Unit = {
-    lastReplyAtMillis = scheduler.nowMillis
+  private def onFrame(frame: Frame): Unit =
     frame match {
       case Frame.Push(elements) =>
+        // not touching lastReplyAtMillis: a push proves only the read path, so push-only traffic must still get the idle keepalive PING
         Pubsub.decode(elements) match {
           case Some(Pubsub.Event.Message(channel, payload))            => dispatch(channelSinks, channel, Delivery.Channel(channel, payload))
           case Some(Pubsub.Event.ShardMessage(channel, payload))       => dispatch(shardSinks, channel, Delivery.Channel(channel, payload))
@@ -314,10 +314,10 @@ final private[client] class SubscriptionConnection(
           case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
       case reply                => // a non-push reply is the bootstrap HELLO or the watchdog's PONG
+        lastReplyAtMillis = scheduler.nowMillis
         val waiter = bootstrapWaiter
         if (waiter != null) waiter(reply) else pingSentAtMillis = 0L
     }
-  }
 
   // snapshot the sinks under the lock, then deliver outside it: a blocking put (backpressure) must never hold the registry lock
   private def dispatch(map: mutable.HashMap[String, mutable.LinkedHashSet[Sink]], key: String, delivery: Delivery): Unit = {
