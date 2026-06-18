@@ -287,10 +287,10 @@ final private[client] class ClusterLive(
     val masters = slotOwningMasters(topology)
     if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
     else {
-      val raw                                       = command.rawFrame
-      val frames                                    = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](masters.size)
-      val remaining                                 = new java.util.concurrent.atomic.AtomicInteger(masters.size)
-      val firstError                                = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
+      val raw                                          = command.rawFrame
+      val frames                                       = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](masters.size)
+      val remaining                                    = new java.util.concurrent.atomic.AtomicInteger(masters.size)
+      val firstError                                   = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
       def settle(index: Int, result: Try[Frame]): Unit = {
         result match {
           case Success(frame) => frames.set(index, frame)
