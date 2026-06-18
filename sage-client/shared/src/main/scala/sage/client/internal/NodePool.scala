@@ -101,20 +101,35 @@ final private[client] class NodePool(
   }
 
   def close(): Unit = {
-    val all = locked { closed = true; val snap = established.values.toVector; established.clear(); snap }
+    val (all, waiters) = locked {
+      closed = true
+      val snap    = established.values.toVector
+      val pending = pendingEstablish.values.toVector
+      established.clear()
+      pendingEstablish.clear()
+      (snap, pending)
+    }
+    // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still
+    // observes `closed` on return and closes the node it opened
+    waiters.foreach(_.fail(NotConnected()))
     all.foreach(_.close())
   }
 }
 
 private[client] object NodePool {
 
-  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get` and observe the same success or failure
+  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get` and observe the same success or failure. The
+  // first settle wins, so a `close` that fails the waiters cannot be overwritten by a late establisher.
   final private class Establish {
     private val latch                                           = new CountDownLatch(1)
+    private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)
     @volatile private var result: Either[Throwable, NodeClient] = null
 
-    def succeed(nc: NodeClient): Unit = { result = Right(nc); latch.countDown() }
-    def fail(error: Throwable): Unit  = { result = Left(error); latch.countDown() }
+    def succeed(nc: NodeClient): Unit = settle(Right(nc))
+    def fail(error: Throwable): Unit  = settle(Left(error))
+
+    private def settle(outcome: Either[Throwable, NodeClient]): Unit =
+      if (settled.compareAndSet(false, true)) { result = outcome; latch.countDown() }
 
     def get(): NodeClient = {
       latch.await()

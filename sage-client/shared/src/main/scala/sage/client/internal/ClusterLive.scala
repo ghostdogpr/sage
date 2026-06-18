@@ -16,7 +16,7 @@ import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Cluster, Command, Connection, Pipeline}
+import sage.commands.{Cluster, Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
 
 /**
@@ -163,7 +163,9 @@ final private[client] class ClusterLive(
     if (closed) complete(Failure(NotConnected()))
     else {
       val topology = topologyRef.get()
-      if (command.allMasters) sendToAllMasters(topology, command, complete)
+      if (command.allMasters)
+        if (command.aggregate) sendToAllMastersAggregated(topology, command, complete)
+        else sendToAllMasters(topology, command, complete)
       else
         topology.route(command) match {
           case Route.ToNode(node, slot) =>
@@ -188,7 +190,7 @@ final private[client] class ClusterLive(
     tryReadCandidates(command, ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()), master, redirectsLeft, complete)
   }
 
-  // a keyless eligible read (KEYS, RANDOMKEY): round-robin over every replica, falling back per policy, so strict Replica never hits a master
+  // a keyless eligible read (RANDOMKEY): round-robin over every replica, falling back per policy, so strict Replica never hits a master
   private def sendKeylessRead[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     pickNode(topology) match {
       case Some(master) =>
@@ -278,6 +280,57 @@ final private[client] class ClusterLive(
       }
     }
   }
+
+  // an aggregating broadcast (KEYS): every slot-owning master returns its node-local slice, which we merge as raw frames and decode once,
+  // since no single node sees the whole keyspace; any node failing fails the command
+  private def sendToAllMastersAggregated[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit): Unit = {
+    val masters = slotOwningMasters(topology)
+    if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
+    else {
+      val raw                                          = command.rawFrame
+      val frames                                       = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](masters.size)
+      val remaining                                    = new java.util.concurrent.atomic.AtomicInteger(masters.size)
+      val firstError                                   = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
+      def settle(index: Int, result: Try[Frame]): Unit = {
+        result match {
+          case Success(frame) => frames.set(index, frame)
+          case Failure(e)     => firstError.compareAndSet(null, e)
+        }
+        if (remaining.decrementAndGet() == 0)
+          Option(firstError.get()) match {
+            case Some(e) => complete(Failure(e))
+            case None    => complete(decodeMerged(command, mergeFrames(frames, masters.size)))
+          }
+      }
+      masters.iterator.zipWithIndex.foreach { case (node, index) =>
+        val nc =
+          try getOrEstablish(node)
+          catch { case NonFatal(_) => null }
+        if (nc == null) settle(index, Failure(NotConnected()))
+        else nc.submit[Frame](raw, asking = false, result => settle(index, result))
+      }
+    }
+  }
+
+  private def mergeFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Frame = {
+    val merged = Vector.newBuilder[Frame]
+    var i      = 0
+    while (i < size) {
+      frames.get(i) match {
+        case Frame.Array(elements) => merged ++= elements
+        case Frame.Set(elements)   => merged ++= elements
+        case other                 => merged += other
+      }
+      i += 1
+    }
+    Frame.Array(merged.result())
+  }
+
+  private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] =
+    Reply.run(command, merged) match {
+      case Right(value) => Success(value)
+      case Left(error)  => Failure(error)
+    }
 
   private def sendToAny[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     pickNode(topology) match {
@@ -393,12 +446,12 @@ final private[client] class ClusterLive(
     // a blocking command is a programmer error: fail the whole effect up front, never a single position
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
-    // a Pipeline batches per node, so an all-masters command (SCRIPT LOAD, FUNCTION LOAD, …) would load one node only and break a later
-    // key-routed EVALSHA/FCALL; fail up front rather than partially apply it
+    // a Pipeline batches per node, so an all-masters command (SCRIPT LOAD, FUNCTION LOAD, KEYS, …) would touch one node only and either
+    // break a later key-routed EVALSHA/FCALL or return a partial keyspace; fail up front rather than partially apply it
     else if (p.commands.exists(_.allMasters))
       CIO.fail(
         new IllegalArgumentException(
-          "a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD); run it individually on the client"
+          "a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD, KEYS); run it individually on the client"
         )
       )
     else

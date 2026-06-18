@@ -104,7 +104,8 @@ final private[client] class ClientCache(maxBytes: Long) {
 
   private def insert(key: Key, entry: Entry): Unit = {
     val previous = entries.put(key, entry)
-    if (previous != null) bytesUsed -= previous.sizeBytes
+    // drop the replaced entry before recording the new mappings, so a key shared by both is not removed right after being re-added
+    if (previous != null) dropAccounting(key, previous)
     entry.keys.foreach(k => reverse.getOrElseUpdate(k, mutable.HashSet.empty) += key)
     bytesUsed += entry.sizeBytes
     val it       = entries.entrySet().iterator()
