@@ -111,8 +111,18 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
       else CIO.sleep(500.millis).flatMap(_ => awaitClusterOk(container, attempts - 1))
     }
 
+  // `cluster_state:ok` flips before every node will actually serve writes, so a freshly formed cluster can briefly answer CLUSTERDOWN; retry
+  // each write across that warm-up window, as a real application would, so the failover the test means to exercise is not masked by a startup race
+  private def writeKey(client: Client[CIO, String], key: String, attempts: Int): CIO[Unit] =
+    client
+      .set(key, key)
+      .fold(
+        _ => CIO.value(()),
+        error => if (attempts <= 0) CIO.fail(error) else CIO.sleep(200.millis).flatMap(_ => writeKey(client, key, attempts - 1))
+      )
+
   private def writeAll(client: Client[CIO, String], keys: Vector[String]): CIO[Unit] =
-    keys.foldLeft(CIO.value(()))((acc, key) => acc.flatMap(_ => client.set(key, key).map(_ => ())))
+    keys.foldLeft(CIO.value(()))((acc, key) => acc.flatMap(_ => writeKey(client, key, 150)))
 
   // retry a read across the failover window until the client refreshes onto the promoted master; each key stores its own name
   private def recoverKey(client: Client[CIO, String], key: String, attempts: Int): CIO[Boolean] =
