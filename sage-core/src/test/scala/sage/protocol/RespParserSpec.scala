@@ -163,6 +163,14 @@ class RespParserSpec extends munit.FunSuite {
     assert(parseError("*1\r\n" * 1000 + ":1\r\n").message.contains("aggregate nesting exceeds"))
   }
 
+  test("accepts nesting exactly at the depth bound and rejects one level past it") {
+    val maxDepth        = 512
+    var expected: Frame = Frame.Integer(1)
+    for (_ <- 1 to maxDepth) expected = Frame.Array(Vector(expected))
+    assertEquals(parseOne("*1\r\n" * maxDepth + ":1\r\n"), expected)
+    assert(parseError("*1\r\n" * (maxDepth + 1) + ":1\r\n").message.contains("aggregate nesting exceeds"))
+  }
+
   test("resumes a deeply nested aggregate fed one byte at a time") {
     val deep            = 50
     val wire            = ("*1\r\n" * deep + ":1\r\n").getBytes

@@ -10,7 +10,7 @@ import sage.Bytes
 import sage.SageException.{CrossSlot, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
-import sage.commands.{Command, Connection, Strings}
+import sage.commands.{Command, Connection, Keys, Strings}
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -127,6 +127,25 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some(owner.host))
       assert(fixture.written(owner).exists(_.contains("GET")), "owner did not receive GET")
       assert(!fixture.written(other).exists(_.contains("GET")), "non-owner received GET")
+    }
+  }
+
+  test("KEYS broadcasts to every slot-owning master and concatenates the per-node slices") {
+    // nodeA owns the lower half, nodeB the upper half; KEYS is node-local, so each returns only its own keys
+    val mid             = Slot.Count / 2
+    val aKeys           = Vector("a1", "a2")
+    val bKeys           = Vector("b1")
+    def bulk(s: String) = Frame.BulkString(Bytes.utf8(s))
+    val behaviour       = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("KEYS")) Seq(Frame.Array((if (node == nodeA) aKeys else bKeys).map(bulk)))
+      else Seq(Frame.Null)
+    val fixture         = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Keys.keys[String]("*")).unsafeRun.map { result =>
+      assertEquals(result.toSet, (aKeys ++ bKeys).toSet)
+      assert(fixture.written(nodeA).exists(_.contains("KEYS")), "nodeA did not receive KEYS")
+      assert(fixture.written(nodeB).exists(_.contains("KEYS")), "nodeB did not receive KEYS")
     }
   }
 

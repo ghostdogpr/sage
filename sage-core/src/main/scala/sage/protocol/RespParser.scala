@@ -163,7 +163,6 @@ final private[sage] class RespParser {
   // or Invalid (`failMessage` set)
   private def produceValue(): Int =
     if (readPos >= writePos) Incomplete
-    else if (stackDepth > MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
     else {
       val pos = readPos
       (buf(pos).toChar: @switch) match {
@@ -275,7 +274,6 @@ final private[sage] class RespParser {
       val agg = new Agg(kind, count)
       agg.elements = Vector.newBuilder[Frame]
       push(agg)
-      Opened
     }
   }
 
@@ -288,19 +286,22 @@ final private[sage] class RespParser {
       val agg = new Agg(kind, count)
       if (kind == Map) agg.pairs = Vector.newBuilder[(Frame, Frame)]
       push(agg)
-      Opened
     }
   }
 
-  private def push(agg: Agg): Unit = {
-    if (stackDepth == stack.length) {
-      val grown = new Array[Agg](math.min(stack.length * 2, MaxDepth + 1))
-      System.arraycopy(stack, 0, grown, 0, stackDepth)
-      stack = grown
+  // bounds nesting at open time (not on every value), so a leaf at the deepest allowed level is still accepted
+  private def push(agg: Agg): Int =
+    if (stackDepth >= MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
+    else {
+      if (stackDepth == stack.length) {
+        val grown = new Array[Agg](math.min(stack.length * 2, MaxDepth))
+        System.arraycopy(stack, 0, grown, 0, stackDepth)
+        stack = grown
+      }
+      stack(stackDepth) = agg
+      stackDepth += 1
+      Opened
     }
-    stack(stackDepth) = agg
-    stackDepth += 1
-  }
 
   // -1 is the RESP2 null marker; '+' is signed-integer syntax that the length grammar does not permit
   private def readLength(pos: Int, allowNull: Boolean): Int = {
