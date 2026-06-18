@@ -12,7 +12,7 @@ import kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, LoweredClient, ScanStep, ScanTarget, Subscription}
+import sage.client.internal.{Client, LoweredClient, Paged, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -66,30 +66,16 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
 
   private def scanStream[A](fetch: ScanCursor => (Ox ?=> ScanPage[A])): Ox ?=> Flow[A] =
     CStream
-      .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start)) {
-        case None         => CIO.value(None)
-        case Some(cursor) => CIO.lift(fetch(cursor)).map(page => Some((page.items, page.next)))
-      }
+      .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
       .flatMap(items => CStream.init(items))
       .lower
 
   // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
   private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => (Ox ?=> ScanPage[A])): Ox ?=> Flow[A] =
     CStream
-      .unfold[ScanStep, Vector[A]](ScanStep.Begin) {
-        case ScanStep.Begin                 =>
-          CIO
-            .lift(client.scanTargets)
-            .map(targets => if (targets.isEmpty) None else Some((Vector.empty[A], ScanStep.Visit(ScanCursor.start, targets))))
-        case ScanStep.Visit(cursor, remain) =>
-          CIO.lift(fetch(remain.head)(cursor)).map { page =>
-            page.next match {
-              case Some(next) => Some((page.items, ScanStep.Visit(next, remain)))
-              case None       => Some((page.items, if (remain.tail.isEmpty) ScanStep.End else ScanStep.Visit(ScanCursor.start, remain.tail)))
-            }
-          }
-        case ScanStep.End                   => CIO.value(None)
-      }
+      .unfold[ScanStep, Vector[A]](ScanStep.Begin)(
+        Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor)))
+      )
       .flatMap(items => CStream.init(items))
       .lower
 
@@ -103,14 +89,9 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     batch: Long = 100L
   ): Ox ?=> Flow[StreamEntry[F, V]] =
     CStream
-      .unfold[Option[StreamRangeId], Vector[StreamEntry[F, V]]](Some(start)) {
-        case None       => CIO.value(None)
-        case Some(from) =>
-          CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))).map { entries =>
-            if (entries.isEmpty) None
-            else Some((entries, if (entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
-          }
-      }
+      .unfold[Option[StreamRangeId], Vector[StreamEntry[F, V]]](Some(start))(
+        Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
+      )
       .flatMap(items => CStream.init(items))
       .lower
 
@@ -128,13 +109,9 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     count: Option[Long] = None
   ): Ox ?=> Flow[StreamEntry[F, V]] =
     CStream
-      .unfold[Option[StreamId], Vector[StreamEntry[F, V]]](Some(start)) {
-        case None       => CIO.value(None)
-        case Some(from) =>
-          CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))).map { result =>
-            Some((result.entries.filter(_.fields.nonEmpty), if (result.cursor == StreamId.Zero) None else Some(result.cursor)))
-          }
-      }
+      .unfold[Option[StreamId], Vector[StreamEntry[F, V]]](Some(start))(
+        Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
+      )
       .flatMap(items => CStream.init(items))
       .lower
 
@@ -150,12 +127,11 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     block: BlockTimeout = SageClient.defaultPoll
   ): Ox ?=> Flow[StreamEntry[F, V]] =
     CStream
-      .unfold[StreamId, Vector[StreamEntry[F, V]]](from) { last =>
-        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map { result =>
-          val entries = result.flatMap(_._2)
-          Some((entries, if (entries.isEmpty) last else entries.last.id))
-        }
-      }
+      .unfold[StreamId, Vector[StreamEntry[F, V]]](from)(
+        Paged.tail(last =>
+          CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
+        )
+      )
       .flatMap(items => CStream.init(items))
       .lower
 
@@ -185,17 +161,15 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     block: BlockTimeout
   ): Ox ?=> Flow[StreamEntry[F, V]] =
     CStream
-      .unfold[Either[StreamId, Unit], Vector[StreamEntry[F, V]]](Left(StreamId.Zero)) {
-        case Left(after) =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map { result =>
-            val entries = result.flatMap(_._2)
-            if (entries.isEmpty) Some((Vector.empty, Right(()))) else Some((entries, Left(entries.last.id)))
-          }
-        case Right(_)    =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block)))).map { result =>
-            Some((result.flatMap(_._2), Right(())))
-          }
-      }
+      .unfold[Either[StreamId, Unit], Vector[StreamEntry[F, V]]](Left(StreamId.Zero))(
+        Paged.consume(
+          drainPending = after =>
+            CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map(_.flatMap(_._2)),
+          tailNew = CIO
+            .lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))))
+            .map(_.flatMap(_._2))
+        )
+      )
       .flatMap(items => CStream.init(items))
       .lower
 
