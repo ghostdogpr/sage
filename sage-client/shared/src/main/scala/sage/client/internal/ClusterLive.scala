@@ -858,7 +858,16 @@ final private[client] class ClusterLive(
   }
 
   private def closeAll(): Unit = {
-    val all = lockedNodes { closed = true; val snapshot = established.values.toVector; established.clear(); snapshot }
+    val (all, waiters) = lockedNodes {
+      closed = true
+      val snapshot = established.values.toVector
+      val pending  = pendingEstablish.values.toVector
+      established.clear()
+      pendingEstablish.clear()
+      (snapshot, pending)
+    }
+    // release callers blocked on an in-flight connect; the establisher observes `closed` on return and closes the node it opened
+    waiters.foreach(_.fail(NotConnected()))
     subscriptions.close()
     replicaPool.close()
     all.foreach(_.close())
@@ -872,13 +881,18 @@ private[client] object ClusterLive {
     case Reroute, RefreshThenTerminal, Terminal
   }
 
-  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get` and observe the same success or failure
+  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get`. First settle wins, so a `close` that
+  // fails the waiters cannot be overwritten by a late establisher.
   final private class Establish {
     private val latch                                           = new CountDownLatch(1)
+    private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)
     @volatile private var result: Either[Throwable, NodeClient] = null
 
-    def succeed(nc: NodeClient): Unit = { result = Right(nc); latch.countDown() }
-    def fail(error: Throwable): Unit  = { result = Left(error); latch.countDown() }
+    def succeed(nc: NodeClient): Unit = settle(Right(nc))
+    def fail(error: Throwable): Unit  = settle(Left(error))
+
+    private def settle(outcome: Either[Throwable, NodeClient]): Unit =
+      if (settled.compareAndSet(false, true)) { result = outcome; latch.countDown() }
 
     def get(): NodeClient = {
       latch.await()
