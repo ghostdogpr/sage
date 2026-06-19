@@ -7,7 +7,7 @@ val munitVersion          = "1.3.2"
 val testcontainersVersion = "0.44.1"
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
-val kyoVersion        = "1.0.0-RC2+99-6f012d83-SNAPSHOT"
+val kyoVersion        = "1.0.0-RC4"
 val zioVersion        = "2.1.26"
 val catsEffectVersion = "3.7.0"
 val fs2Version        = "3.13.0"
