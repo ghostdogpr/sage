@@ -1,5 +1,6 @@
 # <img src="docs/public/sage.svg" height="34" alt="" valign="middle">&nbsp; Sage
 
+[![Maven Central](https://img.shields.io/maven-central/v/com.github.ghostdogpr/sage-core_3)](https://central.sonatype.com/artifact/com.github.ghostdogpr/sage-core_3)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
 **Sage** is a **Redis & Valkey client for Scala 3**: one client for any effect system, built on a from-scratch native Redis protocol implementation.
