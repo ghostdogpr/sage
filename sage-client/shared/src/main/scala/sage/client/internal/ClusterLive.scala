@@ -234,24 +234,21 @@ final private[client] class ClusterLive(
     redirectsLeft: Int,
     complete: Try[A] => Unit
   ): Unit =
-    classify(error) match {
-      case ClusterLive.Disposition.Reroute             =>
-        error match {
-          case e: ServerError =>
-            Redirect.parse(e.getMessage).get match {
-              // strict Replica must not follow ASK onto the importing master (the migrating key is on no replica); MOVED refreshes and re-dispatches
-              case ask if ask.kind == RedirectKind.Ask =>
-                if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
-                else onRedirect(node, ask, command, redirectsLeft, complete)
-              case _ if redirectsLeft <= 0             =>
-                complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
-              case _                                   => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
-            }
-          case _              =>
-            if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
+    Fault.categorize(error) match {
+      case Fault.Redirected(redirect)       =>
+        redirect.kind match {
+          // strict Replica must not follow ASK onto the importing master (the migrating key is on no replica); MOVED refreshes and re-dispatches
+          case RedirectKind.Ask                         =>
+            if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
+            else onRedirect(node, redirect, command, redirectsLeft, complete)
+          case RedirectKind.Moved if redirectsLeft <= 0 =>
+            complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+          case RedirectKind.Moved                       => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
         }
-      case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
-      case ClusterLive.Disposition.Terminal            => Events.attributeNode(complete, node); complete(Failure(error))
+      case Fault.Lost(false)                =>
+        if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
+      case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
+      case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
   // a broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
@@ -355,31 +352,11 @@ final private[client] class ClusterLive(
   }
 
   private def onFailure[A](node: Node, command: Command[A], error: Throwable, redirectsLeft: Int, complete: Try[A] => Unit): Unit =
-    classify(error) match {
-      case ClusterLive.Disposition.Reroute             =>
-        error match {
-          // classify only reroutes a ServerError when it parses as a redirect, so `.get` is safe here
-          case e: ServerError => onRedirect(node, Redirect.parse(e.getMessage).get, command, redirectsLeft, complete)
-          case _              => onUnreachable(command, redirectsLeft, complete)
-        }
-      case ClusterLive.Disposition.RefreshThenTerminal =>
-        triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
-      case ClusterLive.Disposition.Terminal            => Events.attributeNode(complete, node); complete(Failure(error))
-    }
-
-  // the single failure taxonomy a routed command can meet, shared by single-command and Pipeline-batch paths so they cannot drift: a redirect
-  // or a provably-unexecuted loss re-routes; a demoted master (`READONLY`) or a may-have-executed loss refreshes but still fails this command;
-  // anything else fails fast in place
-  private def classify(error: Throwable): ClusterLive.Disposition =
-    error match {
-      case e: ServerError        =>
-        if (Redirect.parse(e.getMessage).isDefined) ClusterLive.Disposition.Reroute
-        else if (e.code == "READONLY") ClusterLive.Disposition.RefreshThenTerminal
-        else ClusterLive.Disposition.Terminal
-      case NotConnected()        => ClusterLive.Disposition.Reroute
-      case ConnectionLost(false) => ClusterLive.Disposition.Reroute
-      case ConnectionLost(true)  => ClusterLive.Disposition.RefreshThenTerminal
-      case _                     => ClusterLive.Disposition.Terminal
+    Fault.categorize(error) match {
+      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete)
+      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete)
+      case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
+      case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
   private def onRedirect[A](from: Node, redirect: Redirect, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
@@ -524,24 +501,20 @@ final private[client] class ClusterLive(
       result match {
         case Success(_)     => settle(index, result)
         case Failure(error) =>
-          classify(error) match {
-            case ClusterLive.Disposition.Reroute             =>
-              error match {
-                // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
-                // to the importing node with ASKING. MOVED and connection loss re-route normally.
-                case e: ServerError =>
-                  val redirect = Redirect.parse(e.getMessage).get // classify only reroutes a ServerError that parses as a redirect
-                  redirect.kind match {
-                    // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
-                    case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
-                    case RedirectKind.Ask                                               =>
-                      onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
-                    case RedirectKind.Moved                                             => reroute(index)
-                  }
-                case _              => reroute(index)
+          Fault.categorize(error) match {
+            // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
+            // to the importing node with ASKING. MOVED and connection loss re-route normally.
+            case Fault.Redirected(redirect)       =>
+              redirect.kind match {
+                // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
+                case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
+                case RedirectKind.Ask                                               =>
+                  onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
+                case RedirectKind.Moved                                             => reroute(index)
               }
-            case ClusterLive.Disposition.RefreshThenTerminal => triggerRefresh(); settle(index, result)
-            case ClusterLive.Disposition.Terminal            => settle(index, result)
+            case Fault.Lost(false)                => reroute(index)
+            case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
+            case Fault.Fatal                      => settle(index, result)
           }
       }
     }
@@ -598,9 +571,9 @@ final private[client] class ClusterLive(
     // a transaction never follows a redirect (that would break MULTI/EXEC atomicity), but on any ownership/connection fault it refreshes in the
     // background so the caller's retry re-pins to the new owner instead of looping on the stale node; a data error refreshes nothing
     private def refreshOnFault(error: Throwable): Unit =
-      classify(error) match {
-        case ClusterLive.Disposition.Terminal => ()
-        case _                                => forceRefresh()
+      Fault.categorize(error) match {
+        case Fault.Fatal => ()
+        case _           => forceRefresh()
       }
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
@@ -612,7 +585,7 @@ final private[client] class ClusterLive(
     // level and the EXEC array and refresh on any non-terminal one so the caller's retry re-pins
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
       val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
-      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => classify(ServerError.of(m)) != ClusterLive.Disposition.Terminal)
+      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => Fault.categorize(ServerError.of(m)) != Fault.Fatal)
       if (fault) forceRefresh()
     }
 
@@ -876,10 +849,6 @@ final private[client] class ClusterLive(
 }
 
 private[client] object ClusterLive {
-
-  private enum Disposition {
-    case Reroute, RefreshThenTerminal, Terminal
-  }
 
   // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get`. First settle wins, so a `close` that
   // fails the waiters cannot be overwritten by a late establisher.
