@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Message, PatternMessage, SageException}
-import sage.SageException.{ConnectionLost, NotConnected, ServerError, TimedOut}
+import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
@@ -232,17 +232,14 @@ final private[client] class MasterReplicaLive(
     } else { Events.attributeNode(complete, node); complete(Failure(error)) }
   }
 
-  private def isOwnershipFault(error: Throwable): Boolean = error match {
-    case e: ServerError    => e.code == "READONLY"
-    case NotConnected()    => true
-    case ConnectionLost(_) => true
-    case _                 => false
+  private def isOwnershipFault(error: Throwable): Boolean = Fault.categorize(error) match {
+    case Fault.Demoted | Fault.Lost(_) => true
+    case _                             => false
   }
 
-  private def isConnLoss(error: Throwable): Boolean = error match {
-    case NotConnected()    => true
-    case ConnectionLost(_) => true
-    case _                 => false
+  private def isConnLoss(error: Throwable): Boolean = Fault.categorize(error) match {
+    case Fault.Lost(_) => true
+    case _             => false
   }
 
   // --- pipelines -----------------------------------------------------------------------------------------------------------------------
