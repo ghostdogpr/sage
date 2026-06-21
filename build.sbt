@@ -1,7 +1,8 @@
 import sbt.VirtualAxis
 
 val scala3Version     = "3.3.8"
-val scala3NextVersion = "3.8.3" // Kyo requires Scala 3.8.x (Next)
+val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
+val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
 
 val munitVersion          = "1.3.3"
 val testcontainersVersion = "0.44.1"
@@ -37,26 +38,26 @@ name := "sage"
 addCommandAlias(
   "fmt",
   "all scalafmtSbt scalafmt test:scalafmt " +
-    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksKyo3_8_3/scalafmt"
+    s"benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksKyo$scala3NextSuffix/scalafmt"
 )
 addCommandAlias(
   "check",
   "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
-    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
+    s"benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksKyo$scala3NextSuffix/scalafmtCheck"
 )
 
 addCommandAlias(
   "testUnit",
-  "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
+  s"all core/test clientZio/test clientCe/test clientOx/test clientKyo$scala3NextSuffix/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile " +
-    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile " +
+    s"benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo$scala3NextSuffix/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile " +
-    "examplesKyo3_8_3/Compile/compile examplesFuture/Compile/compile"
+    s"examplesKyo$scala3NextSuffix/Compile/compile examplesFuture/Compile/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
-addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
+addCommandAlias("itKyo", s"integrationTestsKyo$scala3NextSuffix/test")
 
 lazy val root = project
   .in(file("."))
@@ -178,7 +179,7 @@ addCommandAlias(
   ";benchmarksZio/Jmh/run -rf json -rff benchmarks/results/zio.json " +
     ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
     ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
-    ";benchmarksKyo3_8_3/Jmh/run -rf json -rff benchmarks/results/kyo.json"
+    s";benchmarksKyo$scala3NextSuffix/Jmh/run -rf json -rff benchmarks/results/kyo.json"
 )
 
 lazy val commonSettings = Def.settings(
