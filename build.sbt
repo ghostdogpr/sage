@@ -59,6 +59,8 @@ addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
 addCommandAlias("itKyo", s"integrationTestsKyo$scala3NextSuffix/test")
 
+addCommandAlias("exampleKyo", s"examplesKyo$scala3NextSuffix/run")
+
 addCommandAlias(
   "docAll",
   s"all core/doc clientZio/doc clientCe/doc clientOx/doc clientKyo$scala3NextSuffix/doc"
