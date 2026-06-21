@@ -59,6 +59,11 @@ addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
 addCommandAlias("itKyo", s"integrationTestsKyo$scala3NextSuffix/test")
 
+addCommandAlias(
+  "docAll",
+  s"all core/doc clientZio/doc clientCe/doc clientOx/doc clientKyo$scala3NextSuffix/doc"
+)
+
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
