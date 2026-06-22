@@ -63,7 +63,7 @@ jobs:
       - name: Build API docs (no Scaladoc warnings)
         run: |
           set -o pipefail
-          sbt -batch core/doc clientZio/doc clientCe/doc clientOx/doc clientKyo3_8_3/doc 2>&1 | tee doc.log
+          sbt -batch core/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo3_8_3/doc 2>&1 | tee doc.log
           if grep -E "Couldn't resolve|-- (\[E\] )?(Warning|Error)" doc.log; then
             echo "::error::Scaladoc emitted warnings; see the log above"
             exit 1
@@ -74,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [Zio, Ce, Ox, Kyo]
+        backend: [Zio, Ce, Ox, Pekko, Kyo]
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6
