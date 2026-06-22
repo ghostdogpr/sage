@@ -9,7 +9,6 @@ import scala.util.{Failure, Success}
 
 import kyo.compat.*
 import org.apache.pekko.{Done, NotUsed}
-import org.apache.pekko.actor.CoordinatedShutdown
 import org.apache.pekko.actor.typed.ActorSystem
 import org.apache.pekko.stream.{KillSwitches, Materializer, SystemMaterializer, UniqueKillSwitch}
 import org.apache.pekko.stream.scaladsl.{Keep, Sink, Source}
@@ -107,12 +106,16 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
-  ): Source[StreamEntry[F, V], NotUsed] =
+  ): Source[StreamEntry[F, V], NotUsed] = {
+    val poll = SageClient.boundedPoll(block, "xTail")
     pagedSource[StreamId, StreamEntry[F, V]](from)(
       Paged.tail(last =>
-        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
+        CIO
+          .lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(poll))))
+          .map(_.flatMap(_._2))
       )
     )
+  }
 
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
@@ -128,7 +131,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
   )(handle: StreamEntry[F, V] => Future[Unit])(using system: ActorSystem[?]): RunningConsumer = {
     given Materializer     = SystemMaterializer(system).materializer
     given ExecutionContext = system.executionContext
-    val (killSwitch, done) = consumeSource[F, V](group, consumer, key, count, block)
+    val (killSwitch, done) = consumeSource[F, V](group, consumer, key, count, SageClient.boundedPoll(block, "xConsume"))
       .viaMat(KillSwitches.single)(Keep.right)
       .mapAsync(1)(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
       .toMat(Sink.ignore)(Keep.both)
@@ -226,26 +229,19 @@ object SageClient {
   private[backend] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
   /**
-    * Connects and returns a Pekko-native client. Registers a `CoordinatedShutdown` task so the client closes when the user's
-    * `ActorSystem` terminates; pass the system in scope as a `using` argument.
+    * Connects and returns a Pekko-native client. The caller owns the client lifecycle and must call `close` explicitly.
     */
-  def connect(config: SageConfig)(using system: ActorSystem[?]): Future[SageClient] = {
-    given ExecutionContext = system.executionContext
-    Client.connect(config).unsafeRun.map { underlying =>
-      val client = new Lowered(underlying)
-      // teardown must not fail the shutdown phase (close-on-release policy)
-      CoordinatedShutdown(system).addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "sage-client-close") { () =>
-        client.close.map(_ => Done).recover { case _ => Done }
-      }
-      client
-    }
-  }
-
-  /**
-    * Connects without registering any shutdown hook; the caller owns the client lifecycle and must call `close` explicitly.
-    */
-  def connectUnmanaged(config: SageConfig): Future[SageClient] =
+  def connect(config: SageConfig): Future[SageClient] =
     Client.connect(config).unsafeRun.map(new Lowered(_))(ExecutionContext.parasitic)
+
+  private[backend] def boundedPoll(block: BlockTimeout, method: String): BlockTimeout =
+    block match {
+      case BlockTimeout.Forever =>
+        throw new IllegalArgumentException(
+          s"$method cannot use BlockTimeout.Forever on the Pekko backend; Future cannot interrupt an in-flight blocking read"
+        )
+      case other                => other
+    }
 
   final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[Future](underlying) {
     protected def lower[A](c: CIO[A]): Future[A] = c.unsafeRun

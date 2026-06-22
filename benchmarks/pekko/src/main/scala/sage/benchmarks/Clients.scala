@@ -27,7 +27,7 @@ final class SagePekkoBench(host: String, port: Int) extends BenchClient {
   private given ExecutionContext             = system.executionContext
 
   private val client: SageClient =
-    Await.result(SageClient.connectUnmanaged(SageConfig(topology = Topology.Standalone(Endpoint(host, port)))), 30.seconds)
+    Await.result(SageClient.connect(SageConfig(topology = Topology.Standalone(Endpoint(host, port)))), 30.seconds)
 
   // bounds in-flight commands by running each item of a group sequentially while groups run in parallel
   private def seqTraverse[A, B](as: List[A])(f: A => Future[B]): Future[List[B]] =

@@ -14,10 +14,17 @@ import sage.backend.*
 
 class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
-  private def withClientMat[A](server: GenericContainer)(body: (SageClient, Materializer) => Future[A]): A = {
-    given system: ActorSystem[Nothing] = ActorSystem(Behaviors.empty, "pekko-smoke")
-    val mat                            = Materializer(system)
-    try Await.result(SageClient.connect(configOf(server)).flatMap(client => body(client, mat)), 30.seconds)
+  private def withClientMat[A](server: GenericContainer)(body: (SageClient, Materializer, ActorSystem[Nothing]) => Future[A]): A = {
+    given system: ActorSystem[Nothing]      = ActorSystem(Behaviors.empty, "pekko-smoke")
+    given scala.concurrent.ExecutionContext = system.executionContext
+    val mat                                 = Materializer(system)
+    try
+      Await.result(
+        SageClient.connect(configOf(server)).flatMap { client =>
+          body(client, mat, system).transformWith(result => client.close.recover { case _ => () }.transform(_ => result))
+        },
+        30.seconds
+      )
     finally {
       system.terminate()
       val _ = Await.ready(system.whenTerminated, 10.seconds)
@@ -26,7 +33,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("an end user connects and round-trips with scala.concurrent.Future") {
     withContainers { server =>
-      val values = withClientMat(server) { (client, _) =>
+      val values = withClientMat(server) { (client, _, _) =>
         for {
           pong <- client.ping()
           _    <- Future.traverse(1 to 50)(i => client.set(s"key-$i", s"value-$i"))
@@ -40,7 +47,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("a pipeline returns a typed tuple natively, surfacing failures per position") {
     withContainers { server =>
-      val (out, attempt) = withClientMat(server) { (client, _) =>
+      val (out, attempt) = withClientMat(server) { (client, _, _) =>
         for {
           _       <- client.set("pipe:a", "x")
           _       <- client.set("pipe:n", 10)
@@ -57,7 +64,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("a transaction commits atomically with Future, guarded by WATCH") {
     withContainers { server =>
-      val out = withClientMat(server) { (client, _) =>
+      val out = withClientMat(server) { (client, _, _) =>
         for {
           _   <- client.set("tx:n", 1)
           res <- client.transaction { tx =>
@@ -75,7 +82,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("scanAll streams every key as a native Pekko Source") {
     withContainers { server =>
-      val keys = withClientMat(server) { (client, mat) =>
+      val keys = withClientMat(server) { (client, mat, _) =>
         given Materializer = mat
         for {
           _    <- Future.traverse(1 to 50)(i => client.set(s"scan-$i", "v"))
@@ -88,7 +95,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("subscribe delivers published messages as a native Pekko Source") {
     withContainers { server =>
-      val messages = withClientMat(server) { (client, mat) =>
+      val messages = withClientMat(server) { (client, mat, _) =>
         given Materializer        = mat
         val (confirmed, received) =
           client.subscribe[String]("smoke").take(3).toMat(Sink.seq)(Keep.both).run()
@@ -106,7 +113,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("hScanAll streams every field/value pair as a native Pekko Source") {
     withContainers { server =>
-      val pairs = withClientMat(server) { (client, mat) =>
+      val pairs = withClientMat(server) { (client, mat, _) =>
         given Materializer = mat
         for {
           _     <- Future.traverse(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
@@ -119,7 +126,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
 
   test("zScanAll streams every member/score pair as a native Pekko Source") {
     withContainers { server =>
-      val pairs = withClientMat(server) { (client, mat) =>
+      val pairs = withClientMat(server) { (client, mat, _) =>
         given Materializer = mat
         for {
           _     <- Future.traverse(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
@@ -127,6 +134,22 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
         } yield pairs
       }
       assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+    }
+  }
+
+  test("tailing helpers reject an infinite block timeout because Future cannot interrupt it") {
+    withContainers { server =>
+      withClientMat(server) { (client, _, system) =>
+        Future {
+          given ActorSystem[Nothing] = system
+          intercept[IllegalArgumentException] {
+            client.xTail[String, String]("stream:forever", block = BlockTimeout.Forever)
+          }
+          intercept[IllegalArgumentException] {
+            client.xConsume[String, String]("workers", "w1", "stream:forever", block = BlockTimeout.Forever)(_ => Future.unit)
+          }
+        }
+      }
     }
   }
 }

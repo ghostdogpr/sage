@@ -72,7 +72,7 @@ Each command position that admits a special ID token carries its own type, so an
 
 ## Tailing a group
 
-For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt. On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` hands back a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`.
+For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt. On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` hands back a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`. Pekko tailing helpers require a finite block timeout; the default bounded poll keeps stop/cancel responsive.
 
 ::: tip At-least-once delivery
 Because an entry is acknowledged only after the handler succeeds, the same entry can be delivered again after a crash or a failed handler. Make your handler idempotent. `xConsume` also blocks while tailing, so it is the body of a long-running worker, not a one-shot read.

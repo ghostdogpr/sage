@@ -18,7 +18,7 @@ pekko/    …Example.scala + Tour   the Pekko tour (scala.concurrent.Future + Pe
 ```
 
 Each backend's `Tour` is a runnable entry point that wires the client with that ecosystem's idiomatic construction form (ZIO `layer`,
-Cats Effect `resource`, Ox/Kyo `scoped`, Pekko `connect` with a user-provided typed `ActorSystem`) and runs the common feature set: commands across several families, a Pipeline, a WATCH-guarded
+Cats Effect `resource`, Ox/Kyo `scoped`, Pekko `connect` with an explicit `close` and a user-provided typed `ActorSystem`) and runs the common feature set: commands across several families, a Pipeline, a WATCH-guarded
 transaction, classic pub/sub, and a cached read. The `…Example` objects are the individual copy-pasteable snippets the tour stitches together.
 
 ## Running the tours

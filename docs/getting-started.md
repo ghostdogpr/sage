@@ -39,7 +39,7 @@ Two imports cover everything: `import sage.*` for the command vocabulary and con
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `Future` on Pekko that registers a `CoordinatedShutdown` task to close the client when your `ActorSystem` terminates. The command surface is identical across all five; only this wiring differs.
+A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `Future` on Pekko that you close explicitly. The command surface is identical across all five; only this wiring differs.
 
 ::: code-group
 
@@ -136,7 +136,7 @@ import sage.*
 import sage.backend.*
 
 @main def main(): Unit = {
-  // you own the ActorSystem; the client closes when it terminates
+  // you own both the ActorSystem and the client lifecycle
   given system: ActorSystem[Nothing] = ActorSystem(Behaviors.empty, "sage")
   given ExecutionContext             = system.executionContext
 
@@ -145,11 +145,14 @@ import sage.backend.*
   )
 
   val done =
-    for {
-      client   <- SageClient.connect(config)
-      _        <- client.set("greeting", "hello")
-      greeting <- client.get[String]("greeting")
-    } yield println(s"greeting=$greeting") // Some("hello")
+    SageClient.connect(config).flatMap { client =>
+      val run =
+        for {
+          _        <- client.set("greeting", "hello")
+          greeting <- client.get[String]("greeting")
+        } yield println(s"greeting=$greeting") // Some("hello")
+      run.transformWith(result => client.close.transform(_ => result))
+    }
 
   done.onComplete(_ => system.terminate())
 }
