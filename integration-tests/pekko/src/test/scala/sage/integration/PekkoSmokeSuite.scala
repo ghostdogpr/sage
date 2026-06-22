@@ -137,17 +137,22 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
-  test("tailing helpers reject an infinite block timeout because Future cannot interrupt it") {
+  test("tailing helpers surface an infinite block timeout through the effect because Future cannot interrupt it") {
     withContainers { server =>
-      withClientMat(server) { (client, _, system) =>
-        Future {
-          given ActorSystem[Nothing] = system
-          intercept[IllegalArgumentException] {
-            client.xTail[String, String]("stream:forever", block = BlockTimeout.Forever)
-          }
-          intercept[IllegalArgumentException] {
-            client.xConsume[String, String]("workers", "w1", "stream:forever", block = BlockTimeout.Forever)(_ => Future.unit)
-          }
+      withClientMat(server) { (client, mat, system) =>
+        given ActorSystem[Nothing]              = system
+        given Materializer                      = mat
+        given scala.concurrent.ExecutionContext = system.executionContext
+        val tailed                              =
+          client.xTail[String, String]("stream:forever", block = BlockTimeout.Forever).runWith(Sink.ignore).failed
+        val consumed                            =
+          client.xConsume[String, String]("workers", "w1", "stream:forever", block = BlockTimeout.Forever)(_ => Future.unit).completion.failed
+        for {
+          e1 <- tailed
+          e2 <- consumed
+        } yield {
+          assert(e1.isInstanceOf[IllegalArgumentException], e1)
+          assert(e2.isInstanceOf[IllegalArgumentException], e2)
         }
       }
     }

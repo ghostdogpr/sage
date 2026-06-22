@@ -10,9 +10,9 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Runnable Pekko tour. A user-provided typed `ActorSystem` supplies the stream `Materializer` and the `ExecutionContext`; the client is
-  * connected once, closed explicitly, and shared across every snippet. Start a server on localhost:6379 first (see examples/README.md), then
-  * `sbt examplesPekko/run`.
+  * Runnable Pekko tour. A user-provided typed `ActorSystem` supplies the stream `Materializer` and the `ExecutionContext`; `use` connects the
+  * client, shares it across every snippet, and closes it when the program finishes. Start a server on localhost:6379 first (see
+  * examples/README.md), then `sbt examplesPekko/run`.
   */
 object Tour {
 
@@ -23,17 +23,15 @@ object Tour {
     given ExecutionContext             = system.executionContext
 
     val program: Future[Unit] =
-      SageClient.connect(config).flatMap { client =>
-        val run =
-          for {
-            _ <- CommandsExample.run(client)
-            _ <- PipelinesExample.run(client)
-            _ <- TransactionsExample.run(client)
-            _ <- PubSubExample.run(client)
-            _ <- CachedReadsExample.run(client)
-            _ <- StreamsExample.run(client)
-          } yield ()
-        run.transformWith(result => client.close.recover { case _ => () }.transform(_ => result))
+      SageClient.use(config) { client =>
+        for {
+          _ <- CommandsExample.run(client)
+          _ <- PipelinesExample.run(client)
+          _ <- TransactionsExample.run(client)
+          _ <- PubSubExample.run(client)
+          _ <- CachedReadsExample.run(client)
+          _ <- StreamsExample.run(client)
+        } yield ()
       }
 
     try Await.result(program, 60.seconds)

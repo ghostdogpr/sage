@@ -6,6 +6,7 @@ import scala.annotation.unused
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success}
+import scala.util.control.NonFatal
 
 import kyo.compat.*
 import org.apache.pekko.{Done, NotUsed}
@@ -106,16 +107,18 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
-  ): Source[StreamEntry[F, V], NotUsed] = {
-    val poll = SageClient.boundedPoll(block, "xTail")
-    pagedSource[StreamId, StreamEntry[F, V]](from)(
-      Paged.tail(last =>
-        CIO
-          .lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(poll))))
-          .map(_.flatMap(_._2))
-      )
-    )
-  }
+  ): Source[StreamEntry[F, V], NotUsed] =
+    SageClient.boundedPoll(block, "xTail") match {
+      case Left(e)     => Source.failed(e)
+      case Right(poll) =>
+        pagedSource[StreamId, StreamEntry[F, V]](from)(
+          Paged.tail(last =>
+            CIO
+              .lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(poll))))
+              .map(_.flatMap(_._2))
+          )
+        )
+    }
 
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
@@ -128,16 +131,19 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     key: K,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
-  )(handle: StreamEntry[F, V] => Future[Unit])(using system: ActorSystem[?]): RunningConsumer = {
-    given Materializer     = SystemMaterializer(system).materializer
-    given ExecutionContext = system.executionContext
-    val (killSwitch, done) = consumeSource[F, V](group, consumer, key, count, SageClient.boundedPoll(block, "xConsume"))
-      .viaMat(KillSwitches.single)(Keep.right)
-      .mapAsync(1)(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
-      .toMat(Sink.ignore)(Keep.both)
-      .run()
-    new RunningConsumer(killSwitch, done)
-  }
+  )(handle: StreamEntry[F, V] => Future[Unit])(using system: ActorSystem[?]): RunningConsumer =
+    SageClient.boundedPoll(block, "xConsume") match {
+      case Left(e)     => RunningConsumer.failed(e)
+      case Right(poll) =>
+        given Materializer     = SystemMaterializer(system).materializer
+        given ExecutionContext = system.executionContext
+        val (killSwitch, done) = consumeSource[F, V](group, consumer, key, count, poll)
+          .viaMat(KillSwitches.single)(Keep.right)
+          .mapAsync(1)(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
+          .toMat(Sink.ignore)(Keep.both)
+          .run()
+        RunningConsumer(killSwitch, done)
+    }
 
   /**
     * Subscribes to one or more channels; the subscription opens when the `Source` is materialized and unsubscribes when the stream is
@@ -234,13 +240,30 @@ object SageClient {
   def connect(config: SageConfig): Future[SageClient] =
     Client.connect(config).unsafeRun.map(new Lowered(_))(ExecutionContext.parasitic)
 
-  private[backend] def boundedPoll(block: BlockTimeout, method: String): BlockTimeout =
+  /**
+    * Connects, runs `f`, then closes the client on every exit path (success, failure, or a failed body), so a connection is never leaked
+    * when the body throws or its `Future` fails. Teardown errors are swallowed, matching the close-on-release policy of the other backends'
+    * `scoped`/`resource` helpers. Prefer this over `connect` + manual `close` unless you need to own the lifecycle yourself.
+    */
+  def use[A](config: SageConfig)(f: SageClient => Future[A]): Future[A] = {
+    given ExecutionContext = ExecutionContext.parasitic
+    connect(config).flatMap { client =>
+      val ran =
+        try f(client)
+        catch { case NonFatal(e) => Future.failed(e) }
+      ran.transformWith(result => client.close.transformWith(_ => Future.fromTry(result)))
+    }
+  }
+
+  private[backend] def boundedPoll(block: BlockTimeout, method: String): Either[IllegalArgumentException, BlockTimeout] =
     block match {
       case BlockTimeout.Forever =>
-        throw new IllegalArgumentException(
-          s"$method cannot use BlockTimeout.Forever on the Pekko backend; Future cannot interrupt an in-flight blocking read"
+        Left(
+          new IllegalArgumentException(
+            s"$method cannot use BlockTimeout.Forever on the Pekko backend; Future cannot interrupt an in-flight blocking read"
+          )
         )
-      case other                => other
+      case other                => Right(other)
     }
 
   final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[Future](underlying) {
@@ -254,13 +277,22 @@ object SageClient {
   * `completion` is the loop's terminal signal: it succeeds when the loop drains and fails if a `handle` invocation (or its acknowledgement)
   * failed, mirroring how the other backends surface a handler error through their terminal effect.
   */
-final class RunningConsumer private[backend] (killSwitch: UniqueKillSwitch, val completion: Future[Done]) {
+final class RunningConsumer private[backend] (killSwitch: Option[UniqueKillSwitch], val completion: Future[Done]) {
 
   /**
     * Requests a graceful stop between entries and returns [[completion]] (which fails if the loop had already failed in `handle`).
     */
   def stop(): Future[Done] = {
-    killSwitch.shutdown()
+    killSwitch.foreach(_.shutdown())
     completion
   }
+}
+
+object RunningConsumer {
+
+  private[backend] def apply(killSwitch: UniqueKillSwitch, completion: Future[Done]): RunningConsumer =
+    new RunningConsumer(Some(killSwitch), completion)
+
+  private[backend] def failed(error: Throwable): RunningConsumer =
+    new RunningConsumer(None, Future.failed(error))
 }

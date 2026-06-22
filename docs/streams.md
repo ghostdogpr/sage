@@ -108,7 +108,7 @@ client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
 ```scala [Pekko]
 // a Future has no interruption, so the loop is returned as a RunningConsumer:
 // the handler returns Future[Unit], and you call stop() to halt it and await completion
-val consumer = client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+val consumer = client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => Future(println(s"got ${entry.id}: ${entry.fields}"))
 }
 // later: consumer.stop() // Future[Done], resolves once the loop has drained
