@@ -13,7 +13,7 @@ val v1 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)
 val v2 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _  <- client.set("cached:key", "v1")
   v1 <- client.cached(Commands.get[String, String]("cached:key"), 1.minute)

@@ -1,3 +1,4 @@
+import _root_.io.getkyo.compat.CompatBackendAxis
 import sbt.VirtualAxis
 
 val scala3Version     = "3.3.8"
@@ -12,12 +13,17 @@ val zioVersion        = "2.1.26"
 val catsEffectVersion = "3.7.0"
 val fs2Version        = "3.13.0"
 val oxVersion         = "1.0.5"
+val pekkoVersion      = "1.6.0"
 
 // competitor baselines for the runtime benchmark harness (dev-only, never published) — see benchmarks/README.md
 val zioRedisVersion   = "1.2.1"
 val redis4catsVersion = "2.0.3"
 val lettuceVersion    = "7.6.0.RELEASE"
 val rediscalaVersion  = "2.1.0"
+
+// The Pekko backend rides the Future effect cell (kyo-compat-future) plus Pekko Streams. A distinct axis name keeps it separate from the
+// implicit Future anchor (which dedups by name); the nonexistent kyo-compat-pekko dep it makes the plugin inject is stripped in jvmSettings.
+val PekkoLib = CompatBackendAxis("pekko", "Pekko", "-pekko", Set("jvm"))
 
 inThisBuild(
   List(
@@ -37,25 +43,26 @@ name := "sage"
 addCommandAlias(
   "fmt",
   "all scalafmtSbt scalafmt test:scalafmt " +
-    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksKyo3_8_3/scalafmt"
+    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo3_8_3/scalafmt"
 )
 addCommandAlias(
   "check",
   "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
-    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
+    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
 )
 
 addCommandAlias(
   "testUnit",
-  "all core/test clientZio/test clientCe/test clientOx/test clientKyo3_8_3/test " +
-    "clientFuture/Test/compile integrationTestsFuture/Test/compile " +
-    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksKyo3_8_3/compile " +
-    "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile " +
+  "all core/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo3_8_3/test " +
+    "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo3_8_3/compile " +
+    "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
     "examplesKyo3_8_3/Compile/compile examplesFuture/Compile/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
+addCommandAlias("itPekko", "integrationTestsPekko/test")
 addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
 
 lazy val root = project
@@ -103,11 +110,18 @@ lazy val client = (projectMatrix in file("sage-client"))
       if (m.endsWith("-zio")) Seq("dev.zio" %% "zio" % zioVersion, "dev.zio" %% "zio-streams" % zioVersion)
       else if (m.endsWith("-ce")) Seq("org.typelevel" %% "cats-effect" % catsEffectVersion, "co.fs2" %% "fs2-core" % fs2Version)
       else if (m.endsWith("-ox")) Seq("com.softwaremill.ox" %% "core" % oxVersion)
+      else if (m.endsWith("-pekko"))
+        Seq(
+          "io.getkyo"        %% "kyo-compat-future" % kyoVersion,
+          "org.apache.pekko" %% "pekko-stream"      % pekkoVersion,
+          "org.apache.pekko" %% "pekko-actor-typed" % pekkoVersion
+        )
       else Seq.empty
     }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .jvmSettings(stripBogusPekkoCompatDep)
 
 // the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers;
 // command-behavior (sage.integration.commands), security (sage.integration.security), cluster (sage.integration.cluster), and master-replica
@@ -129,7 +143,8 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
     }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .jvmSettings(stripBogusPekkoCompatDep)
 
 // Runnable, never-published usage examples — one cell per backend so each compiles against its own native artifact (ZIO Task, Cats Effect
 // IO, Ox direct style, Kyo). Aggregated by root and compiled in CI via the testUnit alias; the forced future anchor cell carries no example
@@ -143,7 +158,8 @@ lazy val examples = (projectMatrix in file("examples"))
   // (e.g. Cats Effect's IOApp) that an example extends
   .settings(Compile / doc / sources := Seq.empty)
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .jvmSettings(stripBogusPekkoCompatDep)
 
 // Runtime end-to-end benchmark harness (JMH), dev-only and never published. One cell per backend (the backends are cross-compiled from the
 // same sage.* sources and would collide on one classpath, so they cannot share a module). Competitor baselines are added per cell: zio-redis
@@ -168,7 +184,8 @@ lazy val benchmarks = (projectMatrix in file("benchmarks"))
     }
   )
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .jvmSettings(stripBogusPekkoCompatDep)
 
 // the runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
 // each writing JMH JSON to benchmarks/results/<cell>.json. benchmarks/merge-results.sh merges them into one all.json covering every client
@@ -178,6 +195,7 @@ addCommandAlias(
   ";benchmarksZio/Jmh/run -rf json -rff benchmarks/results/zio.json " +
     ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
     ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
+    ";benchmarksPekko/Jmh/run -rf json -rff benchmarks/results/pekko.json " +
     ";benchmarksKyo3_8_3/Jmh/run -rf json -rff benchmarks/results/kyo.json"
 )
 
@@ -201,3 +219,7 @@ lazy val commonSettings = Def.settings(
 // only for container-free cells: integration suites each boot their own container, so running them in
 // parallel would multiply peak load and invite timing races
 lazy val parallelUnitTests = Def.settings(Test / testForkedParallel := true)
+
+// compatLibrary auto-injects a nonexistent kyo-compat-pekko for the custom axis; drop it (via jvmSettings, after the plugin's per-row settings).
+lazy val stripBogusPekkoCompatDep: Setting[?] =
+  libraryDependencies := libraryDependencies.value.filterNot(m => m.organization == "io.getkyo" && m.name.startsWith("kyo-compat-pekko"))

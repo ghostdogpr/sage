@@ -17,7 +17,7 @@ val entries = client.xRange[String, String]("stream:orders")
 // Vector(StreamEntry(id, Vector(("item","book"), ("qty","2"))), ...)
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _       <- client.del("stream:orders")
   _       <- client.xAdd("stream:orders")(("item", "book"), ("qty", "2"))
@@ -51,7 +51,7 @@ val ids = batches.flatMap(_._2).map(_.id)
 client.xAck("stream:orders", "workers")(ids.head, ids.tail*)
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _       <- client.xGroupCreate(
                "stream:orders",
@@ -72,7 +72,7 @@ Each command position that admits a special ID token carries its own type, so an
 
 ## Tailing a group
 
-For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt.
+For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt. On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` hands back a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`.
 
 ::: tip At-least-once delivery
 Because an entry is acknowledged only after the handler succeeds, the same entry can be delivered again after a crash or a failed handler. Make your handler idempotent. `xConsume` also blocks while tailing, so it is the body of a long-running worker, not a one-shot read.
@@ -103,6 +103,15 @@ client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
 client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
   entry => Console.printLine(s"got ${entry.id}: ${entry.fields}")
 }
+```
+
+```scala [Pekko]
+// a Future has no interruption, so the loop is returned as a RunningConsumer:
+// the handler returns Future[Unit], and you call stop() to halt it and await completion
+val consumer = client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+  entry => Future(println(s"got ${entry.id}: ${entry.fields}"))
+}
+// later: consumer.stop() // Future[Done], resolves once the loop has drained
 ```
 
 :::
