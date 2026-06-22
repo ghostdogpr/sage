@@ -82,25 +82,25 @@ Because an entry is acknowledged only after the handler succeeds, the same entry
 
 ```scala [Ox]
 // runs inside a `supervised` scope; tails new entries forever
-client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => println(s"got ${entry.id}: ${entry.fields}")
 }
 ```
 
 ```scala [ZIO]
-client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => Console.printLine(s"got ${entry.id}: ${entry.fields}")
 }
 ```
 
 ```scala [Cats Effect]
-client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => IO.println(s"got ${entry.id}: ${entry.fields}")
 }
 ```
 
 ```scala [Kyo]
-client.xConsume[String, String, String]("workers", "w1", "stream:orders") {
+client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => Console.printLine(s"got ${entry.id}: ${entry.fields}")
 }
 ```
