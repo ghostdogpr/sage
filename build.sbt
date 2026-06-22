@@ -2,9 +2,10 @@ import _root_.io.getkyo.compat.CompatBackendAxis
 import sbt.VirtualAxis
 
 val scala3Version     = "3.3.8"
-val scala3NextVersion = "3.8.3" // Kyo requires Scala 3.8.x (Next)
+val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
+val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
 
-val munitVersion          = "1.3.2"
+val munitVersion          = "1.3.3"
 val testcontainersVersion = "0.44.1"
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
@@ -43,27 +44,34 @@ name := "sage"
 addCommandAlias(
   "fmt",
   "all scalafmtSbt scalafmt test:scalafmt " +
-    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo3_8_3/scalafmt"
+    s"benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo$scala3NextSuffix/scalafmt"
 )
 addCommandAlias(
   "check",
   "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
-    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo3_8_3/scalafmtCheck"
+    s"benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo$scala3NextSuffix/scalafmtCheck"
 )
 
 addCommandAlias(
   "testUnit",
-  "all core/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo3_8_3/test " +
+  s"all core/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo$scala3NextSuffix/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
-    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo3_8_3/compile " +
+    s"benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo$scala3NextSuffix/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
-    "examplesKyo3_8_3/Compile/compile examplesFuture/Compile/compile"
+    s"examplesKyo$scala3NextSuffix/Compile/compile examplesFuture/Compile/compile"
 )
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
 addCommandAlias("itPekko", "integrationTestsPekko/test")
-addCommandAlias("itKyo", "integrationTestsKyo3_8_3/test")
+addCommandAlias("itKyo", s"integrationTestsKyo$scala3NextSuffix/test")
+
+addCommandAlias("exampleKyo", s"examplesKyo$scala3NextSuffix/run")
+
+addCommandAlias(
+  "docAll",
+  s"all core/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo$scala3NextSuffix/doc"
+)
 
 lazy val root = project
   .in(file("."))
@@ -196,7 +204,7 @@ addCommandAlias(
     ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
     ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
     ";benchmarksPekko/Jmh/run -rf json -rff benchmarks/results/pekko.json " +
-    ";benchmarksKyo3_8_3/Jmh/run -rf json -rff benchmarks/results/kyo.json"
+    s";benchmarksKyo$scala3NextSuffix/Jmh/run -rf json -rff benchmarks/results/kyo.json"
 )
 
 lazy val commonSettings = Def.settings(

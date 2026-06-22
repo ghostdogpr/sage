@@ -25,8 +25,8 @@ different Scala version), so the harness is one `projectMatrix` cell per backend
 | `sage-zio` / `zio-redis` | `benchmarksZio` | zio-redis is native ZIO. |
 | `sage-ce` / `redis4cats` | `benchmarksCe` | redis4cats wraps Lettuce. |
 | `sage-ox` / `lettuce` | `benchmarksOx` | `lettuce` is the async/auto-pipelined Lettuce client — the JVM ceiling. |
-| `sage-kyo` | `benchmarksKyo3_8_3` | no native Kyo competitor exists. |
 | `sage-pekko` | `benchmarksPekko` | no native Pekko (Future) competitor exists. |
+| `sage-kyo` | `benchmarksKyo<scala-next>` | suffix tracks the Next Scala version; no native Kyo competitor exists. |
 
 Dropped after review: Jedis (sync Java), laserdisc (Scala 2.13 + RESP2), rediculous (RESP2, dormant) — none are Scala-3 + RESP3 peers.
 

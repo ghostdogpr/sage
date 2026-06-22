@@ -35,7 +35,7 @@ Then run a tour:
 sbt examplesZio/run
 sbt examplesCe/run
 sbt examplesOx/run
-sbt examplesKyo3_8_3/run
+sbt exampleKyo
 sbt examplesPekko/run
 ```
 
