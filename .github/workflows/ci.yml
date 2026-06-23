@@ -74,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [Zio, Ce, Ox, Kyo]
+        backend: [Zio, Ce, Ox, Pekko, Kyo]
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6

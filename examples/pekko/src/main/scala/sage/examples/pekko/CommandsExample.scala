@@ -1,0 +1,38 @@
+package sage.examples.pekko
+
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future
+import scala.concurrent.duration.*
+
+import sage.*
+import sage.backend.*
+import sage.examples.User
+
+/**
+  * Commands across several families, each returning a `scala.concurrent.Future`.
+  */
+object CommandsExample {
+
+  def run(client: SageClient)(using ExecutionContext): Future[Unit] =
+    for {
+      // strings, numbers, and a conditional write with a TTL
+      _        <- client.set("greeting", "hello")
+      greeting <- client.get[String]("greeting")
+      _        <- client.incrBy("counter", 10)
+      _        <- client.set("session", "token", expiry = SetExpiry.In(1.minute), condition = SetCondition.IfNotExists)
+      // hashes
+      _        <- client.hSet("user:1", ("name", "Ada"), ("age", "36"))
+      profile  <- client.hGetAll[String, String]("user:1")
+      // lists: a blocking pop off a Dedicated Connection (data is pushed first, so it returns at once)
+      _        <- client.rPush("queue", "a", "b", "c")
+      head     <- client.blPop[String]("queue")(BlockTimeout.Forever)
+      // sets and sorted sets
+      _        <- client.sAdd("tags", "scala", "redis")
+      _        <- client.zAdd("scores")(("ada", 36.0))
+      // a custom-codec round-trip: User rides on the given ValueCodec from the shared module
+      _        <- client.set("user:ada", User("Ada", 36))
+      ada      <- client.get[User]("user:ada")
+      // a raw Lua eval yields a Frame; decode it with the strict helpers
+      sum      <- client.eval("return 1 + 1")
+    } yield println(s"greeting=$greeting profile=$profile head=$head ada=$ada sum=${sum.asLong}")
+}

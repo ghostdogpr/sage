@@ -20,7 +20,7 @@ val tuple = client.pipeline(
 // tuple: (Option[String], Long)
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _     <- client.set("pipe:a", "x")
   _     <- client.set("pipe:n", 10)
@@ -58,7 +58,7 @@ val attempt = client.pipelineAttempt(
 )
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _       <- client.set("pipe:str", "hello")
   // INCR on a non-numeric string fails only at its own position;
@@ -94,7 +94,7 @@ val result = client.transaction { tx =>
 // result: Some((2, 6)), or None if "tx:n" changed before EXEC
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _      <- client.set("tx:n", 1)
   result <- client.transaction { tx =>

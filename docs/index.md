@@ -19,7 +19,7 @@ hero:
 
 features:
   - title: Use any effect system
-    details: First-class ZIO, Cats Effect, Kyo, and Ox artifacts, each with its ecosystem's native types and no wrapper visible.
+    details: First-class ZIO, Cats Effect, Kyo, Ox, and Pekko artifacts, each with its ecosystem's native types and no wrapper visible.
   - title: Fast, native Redis protocol
     details: RESP3, commands, and codecs implemented directly in Scala 3, with no Java client wrapped underneath and fast by design.
   - title: Modern and feature-rich

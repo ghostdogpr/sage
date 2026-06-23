@@ -5,7 +5,7 @@
 
 **Sage** is a **Redis & Valkey client for Scala 3**: one client for any effect system, built on a from-scratch native Redis protocol implementation.
 
-**Use any effect system.** First-class [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Ox](https://ox.softwaremill.com) artifacts, each with its ecosystem's native types and no wrapper visible.
+**Use any effect system.** First-class [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), [Ox](https://ox.softwaremill.com), and [Pekko](https://pekko.apache.org) artifacts, each with its ecosystem's native types and no wrapper visible.
 
 **Fast, native Redis protocol.** RESP3, commands, and codecs implemented directly in Scala 3, with no Java client wrapped underneath and fast by design.
 

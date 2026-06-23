@@ -1,6 +1,6 @@
 # Pub/Sub
 
-Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, or a Kyo `Stream`. Each message carries the channel it arrived on and a payload decoded with a `ValueCodec`. Ending the stream, or closing its scope, unsubscribes.
+Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Each message carries the channel it arrived on and a payload decoded with a `ValueCodec`. Ending the stream, or closing its scope, unsubscribes.
 
 ## Classic channels
 
@@ -47,12 +47,32 @@ for {
 } yield chunk.toList.map(_.payload)
 ```
 
+```scala [Pekko]
+// Keep.both keeps the confirmation Future[Done] alongside the collected messages;
+// await it before publishing so the publish can't outrun the registration (best-effort in cluster)
+val (confirmed, collected) =
+  client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
+val messages =
+  for {
+    _        <- confirmed
+    _        <- Future.traverse(1 to 3)(i => client.publish("news", s"item-$i"))
+    received <- collected
+  } yield received.map(_.payload).toList
+```
+
 :::
 
 Pattern subscriptions are also available; they deliver a **pattern message** that additionally names the glob that matched.
 
 ::: tip Confirmed subscriptions
-The plain `subscribe` returns the stream immediately and registers the subscription lazily, on the first pull. That is fine for a long-lived consumer, but a `publish` sequenced right after it can outrun the registration and be missed. To close that gap, the effectful backends expose a variant that returns only once the server has confirmed the SUBSCRIBE: `subscribeScoped` / `pSubscribeScoped` / `sSubscribeScoped` on ZIO (a `ZIO[Scope, _, _]`) and Kyo, and `subscribeResource` / `pSubscribeResource` / `sSubscribeResource` on Cats Effect (a `Resource`). On Ox the plain `subscribe` is already this: the call is synchronous and returns once confirmed. The examples above use these so the publisher can't race the subscriber. With these variants the `Scope` or `Resource` owns the unsubscribe, so the subscription outlives the stream's completion and is released only when that scope closes.
+The plain `subscribe` returns the stream immediately and registers the subscription on the first pull, so a `publish` sequenced right after it can outrun the registration and be missed. Each backend has a way to wait for the server's SUBSCRIBE confirmation first (also in `p`/`s` forms):
+
+- **ZIO / Kyo**: `subscribeScoped`, a scoped effect.
+- **Cats Effect**: `subscribeResource`, a `Resource`.
+- **Ox**: plain `subscribe` already blocks until confirmed.
+- **Pekko**: plain `subscribe` returns a `Source` whose materialized `Future[Done]` completes once registered; await it before publishing.
+
+The examples above use these. Confirmation closes the race on a standalone or master-replica server; in cluster mode it is best-effort, as on every backend. With the scoped and resource variants that scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes; on Pekko, ending the `Source` (cancel, complete, or fail) unsubscribes.
 :::
 
 ::: tip Connection isolation

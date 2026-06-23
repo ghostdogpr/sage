@@ -2,7 +2,7 @@
 
 **Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). There is no Java client wrapped underneath: the RESP3 protocol, the commands, and the codecs are implemented directly in Scala, on a zero-dependency, effect-free core.
 
-That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), and [Kyo](https://getkyo.io), so you use sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
+That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org), so you use sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
 
 ## Installation
 
@@ -26,13 +26,17 @@ Add the artifact for your effect system. The core is pulled in transitively, so 
 "com.github.ghostdogpr" %% "sage-client-kyo" % "@VERSION@"
 ```
 
+```scala [Pekko]
+"com.github.ghostdogpr" %% "sage-client-pekko" % "@VERSION@"
+```
+
 :::
 
 Two imports cover everything: `import sage.*` for the command vocabulary and connection config, and `import sage.backend.*` for the client. That second import is the same regardless of effect system; only the dependency you choose differs.
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, and a `Resource` for Cats Effect. The command surface is identical across all four; only this wiring differs.
+A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `use` block on Pekko that closes the client when your program finishes. The command surface is identical across all five; only this wiring differs.
 
 ::: code-group
 
@@ -119,6 +123,35 @@ object Main extends KyoApp {
 }
 ```
 
+```scala [Pekko]
+import org.apache.pekko.actor.typed.ActorSystem
+import org.apache.pekko.actor.typed.scaladsl.Behaviors
+
+import scala.concurrent.{ExecutionContext, Future}
+
+import sage.*
+import sage.backend.*
+
+@main def main(): Unit = {
+  given system: ActorSystem[Nothing] = ActorSystem(Behaviors.empty, "sage")
+  given ExecutionContext             = system.executionContext
+
+  val config = SageConfig(
+    topology = Topology.Standalone(Endpoint("localhost", 6379))
+  )
+
+  val done =
+    SageClient.use(config) { client =>
+      for {
+        _        <- client.set("greeting", "hello")
+        greeting <- client.get[String]("greeting")
+      } yield println(s"greeting=$greeting") // Some("hello")
+    }
+
+  done.onComplete(_ => system.terminate())
+}
+```
+
 :::
 
 ::: tip How it works
@@ -129,7 +162,7 @@ Two cases step off that connection automatically. Commands that hold per-connect
 
 ## A short tour
 
-The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; in ZIO, Cats Effect, and Kyo they are steps in a for-comprehension over that ecosystem's effect type. Each assumes a `client` in scope and the usual imports for your effect type (plus `import scala.concurrent.duration.*` where a duration appears).
+The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; in ZIO, Cats Effect, Kyo, and Pekko they are steps in a for-comprehension over that ecosystem's effect type, where on Pekko that type is `scala.concurrent.Future` (each `for` needs an `ExecutionContext`, for example `system.executionContext`). Each assumes a `client` in scope and the usual imports for your effect type (plus `import scala.concurrent.duration.*` where a duration appears).
 
 ### Commands
 
@@ -150,7 +183,7 @@ client.set("user:ada", User("Ada", 36))
 val ada = client.get[User]("user:ada") // Some(User("Ada", 36))
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _        <- client.set("greeting", "hello")
   greeting <- client.get[String]("greeting")
@@ -183,7 +216,7 @@ val tuple = client.pipeline(
 )
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _     <- client.set("pipe:a", "x")
   _     <- client.set("pipe:n", 10)
@@ -213,7 +246,7 @@ val result = client.transaction { tx =>
 }
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _      <- client.set("tx:n", 1)
   result <- client.transaction { tx =>
@@ -237,9 +270,9 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 ### Pub/Sub
 
-Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, or a Kyo `Stream`. Ending the stream, or closing its scope, unsubscribes.
+Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Ending the stream, or closing its scope, unsubscribes.
 
-Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on Cats Effect, and plain `subscribe` on Ox (where the call is already synchronous). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
+Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on Cats Effect, and plain `subscribe` on Ox (where the call is already synchronous). On Pekko, `subscribe` returns a `Source` whose materialized value is a `Future[Done]` that completes once the subscription is registered, so awaiting it before publishing closes the same gap on a standalone or master-replica server (in cluster mode that confirmation is best-effort, as on every backend). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
 
 ::: code-group
 
@@ -282,6 +315,19 @@ for {
 } yield chunk.toList.map(_.payload)
 ```
 
+```scala [Pekko]
+// Keep.both keeps the confirmation Future[Done] and the collected messages;
+// await it before publishing so the publish can't outrun the registration (best-effort in cluster)
+val (confirmed, collected) =
+  client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
+val messages =
+  for {
+    _        <- confirmed
+    _        <- Future.traverse(1 to 3)(i => client.publish("news", s"item-$i"))
+    received <- collected
+  } yield received.map(_.payload).toList
+```
+
 :::
 
 Classic and sharded pub/sub are both covered in [Pub/Sub](/pubsub).
@@ -299,7 +345,7 @@ val v1 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)
 val v2 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   _  <- client.set("cached:key", "v1")
   v1 <- client.cached(Commands.get[String, String]("cached:key"), 1.minute)

@@ -16,7 +16,7 @@ val greeting = client.get[String]("greeting")
 val same = client.run(Commands.get[String, String]("greeting"))
 ```
 
-```scala [ZIO · Cats Effect · Kyo]
+```scala [ZIO · Cats Effect · Kyo · Pekko]
 for {
   greeting <- client.get[String]("greeting")
   // the same command, built as a value and run explicitly

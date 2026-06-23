@@ -18,6 +18,7 @@ One per effect system, all sharing the same runtime:
 - Cats Effect: `sage-client-ce`
 - Kyo: `sage-client-kyo`
 - Ox: `sage-client-ox`
+- Pekko: `sage-client-pekko`
 
 `sage-core` comes in transitively, so you depend on the backend artifact only. See [Getting started](/getting-started).
 
