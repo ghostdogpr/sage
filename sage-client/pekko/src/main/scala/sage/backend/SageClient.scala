@@ -245,15 +245,13 @@ object SageClient {
     * when the body throws or its `Future` fails. Teardown errors are swallowed, matching the close-on-release policy of the other backends'
     * `scoped`/`resource` helpers. Prefer this over `connect` + manual `close` unless you need to own the lifecycle yourself.
     */
-  def use[A](config: SageConfig)(f: SageClient => Future[A]): Future[A] = {
-    given ExecutionContext = ExecutionContext.parasitic
+  def use[A](config: SageConfig)(f: SageClient => Future[A])(using ExecutionContext): Future[A] =
     connect(config).flatMap { client =>
       val ran =
         try f(client)
         catch { case NonFatal(e) => Future.failed(e) }
       ran.transformWith(result => client.close.transformWith(_ => Future.fromTry(result)))
     }
-  }
 
   private[backend] def boundedPoll(block: BlockTimeout, method: String): Either[IllegalArgumentException, BlockTimeout] =
     block match {
