@@ -28,9 +28,6 @@ Add the artifact for your effect system. The core is pulled in transitively, so 
 
 ```scala [Pekko]
 "com.github.ghostdogpr" %% "sage-client-pekko" % "@VERSION@"
-// Pekko also needs Pekko Streams and the typed actor module; you provide the ActorSystem
-"org.apache.pekko" %% "pekko-stream" % "1.6.0"
-"org.apache.pekko" %% "pekko-actor-typed" % "1.6.0"
 ```
 
 :::

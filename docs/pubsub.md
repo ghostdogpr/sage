@@ -65,7 +65,14 @@ val messages =
 Pattern subscriptions are also available; they deliver a **pattern message** that additionally names the glob that matched.
 
 ::: tip Confirmed subscriptions
-The plain `subscribe` returns the stream immediately and registers the subscription lazily, on the first pull. That is fine for a long-lived consumer, but a `publish` sequenced right after it can outrun the registration and be missed. To close that gap, the effectful backends expose a variant that returns only once the server has confirmed the SUBSCRIBE: `subscribeScoped` / `pSubscribeScoped` / `sSubscribeScoped` on ZIO (a `ZIO[Scope, _, _]`) and Kyo, and `subscribeResource` / `pSubscribeResource` / `sSubscribeResource` on Cats Effect (a `Resource`). On Ox the plain `subscribe` is already this: the call is synchronous and returns once confirmed. On Pekko, `subscribe` / `pSubscribe` / `sSubscribe` return a `Source[Message[V], Future[Done]]` whose materialized `Future[Done]` completes once the subscription is registered, so awaiting that value before publishing closes the same gap on a standalone or master-replica server (in cluster mode that confirmation is best-effort, as on every backend). The examples above use these so the publisher does not race the subscriber on a standalone or master-replica server. With the scoped variants the `Scope` or `Resource` owns the unsubscribe, so the subscription outlives the stream's completion and is released only when that scope closes; on Pekko, cancelling, completing, or failing the `Source` unsubscribes.
+The plain `subscribe` returns the stream immediately and registers the subscription on the first pull, so a `publish` sequenced right after it can outrun the registration and be missed. Each backend has a way to wait for the server's SUBSCRIBE confirmation first (also in `p`/`s` forms):
+
+- **ZIO / Kyo**: `subscribeScoped`, a scoped effect.
+- **Cats Effect**: `subscribeResource`, a `Resource`.
+- **Ox**: plain `subscribe` already blocks until confirmed.
+- **Pekko**: plain `subscribe` returns a `Source` whose materialized `Future[Done]` completes once registered; await it before publishing.
+
+The examples above use these. Confirmation closes the race on a standalone or master-replica server; in cluster mode it is best-effort, as on every backend. With the scoped and resource variants that scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes; on Pekko, ending the `Source` (cancel, complete, or fail) unsubscribes.
 :::
 
 ::: tip Connection isolation
