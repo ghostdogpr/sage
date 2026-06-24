@@ -6,7 +6,6 @@ import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
-import scala.util.{Failure, Success}
 import scala.util.control.NonFatal
 
 import sage.Bytes
@@ -253,11 +252,7 @@ final private[client] class SubscriptionConnection(
         bootstrap,
         connectTimeoutMillis,
         (command, cb) => {
-          bootstrapWaiter = frame =>
-            cb(Reply.run(command, frame) match {
-              case Right(value) => Success(value)
-              case Left(error)  => Failure(error)
-            })
+          bootstrapWaiter = frame => cb(Reply.decode(command, frame))
           conn.send(command.encode)
         },
         () => conn.close()
