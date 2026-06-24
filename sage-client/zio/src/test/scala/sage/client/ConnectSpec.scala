@@ -9,7 +9,7 @@ import scala.jdk.CollectionConverters.*
 import kyo.compat.*
 
 import sage.{Bytes, Outcome, SageEvent, SageListener}
-import sage.SageException.{NotConnected, UnsupportedServer}
+import sage.SageException.{ConnectionFailed, NotConnected, UnsupportedServer}
 import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
 import sage.commands.{Command, Execution}
 import sage.protocol.Frame
@@ -46,6 +46,15 @@ class ConnectSpec extends munit.FunSuite {
     val (factory, _) = scripted(helloThenPong)
     Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map { result =>
       assertEquals(result, "PONG")
+    }
+  }
+
+  test("a refused connection surfaces as a recoverable ConnectionFailed carrying the cause") {
+    val deadPort = { val s = new java.net.ServerSocket(0); val p = s.getLocalPort; s.close(); p } // a port nothing listens on
+    val config   = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", deadPort)), connectTimeout = 1.second)
+    Client.connect(config).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ConnectionFailed], s"expected ConnectionFailed, got $error")
+      assert(error.getCause != null, "the original network error should be preserved as the cause")
     }
   }
 

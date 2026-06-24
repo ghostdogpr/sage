@@ -21,11 +21,13 @@ import sage.commands.*
 type SageClient = Client[[A] =>> A < (Abort[SageException] & Async), String]
 
 // Narrow the carrier to the typed channel: a SageException stays a failure, anything else becomes a Panic.
+private val toSageException: Throwable => Nothing < Abort[SageException] = {
+  case e: SageException => Abort.fail(e)
+  case e                => Abort.panic(e)
+}
+
 private def refine[A](v: A < (Abort[Throwable] & Async))(using Frame): A < (Abort[SageException] & Async) =
-  Abort.recover[Throwable] {
-    case e: SageException => Abort.fail(e)
-    case e                => Abort.panic(e)
-  }(v)
+  Abort.recover[Throwable](toSageException)(v)
 
 extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(using @unused ev: KeyCodec[K]) {
 

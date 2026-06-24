@@ -36,6 +36,12 @@ object SageException {
   }
 
   /**
+    * The initial connection could not be established (host unreachable, refused, or connect timeout). Distinct from [[ConnectionLost]], a
+    * live connection dropping around a command.
+    */
+  final case class ConnectionFailed(message: String) extends SageException(message)
+
+  /**
     * The connection dropped around this command. `mayHaveExecuted` is true when it was already in flight — the server may or may not have
     * applied it, so a non-idempotent command is not safe to blindly retry; false means it was never sent and retrying is safe.
     */

@@ -323,11 +323,7 @@ final private[client] class ClusterLive(
     Frame.Array(merged.result())
   }
 
-  private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] =
-    Reply.run(command, merged) match {
-      case Right(value) => Success(value)
-      case Left(error)  => Failure(error)
-    }
+  private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] = Reply.decode(command, merged)
 
   private def sendToAny[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     pickNode(topology) match {

@@ -4,7 +4,6 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference, AtomicReferenceArray}
 
 import scala.util.{Failure, Success, Try}
-import scala.util.control.NonFatal
 
 import sage.Bytes
 import sage.SageException
@@ -102,15 +101,7 @@ final private[client] class DedicatedConnection private (
     def dropped(): Unit = { inFlight.decrementAndGet(); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
 
     def complete(frame: Frame): Unit = {
-      val result =
-        try
-          Reply.run(command, frame) match {
-            case Right(value) => Success(value)
-            case Left(error)  => Failure(error)
-          }
-        catch {
-          case NonFatal(error) => Failure(error)
-        }
+      val result = Reply.decode(command, frame)
       inFlight.decrementAndGet()
       callback(result)
     }

@@ -9,6 +9,7 @@ Every sage failure is a `SageException`, a single sealed hierarchy you can match
 | `ProtocolError(message)` | Malformed RESP3 on the wire; the connection is discarded. |
 | `DecodeError(expected, actual)` | A reply was well-formed but not the shape a decoder or codec required (the built-in codecs decode strictly). |
 | `ServerError(code, detail)` | An error reply from the server. `code` is the leading token (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`, the generic `ERR`, …). |
+| `ConnectionFailed(message)` | The initial connection could not be established (host unreachable, connection refused, or connect timeout). Distinct from `ConnectionLost`, which is a live connection dropping. |
 | `ConnectionLost(mayHaveExecuted)` | The connection dropped around this command. |
 | `NotConnected()` | The client was never started, or has been closed. |
 | `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |

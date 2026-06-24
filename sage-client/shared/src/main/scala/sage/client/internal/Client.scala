@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
+import sage.SageException.{ConnectionFailed, ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
@@ -2305,7 +2305,12 @@ object Client {
         UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: ${e.getMessage}")
       case e: SSLException                                                                               =>
         TlsError(s"TLS handshake failed: ${e.getMessage}")
-      case other                                                                                         => other
+      case e: SageException                                                                              => e
+      // a raw network error would otherwise escape the sealed hierarchy
+      case other                                                                                         =>
+        val failed = ConnectionFailed(s"could not connect: $other")
+        failed.initCause(other)
+        failed
     }
 
   final private class Live(
