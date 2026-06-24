@@ -19,6 +19,15 @@ object SageException {
     */
   final case class DecodeError(expected: String, actual: String) extends SageException(s"expected $expected, got $actual")
 
+  object DecodeError {
+
+    private[sage] def fromThrowable(error: Throwable): DecodeError = {
+      val wrapped = DecodeError("a value the codec could decode", s"the codec threw $error")
+      wrapped.initCause(error)
+      wrapped
+    }
+  }
+
   /**
     * An error reply from the server. `code` is the leading token Redis/Valkey put on every error (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`,
     * the generic `ERR`, …), split out so callers can branch on it — `case ServerError("WRONGTYPE", _)` — without parsing the message

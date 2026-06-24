@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionFailed, ConnectionLost, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
+import sage.SageException.{ConnectionFailed, ConnectionLost, DecodeError, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
@@ -2407,11 +2407,16 @@ object Client {
       def close: CIO[Unit]                     = CIO.blocking(raw.close())
     }
 
-  // an undecodable payload fails the subscription stream rather than being silently dropped
+  // fail the stream on a bad payload rather than dropping it
   private def decodeOrThrow[V](payload: sage.Bytes)(using codec: ValueCodec[V]): V =
-    codec.decode(payload) match {
-      case Right(value) => value
-      case Left(error)  => throw error
+    try
+      codec.decode(payload) match {
+        case Right(value) => value
+        case Left(error)  => throw error
+      }
+    catch {
+      case e: SageException => throw e
+      case NonFatal(e)      => throw DecodeError.fromThrowable(e)
     }
 
   final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => ()) extends TransactionScope[CIO, String] {

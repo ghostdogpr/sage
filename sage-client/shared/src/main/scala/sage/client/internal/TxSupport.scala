@@ -29,7 +29,7 @@ private[internal] object TxSupport {
     result match {
       case Success(value)            => Right(value)
       case Failure(e: SageException) => Left(e)
-      case Failure(other)            => Left(DecodeError("a decodable reply", s"decoder threw $other"))
+      case Failure(other)            => Left(DecodeError.fromThrowable(other))
     }
 
   // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).
@@ -43,7 +43,7 @@ private[internal] object TxSupport {
         frames(n + 1) match {
           case Frame.Null                              => CIO.value(None)
           case Frame.Array(elems) if elems.length == n =>
-            CIO.value(Some(Vector.tabulate(n)(i => Reply.run(commands(i), elems(i)))))
+            CIO.value(Some(Vector.tabulate(n)(i => toEither(Reply.decode(commands(i), elems(i))))))
           case Frame.Array(elems)                      =>
             CIO.fail(ProtocolError(s"EXEC returned ${elems.length} results for $n queued commands"))
           case other                                   =>

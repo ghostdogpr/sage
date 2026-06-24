@@ -228,7 +228,10 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     var result: Option[Try[String]] = None
     connection.submit(throwing, r => result = Some(r))
     transports.head.emit(Frame.SimpleString("PONG"))
-    assertEquals(result, Some(Failure(boom)))
+    result match {
+      case Some(Failure(e: DecodeError)) => assertEquals(e.getCause, boom)
+      case other                         => fail(s"expected a DecodeError wrapping the thrown exception, got $other")
+    }
   }
 
   test("a reply with nothing pending discards the connection") {

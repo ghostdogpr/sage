@@ -32,9 +32,6 @@ private[sage] object Reply {
       }
     catch {
       case error: SageException => Failure(error)
-      case NonFatal(error)      =>
-        val wrapped = DecodeError("a value the codec could decode", s"the codec threw $error")
-        wrapped.initCause(error)
-        Failure(wrapped)
+      case NonFatal(error)      => Failure(DecodeError.fromThrowable(error))
     }
 }
