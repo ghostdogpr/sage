@@ -7,25 +7,32 @@ import _root_.kyo.{<, Abort, Async, Duration, Frame, Maybe, Scope, Stream, Tag}
 import _root_.kyo.Duration.toMillis
 import _root_.kyo.compat.*
 
-import sage.{Message, PatternMessage}
+import sage.{Message, PatternMessage, SageException}
 import sage.client.SageConfig
 import sage.client.internal.{Client, LoweredClient, Paged, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
 /**
-  * The Kyo-native surface: the same client, with every method returning a Kyo pending computation.
+  * The Kyo-native surface: the same client, with every method returning a pending computation whose `Abort` channel is the sealed
+  * [[SageException]], so failures are matched exhaustively. Anything that is not a `SageException` is a Kyo `Panic` (a defect), never a
+  * typed failure.
   */
-type SageClient = Client[[A] =>> A < (Abort[Throwable] & Async), String]
+type SageClient = Client[[A] =>> A < (Abort[SageException] & Async), String]
 
-private type KyoEff[A] = A < (Abort[Throwable] & Async)
+// Narrow the carrier to the typed channel: a SageException stays a failure, anything else becomes a Panic.
+private def refine[A](v: A < (Abort[Throwable] & Async))(using Frame): A < (Abort[SageException] & Async) =
+  Abort.recover[Throwable] {
+    case e: SageException => Abort.fail(e)
+    case e                => Abort.panic(e)
+  }(v)
 
-extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @unused ev: KeyCodec[K]) {
+extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(using @unused ev: KeyCodec[K]) {
 
   /**
     * Runs a read with client-side caching and a Kyo `Duration` TTL — the Kyo-native form of [[sage.client.internal.Client.cached]].
     */
-  def cached[A](command: Command[A], ttl: Duration): A < (Abort[Throwable] & Async) =
+  def cached[A](command: Command[A], ttl: Duration): A < (Abort[SageException] & Async) =
     client.cached(command, FiniteDuration(ttl.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
 
   /**
@@ -36,7 +43,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     pattern: Option[String] = None,
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
-  )(using Tag[K]): Stream[K, Abort[Throwable] & Async] =
+  )(using Tag[K]): Stream[K, Abort[SageException] & Async] =
     scanStreamAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
 
   /**
@@ -46,7 +53,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
-  )(using Tag[F], Tag[V]): Stream[(F, V), Abort[Throwable] & Async] =
+  )(using Tag[F], Tag[V]): Stream[(F, V), Abort[SageException] & Async] =
     scanStream(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
@@ -56,7 +63,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
-  )(using Tag[V]): Stream[V, Abort[Throwable] & Async] =
+  )(using Tag[V]): Stream[V, Abort[SageException] & Async] =
     scanStream(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
@@ -66,21 +73,25 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     key: K,
     pattern: Option[String] = None,
     count: Option[Long] = None
-  )(using Tag[V]): Stream[(V, Double), Abort[Throwable] & Async] =
+  )(using Tag[V]): Stream[(V, Double), Abort[SageException] & Async] =
     scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
   // chunkSize = 1: emit each page as it arrives — the default rechunks to 4096, withholding an infinite tail (xTail/xConsume) until then.
-  // The page-step logic itself is shared in `Paged`; here we only lower its `CIO` to Kyo and turn the `Option` end-signal into a `Maybe`.
-  private def paged[S, A](start: S)(step: Paged.Step[S, A])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
+  // The page-step logic itself is shared in `Paged`; here we lower its `CIO` to Kyo, refine the channel, and turn the `Option` end-signal into a `Maybe`.
+  private def paged[S, A](start: S)(step: Paged.Step[S, A])(using Tag[A]): Stream[A, Abort[SageException] & Async] =
     Stream
-      .unfold[S, Vector[A], Abort[Throwable] & Async](start, chunkSize = 1)(s => step(s).lower.map(Maybe.fromOption))
+      .unfold[S, Vector[A], Abort[SageException] & Async](start, chunkSize = 1)(s => refine(step(s).lower).map(Maybe.fromOption))
       .flatMap(items => Stream.init(items))
 
-  private def scanStream[A](fetch: ScanCursor => KyoEff[ScanPage[A]])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
+  private def scanStream[A](fetch: ScanCursor => ScanPage[A] < (Abort[SageException] & Async))(
+    using Tag[A]
+  ): Stream[A, Abort[SageException] & Async] =
     paged[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
 
   // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
-  private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => KyoEff[ScanPage[A]])(using Tag[A]): Stream[A, Abort[Throwable] & Async] =
+  private def scanStreamAll[A](
+    fetch: ScanTarget => ScanCursor => ScanPage[A] < (Abort[SageException] & Async)
+  )(using Tag[A]): Stream[A, Abort[SageException] & Async] =
     paged[ScanStep, A](ScanStep.Begin)(Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor))))
 
   /**
@@ -91,7 +102,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     start: StreamRangeId = StreamRangeId.Min,
     end: StreamRangeId = StreamRangeId.Max,
     batch: Long = 100L
-  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
+  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[SageException] & Async] =
     paged[Option[StreamRangeId], StreamEntry[F, V]](Some(start))(
       Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
     )
@@ -108,7 +119,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     minIdle: FiniteDuration,
     start: StreamId = StreamId.Zero,
     count: Option[Long] = None
-  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
+  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[SageException] & Async] =
     paged[Option[StreamId], StreamEntry[F, V]](Some(start))(
       Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
     )
@@ -123,7 +134,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
-  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
+  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[SageException] & Async] =
     paged[StreamId, StreamEntry[F, V]](from)(
       Paged.tail(last =>
         CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
@@ -141,7 +152,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     key: K,
     count: Option[Long] = None,
     block: BlockTimeout = SageClient.defaultPoll
-  )(handle: StreamEntry[F, V] => KyoEff[Unit])(using Tag[F], Tag[V], Frame): KyoEff[Unit] =
+  )(handle: StreamEntry[F, V] => Unit < (Abort[SageException] & Async))(using Tag[F], Tag[V], Frame): Unit < (Abort[SageException] & Async) =
     consumeStream[F, V](group, consumer, key, count, block)
       .foreach(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
 
@@ -151,7 +162,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     key: K,
     count: Option[Long],
     block: BlockTimeout
-  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[Throwable] & Async] =
+  )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[SageException] & Async] =
     paged[Either[StreamId, Unit], StreamEntry[F, V]](Left(StreamId.Zero))(
       Paged.consume(
         drainPending = after =>
@@ -166,7 +177,10 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
     * Subscribes to one or more channels; closing the enclosing `Scope` unsubscribes. Survives reconnects via auto-resubscribe, dropping
     * messages published during the reconnect gap.
     */
-  def subscribe[V: ValueCodec](channel: String, rest: String*)(using Tag[Message[V]], Frame): Stream[Message[V], Abort[Throwable] & Async & Scope] =
+  def subscribe[V: ValueCodec](channel: String, rest: String*)(
+    using Tag[Message[V]],
+    Frame
+  ): Stream[Message[V], Abort[SageException] & Async & Scope] =
     streamOf(client.subscribeChannels[V](channel, rest*))
 
   /**
@@ -175,14 +189,17 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
   def pSubscribe[V: ValueCodec](pattern: String, rest: String*)(
     using Tag[PatternMessage[V]],
     Frame
-  ): Stream[PatternMessage[V], Abort[Throwable] & Async & Scope] =
+  ): Stream[PatternMessage[V], Abort[SageException] & Async & Scope] =
     streamOf(client.subscribePatterns[V](pattern, rest*))
 
   /**
     * Subscribes to one or more Shard Channels; in a cluster each is routed to the Node owning its Slot, and resubscription follows the Slot
     * on migration or failover. A sharded delivery is an ordinary [[Message]].
     */
-  def sSubscribe[V: ValueCodec](channel: String, rest: String*)(using Tag[Message[V]], Frame): Stream[Message[V], Abort[Throwable] & Async & Scope] =
+  def sSubscribe[V: ValueCodec](channel: String, rest: String*)(
+    using Tag[Message[V]],
+    Frame
+  ): Stream[Message[V], Abort[SageException] & Async & Scope] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
   /**
@@ -192,7 +209,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
   def subscribeScoped[V: ValueCodec](channel: String, rest: String*)(
     using Tag[Message[V]],
     Frame
-  ): Stream[Message[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+  ): Stream[Message[V], Abort[SageException] & Async & Scope] < (Abort[SageException] & Async & Scope) =
     scopedStreamOf(client.subscribeChannels[V](channel, rest*))
 
   /**
@@ -202,7 +219,7 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
   def pSubscribeScoped[V: ValueCodec](pattern: String, rest: String*)(
     using Tag[PatternMessage[V]],
     Frame
-  ): Stream[PatternMessage[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+  ): Stream[PatternMessage[V], Abort[SageException] & Async & Scope] < (Abort[SageException] & Async & Scope) =
     scopedStreamOf(client.subscribePatterns[V](pattern, rest*))
 
   /**
@@ -212,21 +229,23 @@ extension [K](client: Client[[A] =>> A < (Abort[Throwable] & Async), K])(using @
   def sSubscribeScoped[V: ValueCodec](channel: String, rest: String*)(
     using Tag[Message[V]],
     Frame
-  ): Stream[Message[V], Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+  ): Stream[Message[V], Abort[SageException] & Async & Scope] < (Abort[SageException] & Async & Scope) =
     scopedStreamOf(client.subscribeShardChannels[V](channel, rest*))
 
   private def streamOf[A](
-    open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
-  )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
+    open: => Subscription[[B] =>> B < (Abort[SageException] & Async), A] < (Abort[SageException] & Async)
+  )(using Tag[A], Frame): Stream[A, Abort[SageException] & Async & Scope] =
     Stream.init(Scope.acquireRelease(open)(_.close).map(Seq(_))).flatMap(deliveries)
 
   private def scopedStreamOf[A](
-    open: => Subscription[KyoEff, A] < (Abort[Throwable] & Async)
-  )(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] < (Abort[Throwable] & Async & Scope) =
+    open: => Subscription[[B] =>> B < (Abort[SageException] & Async), A] < (Abort[SageException] & Async)
+  )(using Tag[A], Frame): Stream[A, Abort[SageException] & Async & Scope] < (Abort[SageException] & Async & Scope) =
     Scope.acquireRelease(open)(_.close).map(deliveries)
 
   // chunkSize = 1: emit each message as it arrives — the default rechunks to 4096, withholding a live stream until that many accumulate
-  private def deliveries[A](sub: Subscription[KyoEff, A])(using Tag[A], Frame): Stream[A, Abort[Throwable] & Async & Scope] =
+  private def deliveries[A](
+    sub: Subscription[[B] =>> B < (Abort[SageException] & Async), A]
+  )(using Tag[A], Frame): Stream[A, Abort[SageException] & Async & Scope] =
     Stream.repeatPresent(sub.next.map(opt => Maybe.fromOption(opt.map(Seq(_)))), chunkSize = 1)
 }
 
@@ -236,19 +255,19 @@ object SageClient {
     * A command surface re-typed to a non-String key, as returned by `client.as[K]`. The unqualified [[SageClient]] is String-keyed;
     * use `as` to reach any other key type over the same connection.
     */
-  type Keyed[K] = Client[[A] =>> A < (Abort[Throwable] & Async), K]
+  type Keyed[K] = Client[[A] =>> A < (Abort[SageException] & Async), K]
 
   // bounded poll so xConsume's blocking read returns periodically, keeping cancellation responsive
   private[backend] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, java.util.concurrent.TimeUnit.SECONDS))
 
-  def connect(config: SageConfig): SageClient < (Abort[Throwable] & Async) =
-    Client.connect(config).lower.map(new Lowered(_))
+  def connect(config: SageConfig): SageClient < (Abort[SageException] & Async) =
+    refine(Client.connect(config).lower).map(new Lowered(_))
 
-  def scoped(config: SageConfig): SageClient < (Scope & Abort[Throwable] & Async) =
-    Scope.acquireRelease(connect(config))(client => Abort.run(client.close))
+  def scoped(config: SageConfig): SageClient < (Scope & Abort[SageException] & Async) =
+    Scope.acquireRelease(connect(config))(client => Abort.run[SageException](client.close))
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[A] =>> A < (Abort[Throwable] & Async)](underlying) {
-    protected def lower[A](c: CIO[A]): A < (Abort[Throwable] & Async) = c.lower
-    protected def lift[A](fa: A < (Abort[Throwable] & Async)): CIO[A] = CIO.lift(fa)
+  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[A] =>> A < (Abort[SageException] & Async)](underlying) {
+    protected def lower[A](c: CIO[A]): A < (Abort[SageException] & Async) = refine(c.lower)
+    protected def lift[A](fa: A < (Abort[SageException] & Async)): CIO[A] = CIO.lift(fa)
   }
 }

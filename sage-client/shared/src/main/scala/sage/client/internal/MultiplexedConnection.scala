@@ -9,7 +9,7 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import sage.{Bytes, Outcome, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, NotConnected}
+import sage.SageException.{ConnectionLost, DecodeError, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.{Command, Connection, Invalidation, Reply}
@@ -232,14 +232,17 @@ final private[client] class MultiplexedConnection private (
     if (conn != null) conn.checkLiveness(scheduler.nowMillis, watchdog.pingInterval.toMillis, watchdog.pingTimeout.toMillis)
   }
 
-  // mirrors Entry.complete: top-level error frames become a ServerError, and a throwing user decoder fails the call rather than escaping
+  // mirrors Entry.complete: top-level error frames become a ServerError, and a throwing user codec becomes a DecodeError
   private def decodeFrame[A](command: Command[A], frame: Frame): Try[A] =
     try
       Reply.run(command, frame) match {
         case Right(value) => Success(value)
         case Left(error)  => Failure(error)
       }
-    catch { case NonFatal(error) => Failure(error) }
+    catch {
+      case error: SageException => Failure(error)
+      case NonFatal(error)      => Failure(DecodeError("a value the codec could decode", s"a codec that threw $error"))
+    }
 
   final private class Conn {
 

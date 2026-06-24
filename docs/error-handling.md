@@ -1,6 +1,6 @@
 # Error handling
 
-Every sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. How a failure reaches you depends on your backend: a failed ZIO `Task`, a raised Cats Effect `IO`, a Kyo `Abort[Throwable]`, a thrown exception in Ox direct style, or a failed `scala.concurrent.Future` on Pekko. In every case the value is the same `SageException`.
+Every sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. On ZIO and Kyo the error channel is that `SageException` itself (`IO[SageException, *]`, `Abort[SageException]`), so the compiler holds you to handling it. On Cats Effect, Ox, and Pekko the same `SageException` arrives through the ecosystem's untyped failure channel: a raised `IO`, a thrown exception, a failed `scala.concurrent.Future`. The runtime value is always a `SageException`; ZIO and Kyo also put it in the type.
 
 ## The hierarchy
 
@@ -51,10 +51,10 @@ When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command:
 
 ## How failures surface per backend
 
-The same `SageException` is delivered through each ecosystem's normal failure channel:
+The same `SageException` is delivered through each ecosystem's normal failure channel. ZIO and Kyo carry it in the type as well, so on those two a non-`SageException` is a defect (a ZIO die, a Kyo `Panic`) rather than a typed failure:
 
-- **ZIO**: a failed `Task`; recover with `catchAll` / `catchSome`.
-- **Cats Effect**: a raised `IO`; recover with `handleErrorWith` / `recoverWith`.
-- **Kyo**: an `Abort[Throwable]`; handle with the `Abort` combinators.
+- **ZIO**: a failed `IO[SageException, *]`; recover with `catchAll` / `catchSome`, which hand you a `SageException` directly.
+- **Cats Effect**: a raised `IO`; recover with `handleErrorWith` / `recoverWith` and match the `SageException`.
+- **Kyo**: an `Abort[SageException]`; handle with the `Abort` combinators.
 - **Ox**: thrown in direct style; handle with an ordinary `try`/`catch`.
 - **Pekko**: a failed `scala.concurrent.Future`; recover with `recover` / `recoverWith`.
