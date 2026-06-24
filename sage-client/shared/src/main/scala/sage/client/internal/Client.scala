@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionFailed, ConnectionLost, DecodeError, NotCacheable, NotConnected, ServerError, TimedOut, TlsError, UnsupportedServer}
+import sage.SageException.*
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
