@@ -50,6 +50,11 @@ class TxScopeFaultSpec extends munit.FunSuite {
     }
   }
 
+  test("a synchronous failure while submitting completes the effect instead of hanging") {
+    val (scope, _) = txScope(p => if (p.asUtf8String.contains("HELLO")) Seq(helloReply) else throw ConnectionLost(mayHaveExecuted = false))
+    scope.run(Strings.set("k", "v")).unsafeRun.failed.map(e => assert(e.isInstanceOf[ConnectionLost], s"expected ConnectionLost, got $e"))
+  }
+
   test("a transaction whose EXEC hits a READONLY invokes the onFault hook") {
     val respond: Bytes => Seq[Frame] = p =>
       if (p.asUtf8String.contains("HELLO")) Seq(helloReply)

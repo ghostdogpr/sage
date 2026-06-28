@@ -7,6 +7,7 @@ val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed t
 
 val munitVersion          = "1.3.3"
 val testcontainersVersion = "0.44.1"
+val otelVersion           = "1.40.0"
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC4"
@@ -54,7 +55,7 @@ addCommandAlias(
 
 addCommandAlias(
   "testUnit",
-  s"all core/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo$scala3NextSuffix/test " +
+  s"all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo$scala3NextSuffix/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
     s"benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo$scala3NextSuffix/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
@@ -78,7 +79,7 @@ lazy val root = project
   .settings(publish / skip := true)
   // benchmarks is intentionally NOT aggregated: it is dev-only/on-demand and pulls JMH + testcontainers + competitor clients, which should
   // not be dragged into ordinary root compile/test/CI. The benchAll alias and benchmarks<Cell>/Jmh/run target its cells directly.
-  .aggregate(core.projectRefs ++ client.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs: _*)
+  .aggregate(core.projectRefs ++ client.projectRefs ++ opentelemetry.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs: _*)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
 // Built for both Scala LTS (published) and Scala Next (compile-only, so the kyo client cell can depend on it).
@@ -96,6 +97,26 @@ lazy val core = (projectMatrix in file("sage-core"))
     autoScalaLibrary = true,
     axisValues = Seq(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3NextVersion, scala3NextVersion)),
     process = (p: Project) => p.settings(publish / skip := true)
+  )
+
+// OpenTelemetry tracing. LTS-only: a Scala Next (kyo) app consumes the LTS artifact, as it already does for sage-core.
+lazy val opentelemetry = (projectMatrix in file("sage-opentelemetry"))
+  .dependsOn(core)
+  .settings(name := "sage-opentelemetry")
+  .settings(commonSettings)
+  .settings(parallelUnitTests)
+  .settings(
+    libraryDependencies ++= Seq(
+      "io.opentelemetry" % "opentelemetry-api"         % otelVersion,
+      "io.opentelemetry" % "opentelemetry-sdk"         % otelVersion % Test,
+      "io.opentelemetry" % "opentelemetry-sdk-testing" % otelVersion % Test
+    )
+  )
+  .defaultAxes(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version))
+  .customRow(
+    autoScalaLibrary = true,
+    axisValues = Seq(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version)),
+    process = identity[Project] _
   )
 
 // Runtime written once against kyo-compat, cross-published per backend. JDK 21+.

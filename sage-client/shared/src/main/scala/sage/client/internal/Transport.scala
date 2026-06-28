@@ -3,7 +3,7 @@ package sage.client.internal
 import sage.Bytes
 
 /**
-  * The socket layer's seam: the layer above speaks frames and send items, never bytes or threads. Implementations deliver every parsed
+  * The socket layer's boundary: the layer above speaks frames and send items, never bytes or threads. Implementations deliver every parsed
   * frame to an `onFrame` callback taken at construction, and invoke `onClosed` exactly once when the connection terminates for any reason,
   * including `close()`; by then every queued-but-unwritten item has been `dropped()`.
   */

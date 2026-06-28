@@ -6,7 +6,7 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.control.NonFatal
 
 /**
-  * The clock and timer seam under the reconnect loop and the watchdog, injected so tests drive virtual time. `nowMillis` is monotonic. A
+  * The clock and timer abstraction under the reconnect loop and the watchdog, injected so tests drive virtual time. `nowMillis` is monotonic. A
   * one-shot `after` task may block (connect, bootstrap); a periodic `every` tick must not.
   */
 private[client] trait Scheduler {

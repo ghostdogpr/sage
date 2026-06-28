@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage, SageEvent, SageException}
+import sage.{CommandSpan, Message, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
@@ -110,14 +110,20 @@ final private[client] class ClusterLive(
   }
 
   def run[A](command: Command[A]): CIO[A] =
-    CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete))))
+    CIO.async[A] { complete =>
+      val span = Events.startSpan(events, command)
+      offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete, span)))
+    }
 
   // caching is not applied in cluster mode (per-node tracking through redirects/failover is unsupported): the read runs uncached but on the
   // master (allowReplica = false), so it never honors ReadFrom and the call stays portable; the cacheability guard still applies
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else
-      CIO.async[A](complete => offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete), allowReplica = false)))
+      CIO.async[A] { complete =>
+        val span = Events.startSpan(events, command)
+        offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete, span), allowReplica = false))
+      }
 
   // SCAN cursors are node-local, so a full SCAN must sweep every slot-owning master; a reshard mid-scan can still miss or duplicate keys
   def scanTargets: CIO[Vector[ScanTarget]] =
@@ -134,7 +140,10 @@ final private[client] class ClusterLive(
   def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] =
     target.node match {
       case Some(node) =>
-        CIO.async[A](complete => offload(sendTo(node, command, asking = false, redirectsLeft = 0, Events.trackCommand(events, command, complete))))
+        CIO.async[A] { complete =>
+          val span = Events.startSpan(events, command)
+          offload(sendTo(node, command, asking = false, redirectsLeft = 0, Events.trackCommand(events, command, complete, span)))
+        }
       case None       => run(command)
     }
 
@@ -428,15 +437,24 @@ final private[client] class ClusterLive(
         )
       )
     else
-      CIO.async(complete => offload(runPipeline(p, complete)))
+      CIO.async { complete =>
+        val spans = Events.startSpans(events, p.commands)
+        offload(runPipeline(p, complete, spans))
+      }
 
   // a position a stale topology can't resolve (redirect, unreachable node, Unowned) falls back to per-command dispatch; the collector completes
   // the effect once every position has landed terminally, never on a redirect
-  private def runPipeline[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Either[SageException, Any]]] => Unit): Unit = {
+  private def runPipeline[Out, R](
+    p: Pipeline[Out, R],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit,
+    spans: Vector[CommandSpan]
+  ): Unit = {
     val n                         = p.commands.length
     val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
-    val emits                     =
-      Vector.tabulate(n)(i => Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result))))
+    val emits                     = Vector.tabulate(n) { i =>
+      val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
+      Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
+    }
     // all-or-nothing: reroutes honor the same choice so a slot is never split across master and replica
     val useReplica                = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
     def reroute(index: Int): Unit = offload(dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica))
@@ -444,7 +462,11 @@ final private[client] class ClusterLive(
     val plan = topologyRef.get().split(p)
     // a malformed command is a programmer error: fail the whole effect before anything reaches the wire, never as a per-position result
     plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
-      case Some(index) => complete(Failure(malformedKeys(p.commands(index).name))); return
+      case Some(index) =>
+        val error = malformedKeys(p.commands(index).name)
+        // this path completes the effect without invoking emits, so end their spans here rather than leak them unsettled
+        emits.foreach(Events.abandonSpan(_, error))
+        complete(Failure(error)); return
       case None        => ()
     }
     plan.rejected.foreach {
@@ -543,14 +565,20 @@ final private[client] class ClusterLive(
 
     def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] = {
       val command = Connection.watch(key, rest*)
-      CIO.async[Unit](complete => offload(withConn(command, complete) { c => armed.set(true); c.submit(command, faulting(complete)) }))
+      CIO.async[Unit] { complete =>
+        val tracked = Events.trackSpan(events, command, complete)
+        offload(withConn(command, tracked) { c => armed.set(true); c.submit(command, faulting(tracked)) })
+      }
     }
 
     def run[A](command: Command[A]): CIO[A] =
       if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
-        CIO.async[A](complete => offload(withConn(command, complete)(c => c.submit(command, faulting(complete)))))
+        CIO.async[A] { complete =>
+          val tracked = Events.trackSpan(events, command, complete)
+          offload(withConn(command, tracked)(c => c.submit(command, faulting(tracked))))
+        }
 
     def discard: CIO[Unit] =
       CIO.async[Unit] { complete =>
@@ -559,7 +587,7 @@ final private[client] class ClusterLive(
           try
             if (released) complete(Failure(TxSupport.scopeReleasedError))
             else if (conn == null) complete(Success(())) // nothing leased, nothing watched
-            else { armed.set(false); conn.submit(Connection.unwatch, faulting(complete)) }
+            else Client.completing(complete) { armed.set(false); conn.submit(Connection.unwatch, faulting(complete)) }
           finally lock.unlock()
         }
       }
@@ -603,7 +631,10 @@ final private[client] class ClusterLive(
         CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
       else
         CIO
-          .async[Vector[Frame]](complete => offload(submitExec(p, complete)))
+          .async[Vector[Frame]] { complete =>
+            val tracked = Events.trackSpan(events, Connection.multi, complete)
+            offload(submitExec(p, tracked))
+          }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
             refreshOnExecFault(frames)
@@ -618,7 +649,7 @@ final private[client] class ClusterLive(
         else
           pipelineSlot(p).flatMap(ensureConn) match {
             case Left(error) => refreshOnFault(error); complete(Failure(error))
-            case Right(_)    => conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete))
+            case Right(_)    => Client.completing(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
           }
       finally lock.unlock()
     }
@@ -630,7 +661,7 @@ final private[client] class ClusterLive(
         else
           commandSlot(command).flatMap(ensureConn) match {
             case Left(error) => refreshOnFault(error); complete(Failure(error))
-            case Right(_)    => use(conn)
+            case Right(_)    => Client.completing(complete)(use(conn))
           }
       finally lock.unlock()
     }
@@ -803,11 +834,12 @@ final private[client] class ClusterLive(
   // means "the node I queried", so substitute `from` as redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
     val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
-    val previous     = if (events.enabled) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
+    // TopologyChanged is a listener-only event, so only do the slot-owner bookkeeping when a listener is registered, not for a tracer-only client
+    val previous     = if (events.emitsEvents) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
     val newTopology  = ClusterTopology.from(resolved)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change
-    if (events.enabled && previous.nonEmpty) {
+    if (events.emitsEvents && previous.nonEmpty) {
       val current = slotOwningMasters(newTopology)
       if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
     }
@@ -882,7 +914,7 @@ private[client] object ClusterLive {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)
         (onFrame, onClosed) => SocketTransport.connect(node.host, node.port, config.connectTimeout, upgrade, onFrame, onClosed)
       }
-      val events                                                  = Events(config.listeners)
+      val events                                                  = Events(config.listeners, config.tracer)
       val live                                                    = new ClusterLive(
         factory,
         scheduler,

@@ -7,10 +7,10 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success}
 
-import sage.{Bytes, SageEvent, SageListener}
+import sage.{Bytes, CommandSpan, CommandTracer, Outcome, SageEvent, SageListener}
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.cluster.Node
-import sage.commands.{Connection, Strings}
+import sage.commands.{Command, Connection, Strings}
 import sage.protocol.Frame
 
 class EventsSpec extends munit.FunSuite {
@@ -19,12 +19,25 @@ class EventsSpec extends munit.FunSuite {
   private val noWatchdog   = WatchdogConfig(enabled = false)
 
   // a synchronous sink, so wiring assertions are deterministic; the real Dispatcher's async behavior is exercised separately
-  final private class Recording extends Events {
+  final private class Recording(val tracer: Option[CommandTracer] = None) extends Events {
     private val buf                  = mutable.ArrayBuffer.empty[SageEvent]
     def enabled: Boolean             = true
+    def emitsEvents: Boolean         = true
     def emit(event: SageEvent): Unit = synchronized { val _ = buf += event }
     def close(): Unit                = ()
     def events: Vector[SageEvent]    = synchronized(buf.toVector)
+  }
+
+  // a fake tracer recording its span lifecycle as a flat log, so the synchronous tracing wiring can be asserted without OpenTelemetry
+  final private class RecordingTracer extends CommandTracer {
+    val log                                         = mutable.ArrayBuffer.empty[String]
+    def onCommand(command: Command[?]): CommandSpan = {
+      log += s"start:${command.name}"
+      new CommandSpan {
+        def routedTo(node: Node): Unit      = log += s"routed:${node.host}:${node.port}"
+        def settled(outcome: Outcome): Unit = log += s"settled:$outcome"
+      }
+    }
   }
 
   final private class Capturing(latch: CountDownLatch) extends SageListener {
@@ -128,6 +141,62 @@ class EventsSpec extends munit.FunSuite {
       case Vector(SageEvent.CommandCompleted("INCR", Some(Node("redis", 7000)), _, sage.Outcome.Failed(_))) => ()
       case other                                                                                            => fail(s"unexpected: $other")
     }
+  }
+
+  // --- tracing ---------------------------------------------------------------------------------------------------------------------------
+
+  test("a tracer-only bus is enabled but emits no events, and drives the span lifecycle through trackCommand") {
+    val tracer = new RecordingTracer
+    val bus    = Events(Vector.empty, Some(tracer))
+    assert(bus.enabled)
+    assert(!bus.emitsEvents) // no listeners, so no CommandCompleted events are produced
+    val tracked = Events.trackCommand[String](bus, Connection.ping(None), _ => ())
+    Events.attributeNode(tracked, Node("redis", 7000))
+    tracked(Success("PONG"))
+    assertEquals(tracer.log.toVector, Vector("start:PING", "routed:redis:7000", "settled:Succeeded"))
+  }
+
+  test("startSpan starts the span once on the caller; the trackCommand overload reuses it and still emits the event") {
+    val tracer  = new RecordingTracer
+    val rec     = new Recording(Some(tracer))
+    val span    = Events.startSpan(rec, Connection.ping(None))                           // span starts here, on the caller's fiber
+    assertEquals(tracer.log.toVector, Vector("start:PING"))
+    val tracked = Events.trackCommand[String](rec, Connection.ping(None), _ => (), span) // reuses the span, does not start a second
+    assertEquals(tracer.log.toVector, Vector("start:PING"))
+    tracked(Success("PONG"))
+    assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
+    assert(rec.events.exists { case _: SageEvent.CommandCompleted => true; case _ => false }) // listener still sees the completion
+  }
+
+  test("a failure settles the span as Failed") {
+    val tracer  = new RecordingTracer
+    val bus     = Events(Vector.empty, Some(tracer))
+    val tracked = Events.trackCommand[Long](bus, Strings.incr[String]("k"), _ => ())
+    tracked(Failure(sage.SageException.NotConnected()))
+    assertEquals(tracer.log.head, "start:INCR")
+    assert(tracer.log.last.startsWith("settled:Failed"))
+  }
+
+  test("trackSpan drives the span but emits no event, and is transparent when no tracer is set") {
+    val tracer  = new RecordingTracer
+    val rec     = new Recording(Some(tracer)) // emitsEvents is true, yet trackSpan must still not emit a CommandCompleted
+    val tracked = Events.trackSpan[String](rec, Connection.ping(None), _ => ())
+    tracked(Success("PONG"))
+    assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
+    assertEquals(rec.events, Vector.empty) // span-only: a transaction's commands stay invisible to listeners
+
+    val cb: scala.util.Try[String] => Unit = _ => ()
+    assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb) // no tracer, no wrap
+  }
+
+  test("abandonSpan settles the span without invoking the callback (the fail-fast path)") {
+    val tracer  = new RecordingTracer
+    val bus     = Events(Vector.empty, Some(tracer))
+    var called  = false
+    val tracked = Events.trackCommand[String](bus, Connection.ping(None), _ => called = true)
+    Events.abandonSpan(tracked, sage.SageException.NotConnected())
+    assert(!called, "abandonSpan must not invoke the wrapped callback")
+    assert(tracer.log.last.startsWith("settled:Failed"))
   }
 
   // --- connection lifecycle --------------------------------------------------------------------------------------------------------------

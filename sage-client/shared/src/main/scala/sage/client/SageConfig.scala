@@ -7,7 +7,7 @@ import javax.net.ssl.SSLContext
 
 import scala.concurrent.duration.*
 
-import sage.SageListener
+import sage.{CommandTracer, SageListener}
 
 /**
   * Exponential reconnect backoff with full jitter (a random wait in `[0, base]`), spreading the reconnect storm across clients.
@@ -157,6 +157,8 @@ enum Topology {
   *                       a connection. Must be 0 for a cluster topology, which has only database 0
   * @param clientName     sets `CLIENT SETNAME`, visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically
   * @param listeners      observers of runtime [[sage.SageEvent]]s — see [[sage.SageListener]]
+  * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active
+  *                       span — see [[sage.CommandTracer]]. `None` (the default) emits no spans
   */
 final case class SageConfig(
   connectTimeout: FiniteDuration = 10.seconds,
@@ -172,7 +174,8 @@ final case class SageConfig(
   readFrom: ReadFrom = ReadFrom.Master,
   database: Int = 0,
   clientName: Option[String] = None,
-  listeners: Vector[SageListener] = Vector.empty
+  listeners: Vector[SageListener] = Vector.empty,
+  tracer: Option[CommandTracer] = None
 )
 
 object SageConfig {

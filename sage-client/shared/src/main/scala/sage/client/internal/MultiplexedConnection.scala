@@ -285,10 +285,10 @@ final private[client] class MultiplexedConnection private (
       cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
         // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
         // and release the two slots reserved for the (now unsent) fetch
-        case ClientCache.Acquire.Hit(frame) => release(2); events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
-        case ClientCache.Acquire.Wait       => release(2); events.emit(SageEvent.Cache.Hit(command.name))
+        case ClientCache.Acquire.Hit(frame) => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
+        case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Acquire.Fetch      =>
-          events.emit(SageEvent.Cache.Miss(command.name))
+          if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
           val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
           val onReply: Try[Frame] => Unit = { result =>
@@ -296,8 +296,9 @@ final private[client] class MultiplexedConnection private (
               case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
               case Failure(error) => cache.fail(commandBytes, error)
             }
-            // a miss touched the server, so unlike a hit it also produces a CommandCompleted; the outcome reflects the decoded reply
-            if (events.enabled)
+            // a miss touched the server, so unlike a hit it also produces a CommandCompleted; the outcome reflects the decoded reply. gated on
+            // emitsEvents (not enabled): a tracer-only client has no listener to receive it, and a cached miss is not span-traced either
+            if (events.emitsEvents)
               events.emit(
                 SageEvent.CommandCompleted(
                   command.name,

@@ -11,7 +11,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Bytes, Message, Outcome, PatternMessage, SageEvent, SageException}
+import sage.{Bytes, CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.*
 import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
 import sage.cluster.Node
@@ -2142,27 +2142,40 @@ object Client {
   private[internal] def notCacheable(command: Command[?]): NotCacheable =
     NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
 
+  // run a submit that registers a reply callback; if it throws synchronously instead (e.g. a closed transport), complete with the error so the
+  // caller's CIO.async settles rather than hangs
+  private[internal] def completing[A](complete: Try[A] => Unit)(submit: => Unit): Unit =
+    try submit
+    catch { case NonFatal(error) => complete(Failure(error)) }
+
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
+  // `spans` are started by the caller on its fiber and passed in (empty when no tracer), so a master-replica pipeline running this on an offload
+  // worker still nests its spans correctly while the duration clock starts here, on the executing thread.
   private[internal] def submitBatchOnOne(
     events: Events,
     commands: Vector[Command[?]],
+    spans: Vector[CommandSpan],
     submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
     complete: Try[Vector[Either[SageException, Any]]] => Unit
   ): Unit = {
     val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
-    val callbacks = Vector.tabulate(commands.length)(i =>
-      Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)))
-    )
+    val callbacks = Vector.tabulate(commands.length) { i =>
+      val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
+      Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
+    }
     if (!submitAll(commands, callbacks)) {
-      if (events.enabled)
-        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(NotConnected()))))
-      complete(Failure(NotConnected()))
+      val error = NotConnected()
+      // this path completes the effect without invoking callbacks, so end any tracing spans they started rather than leak them unsettled
+      callbacks.foreach(Events.abandonSpan(_, error))
+      if (events.emitsEvents)
+        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
+      complete(Failure(error))
     }
   }
 
   /**
-    * The construction seam each backend's `connect`/`scoped` builds on: validates `config`, then connects per its [[Topology]].
+    * The construction entry point each backend's `connect`/`scoped` builds on: validates `config`, then connects per its [[Topology]].
     */
   def connect(config: SageConfig): CIO[Client[CIO, String]] =
     validate(config) match {
@@ -2246,7 +2259,7 @@ object Client {
         config.auth,
         config.clientCache.maxBytes,
         config.clientCache.enabled,
-        Events(config.listeners),
+        Events(config.listeners, config.tracer),
         config.database,
         config.clientName
       )
@@ -2350,7 +2363,7 @@ object Client {
 
     private def acquireScope: CIO[TxScope] =
       CIO.blocking {
-        try new TxScope(pool.acquireForTransaction())
+        try new TxScope(pool.acquireForTransaction(), events = events)
         catch {
           case e: NotConnected => throw e
           case e: TimedOut     => throw e
@@ -2367,7 +2380,9 @@ object Client {
       else if (p.commands.exists(_.isBlocking))
         CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
-        CIO.async(complete => Client.submitBatchOnOne(events, p.commands, connection.submitAll, complete))
+        CIO.async { complete =>
+          Client.submitBatchOnOne(events, p.commands, Events.startSpans(events, p.commands), connection.submitAll, complete)
+        }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
@@ -2382,7 +2397,7 @@ object Client {
     def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close(); events.close() }
   }
 
-  // wrap a raw subscription as the effect-typed seam each backend lowers into its native stream; a channel/shard delivery is a Message
+  // wrap a raw subscription as the effect-typed interface each backend lowers into its native stream; a channel/shard delivery is a Message
   private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
     new Subscription[CIO, Message[V]] {
       // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
@@ -2419,7 +2434,8 @@ object Client {
       case NonFatal(e)      => throw DecodeError.fromThrowable(e)
     }
 
-  final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => ()) extends TransactionScope[CIO, String] {
+  final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => (), events: Events = Events.disabled)
+    extends TransactionScope[CIO, String] {
 
     // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
     val armed = new AtomicBoolean(false)
@@ -2443,7 +2459,9 @@ object Client {
 
     private def submitting[A](complete: Try[A] => Unit)(submit: => Unit): Unit = {
       lock.lock()
-      try if (released) complete(Failure(TxSupport.scopeReleasedError)) else submit
+      try
+        if (released) complete(Failure(TxSupport.scopeReleasedError))
+        else Client.completing(complete)(submit)
       finally lock.unlock()
     }
 
@@ -2464,9 +2482,11 @@ object Client {
 
     def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] =
       CIO.async[Unit] { complete =>
-        submitting(complete) {
+        val watchCmd = Connection.watch(key, rest*)
+        val tracked  = Events.trackSpan(events, watchCmd, complete)
+        submitting(tracked) {
           armed.set(true)
-          conn.submit(Connection.watch(key, rest*), faulting(complete))
+          conn.submit(watchCmd, faulting(tracked))
         }
       }
 
@@ -2476,7 +2496,11 @@ object Client {
       else if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
-        CIO.async[A](complete => submitting(complete)(conn.submit(command, faulting(complete))))
+        // a live watch-phase read is an ordinary round trip, so trace it like any command; submitting drives `tracked` on every path
+        CIO.async[A] { complete =>
+          val tracked = Events.trackSpan(events, command, complete)
+          submitting(tracked)(conn.submit(command, faulting(tracked)))
+        }
 
     def discard: CIO[Unit] =
       CIO.async[Unit] { complete =>
@@ -2507,7 +2531,8 @@ object Client {
       else
         CIO
           .async[Vector[Frame]] { complete =>
-            submitting(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
+            val tracked = Events.trackSpan(events, Connection.multi, complete)
+            submitting(tracked)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(tracked)))
           }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
