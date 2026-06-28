@@ -8,7 +8,7 @@ import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-import sage.{Bytes, Outcome, SageEvent, SageException}
+import sage.{Bytes, CommandSpan, Outcome, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.cluster.Node
@@ -81,11 +81,15 @@ final private[client] class MultiplexedConnection private (
   }
 
   // Captures one generation so the cache lookup and the fetch share a connection; a reconnect mid-flight fails the fetch as a normal loss.
-  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit): Unit = {
+  // deferred (master-replica) captured the context before offloading; null starts the span inline (standalone). Only a server-bound command is traced.
+  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan = null): Unit = {
     // a Fetch sends [CLIENT CACHING YES, read]; a cache hit/wait sends nothing and releases the reservation
     val conn = reserved(2)
-    if (conn == null) callback(Failure(NotConnected()))
-    else conn.cachedSubmit(command, ttlMillis, callback)
+    if (conn == null) {
+      val error = NotConnected()
+      Events.settleSpan(if (deferred == null) Events.startSpan(events, command) else deferred(), Outcome.Failed(error))
+      callback(Failure(error))
+    } else conn.cachedSubmit(command, ttlMillis, callback, deferred)
   }
 
   // ASKING must immediately precede its command on the wire (it arms the target node for the next command on the connection). Writing the
@@ -274,7 +278,7 @@ final private[client] class MultiplexedConnection private (
 
     // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
     // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
-    def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit): Unit = {
+    def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
       val commandBytes                = command.encode
       val keys                        = command.keys
       def deliver(frame: Frame): Unit = callback(decodeFrame(command, frame))
@@ -289,8 +293,7 @@ final private[client] class MultiplexedConnection private (
         case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Acquire.Fetch      =>
           if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
-          // a miss reaches the server, so it is traced like an ordinary command; a hit/wait above is not
-          val span                        = Events.startSpan(events, command)
+          val span                        = if (deferred == null) Events.startSpan(events, command) else deferred()
           node.foreach(Events.routeSpan(span, _))
           val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))

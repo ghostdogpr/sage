@@ -7,10 +7,10 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success}
 
-import sage.{Bytes, CommandSpan, CommandTracer, Outcome, SageEvent, SageListener}
+import sage.{Bytes, CommandTracer, SageEvent, SageListener}
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.cluster.Node
-import sage.commands.{Command, Connection, Strings}
+import sage.commands.{Connection, Strings}
 import sage.protocol.Frame
 
 class EventsSpec extends munit.FunSuite {
@@ -19,25 +19,13 @@ class EventsSpec extends munit.FunSuite {
   private val noWatchdog   = WatchdogConfig(enabled = false)
 
   // a synchronous sink, so wiring assertions are deterministic; the real Dispatcher's async behavior is exercised separately
-  final private class Recording(val tracer: Option[CommandTracer] = None) extends Events {
+  final private class Recording(val tracer: Option[CommandTracer] = None, val serverNode: Option[Node] = None) extends Events {
     private val buf                  = mutable.ArrayBuffer.empty[SageEvent]
     def enabled: Boolean             = true
     def emitsEvents: Boolean         = true
     def emit(event: SageEvent): Unit = synchronized { val _ = buf += event }
     def close(): Unit                = ()
     def events: Vector[SageEvent]    = synchronized(buf.toVector)
-  }
-
-  // a fake tracer recording its span lifecycle as a flat log, so the synchronous tracing wiring can be asserted without OpenTelemetry
-  final private class RecordingTracer extends CommandTracer {
-    val log                                         = mutable.ArrayBuffer.empty[String]
-    def onCommand(command: Command[?]): CommandSpan = {
-      log += s"start:${command.name}"
-      new CommandSpan {
-        def routedTo(node: Node): Unit      = log += s"routed:${node.host}:${node.port}"
-        def settled(outcome: Outcome): Unit = log += s"settled:$outcome"
-      }
-    }
   }
 
   final private class Capturing(latch: CountDownLatch) extends SageListener {
@@ -166,6 +154,26 @@ class EventsSpec extends munit.FunSuite {
     tracked(Success("PONG"))
     assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
     assert(rec.events.exists { case _: SageEvent.CommandCompleted => true; case _ => false }) // listener still sees the completion
+  }
+
+  test("startSpan routes to a fixed serverNode when set (standalone), without a node ever being attributed") {
+    val tracer = new RecordingTracer
+    val rec    = new Recording(Some(tracer), serverNode = Some(Node("localhost", 6379)))
+    val span   = Events.startSpan(rec, Connection.ping(None))
+    assertEquals(tracer.log.toVector, Vector("start:PING", "routed:localhost:6379"))
+    Events.settleSpan(span, sage.Outcome.Succeeded)
+    assertEquals(tracer.log.toVector, Vector("start:PING", "routed:localhost:6379", "settled:Succeeded"))
+  }
+
+  test("deferSpan starts nothing until its factory is invoked, then routes the fixed serverNode") {
+    val tracer = new RecordingTracer
+    val rec    = new Recording(Some(tracer), serverNode = Some(Node("localhost", 6379)))
+    val make   = Events.deferSpan(rec, Connection.ping(None))
+    assertEquals(tracer.log.toVector, Vector.empty) // capturing the context starts no span (a cache hit never invokes the factory)
+    val span = make()
+    assertEquals(tracer.log.toVector, Vector("start:PING", "routed:localhost:6379"))
+    Events.settleSpan(span, sage.Outcome.Succeeded)
+    assertEquals(tracer.log.last, "settled:Succeeded")
   }
 
   test("a failure settles the span as Failed") {

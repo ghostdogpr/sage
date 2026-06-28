@@ -464,7 +464,6 @@ final private[client] class ClusterLive(
     plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
       case Some(index) =>
         val error = malformedKeys(p.commands(index).name)
-        // this path completes the effect without invoking emits, so end their spans here rather than leak them unsettled
         emits.foreach(Events.abandonSpan(_, error))
         complete(Failure(error)); return
       case None        => ()
@@ -834,7 +833,6 @@ final private[client] class ClusterLive(
   // means "the node I queried", so substitute `from` as redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
     val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
-    // TopologyChanged is a listener-only event, so only do the slot-owner bookkeeping when a listener is registered, not for a tracer-only client
     val previous     = if (events.emitsEvents) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
     val newTopology  = ClusterTopology.from(resolved)
     topologyRef.set(newTopology)

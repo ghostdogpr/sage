@@ -3,6 +3,7 @@ package sage.client.internal
 import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
 
+import sage.CommandSpan
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.Command
@@ -18,8 +19,8 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
     else if (asking) connection.submitAsking(command, callback)
     else connection.submit(command, callback)
 
-  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit): Unit =
-    connection.cachedSubmit(command, ttlMillis, callback)
+  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =
+    connection.cachedSubmit(command, ttlMillis, callback, deferred)
 
   // a pipeline's per-node batch: one round-trip on this node's Multiplexed Connection. False when not connected (nothing submitted), so
   // the caller re-routes each position rather than fabricating per-position errors. Blocking commands never reach here (rejected up front).

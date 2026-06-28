@@ -16,6 +16,14 @@ trait CommandTracer {
     * given its routed node (when known) and settled when the command does.
     */
   def onCommand(command: Command[?]): CommandSpan
+
+  /**
+    * For a command whose execution — and so whether a span is even needed — is decided later, possibly on another thread: a cached read that
+    * only reaches the server on a miss. Called on the caller's fiber to capture the live parent context; the returned thunk starts the span with
+    * that parent if and when the command actually runs (never, for a local cache hit). The default starts the span lazily via [[onCommand]];
+    * override when the parent context must be captured up front, before the deferred work moves off the caller's fiber.
+    */
+  def prepare(command: Command[?]): () => CommandSpan = () => onCommand(command)
 }
 
 /**

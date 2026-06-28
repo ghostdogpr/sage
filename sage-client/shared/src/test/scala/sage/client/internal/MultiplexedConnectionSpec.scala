@@ -4,10 +4,9 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 
-import sage.{Bytes, CommandSpan, CommandTracer, Outcome}
+import sage.Bytes
 import sage.SageException.{ConnectionLost, DecodeError, NotConnected, ServerError}
 import sage.client.{BackoffConfig, WatchdogConfig}
-import sage.cluster.Node
 import sage.commands.{Command, Connection, Strings}
 import sage.protocol.Frame
 
@@ -518,18 +517,6 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     (connection, scheduler, transports)
   }
 
-  // records each span's lifecycle as a flat log so the cache-miss tracing wiring can be asserted without OpenTelemetry
-  final private class RecordingTracer extends CommandTracer {
-    val log                                         = mutable.ArrayBuffer.empty[String]
-    def onCommand(command: Command[?]): CommandSpan = {
-      log += s"start:${command.name}"
-      new CommandSpan {
-        def routedTo(node: Node): Unit      = log += s"routed:${node.host}:${node.port}"
-        def settled(outcome: Outcome): Unit = log += s"settled:$outcome"
-      }
-    }
-  }
-
   private def invalidationOf(redisKey: String): Frame =
     Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Array(Vector(Frame.BulkString(Bytes.utf8(redisKey))))))
 
@@ -595,7 +582,8 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
   test("a cache miss is traced like an ordinary command; a local hit is not") {
     val tracer                      = new RecordingTracer
-    val (connection, _, transports) = cachedConnection(Events(Vector.empty, Some(tracer)))
+    val events                      = Events(Vector.empty, Some(tracer))
+    val (connection, _, transports) = cachedConnection(events)
     val get                         = Strings.get[String, String]("foo")
 
     connection.cachedSubmit(get, 60000L, _ => ()) // miss -> fetch
@@ -605,5 +593,16 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     connection.cachedSubmit(get, 60000L, _ => ())                               // served locally
     assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded")) // unchanged: no span for a hit
+  }
+
+  test("a cached read that fails fast (not connected) settles a Failed span, like an ordinary command") {
+    val tracer                              = new RecordingTracer
+    val (connection, _, _)                  = cachedConnection(Events(Vector.empty, Some(tracer)))
+    connection.close()
+    var result: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(Strings.get[String, String]("foo"), 60000L, r => result = Some(r))
+    assert(result.exists(_.isFailure))
+    assertEquals(tracer.log.head, "start:GET")
+    assert(tracer.log.last.startsWith("settled:Failed"))
   }
 }

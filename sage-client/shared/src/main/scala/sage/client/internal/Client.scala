@@ -2142,16 +2142,13 @@ object Client {
   private[internal] def notCacheable(command: Command[?]): NotCacheable =
     NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
 
-  // run a submit that registers a reply callback; if it throws synchronously instead (e.g. a closed transport), complete with the error so the
-  // caller's CIO.async settles rather than hangs
+  // if the submit throws synchronously (e.g. a closed transport) instead of registering a callback, complete with the error so CIO.async settles
   private[internal] def completing[A](complete: Try[A] => Unit)(submit: => Unit): Unit =
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
-  // `spans` are started by the caller on its fiber and passed in (empty when no tracer), so a master-replica pipeline running this on an offload
-  // worker still nests its spans correctly while the duration clock starts here, on the executing thread.
   private[internal] def submitBatchOnOne(
     events: Events,
     commands: Vector[Command[?]],
@@ -2166,7 +2163,6 @@ object Client {
     }
     if (!submitAll(commands, callbacks)) {
       val error = NotConnected()
-      // this path completes the effect without invoking callbacks, so end any tracing spans they started rather than leak them unsettled
       callbacks.foreach(Events.abandonSpan(_, error))
       if (events.emitsEvents)
         commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
@@ -2259,7 +2255,7 @@ object Client {
         config.auth,
         config.clientCache.maxBytes,
         config.clientCache.enabled,
-        Events(config.listeners, config.tracer),
+        Events(config.listeners, config.tracer, serverNode = Some(Node(endpoint.host, endpoint.port))),
         config.database,
         config.clientName
       )
@@ -2496,7 +2492,6 @@ object Client {
       else if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
       else
-        // a live watch-phase read is an ordinary round trip, so trace it like any command; submitting drives `tracked` on every path
         CIO.async[A] { complete =>
           val tracked = Events.trackSpan(events, command, complete)
           submitting(tracked)(conn.submit(command, faulting(tracked)))

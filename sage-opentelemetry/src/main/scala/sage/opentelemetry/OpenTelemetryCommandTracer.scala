@@ -24,11 +24,19 @@ final class OpenTelemetryCommandTracer private (
   contextProvider: () => Context
 ) extends CommandTracer {
 
-  def onCommand(command: Command[?]): CommandSpan = {
+  def onCommand(command: Command[?]): CommandSpan = startSpan(command, contextProvider())
+
+  // capture the caller's context now; start the span only when the deferred work runs (a cache miss's fetch), so a local hit starts none
+  override def prepare(command: Command[?]): () => CommandSpan = {
+    val parent = contextProvider()
+    () => startSpan(command, parent)
+  }
+
+  private def startSpan(command: Command[?], parent: Context): CommandSpan = {
     val span = tracer
       .spanBuilder(command.name)
       .setSpanKind(SpanKind.CLIENT)
-      .setParent(contextProvider())
+      .setParent(parent)
       .setAttribute(OpenTelemetryCommandTracer.DbSystem, "redis")
       .setAttribute(OpenTelemetryCommandTracer.DbOperation, command.name)
       .setAttribute(OpenTelemetryCommandTracer.PeerService, peerService)

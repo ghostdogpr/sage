@@ -20,6 +20,8 @@ private[client] trait Events {
   def enabled: Boolean
   def emitsEvents: Boolean
   def tracer: Option[CommandTracer]
+  // the server a span is routed to when routing resolves no node itself (standalone's endpoint); None for cluster/master-replica
+  def serverNode: Option[Node]
   def emit(event: SageEvent): Unit
   def close(): Unit
 }
@@ -34,19 +36,20 @@ private[client] object Events {
     def enabled: Boolean              = false
     def emitsEvents: Boolean          = false
     def tracer: Option[CommandTracer] = None
+    def serverNode: Option[Node]      = None
     def emit(event: SageEvent): Unit  = ()
     def close(): Unit                 = ()
   }
 
-  def apply(listeners: Vector[SageListener], tracer: Option[CommandTracer] = None): Events =
-    if (listeners.isEmpty && tracer.isEmpty) disabled else new Live(listeners, tracer)
+  def apply(listeners: Vector[SageListener], tracer: Option[CommandTracer] = None, serverNode: Option[Node] = None): Events =
+    if (listeners.isEmpty && tracer.isEmpty) disabled else new Live(listeners, tracer, serverNode)
 
   /**
     * Drives the two integrations. Listeners, when present, are fanned to from one bounded queue drained by a single daemon thread, each call
     * guarded so a throwing listener cannot kill the loop or affect its peers; a full queue drops the newest event silently. A tracer carries no
     * thread of its own — it runs inline on the command path. With a tracer but no listener, no queue and no thread exist.
     */
-  final private class Live(listeners: Vector[SageListener], val tracer: Option[CommandTracer]) extends Events {
+  final private class Live(listeners: Vector[SageListener], val tracer: Option[CommandTracer], val serverNode: Option[Node]) extends Events {
 
     def enabled: Boolean     = true
     def emitsEvents: Boolean = listeners.nonEmpty
@@ -85,34 +88,51 @@ private[client] object Events {
     }
   }
 
-  // Start the command's span on the caller's fiber, where the parent context is live; a no-op span when no tracer is set. Split from
-  // [[trackCommand]] so an offloaded path starts the span here but the duration clock starts later, on the executing thread.
+  // start the span on the caller's fiber, where the parent context is live; the duration clock starts later, in trackCommand
   def startSpan(events: Events, command: Command[?]): CommandSpan =
     events.tracer match {
       case Some(t) =>
-        try t.onCommand(command)
-        catch { case NonFatal(_) => CommandSpan.noop }
+        val span =
+          try t.onCommand(command)
+          catch { case NonFatal(_) => CommandSpan.noop }
+        routeToServerNode(events, span)
+        span
       case None    => CommandSpan.noop
     }
 
-  // One span per command, or an empty vector when no tracer is set, so the common no-tracer pipeline path allocates nothing.
+  private val noSpanFactory: () => CommandSpan = () => CommandSpan.noop
+
+  // like startSpan but lazy: capture the caller's context now, start the span only if the thunk is invoked (a cache miss)
+  def deferSpan(events: Events, command: Command[?]): () => CommandSpan =
+    events.tracer match {
+      case Some(t) =>
+        val start =
+          try t.prepare(command)
+          catch { case NonFatal(_) => noSpanFactory }
+        () => {
+          val span =
+            try start()
+            catch { case NonFatal(_) => CommandSpan.noop }
+          routeToServerNode(events, span)
+          span
+        }
+      case None    => noSpanFactory
+    }
+
   def startSpans(events: Events, commands: Vector[Command[?]]): Vector[CommandSpan] =
     if (events.tracer.isEmpty) Vector.empty else commands.map(c => startSpan(events, c))
 
-  // Wrap a command's reply callback so it settles the span and emits a CommandCompleted on completion. The node is filled in later via
-  // attributeNode (never for standalone). Returns the callback unchanged when nothing is registered, so a client without either pays nothing.
   def trackCommand[A](events: Events, command: Command[?], callback: Try[A] => Unit): Try[A] => Unit =
-    if (!events.enabled) callback else new CommandEmit[A](command, System.nanoTime(), events, callback, startSpan(events, command))
+    if (!events.enabled) callback else new CommandEmit[A](command.name, System.nanoTime(), events, callback, startSpan(events, command))
 
-  // Offloaded-path overload, taking a span already started on the caller's fiber (via startSpan): only the duration clock starts here, on the
-  // executing thread, so a listener's CommandCompleted.duration never picks up offload-scheduling latency.
+  // overload taking a span already started on the caller's fiber, for offloaded paths; only the duration clock starts here
   def trackCommand[A](events: Events, command: Command[?], callback: Try[A] => Unit, span: CommandSpan): Try[A] => Unit =
-    if (!events.enabled) callback else new CommandEmit[A](command, System.nanoTime(), events, callback, span)
+    if (!events.enabled) callback else new CommandEmit[A](command.name, System.nanoTime(), events, callback, span)
 
-  // Span-only tracking for a transaction's commands: traces them without emitting a CommandCompleted, so they stay invisible to listeners.
+  // traces a transaction's commands without emitting a CommandCompleted, so they stay invisible to listeners
   def trackSpan[A](events: Events, command: Command[?], callback: Try[A] => Unit): Try[A] => Unit =
     if (events.tracer.isEmpty) callback
-    else new CommandEmit[A](command, System.nanoTime(), events, callback, startSpan(events, command), emitsEvent = false)
+    else new CommandEmit[A](command.name, System.nanoTime(), events, callback, startSpan(events, command), emitsEvent = false)
 
   // set on the tracking callback by the routing layer at the node-known terminal site, just before it completes; a no-op for any other callback
   def attributeNode(callback: AnyRef, node: Node): Unit =
@@ -121,14 +141,18 @@ private[client] object Events {
       case _                    => ()
     }
 
-  // settle only the span, for fail-fast paths that complete the effect without invoking the callback, so a started span is not left unsettled
   def abandonSpan(callback: AnyRef, error: Throwable): Unit =
     callback match {
       case emit: CommandEmit[?] => emit.abandon(error)
       case _                    => ()
     }
 
-  // route/settle a span held directly rather than through a CommandEmit (the cache-miss fetch)
+  private def routeToServerNode(events: Events, span: CommandSpan): Unit =
+    events.serverNode match {
+      case Some(node) => routeSpan(span, node)
+      case None       => ()
+    }
+
   def routeSpan(span: CommandSpan, node: Node): Unit =
     try span.routedTo(node)
     catch { case NonFatal(_) => () }
@@ -138,7 +162,7 @@ private[client] object Events {
     catch { case NonFatal(_) => () }
 
   final private class CommandEmit[A](
-    command: Command[?],
+    name: String,
     startNanos: Long,
     events: Events,
     callback: Try[A] => Unit,
@@ -163,7 +187,7 @@ private[client] object Events {
       val outcome = Outcome.of(result)
       endSpan(outcome)
       if (emitsEvent && events.emitsEvents)
-        events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - startNanos, NANOSECONDS), outcome))
+        events.emit(SageEvent.CommandCompleted(name, node, FiniteDuration(System.nanoTime() - startNanos, NANOSECONDS), outcome))
       callback(result)
     }
   }

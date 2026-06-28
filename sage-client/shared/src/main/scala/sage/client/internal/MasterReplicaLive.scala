@@ -10,7 +10,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage, SageException}
+import sage.{CommandSpan, Message, PatternMessage, SageException}
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
@@ -168,13 +168,17 @@ final private[client] class MasterReplicaLive(
         val span = Events.startSpan(events, command)
         offload(sendMaster(command, Events.trackCommand(events, command, complete, span)))
       }
-    else CIO.async[A](complete => offload(sendMasterCached(command, ttl.toMillis, complete)))
+    else
+      CIO.async[A] { complete =>
+        val deferred = Events.deferSpan(events, command)
+        offload(sendMasterCached(command, ttl.toMillis, complete, deferred))
+      }
 
   private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =
     onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb))
 
-  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit): Unit =
-    onMaster(complete)((nc, _, cb) => nc.cachedSubmit[A](command, ttlMillis, cb))
+  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit =
+    onMaster(complete)((nc, _, cb) => nc.cachedSubmit[A](command, ttlMillis, cb, deferred))
 
   // run `submit` on the master, completing with node attribution; an ownership fault (a demoted master) kicks a re-discovery
   private def onMaster[A](complete: Try[A] => Unit)(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {

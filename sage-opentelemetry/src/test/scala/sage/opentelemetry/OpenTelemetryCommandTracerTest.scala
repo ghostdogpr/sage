@@ -99,6 +99,24 @@ class OpenTelemetryCommandTracerTest extends munit.FunSuite {
     assertEquals(redis.getTraceId, server.getTraceId)
   }
 
+  test("prepare captures the parent context up front, so a span started after the context is gone still nests under it") {
+    val (sdk, exporter) = fixture
+    val tracer          = OpenTelemetryCommandTracer(sdk)
+    val parent          = sdk.getTracer("test").spanBuilder("request").startSpan()
+
+    // capture while the parent is current, then start the span after the scope is closed (mimicking a fetch on an offload worker)
+    val scope     = parent.makeCurrent()
+    val startSpan = tracer.prepare(command("GET"))
+    scope.close()
+    startSpan().settled(Outcome.Succeeded)
+    parent.end()
+
+    val spans = exporter.getFinishedSpanItems.asScala.toList
+    val redis = spans.find(_.getName == "GET").get
+    assertEquals(redis.getParentSpanContext.getSpanId, parent.getSpanContext.getSpanId)
+    assertEquals(redis.getTraceId, parent.getSpanContext.getTraceId)
+  }
+
   test("settling twice ends the span only once") {
     val (sdk, exporter) = fixture
     val tracer          = OpenTelemetryCommandTracer(sdk)
