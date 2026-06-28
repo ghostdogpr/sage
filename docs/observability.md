@@ -3,7 +3,7 @@
 Sage exposes two integration points, for two different jobs:
 
 - **`SageListener`** is an asynchronous observer of `SageEvent`s (command completions, connection transitions, cache outcomes, topology changes), called off the command path. Use it for metrics and operational logging.
-- **`CommandTracer`** produces distributed-tracing spans synchronously on the command path, so each Redis command appears as a client span nested under the surrounding request in an APM such as Datadog or Jaeger. Use it for distributed tracing — see [Distributed tracing](#distributed-tracing).
+- **`CommandTracer`** produces distributed-tracing spans synchronously on the command path, so each Redis command appears as a client span nested under the surrounding request in an APM such as Datadog or Jaeger. Use it for distributed tracing: see [Distributed tracing](#distributed-tracing).
 
 They are separate types because their constraints differ: a listener runs after the fact and may drop events under load, so it cannot produce spans that nest under the active request; a tracer runs on the caller's fiber as the command is submitted, so it can.
 

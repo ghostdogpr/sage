@@ -310,7 +310,11 @@ final private[client] class MultiplexedConnection private (
                 events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
             }
           }
-          submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
+          try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
+          catch {
+            // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
+            case NonFatal(error) => release(2); onReply(Failure(error))
+          }
       }
     }
 

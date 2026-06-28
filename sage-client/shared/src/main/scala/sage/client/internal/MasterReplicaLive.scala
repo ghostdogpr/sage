@@ -10,7 +10,7 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{CommandSpan, Message, PatternMessage, SageException}
+import sage.{CommandSpan, Message, Outcome, PatternMessage, SageException}
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
@@ -182,8 +182,12 @@ final private[client] class MasterReplicaLive(
   private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =
     onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb))
 
-  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit =
-    onMaster(complete)((nc, _, cb) => nc.cachedSubmit[A](command, ttlMillis, cb, deferred))
+  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
+    var reached = false
+    onMaster(complete) { (nc, _, cb) => reached = true; nc.cachedSubmit[A](command, ttlMillis, cb, deferred) }
+    // onMaster short-circuited (master down) without reaching cachedSubmit, so settle a Failed span the deferred factory would otherwise never start
+    if (!reached) Events.settleSpan(Events.startDeferred(deferred), Outcome.Failed(NotConnected()))
+  }
 
   // run `submit` on the master, completing with node attribution; an ownership fault (a demoted master) kicks a re-discovery
   private def onMaster[A](complete: Try[A] => Unit)(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {

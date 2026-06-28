@@ -2331,15 +2331,18 @@ object Client {
   ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
-      command.execution match {
-        case Execution.Ordinary => CIO.async(callback => connection.submit(command, Events.trackCommand(events, command, callback)))
-        case Execution.Blocking => CIO.async(callback => pool.use(command, Events.trackCommand(events, command, callback)))
+      CIO.async { callback =>
+        val tracked = Events.trackCommand(events, command, callback)
+        command.execution match {
+          case Execution.Ordinary => Client.completing(tracked)(connection.submit(command, tracked))
+          case Execution.Blocking => Client.completing(tracked)(pool.use(command, tracked))
+        }
       }
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
       if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
       else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
-      else CIO.async(callback => connection.cachedSubmit(command, ttl.toMillis, callback))
+      else CIO.async(callback => Client.completing(callback)(connection.cachedSubmit(command, ttl.toMillis, callback)))
 
     def scanTargets: CIO[Vector[ScanTarget]] = CIO.value(Vector(ScanTarget.any))
 

@@ -169,20 +169,13 @@ private[client] object Events {
 
     @volatile private var node: Option[Node] = None
 
-    def at(n: Node): Unit = {
-      node = Some(n)
-      try span.routedTo(n)
-      catch { case NonFatal(_) => () }
-    }
+    def at(n: Node): Unit = { node = Some(n); routeSpan(span, n) }
 
-    private def endSpan(outcome: Outcome): Unit = try span.settled(outcome)
-    catch { case NonFatal(_) => () }
-
-    def abandon(error: Throwable): Unit = endSpan(Outcome.Failed(error))
+    def abandon(error: Throwable): Unit = settleSpan(span, Outcome.Failed(error))
 
     def apply(result: Try[A]): Unit = {
       val outcome = Outcome.of(result)
-      endSpan(outcome)
+      settleSpan(span, outcome)
       if (emitsEvent && events.emitsEvents)
         events.emit(SageEvent.CommandCompleted(name, node, FiniteDuration(System.nanoTime() - startNanos, NANOSECONDS), outcome))
       callback(result)

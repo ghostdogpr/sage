@@ -14,7 +14,7 @@ import kyo.compat.*
 import sage.{CommandSpan, Message, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
-import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot}
+import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Cluster, Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
@@ -447,8 +447,12 @@ final private[client] class ClusterLive(
       )
     else
       CIO.async { complete =>
-        val spans = Events.startSpans(events, p.commands)
-        offload(runPipeline(p, complete, spans))
+        val plan = topologyRef.get().split(p)
+        // a malformed command is a programmer error: fail before any span is started or the batch is offloaded, never as a per-position result
+        plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
+          case Some(index) => complete(Failure(malformedKeys(p.commands(index).name)))
+          case None        => offload(runPipeline(p, complete, Events.startSpans(events, p.commands), plan))
+        }
       }
 
   // a position a stale topology can't resolve (redirect, unreachable node, Unowned) falls back to per-command dispatch; the collector completes
@@ -456,7 +460,8 @@ final private[client] class ClusterLive(
   private def runPipeline[Out, R](
     p: Pipeline[Out, R],
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
-    spans: Vector[CommandSpan]
+    spans: Vector[CommandSpan],
+    plan: SplitPlan
   ): Unit = {
     val n                         = p.commands.length
     val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
@@ -468,15 +473,6 @@ final private[client] class ClusterLive(
     val useReplica                = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
     def reroute(index: Int): Unit = offload(dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica))
 
-    val plan = topologyRef.get().split(p)
-    // a malformed command is a programmer error: fail the whole effect before anything reaches the wire, never as a per-position result
-    plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
-      case Some(index) =>
-        val error = malformedKeys(p.commands(index).name)
-        emits.foreach(Events.abandonSpan(_, error))
-        complete(Failure(error)); return
-      case None        => ()
-    }
     plan.rejected.foreach {
       case (index, Rejected.CrossSlot(slots)) => emits(index)(Failure(crossSlot(p.commands(index).name, slots)))
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
