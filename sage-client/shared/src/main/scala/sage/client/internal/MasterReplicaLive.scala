@@ -157,7 +157,9 @@ final private[client] class MasterReplicaLive(
       val span = Events.startSpan(events, command)
       offload {
         val tracked = Events.trackCommand(events, command, complete, span)
-        if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked) else sendMaster(command, tracked)
+        Client.completing(tracked) {
+          if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked) else sendMaster(command, tracked)
+        }
       }
     }
 
@@ -166,12 +168,15 @@ final private[client] class MasterReplicaLive(
     else if (!cachingEnabled)
       CIO.async[A] { complete =>
         val span = Events.startSpan(events, command)
-        offload(sendMaster(command, Events.trackCommand(events, command, complete, span)))
+        offload {
+          val tracked = Events.trackCommand(events, command, complete, span)
+          Client.completing(tracked)(sendMaster(command, tracked))
+        }
       }
     else
       CIO.async[A] { complete =>
         val deferred = Events.deferSpan(events, command)
-        offload(sendMasterCached(command, ttl.toMillis, complete, deferred))
+        offload(Client.completing(complete)(sendMasterCached(command, ttl.toMillis, complete, deferred)))
       }
 
   private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =

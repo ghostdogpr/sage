@@ -87,7 +87,7 @@ final private[client] class MultiplexedConnection private (
     val conn = reserved(2)
     if (conn == null) {
       val error = NotConnected()
-      Events.settleSpan(if (deferred == null) Events.startSpan(events, command) else deferred(), Outcome.Failed(error))
+      Events.settleSpan(if (deferred == null) Events.startSpan(events, command) else Events.startDeferred(deferred), Outcome.Failed(error))
       callback(Failure(error))
     } else conn.cachedSubmit(command, ttlMillis, callback, deferred)
   }
@@ -293,7 +293,7 @@ final private[client] class MultiplexedConnection private (
         case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Acquire.Fetch      =>
           if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
-          val span                        = if (deferred == null) Events.startSpan(events, command) else deferred()
+          val span                        = if (deferred == null) Events.startSpan(events, command) else Events.startDeferred(deferred)
           node.foreach(Events.routeSpan(span, _))
           val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))

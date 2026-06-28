@@ -112,7 +112,10 @@ final private[client] class ClusterLive(
   def run[A](command: Command[A]): CIO[A] =
     CIO.async[A] { complete =>
       val span = Events.startSpan(events, command)
-      offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete, span)))
+      offload {
+        val tracked = Events.trackCommand(events, command, complete, span)
+        Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked))
+      }
     }
 
   // caching is not applied in cluster mode (per-node tracking through redirects/failover is unsupported): the read runs uncached but on the
@@ -122,7 +125,10 @@ final private[client] class ClusterLive(
     else
       CIO.async[A] { complete =>
         val span = Events.startSpan(events, command)
-        offload(dispatch(command, cluster.maxRedirects, Events.trackCommand(events, command, complete, span), allowReplica = false))
+        offload {
+          val tracked = Events.trackCommand(events, command, complete, span)
+          Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, allowReplica = false))
+        }
       }
 
   // SCAN cursors are node-local, so a full SCAN must sweep every slot-owning master; a reshard mid-scan can still miss or duplicate keys
@@ -142,7 +148,10 @@ final private[client] class ClusterLive(
       case Some(node) =>
         CIO.async[A] { complete =>
           val span = Events.startSpan(events, command)
-          offload(sendTo(node, command, asking = false, redirectsLeft = 0, Events.trackCommand(events, command, complete, span)))
+          offload {
+            val tracked = Events.trackCommand(events, command, complete, span)
+            Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked))
+          }
         }
       case None       => run(command)
     }

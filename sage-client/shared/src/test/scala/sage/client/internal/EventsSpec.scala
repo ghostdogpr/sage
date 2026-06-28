@@ -165,13 +165,13 @@ class EventsSpec extends munit.FunSuite {
     assertEquals(tracer.log.toVector, Vector("start:PING", "routed:localhost:6379", "settled:Succeeded"))
   }
 
-  test("deferSpan starts nothing until its factory is invoked, then routes the fixed serverNode") {
+  test("deferSpan starts no span until startDeferred invokes its factory (a cache miss)") {
     val tracer = new RecordingTracer
-    val rec    = new Recording(Some(tracer), serverNode = Some(Node("localhost", 6379)))
+    val rec    = new Recording(Some(tracer))
     val make   = Events.deferSpan(rec, Connection.ping(None))
-    assertEquals(tracer.log.toVector, Vector.empty) // capturing the context starts no span (a cache hit never invokes the factory)
-    val span = make()
-    assertEquals(tracer.log.toVector, Vector("start:PING", "routed:localhost:6379"))
+    assertEquals(tracer.log.toVector, Vector.empty) // capturing the context starts no span; a hit never invokes it
+    val span = Events.startDeferred(make)
+    assertEquals(tracer.log.toVector, Vector("start:PING"))
     Events.settleSpan(span, sage.Outcome.Succeeded)
     assertEquals(tracer.log.last, "settled:Succeeded")
   }
