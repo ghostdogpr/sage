@@ -128,6 +128,15 @@ private[client] object Events {
       case _                    => ()
     }
 
+  // route/settle a span held directly rather than through a CommandEmit (the cache-miss fetch)
+  def routeSpan(span: CommandSpan, node: Node): Unit =
+    try span.routedTo(node)
+    catch { case NonFatal(_) => () }
+
+  def settleSpan(span: CommandSpan, outcome: Outcome): Unit =
+    try span.settled(outcome)
+    catch { case NonFatal(_) => () }
+
   final private class CommandEmit[A](
     command: Command[?],
     startNanos: Long,

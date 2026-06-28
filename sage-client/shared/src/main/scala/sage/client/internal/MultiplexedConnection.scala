@@ -289,6 +289,9 @@ final private[client] class MultiplexedConnection private (
         case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Acquire.Fetch      =>
           if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
+          // a miss reaches the server, so it is traced like an ordinary command; a hit/wait above is not
+          val span                        = Events.startSpan(events, command)
+          node.foreach(Events.routeSpan(span, _))
           val started                     = System.nanoTime()
           val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
           val onReply: Try[Frame] => Unit = { result =>
@@ -296,17 +299,13 @@ final private[client] class MultiplexedConnection private (
               case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
               case Failure(error) => cache.fail(commandBytes, error)
             }
-            // a miss touched the server, so unlike a hit it also produces a CommandCompleted; the outcome reflects the decoded reply. gated on
-            // emitsEvents (not enabled): a tracer-only client has no listener to receive it, and a cached miss is not span-traced either
-            if (events.emitsEvents)
-              events.emit(
-                SageEvent.CommandCompleted(
-                  command.name,
-                  node,
-                  FiniteDuration(System.nanoTime() - started, NANOSECONDS),
-                  Outcome.of(result.flatMap(decodeFrame(command, _)))
-                )
-              )
+            if (events.enabled) {
+              // the outcome reflects the decoded reply, not the raw identity-decoded frame
+              val outcome = Outcome.of(result.flatMap(decodeFrame(command, _)))
+              Events.settleSpan(span, outcome)
+              if (events.emitsEvents)
+                events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
+            }
           }
           submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
       }

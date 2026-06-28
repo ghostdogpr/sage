@@ -80,7 +80,7 @@ val config = SageConfig(
 
 It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), with `db.system=redis`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component=redis-client`, and the server address once routing resolves it; a failure sets an error status carrying the exception. Only the command name is recorded, never arguments or keys, so secrets and user values stay out of your traces. Spans follow the ambient sampling decision.
 
-One span is emitted per command that reaches the server: an ordinary command, a blocking command, and each command in a pipeline (cluster redirects fold into the command's own span). A `cached` read served from the local cache reaches no server and produces no span; one that does reach the server is traced like any other command. (A local cache miss reaches the server but is currently untraced.)
+One span is emitted per command that reaches the server: an ordinary command, a blocking command, and each command in a pipeline (cluster redirects fold into the command's own span). A `cached` read served from the local cache reaches no server and produces no span; one that misses and fetches from the server is traced like any other command.
 
 In a `transaction`, each read during the watch phase and the `WATCH` itself are traced like ordinary commands, and the atomic `MULTI`/`EXEC` body gets a single span named `MULTI`. That span reflects the round trip, not whether the transaction committed, so a `WATCH` abort or an error inside `EXEC` still settles it successfully. Transaction commands are traced but emit no `CommandCompleted`, so the listener contract is unchanged.
 

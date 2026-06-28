@@ -4,9 +4,10 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 
-import sage.Bytes
+import sage.{Bytes, CommandSpan, CommandTracer, Outcome}
 import sage.SageException.{ConnectionLost, DecodeError, NotConnected, ServerError}
 import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.cluster.Node
 import sage.commands.{Command, Connection, Strings}
 import sage.protocol.Frame
 
@@ -501,7 +502,9 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
   }
 
-  private def cachedConnection(): (MultiplexedConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
+  private def cachedConnection(
+    events: Events = Events.disabled
+  ): (MultiplexedConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
@@ -510,8 +513,21 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
       transport
     }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector.empty, fixedBackoff, noWatchdog, 1.second, Duration.Zero, cacheMaxBytes = 1L << 20)
+      MultiplexedConnection
+        .connect(factory, scheduler, Vector.empty, fixedBackoff, noWatchdog, 1.second, Duration.Zero, cacheMaxBytes = 1L << 20, events = events)
     (connection, scheduler, transports)
+  }
+
+  // records each span's lifecycle as a flat log so the cache-miss tracing wiring can be asserted without OpenTelemetry
+  final private class RecordingTracer extends CommandTracer {
+    val log                                         = mutable.ArrayBuffer.empty[String]
+    def onCommand(command: Command[?]): CommandSpan = {
+      log += s"start:${command.name}"
+      new CommandSpan {
+        def routedTo(node: Node): Unit      = log += s"routed:${node.host}:${node.port}"
+        def settled(outcome: Outcome): Unit = log += s"settled:$outcome"
+      }
+    }
   }
 
   private def invalidationOf(redisKey: String): Frame =
@@ -575,5 +591,19 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     transports(1).emit(Frame.SimpleString("OK"))
     transports(1).emit(Frame.BulkString(Bytes.utf8("baz")))
     assertEquals(afterReconnect, Some(Success(Some("baz"))))
+  }
+
+  test("a cache miss is traced like an ordinary command; a local hit is not") {
+    val tracer                      = new RecordingTracer
+    val (connection, _, transports) = cachedConnection(Events(Vector.empty, Some(tracer)))
+    val get                         = Strings.get[String, String]("foo")
+
+    connection.cachedSubmit(get, 60000L, _ => ()) // miss -> fetch
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded"))
+
+    connection.cachedSubmit(get, 60000L, _ => ())                               // served locally
+    assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded")) // unchanged: no span for a hit
   }
 }
