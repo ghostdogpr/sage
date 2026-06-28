@@ -102,8 +102,7 @@ private[client] object Events {
 
   private val noSpanFactory: () => CommandSpan = () => CommandSpan.noop
 
-  // like startSpan but lazy: capture the caller's context now, start the span only when the thunk is invoked (a cache miss), via startDeferred.
-  // For offloaded paths only; the routed node is attributed at the fetch, not here, so serverNode does not apply.
+  // like startSpan but lazy: capture the caller's context now, start the span only when the thunk is invoked (a cache miss), via startDeferred
   def deferSpan(events: Events, command: Command[?]): () => CommandSpan =
     events.tracer match {
       case Some(t) =>
@@ -118,6 +117,9 @@ private[client] object Events {
 
   def startSpans(events: Events, commands: Vector[Command[?]]): Vector[CommandSpan] =
     if (events.tracer.isEmpty) Vector.empty else commands.map(c => startSpan(events, c))
+
+  def deferSpans(events: Events, commands: Vector[Command[?]]): Vector[() => CommandSpan] =
+    if (events.tracer.isEmpty) Vector.empty else commands.map(c => deferSpan(events, c))
 
   def trackCommand[A](events: Events, command: Command[?], callback: Try[A] => Unit): Try[A] => Unit =
     if (!events.enabled) callback else new CommandEmit[A](command.name, System.nanoTime(), events, callback, startSpan(events, command))

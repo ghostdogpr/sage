@@ -447,26 +447,34 @@ final private[client] class ClusterLive(
       )
     else
       CIO.async { complete =>
-        val plan = topologyRef.get().split(p)
-        // a malformed command is a programmer error: fail before any span is started or the batch is offloaded, never as a per-position result
-        plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
-          case Some(index) => complete(Failure(malformedKeys(p.commands(index).name)))
-          case None        => offload(runPipeline(p, complete, Events.startSpans(events, p.commands), plan))
-        }
+        offload(runPipeline(p, complete, Events.deferSpans(events, p.commands)))
       }
 
-  // a position a stale topology can't resolve (redirect, unreachable node, Unowned) falls back to per-command dispatch; the collector completes
-  // the effect once every position has landed terminally, never on a redirect
+  // a position a stale topology can't resolve falls back to per-command dispatch; the collector completes once every position lands terminally
   private def runPipeline[Out, R](
     p: Pipeline[Out, R],
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
-    spans: Vector[CommandSpan],
+    deferred: Vector[() => CommandSpan]
+  ): Unit = {
+    val n    = p.commands.length
+    val plan = topologyRef.get().split(p)
+    // a malformed command is a programmer error: fail the whole effect before any span is started, never as a per-position result
+    plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
+      case Some(index) => complete(Failure(malformedKeys(p.commands(index).name)))
+      case None        => dispatchPipeline(p, complete, deferred, plan)
+    }
+  }
+
+  private def dispatchPipeline[Out, R](
+    p: Pipeline[Out, R],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit,
+    deferred: Vector[() => CommandSpan],
     plan: SplitPlan
   ): Unit = {
     val n                         = p.commands.length
     val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
     val emits                     = Vector.tabulate(n) { i =>
-      val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
+      val span = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
       Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
     }
     // all-or-nothing: reroutes honor the same choice so a slot is never split across master and replica
