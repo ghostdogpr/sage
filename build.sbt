@@ -7,7 +7,7 @@ val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed t
 
 val munitVersion          = "1.3.3"
 val testcontainersVersion = "0.44.1"
-val otelVersion           = "1.40.0"
+val otelVersion           = "1.63.0"
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC4"
