@@ -115,6 +115,9 @@ private[client] object Events {
     try factory()
     catch { case NonFatal(_) => CommandSpan.noop }
 
+  def startOrDefer(events: Events, command: Command[?], deferred: () => CommandSpan): CommandSpan =
+    if (deferred == null) startSpan(events, command) else startDeferred(deferred)
+
   def startSpans(events: Events, commands: Vector[Command[?]]): Vector[CommandSpan] =
     if (events.tracer.isEmpty) Vector.empty else commands.map(c => startSpan(events, c))
 

@@ -147,13 +147,13 @@ class EventsSpec extends munit.FunSuite {
   test("startSpan starts the span once on the caller; the trackCommand overload reuses it and still emits the event") {
     val tracer  = new RecordingTracer
     val rec     = new Recording(Some(tracer))
-    val span    = Events.startSpan(rec, Connection.ping(None))                           // span starts here, on the caller's fiber
+    val span    = Events.startSpan(rec, Connection.ping(None))
     assertEquals(tracer.log.toVector, Vector("start:PING"))
-    val tracked = Events.trackCommand[String](rec, Connection.ping(None), _ => (), span) // reuses the span, does not start a second
+    val tracked = Events.trackCommand[String](rec, Connection.ping(None), _ => (), span)
     assertEquals(tracer.log.toVector, Vector("start:PING"))
     tracked(Success("PONG"))
     assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
-    assert(rec.events.exists { case _: SageEvent.CommandCompleted => true; case _ => false }) // listener still sees the completion
+    assert(rec.events.exists { case _: SageEvent.CommandCompleted => true; case _ => false })
   }
 
   test("startSpan routes to a fixed serverNode when set (standalone), without a node ever being attributed") {
@@ -191,7 +191,7 @@ class EventsSpec extends munit.FunSuite {
     val tracked = Events.trackSpan[String](rec, Connection.ping(None), _ => ())
     tracked(Success("PONG"))
     assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
-    assertEquals(rec.events, Vector.empty) // span-only: a transaction's commands stay invisible to listeners
+    assertEquals(rec.events, Vector.empty)
 
     val cb: scala.util.Try[String] => Unit = _ => ()
     assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb) // no tracer, no wrap

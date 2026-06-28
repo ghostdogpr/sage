@@ -456,7 +456,6 @@ final private[client] class ClusterLive(
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
     deferred: Vector[() => CommandSpan]
   ): Unit = {
-    val n    = p.commands.length
     val plan = topologyRef.get().split(p)
     // a malformed command is a programmer error: fail the whole effect before any span is started, never as a per-position result
     plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
