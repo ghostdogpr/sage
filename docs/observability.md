@@ -33,7 +33,7 @@ val metrics = new SageListener {
     case Connection.Disconnected(_)             => // bump a gauge
     case Cache.Hit(_)                           => // count a hit
     case Cache.Miss(_)                          => // count a miss
-    case _                                       => ()
+    case _                                      => ()
   }
 }
 
