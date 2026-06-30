@@ -724,7 +724,6 @@ final private[client] class ClusterLive(
       else if (command.keyIndices.isEmpty)
         Right(None)
       else {
-        // no Set on the common same-slot path (single key, or a shared hash tag); one is built only for a genuine cross-slot's error
         val keyIndices = command.keyIndices
         val first      = Slot.of(command.args(keyIndices.head))
         var i          = 1
