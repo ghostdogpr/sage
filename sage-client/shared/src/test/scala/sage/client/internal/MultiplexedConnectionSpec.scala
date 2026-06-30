@@ -261,6 +261,27 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(afterReconnect, Some(Success("PONG")))
   }
 
+  test("the initial connection at clock 0 counts as stable: a loss after the ceiling resets to the initial delay") {
+    val backoff                                         = BackoffConfig(initialDelay = 10.millis, maxDelay = 10.seconds, multiplier = 2.0)
+    val scheduler                                       = new ManualScheduler // starts at clock 0, the value 0L must not read as "never been Live"
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+      transports += transport
+      transport
+    }
+    val connection                                      =
+      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], backoff, noWatchdog, 1.second, Duration.Zero)
+    import MultiplexedConnection.State
+
+    scheduler.advance(11.seconds) // the first generation went Live at clock 0 and stays up past the ceiling
+    transports.last.emit(Frame.SimpleString("stray"))
+    scheduler.advance(9.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "still backing off before the reset 10ms initial delay")
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, State.Live, "a stable loss must retry at attempt 0, not advance to attempt 1")
+  }
+
   test("a flapping connection backs off increasingly, and a stable connection resets the backoff") {
     val backoff                                         = BackoffConfig(initialDelay = 10.millis, maxDelay = 10.seconds, multiplier = 2.0)
     val scheduler                                       = new ManualScheduler

@@ -52,7 +52,8 @@ final private[client] class MultiplexedConnection private (
   @volatile private var onLivenessLost: () => Unit = () => ()
   // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
   private var reconnectAttempt: Int                = 0
-  private var liveSinceMillis: Long                = 0L
+  // -1L, not 0L: a clock can legitimately read 0 (the test scheduler starts there), so 0 cannot mean "never been Live"
+  private var liveSinceMillis: Long                = -1L
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
 
@@ -187,7 +188,7 @@ final private[client] class MultiplexedConnection private (
 
   // stable past the backoff ceiling resets the count (a healthy session's loss retries fast); a sooner drop is a flap, so it carries forward
   private def nextReconnectAttempt(): Int = {
-    val stable = liveSinceMillis != 0L && scheduler.nowMillis - liveSinceMillis >= backoff.maxDelay.toMillis
+    val stable = liveSinceMillis >= 0L && scheduler.nowMillis - liveSinceMillis >= backoff.maxDelay.toMillis
     reconnectAttempt = if (stable) 0 else reconnectAttempt + 1
     reconnectAttempt
   }
