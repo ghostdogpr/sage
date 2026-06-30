@@ -52,7 +52,6 @@ final private[client] class MultiplexedConnection private (
   @volatile private var onLivenessLost: () => Unit = () => ()
   // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
   private var reconnectAttempt: Int                = 0
-  // -1L, not 0L: a clock can legitimately read 0 (the test scheduler starts there), so 0 cannot mean "never been Live"
   private var liveSinceMillis: Long                = -1L
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
