@@ -273,6 +273,7 @@ final private[sage] class RespParser {
       readPos = cursor
       val agg = new Agg(kind, count)
       agg.elements = Vector.newBuilder[Frame]
+      agg.elements.sizeHint(count)
       push(agg)
     }
   }
@@ -284,7 +285,7 @@ final private[sage] class RespParser {
     else {
       readPos = cursor
       val agg = new Agg(kind, count)
-      if (kind == Map) agg.pairs = Vector.newBuilder[(Frame, Frame)]
+      if (kind == Map) { agg.pairs = Vector.newBuilder[(Frame, Frame)]; agg.pairs.sizeHint(count) }
       push(agg)
     }
   }
