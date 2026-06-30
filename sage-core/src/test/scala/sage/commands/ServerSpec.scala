@@ -36,6 +36,15 @@ class ServerSpec extends munit.FunSuite {
     assertEquals(Reply.run(Server.role, sentinel), Right(Role.Sentinel(Vector("master1", "master2"))))
   }
 
+  test("ROLE rejects an out-of-range replica port instead of wrapping it") {
+    val wrapping =
+      Frame.Array(Vector(bulk("slave"), bulk("127.0.0.1"), Frame.Integer(Int.MaxValue.toLong + 1L), bulk("connected"), Frame.Integer(0L)))
+    assert(Reply.run(Server.role, wrapping).isLeft, "a port above Int.MaxValue must not wrap to a valid-looking port")
+    val tooLarge =
+      Frame.Array(Vector(bulk("master"), Frame.Integer(0L), Frame.Array(Vector(Frame.Array(Vector(bulk("127.0.0.1"), bulk("70000"), bulk("0")))))))
+    assert(Reply.run(Server.role, tooLarge).isLeft, "a replica port outside 1..65535 must be a DecodeError")
+  }
+
   test("SLOWLOG GET decodes entries, defaulting client fields absent on old servers") {
     val withClient = Frame.Array(
       Vector(

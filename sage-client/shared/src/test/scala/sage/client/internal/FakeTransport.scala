@@ -13,7 +13,7 @@ final class FakeTransport(
   onFrame: Frame => Unit,
   onClosed: () => Unit,
   respond: Bytes => Seq[Frame] = _ => Nil,
-  autoWrite: Boolean = true
+  var autoWrite: Boolean = true
 ) extends Transport {
 
   val written: mutable.ArrayBuffer[Bytes]                 = mutable.ArrayBuffer.empty

@@ -135,12 +135,15 @@ private[sage] object Pubsub {
     frame match {
       case Frame.Array(elements) if elements.length % 2 == 0 =>
         val builder = Map.newBuilder[String, Long]
-        val pairs   = elements.grouped(2)
-        while (pairs.hasNext)
-          pairs.next() match {
-            case Vector(Frame.BulkString(ch), Frame.Integer(count)) => builder += ch.asUtf8String -> count
-            case other                                              => return Left(DecodeError("channel/count pair", other.map(Frame.describe).mkString(", ")))
+        builder.sizeHint(elements.length / 2)
+        var i       = 0
+        while (i < elements.length) {
+          (elements(i), elements(i + 1)) match {
+            case (Frame.BulkString(ch), Frame.Integer(count)) => builder += ch.asUtf8String -> count
+            case (a, b)                                       => return Left(DecodeError("channel/count pair", s"${Frame.describe(a)}, ${Frame.describe(b)}"))
           }
+          i += 2
+        }
         Right(builder.result())
       case other => Left(DecodeError("array of channel/count pairs", Frame.describe(other)))
     }

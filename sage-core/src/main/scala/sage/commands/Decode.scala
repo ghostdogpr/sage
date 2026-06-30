@@ -127,6 +127,22 @@ private[commands] object Decode {
   def each[A, B](items: IterableOnce[A])(f: A => Either[DecodeError, B]): Either[DecodeError, Vector[B]] =
     buildEach(items, Vector.newBuilder[B])(f)
 
+  // steps a flat alternating array two elements at a time, without grouped(2)'s throwaway 2-element Vector per pair; caller guarantees even length
+  private def buildPairs[B, C](elements: Vector[Frame], builder: mutable.Builder[B, C])(
+    f: (Frame, Frame) => Either[DecodeError, B]
+  ): Either[DecodeError, C] = {
+    builder.sizeHint(elements.length / 2)
+    var i = 0
+    while (i < elements.length) {
+      f(elements(i), elements(i + 1)) match {
+        case Right(value) => builder += value
+        case Left(error)  => return Left(error)
+      }
+      i += 2
+    }
+    Right(builder.result())
+  }
+
   // a fixed-arity RESP Array decoded position by position; `label` is the structural description reported on a shape mismatch
   def array2[A, B, R](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B], label: String)(
     combine: (A, B) => R
@@ -190,7 +206,17 @@ private[commands] object Decode {
   val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = {
     case Frame.Map(entries) => Right(entries.collect { case (Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
     case Frame.Array(elements) if elements.length % 2 == 0 =>
-      Right(elements.grouped(2).collect { case Vector(Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
+      val builder = Map.newBuilder[String, Frame]
+      builder.sizeHint(elements.length / 2)
+      var i       = 0
+      while (i < elements.length) {
+        elements(i) match {
+          case Frame.BulkString(k) => builder += (k.asUtf8String -> elements(i + 1))
+          case _                   => ()
+        }
+        i += 2
+      }
+      Right(builder.result())
     case other => Left(DecodeError("map", Frame.describe(other)))
   }
 
@@ -208,10 +234,10 @@ private[commands] object Decode {
   // HSCAN's items are a flat field, value, field, value, … array; HRANDFIELD WITHVALUES nests each pair in its own array.
   def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
     case Frame.Array(elements) if elements.length % 2 == 0 =>
-      buildEach(elements.grouped(2), Vector.newBuilder[(K, V)]) { pair =>
+      buildPairs(elements, Vector.newBuilder[(K, V)]) { (fieldFrame, valueFrame) =>
         for {
-          field <- key(pair(0))
-          value <- this.value(pair(1))
+          field <- key(fieldFrame)
+          value <- this.value(valueFrame)
         } yield field -> value
       }
     case other => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
@@ -272,10 +298,10 @@ private[commands] object Decode {
   // ZSCAN's items are a flat member, score, member, score array with scores as bulk strings, not RESP3 doubles
   def scoredMembersFlat[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
     case Frame.Array(elements) if elements.length % 2 == 0 =>
-      buildEach(elements.grouped(2), Vector.newBuilder[(V, Double)]) { pair =>
+      buildPairs(elements, Vector.newBuilder[(V, Double)]) { (memberFrame, scoreFrame) =>
         for {
-          member <- value(pair(0))
-          s      <- scoreText(pair(1))
+          member <- value(memberFrame)
+          s      <- scoreText(scoreFrame)
         } yield member -> s
       }
     case other => Left(DecodeError("array of member/score pairs", Frame.describe(other)))

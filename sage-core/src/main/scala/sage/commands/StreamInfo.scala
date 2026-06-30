@@ -245,7 +245,12 @@ private[sage] object StreamInfo {
     def of(frame: Frame): Either[DecodeError, Fields] =
       frame match {
         case Frame.Map(entries) => build(entries)
-        case Frame.Array(elements) if elements.length % 2 == 0 => build(elements.grouped(2).map(p => p(0) -> p(1)).toVector)
+        case Frame.Array(elements) if elements.length % 2 == 0 =>
+          val pairs = Vector.newBuilder[(Frame, Frame)]
+          pairs.sizeHint(elements.length / 2)
+          var i     = 0
+          while (i < elements.length) { pairs += (elements(i) -> elements(i + 1)); i += 2 }
+          build(pairs.result())
         case other => Left(DecodeError("introspection map", Frame.describe(other)))
       }
 

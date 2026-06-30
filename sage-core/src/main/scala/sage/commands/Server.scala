@@ -163,7 +163,7 @@ private[sage] object Server {
         case "slave"    =>
           rest match {
             case Vector(Frame.BulkString(host), Frame.Integer(port), Frame.BulkString(state), Frame.Integer(offset)) =>
-              Right(Role.Replica(host.asUtf8String, port.toInt, state.asUtf8String, offset))
+              decodePort(port).map(Role.Replica(host.asUtf8String, _, state.asUtf8String, offset))
             case other                                                                                               =>
               Left(DecodeError("replica role [host, port, state, offset]", other.map(Frame.describe).mkString(", ")))
           }
@@ -289,11 +289,14 @@ private[sage] object Server {
       case Some(CommandFilterBy.Pattern(glob))    => Vector(FilterBy, PatternWord, Bytes.utf8(glob))
     }
 
+  private def decodePort(value: Long): Either[DecodeError, Int] =
+    if (value >= 1L && value <= 65535L) Right(value.toInt) else Left(DecodeError("port in 1..65535", value.toString))
+
   private def decodeReplicas(frame: Frame): Either[DecodeError, Vector[ReplicaNode]] =
     Decode.vector {
       case Frame.Array(Vector(Frame.BulkString(host), Frame.BulkString(port), Frame.BulkString(offset))) =>
         for {
-          p <- port.asUtf8String.toIntOption.toRight(DecodeError("replica port", port.asUtf8String))
+          p <- port.asUtf8String.toLongOption.toRight(DecodeError("replica port", port.asUtf8String)).flatMap(decodePort)
           o <- offset.asUtf8String.toLongOption.toRight(DecodeError("replica offset", offset.asUtf8String))
         } yield ReplicaNode(host.asUtf8String, p, o)
       case other                                                                                         => Left(DecodeError("replica [host, port, offset]", Frame.describe(other)))

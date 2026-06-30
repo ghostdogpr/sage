@@ -91,6 +91,20 @@ class DedicatedPoolSpec extends munit.FunSuite {
     assertEquals(transports.size, 2)
   }
 
+  test("a dropped queued command marks the connection dead before failing the work, so the pool cannot recycle it") {
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil)); transports += t; t
+    }
+    val conn                                            = DedicatedConnection.establish(factory, Vector(Connection.hello()), 1000L)
+    transports.head.autoWrite = false // hold the write so the command stays queued: the path the transport drops on teardown
+
+    var healthyWhenFailed: Option[Boolean] = None
+    conn.submit(blPop, _ => healthyWhenFailed = Some(conn.isHealthy))
+    transports.head.close()
+    assertEquals(healthyWhenFailed, Some(false))
+  }
+
   test("acquire waits for a slot and fails TimedOut when the pool stays exhausted") {
     val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 50.millis, idleTimeout = Duration.Inf)
     val (pool, scheduler, transports) = make(replyWith(Nil), config = config) // the first BLPOP parks, holding the only slot
