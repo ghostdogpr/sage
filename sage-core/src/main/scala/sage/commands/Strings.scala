@@ -139,7 +139,7 @@ private[sage] object Strings {
     Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(Doubles.format(increment))), Decode.double)
 
   def mGet[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
+    val keys = (first +: rest).iterator.map(keyCodec.encode).toVector
     Command.read("MGET", keys.indices.toVector, keys, Decode.vector(Decode.optionalValue))
   }
 

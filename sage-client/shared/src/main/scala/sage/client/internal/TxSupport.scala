@@ -17,11 +17,17 @@ import sage.protocol.Frame
   */
 private[internal] object TxSupport {
 
-  def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] =
-    results.collectFirst { case Left(error) => error } match {
-      case Some(error) => CIO.fail(error)
-      case None        => CIO.value(toOut(results.collect { case Right(value) => value }))
-    }
+  def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] = {
+    val values = Vector.newBuilder[Any]
+    values.sizeHint(results.length)
+    val it     = results.iterator
+    while (it.hasNext)
+      it.next() match {
+        case Right(value) => values += value
+        case Left(error)  => return CIO.fail(error)
+      }
+    CIO.value(toOut(values.result()))
+  }
 
   // decoders return Either and never throw; a non-SageException here is a decoder bug surfaced as a decode failure rather than allowed
   // to escape the per-position result model.
