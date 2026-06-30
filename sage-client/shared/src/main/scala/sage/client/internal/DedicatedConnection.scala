@@ -97,8 +97,8 @@ final private[client] class DedicatedConnection private (
 
     def writeAttempted(): Unit = { val _ = pending.add(this) }
 
-    // exactly one of dropped/complete/fail fires per entry; each retires the in-flight count before delivering the result
-    def dropped(): Unit = { inFlight.decrementAndGet(); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
+    // dropped fires only during teardown, ahead of onClosed; mark dead first so the pool can't recycle this connection mid-close
+    def dropped(): Unit = { dead = true; inFlight.decrementAndGet(); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
 
     def complete(frame: Frame): Unit = {
       val result = Reply.decode(command, frame)
@@ -125,7 +125,7 @@ final private[client] class DedicatedConnection private (
       while (i < n) { val _ = pending.add(new Slot(i)); i += 1 }
     }
 
-    def dropped(): Unit = finish(Failure(ConnectionLost(mayHaveExecuted = false)))
+    def dropped(): Unit = { dead = true; finish(Failure(ConnectionLost(mayHaveExecuted = false))) }
 
     private def finish(result: Try[Vector[Frame]]): Unit =
       if (done.compareAndSet(false, true)) {
