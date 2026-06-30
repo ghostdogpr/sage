@@ -261,6 +261,44 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(afterReconnect, Some(Success("PONG")))
   }
 
+  test("a flapping connection backs off increasingly, and a stable connection resets the backoff") {
+    val backoff                                         = BackoffConfig(initialDelay = 10.millis, maxDelay = 10.seconds, multiplier = 2.0)
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+      transports += transport
+      transport
+    }
+    val connection                                      =
+      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], backoff, noWatchdog, 1.second, Duration.Zero)
+    import MultiplexedConnection.State
+
+    // a flap (Live but dropped before the stable window) carries the attempt forward, so the backoff grows instead of resetting every cycle
+    assertEquals(connection.currentState, State.Live)
+    transports.last.emit(Frame.SimpleString("stray")) // flap 1 -> attempt 1 -> 20ms
+    assertEquals(connection.currentState, State.Reconnecting)
+    scheduler.advance(19.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "still backing off before the 20ms attempt-1 delay")
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, State.Live)
+
+    transports.last.emit(Frame.SimpleString("stray")) // flap 2 -> attempt 2 -> 40ms, not reset to the 10ms initial delay
+    scheduler.advance(39.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "the backoff doubled to 40ms rather than resetting to 10ms")
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, State.Live)
+
+    // staying Live past the backoff ceiling marks a healthy session, so the next loss resets the cadence to the initial delay
+    scheduler.advance(11.seconds)
+    assertEquals(connection.currentState, State.Live)
+    transports.last.emit(Frame.SimpleString("stray")) // stable -> attempt 0 -> 10ms
+    scheduler.advance(9.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "still backing off before the reset 10ms initial delay")
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, State.Live)
+  }
+
   test("a socket dying in the establish->Live window is not published Live, and the reconnect loop recovers") {
     final class DyingAfterBootstrap(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
       def start(): Unit                    = ()

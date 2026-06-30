@@ -50,6 +50,9 @@ final private[client] class MultiplexedConnection private (
   // this lifecycle lock, so there is no pool<->connection lock order to keep
   private val liveEpoch                            = new AtomicReference[Generation](Generation.notLive)
   @volatile private var onLivenessLost: () => Unit = () => ()
+  // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
+  private var reconnectAttempt: Int                = 0
+  private var liveSinceMillis: Long                = 0L
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
 
@@ -63,6 +66,7 @@ final private[client] class MultiplexedConnection private (
   private def transition(to: State): Unit = {
     state = to
     liveEpoch.set(if (to == State.Live) generation else Generation.notLive)
+    if (to == State.Live) liveSinceMillis = scheduler.nowMillis
   }
 
   // the live connection, or null when not Live so callers fail fast rather than join a dead or reconnecting generation
@@ -176,8 +180,17 @@ final private[client] class MultiplexedConnection private (
     } finally locked { if (establishing eq conn) establishing = null }
   }
 
-  private def scheduleReconnect(attempt: Int): Unit =
+  private def scheduleReconnect(attempt: Int): Unit = {
+    reconnectAttempt = attempt
     scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
+  }
+
+  // stable past the backoff ceiling resets the count (a healthy session's loss retries fast); a sooner drop is a flap, so it carries forward
+  private def nextReconnectAttempt(): Int = {
+    val stable = liveSinceMillis != 0L && scheduler.nowMillis - liveSinceMillis >= backoff.maxDelay.toMillis
+    reconnectAttempt = if (stable) 0 else reconnectAttempt + 1
+    reconnectAttempt
+  }
 
   private def attemptReconnect(attempt: Int): Unit = {
     val proceed = locked(state == State.Reconnecting)
@@ -210,7 +223,7 @@ final private[client] class MultiplexedConnection private (
       if (conn eq current)
         state match {
           case State.Live         =>
-            transition(State.Reconnecting); scheduleReconnect(0); events.emit(SageEvent.Connection.Disconnected(node)); true
+            transition(State.Reconnecting); scheduleReconnect(nextReconnectAttempt()); events.emit(SageEvent.Connection.Disconnected(node)); true
           case State.Reconnecting => scheduleReconnect(0); false
           case State.Draining     => transition(State.Closed); stopWatchdog(); false
           case State.Closed       => false
