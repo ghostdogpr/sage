@@ -46,6 +46,24 @@ class SageConfigSpec extends munit.FunSuite {
     )
   }
 
+  test("a bracketed IPv6 literal is the host, brackets stripped, with or without a port") {
+    assertEquals(parsed("redis://[::1]").topology, Topology.Standalone(Endpoint("::1", 6379)))
+    assertEquals(parsed("redis://[::1]:6380").topology, Topology.Standalone(Endpoint("::1", 6380)))
+    assertEquals(parsed("redis://[2001:db8::1]:6379/2").database, 2)
+    assertEquals(
+      parsed("redis://[fe80::1]:6379,[fe80::2]:6380").topology,
+      Topology.Cluster(Vector(Endpoint("fe80::1", 6379), Endpoint("fe80::2", 6380)))
+    )
+  }
+
+  test("an unbracketed IPv6 literal or an empty port fails rather than misparsing") {
+    assert(SageConfig.fromUri("redis://::1").isLeft)     // ambiguous with host:port, must be bracketed
+    assert(SageConfig.fromUri("redis://[::1").isLeft)    // unterminated bracket
+    assert(SageConfig.fromUri("redis://[::1]x").isLeft)  // junk after the literal
+    assert(SageConfig.fromUri("redis://h:").isLeft)      // colon with no port is not a default
+    assert(SageConfig.fromUri("redis://[]:6379").isLeft) // empty host
+  }
+
   test("a cluster URI cannot select a non-zero database") {
     assert(SageConfig.fromUri("redis://a,b/2").isLeft)
     assert(SageConfig.fromUri("redis://a,b/0").isRight)
