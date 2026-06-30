@@ -256,17 +256,37 @@ object SageConfig {
   private def isHex(c: Char): Boolean = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 
   private def parseEndpoints(uri: String, hosts: String): Either[String, Vector[Endpoint]] =
-    hosts.split(",").toVector.foldRight(Right(Vector.empty): Either[String, Vector[Endpoint]]) { (hostPort, acc) =>
-      acc.flatMap { rest =>
-        val colon           = hostPort.lastIndexOf(':')
-        val (host, portStr) = if (colon < 0) (hostPort, "") else (hostPort.substring(0, colon), hostPort.substring(colon + 1))
-        if (host.isEmpty) Left(s"invalid redis URI '$uri': empty host in '$hostPort'")
-        else if (portStr.isEmpty) Right(Endpoint(host) +: rest)
-        else
-          portStr.toIntOption.filter(p => p >= 1 && p <= 65535) match {
-            case Some(port) => Right(Endpoint(host, port) +: rest)
-            case None       => Left(s"invalid redis URI '$uri': invalid port in '$hostPort'")
-          }
-      }
+    hosts.split(",").toVector.foldRight(Right(Vector.empty): Either[String, Vector[Endpoint]]) { (token, acc) =>
+      acc.flatMap(rest => parseEndpoint(uri, token).map(_ +: rest))
     }
+
+  // an IPv6 literal must be bracketed (`[::1]`/`[::1]:6379`), brackets stripped from the host; a bare `::1` or empty port is rejected, not guessed
+  private def parseEndpoint(uri: String, token: String): Either[String, Endpoint] = {
+    def fail(reason: String): Either[String, Endpoint]                    = Left(s"invalid redis URI '$uri': $reason in '$token'")
+    def withPort(host: String, portStr: String): Either[String, Endpoint] =
+      if (portStr.isEmpty) fail("empty port")
+      else
+        portStr.toIntOption.filter(p => p >= 1 && p <= 65535) match {
+          case Some(port) => Right(Endpoint(host, port))
+          case None       => fail("invalid port")
+        }
+    if (token.startsWith("[")) {
+      val close = token.indexOf(']')
+      if (close < 0) fail("unterminated IPv6 literal")
+      else {
+        val host = token.substring(1, close)
+        val tail = token.substring(close + 1)
+        if (host.isEmpty) fail("empty host")
+        else if (tail.isEmpty) Right(Endpoint(host))
+        else if (tail.startsWith(":")) withPort(host, tail.substring(1))
+        else fail("expected ':port' after the IPv6 literal")
+      }
+    } else
+      token.indexOf(':') match {
+        case -1    => if (token.isEmpty) fail("empty host") else Right(Endpoint(token))
+        case colon =>
+          val host = token.substring(0, colon)
+          if (host.isEmpty) fail("empty host") else withPort(host, token.substring(colon + 1))
+      }
+  }
 }
