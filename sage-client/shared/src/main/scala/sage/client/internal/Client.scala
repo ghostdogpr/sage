@@ -2193,20 +2193,20 @@ object Client {
     val watchdog =
       if (config.watchdog.enabled)
         Vector(
-          positive(config.watchdog.pingInterval, "watchdog.pingInterval"),
-          positive(config.watchdog.pingTimeout, "watchdog.pingTimeout")
+          atLeastOneMilli(config.watchdog.pingInterval, "watchdog.pingInterval"),
+          atLeastOneMilli(config.watchdog.pingTimeout, "watchdog.pingTimeout")
         )
       else Vector.empty
     val checks   = Vector(
       cond(config.database >= 0, "database must be >= 0"),
-      positive(config.connectTimeout, "connectTimeout"),
-      positive(config.closeTimeout, "closeTimeout"),
-      positive(config.reconnect.initialDelay, "reconnect.initialDelay"),
+      atLeastOneMilli(config.connectTimeout, "connectTimeout"),
+      atLeastOneMilli(config.closeTimeout, "closeTimeout"),
+      atLeastOneMilli(config.reconnect.initialDelay, "reconnect.initialDelay"),
       cond(config.reconnect.maxDelay >= config.reconnect.initialDelay, "reconnect.maxDelay must be >= initialDelay"),
       cond(config.reconnect.multiplier >= 1.0, "reconnect.multiplier must be >= 1.0"),
       cond(config.dedicatedPool.maxConnections >= 1, "dedicatedPool.maxConnections must be >= 1"),
-      positive(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout"),
-      positiveOrInfinite(config.dedicatedPool.idleTimeout, "dedicatedPool.idleTimeout"),
+      atLeastOneMilli(config.dedicatedPool.acquireTimeout, "dedicatedPool.acquireTimeout"),
+      atLeastOneMilliOrInfinite(config.dedicatedPool.idleTimeout, "dedicatedPool.idleTimeout"),
       cond(!config.clientCache.enabled || config.clientCache.maxBytes > 0L, "clientCache.maxBytes must be positive when caching is enabled"),
       cond(config.pubsub.bufferSize >= 1, "pubsub.bufferSize must be >= 1")
     ) ++ watchdog ++ (config.topology match {
@@ -2215,12 +2215,12 @@ object Client {
           cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
           cond(config.database == 0, "cluster topology has no SELECT; database must be 0"),
           cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
-          positive(cluster.minRefreshInterval, "cluster.minRefreshInterval")
+          atLeastOneMilli(cluster.minRefreshInterval, "cluster.minRefreshInterval")
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
       case Topology.MasterReplica(seeds, masterReplica) =>
         Vector(
           cond(seeds.nonEmpty, "master-replica topology requires at least one seed"),
-          positive(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval")
+          atLeastOneMilli(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval")
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
       // a Standalone has no replicas, so the strict Replica policy could never serve a read; the *Preferred policies harmlessly degrade to
       // the one node, so they stay valid (a readFrom can then be shared across environments)
@@ -2233,11 +2233,11 @@ object Client {
     checks.flatten.headOption
   }
 
-  private def cond(ok: Boolean, problem: String): Option[String]                 = if (ok) None else Some(problem)
-  private def port(value: Int, label: String): Option[String]                    = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
-  private def positive(value: FiniteDuration, label: String): Option[String]     = cond(value.toNanos > 0L, s"$label must be positive")
-  private def positiveOrInfinite(value: Duration, label: String): Option[String] =
-    cond(value == Duration.Inf || (value.isFinite && value.toNanos > 0L), s"$label must be positive (or Inf)")
+  private def cond(ok: Boolean, problem: String): Option[String]                        = if (ok) None else Some(problem)
+  private def port(value: Int, label: String): Option[String]                           = cond(value >= 1 && value <= 65535, s"$label must be in 1..65535")
+  private def atLeastOneMilli(value: FiniteDuration, label: String): Option[String]     = cond(value.toMillis >= 1L, s"$label must be at least 1ms")
+  private def atLeastOneMilliOrInfinite(value: Duration, label: String): Option[String] =
+    cond(value == Duration.Inf || (value.isFinite && value.toMillis >= 1L), s"$label must be at least 1ms (or Inf)")
 
   private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO, String]] =
     // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the

@@ -161,6 +161,13 @@ class ConnectSpec extends munit.FunSuite {
       }
   }
 
+  test("a sub-millisecond duration is rejected before connecting rather than truncating to 0ms") {
+    Client.connect(SageConfig(connectTimeout = 500.micros)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.getMessage.contains("at least 1ms"), s"unexpected message: ${error.getMessage}")
+    }
+  }
+
   test("an empty pipeline succeeds without a round-trip") {
     val (factory, transport) = scripted(helloThenPong)
     val empty                = Vector.empty[Command[Long]]
