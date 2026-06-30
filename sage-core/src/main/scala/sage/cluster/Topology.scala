@@ -36,8 +36,16 @@ final private[sage] class ClusterTopology private (val shards: Vector[Shard], ow
         case 0 => Route.Keyless
         case 1 => routeSlot(Slot.of(command.args(command.keyIndices.head)))
         case _ =>
-          val slots = slotsOf(command)
-          if (slots.sizeIs > 1) Route.CrossSlot(slots) else routeSlot(slots.head)
+          // no Set on the common same-slot path (a shared hash tag); one is built only for a real cross-slot
+          val keyIndices = command.keyIndices
+          val first      = Slot.of(command.args(keyIndices.head))
+          var i          = 1
+          var crossed    = false
+          while (i < keyIndices.length && !crossed) {
+            if (Slot.of(command.args(keyIndices(i))) != first) crossed = true
+            i += 1
+          }
+          if (crossed) Route.CrossSlot(slotsOf(command)) else routeSlot(first)
       }
 
   def split(pipeline: Pipeline[?, ?]): SplitPlan = {

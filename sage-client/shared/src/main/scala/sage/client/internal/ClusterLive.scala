@@ -724,9 +724,17 @@ final private[client] class ClusterLive(
       else if (command.keyIndices.isEmpty)
         Right(None)
       else {
-        val slots = command.keyIndices.iterator.map(index => Slot.of(command.args(index))).toSet
-        if (slots.sizeIs > 1) Left(crossSlot(command.name, slots))
-        else Right(Some(slots.head))
+        // no Set on the common same-slot path (single key, or a shared hash tag); one is built only for a genuine cross-slot's error
+        val keyIndices = command.keyIndices
+        val first      = Slot.of(command.args(keyIndices.head))
+        var i          = 1
+        var crossed    = false
+        while (i < keyIndices.length && !crossed) {
+          if (Slot.of(command.args(keyIndices(i))) != first) crossed = true
+          i += 1
+        }
+        if (crossed) Left(crossSlot(command.name, keyIndices.iterator.map(index => Slot.of(command.args(index))).toSet))
+        else Right(Some(first))
       }
 
     private def pipelineSlot[Out, R](p: Pipeline[Out, R]): Either[Throwable, Option[Slot]] = {

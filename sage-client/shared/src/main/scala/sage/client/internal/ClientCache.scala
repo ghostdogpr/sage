@@ -139,7 +139,9 @@ private[client] object ClientCache {
 
   // a content-addressed Bytes key — universal `==`/`hashCode` on Bytes is reference-based by design (see Bytes)
   final class Key(val bytes: Bytes) {
-    override def hashCode(): Int             = bytes.contentHashCode
+    // memoized: contentHashCode scans the whole wire bytes, and a Key is hashed across several cache map ops
+    private val hash                         = bytes.contentHashCode
+    override def hashCode(): Int             = hash
     override def equals(other: Any): Boolean = other match {
       case that: Key => bytes.sameBytes(that.bytes)
       case _         => false
