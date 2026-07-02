@@ -253,9 +253,11 @@ final private[client] class ClusterSubscriptions(
       if (subs.exists(sub => hasUnownedSlot(sub.channels))) refresh()
       var incomplete = false
       subs.foreach { sub =>
-        if (sub.placement.reconcile(planFor(sub.channels), conns)) incomplete = true
+        val failed = sub.placement.reconcile(planFor(sub.channels), conns)
         // closed during this pass: a racing closeShard may have detached before we re-attached, so reconcile back to empty
         if (!locked(shardSubs.contains(sub))) { val _ = sub.placement.reconcile(Map.empty, conns) }
+        // an unowned slot is dropped from the plan, so reconcile reports no failure though the sub isn't placed; retry until fullyPlaced
+        else if (failed || !sub.placement.fullyPlaced) incomplete = true
       }
       evictEmptyShardConns()
       if (incomplete) scheduleRetry()
