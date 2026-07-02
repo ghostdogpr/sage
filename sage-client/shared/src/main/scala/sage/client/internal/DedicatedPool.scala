@@ -77,12 +77,13 @@ final private[client] class DedicatedPool(
           }
         acquired match {
           case Left(error) => callback(scala.util.Failure(error))
-          // attach fails only if the caller was already interrupted; the connection is discarded, so skip the submit
           case Right(conn) =>
-            if (lease.attach(this, conn)) {
+            // attach fails only when already cancelled (interrupt before/between attaches); settle the callback here since cancel found no Held to settle
+            val onInterrupt = () => callback(scala.util.Failure(ConnectionLost(mayHaveExecuted = true)))
+            if (lease.attach(this, conn, onInterrupt)) {
               if (asking) conn.submit[Unit](Connection.asking, _ => ())
               conn.submit(command, result => if (lease.finish(conn)) { release(conn); callback(result) })
-            }
+            } else onInterrupt()
         }
       }
 
@@ -264,14 +265,15 @@ private[client] object DedicatedPool {
 
   /**
     * Tracks the one Dedicated Connection a single (possibly ASK/MOVED-redirected) blocking command currently holds, so an interrupted caller
-    * can release it. `attach` records a freshly leased connection; `finish` clears it when the reply lands; `cancel` discards whatever is held
-    * and, via the terminal state, makes any later `attach` (a redirect leasing again after the interrupt) discard immediately instead of leak.
+    * can release it. `attach` records a freshly leased connection and the action that settles the caller's tracked callback; `finish` clears it
+    * when the reply lands; `cancel` discards whatever is held, runs that settle action so an interrupted command's span/CommandCompleted still
+    * fire, and, via the terminal state, makes any later `attach` (a redirect leasing again after the interrupt) discard immediately instead of leak.
     */
   final class Lease {
     private val state = new AtomicReference[AnyRef]() // null idle, a Held while leased, Cancelled terminal
 
-    private[internal] def attach(pool: DedicatedPool, conn: DedicatedConnection): Boolean =
-      if (state.compareAndSet(null, Held(pool, conn))) true
+    private[internal] def attach(pool: DedicatedPool, conn: DedicatedConnection, onInterrupt: () => Unit): Boolean =
+      if (state.compareAndSet(null, Held(pool, conn, onInterrupt))) true
       else { pool.releaseTransaction(conn, reusable = false); false }
 
     private[internal] def finish(conn: DedicatedConnection): Boolean =
@@ -281,11 +283,11 @@ private[client] object DedicatedPool {
       }
 
     def cancel(): Unit = state.getAndSet(Cancelled) match {
-      case h: Held => h.pool.releaseTransaction(h.conn, reusable = false)
+      case h: Held => h.pool.releaseTransaction(h.conn, reusable = false); h.onInterrupt()
       case _       => ()
     }
   }
 
-  final private case class Held(pool: DedicatedPool, conn: DedicatedConnection)
+  final private case class Held(pool: DedicatedPool, conn: DedicatedConnection, onInterrupt: () => Unit)
   private case object Cancelled
 }

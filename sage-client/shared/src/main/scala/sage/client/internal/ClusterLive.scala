@@ -112,8 +112,7 @@ final private[client] class ClusterLive(
   }
 
   def run[A](command: Command[A]): CIO[A] = {
-    val lease = if (command.isBlocking) new DedicatedPool.Lease else null
-    val body  =
+    def body(lease: DedicatedPool.Lease): CIO[A] =
       CIO.async[A] { complete =>
         val span = Events.startSpan(events, command)
         offload {
@@ -121,7 +120,9 @@ final private[client] class ClusterLive(
           Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, lease = lease))
         }
       }
-    if (lease != null) CIO.ensure(CIO.blocking(lease.cancel()))(body) else body
+    if (!command.isBlocking) body(null)
+    // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
+    else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
   }
 
   // caching is not applied in cluster mode (per-node tracking through redirects/failover is unsupported): the read runs uncached but on the
