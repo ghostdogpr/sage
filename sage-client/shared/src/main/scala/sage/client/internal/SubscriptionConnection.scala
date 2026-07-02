@@ -57,12 +57,11 @@ final private[client] class SubscriptionConnection(
   // this generation's resubscribe ack count, set in goLive before waiters wake so a re-arming waiter never adopts a later subscribe's count
   private var liveTarget: Long         = -1L
 
-  private var watchdogHandle: Scheduler.Cancelable     = null
-  @volatile private var readerBlocked: Boolean         = false
-  @volatile private var lastReplyAtMillis: Long        = scheduler.nowMillis
-  @volatile private var lastBackpressureMillis: Long   = 0L
-  @volatile private var pingSentAtMillis: Long         = 0L
-  @volatile private var bootstrapWaiter: Frame => Unit = null
+  private var watchdogHandle: Scheduler.Cancelable   = null
+  @volatile private var readerBlocked: Boolean       = false
+  @volatile private var lastReplyAtMillis: Long      = scheduler.nowMillis
+  @volatile private var lastBackpressureMillis: Long = 0L
+  @volatile private var pingSentAtMillis: Long       = 0L
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -248,20 +247,19 @@ final private[client] class SubscriptionConnection(
     conn
   }
 
-  // the subscription connection has no pending-command queue, so each bootstrap command parks the single `bootstrapWaiter` for its reply;
-  // the finally clears it so a later watchdog PONG is not misrouted to a stale waiter (which would never reset pingSentAtMillis)
+  // per-conn waiter (two establishes can bootstrap concurrently and must not cross-complete); the finally clears it so a later PONG isn't misrouted
   private def runBootstrap(conn: Conn): Unit =
     try
       Bootstrap.run(
         bootstrap,
         connectTimeoutMillis,
         (command, cb) => {
-          bootstrapWaiter = frame => cb(Reply.decode(command, frame))
+          conn.bootstrapWaiter = frame => cb(Reply.decode(command, frame))
           conn.send(command.encode)
         },
         () => conn.close()
       )
-    finally bootstrapWaiter = null
+    finally conn.bootstrapWaiter = null
 
   private def scheduleReconnect(attempt: Int): Unit =
     scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
@@ -301,7 +299,7 @@ final private[client] class SubscriptionConnection(
       if (reconnect) scheduleReconnect(0)
     }
 
-  private def onFrame(frame: Frame): Unit =
+  private def onFrame(conn: Conn, frame: Frame): Unit =
     frame match {
       case Frame.Push(elements) =>
         // not touching lastReplyAtMillis: a push proves only the read path, so push-only traffic must still get the idle keepalive PING
@@ -314,21 +312,15 @@ final private[client] class SubscriptionConnection(
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
         lastReplyAtMillis = scheduler.nowMillis
-        val waiter = bootstrapWaiter
+        val waiter = conn.bootstrapWaiter
         if (waiter != null) waiter(reply)
         else
           reply match {
             // an error (e.g. MOVED on SSUBSCRIBE) isn't a PONG: drop the connection so re-home/reconnect re-plans
-            case _: Frame.SimpleError | _: Frame.BulkError => dropOnUnexpectedError()
+            case _: Frame.SimpleError | _: Frame.BulkError => scheduler.after(Duration.Zero)(conn.close()) // off the reader thread: close() joins it
             case _                                         => pingSentAtMillis = 0L
           }
     }
-
-  // off the reader thread, since close() joins the reader
-  private def dropOnUnexpectedError(): Unit = {
-    val conn = locked(current)
-    if (conn != null) scheduler.after(Duration.Zero)(conn.close())
-  }
 
   // snapshot the sinks under the lock, then deliver outside it: a blocking put (backpressure) must never hold the registry lock
   private def dispatch(map: mutable.HashMap[String, mutable.LinkedHashSet[Sink]], key: String, delivery: Delivery): Unit = {
@@ -468,13 +460,14 @@ final private[client] class SubscriptionConnection(
 
   final private class Conn {
 
-    private val transportRef         = new AtomicReference[Transport]()
-    @volatile private var terminated = false
+    private val transportRef                     = new AtomicReference[Transport]()
+    @volatile private var terminated             = false
+    @volatile var bootstrapWaiter: Frame => Unit = null
 
     def isTerminated: Boolean = terminated
 
     def start(): Unit = {
-      val transport = factory(onFrame, () => { terminated = true; onConnClosed(this) })
+      val transport = factory(frame => onFrame(this, frame), () => { terminated = true; onConnClosed(this) })
       transportRef.set(transport)
       transport.start()
     }
