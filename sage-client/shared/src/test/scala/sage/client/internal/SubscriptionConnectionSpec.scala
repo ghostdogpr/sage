@@ -80,6 +80,14 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     box.get()
   }
 
+  private def nextBlocking(sink: SubscriptionConnection.Sink): Option[SubscriptionConnection.Delivery] = {
+    val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
+    val latch = new CountDownLatch(1)
+    sink.next { delivery => box.set(delivery); latch.countDown() }
+    latch.await()
+    box.get()
+  }
+
   // Bytes has no structural `==` (CONTEXT: compare with sameBytes), so destructure and compare the payload as text
   private def assertChannel(delivery: Option[SubscriptionConnection.Delivery], channel: String, payload: String)(using munit.Location): Unit =
     delivery match {
@@ -232,6 +240,65 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assertChannel(nextBlocking(sub), "b", "from-b")
     transports.head.emit(message("a", "from-a"))
     assertChannel(nextBlocking(sub), "a", "from-a")
+  }
+
+  test("closeIfEmpty keeps a connection holding a sink, closes it once empty, and then rejects a racing attach") {
+    val (connection, _, transports) = make()
+    val sink                        = new SubscriptionConnection.Sink(Vector("orders"), SubscriptionConnection.Kind.Shard, 16)
+    connection.attach(sink, Vector("orders"), SubscriptionConnection.Kind.Shard)
+
+    assert(!connection.closeIfEmpty(), "a connection carrying a live sink must not be evicted")
+    assertEquals(transports.head.closeCount, 0)
+
+    val _ = connection.detach(sink, Vector("orders"), SubscriptionConnection.Kind.Shard)
+    assert(connection.closeIfEmpty(), "with its last sink gone the connection is empty and closes")
+    assertEquals(transports.head.closeCount, 1)
+
+    val late = new SubscriptionConnection.Sink(Vector("late"), SubscriptionConnection.Kind.Shard, 16)
+    intercept[NotConnected](connection.attach(late, Vector("late"), SubscriptionConnection.Kind.Shard))
+  }
+
+  test("shutdown drops the socket but leaves the sink usable, so a re-home can re-attach it to a fresh connection") {
+    val (conn1, _, transports1) = make()
+    val sink                    = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    conn1.attach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)
+
+    conn1.shutdown()
+    assertEquals(transports1.head.closeCount, 1, "the abandoned socket is closed")
+
+    val (conn2, _, transports2) = make()
+    conn2.attach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)
+    transports2.head.emit(message("news", "after-rehome"))
+    assertChannel(nextBlocking(sink), "news", "after-rehome")
+  }
+
+  test("an unexpected error reply (e.g. MOVED on a subscribe) drops the connection instead of being swallowed as a PONG") {
+    var terminated                                      = false
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FakeTransport(onFrame, onClosed, serverResponder); transports += t; t
+    }
+    val connection                                      = new SubscriptionConnection(
+      factory,
+      Vector(Connection.ping()),
+      scheduler,
+      fixedBackoff,
+      noWatchdog,
+      1000L,
+      16,
+      () => true,
+      cluster = true,
+      onTerminated = () => terminated = true
+    )
+    val sink                                            = new SubscriptionConnection.Sink(Vector("orders"), SubscriptionConnection.Kind.Shard, 16)
+    connection.attach(sink, Vector("orders"), SubscriptionConnection.Kind.Shard)
+    assertEquals(transports.size, 1)
+
+    transports.head.emit(Frame.SimpleError("MOVED 1234 10.0.0.2:6379"))
+    scheduler.advance(Duration.Zero) // the close is scheduled off the reader thread
+    assert(terminated, "a MOVED error on the subscribe connection must drop it so the manager re-homes")
+    assertEquals(transports.head.closeCount, 1)
   }
 
   test("a socket dying in the establish->live window fires onTerminated in cluster mode instead of going silently Live") {

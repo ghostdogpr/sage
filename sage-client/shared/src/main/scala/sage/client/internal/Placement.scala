@@ -72,8 +72,8 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
       incomplete
     }
 
-  // every requested channel is placed on some owner; false means an unowned Slot or unreachable owner is still outstanding
-  def fullyPlaced: Boolean = locked(placedAt.valuesIterator.map(_.size).sum) >= requested.distinct.size
+  // distinct union, not a sum of per-node sizes: a double-recorded channel must not mask an unplaced one
+  def fullyPlaced: Boolean = locked(placedAt.valuesIterator.flatten.toSet.size) >= requested.distinct.size
 }
 
 private[internal] object Placement {

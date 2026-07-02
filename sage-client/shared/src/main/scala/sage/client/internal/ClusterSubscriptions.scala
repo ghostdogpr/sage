@@ -159,7 +159,9 @@ final private[client] class ClusterSubscriptions(
           } catch { case NonFatal(_) => failed = true }
         }
         if (failed) {
+          // conn may be Live with re-attached subs: shut it down or the retry double-delivers and leaks the socket
           locked(if (classicConn eq conn) classicConn = null)
+          conn.shutdown()
           scheduleRehomeRetry()
         }
       }
@@ -276,11 +278,10 @@ final private[client] class ClusterSubscriptions(
   }
 
   private def evictEmptyShardConns(): Unit = {
-    val gone = locked {
-      val empties = shardConns.iterator.collect { case (node, conn) if conn.isEmpty => node }.toVector
-      empties.flatMap(node => shardConns.remove(node).map(node -> _))
+    val candidates = locked(shardConns.iterator.collect { case (node, conn) if conn.isEmpty => node -> conn }.toVector)
+    candidates.foreach { case (node, conn) =>
+      if (conn.closeIfEmpty()) locked(if (shardConns.get(node).contains(conn)) shardConns -= node)
     }
-    gone.foreach { case (_, conn) => conn.close() }
   }
 
   // --- shared ------------------------------------------------------------------------------------------------------------------------------

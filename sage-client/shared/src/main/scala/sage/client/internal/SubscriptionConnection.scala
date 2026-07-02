@@ -312,11 +312,23 @@ final private[client] class SubscriptionConnection(
           case Some(_: Pubsub.Event.Subscribed)                        => locked { subscribeConfirmed += 1; confirmed.signalAll() }
           case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
-      case reply                => // a non-push reply is the bootstrap HELLO or the watchdog's PONG
+      case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
         lastReplyAtMillis = scheduler.nowMillis
         val waiter = bootstrapWaiter
-        if (waiter != null) waiter(reply) else pingSentAtMillis = 0L
+        if (waiter != null) waiter(reply)
+        else
+          reply match {
+            // an error (e.g. MOVED on SSUBSCRIBE) isn't a PONG: drop the connection so re-home/reconnect re-plans
+            case _: Frame.SimpleError | _: Frame.BulkError => dropOnUnexpectedError()
+            case _                                         => pingSentAtMillis = 0L
+          }
     }
+
+  // off the reader thread, since close() joins the reader
+  private def dropOnUnexpectedError(): Unit = {
+    val conn = locked(current)
+    if (conn != null) scheduler.after(Duration.Zero)(conn.close())
+  }
 
   // snapshot the sinks under the lock, then deliver outside it: a blocking put (backpressure) must never hold the registry lock
   private def dispatch(map: mutable.HashMap[String, mutable.LinkedHashSet[Sink]], key: String, delivery: Delivery): Unit = {
@@ -346,6 +358,42 @@ final private[client] class SubscriptionConnection(
     }
     sink.terminate()
     if (teardown != null) teardown.close()
+  }
+
+  // atomic empty-check + Closed transition, so a racing attach can't bind a sink to a connection about to close
+  def closeIfEmpty(): Boolean = {
+    var conn: Conn = null
+    val closing    = locked {
+      if (!isEmptyUnlocked) false
+      else {
+        conn = current
+        state = State.Closed
+        stopWatchdog()
+        current = null
+        established.signalAll()
+        confirmed.signalAll()
+        true
+      }
+    }
+    if (conn != null) conn.close()
+    closing
+  }
+
+  // close socket/watchdog but keep the sinks (unlike close), so a re-home re-attaches them
+  def shutdown(): Unit = {
+    var conn: Conn = null
+    locked {
+      conn = current
+      state = State.Closed
+      stopWatchdog()
+      current = null
+      channelSinks.clear()
+      patternSinks.clear()
+      shardSinks.clear()
+      established.signalAll()
+      confirmed.signalAll()
+    }
+    if (conn != null) conn.close()
   }
 
   def close(): Unit = {

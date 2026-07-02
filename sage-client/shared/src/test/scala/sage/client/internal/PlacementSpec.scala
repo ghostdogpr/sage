@@ -100,6 +100,16 @@ class PlacementSpec extends munit.FunSuite {
     assert(placement.fullyPlaced)
   }
 
+  test("fullyPlaced counts distinct channels, so one double-recorded across owners cannot mask an unplaced channel") {
+    val pool      = new FakePool
+    val placement = new Placement(sink("a", "b"), Vector("a", "b"))
+
+    placement.reconcile(Map(n2 -> groups(Vector("a"))), pool) // fresh topology records a on n2
+    placement.place(Map(n1 -> groups(Vector("a"))), pool) // a stale concurrent place re-records a on n1, never touching b
+
+    assert(!placement.fullyPlaced, "b never landed; the duplicate a on n1 and n2 must not count as full coverage")
+  }
+
   test("a partial attach followed by a topology shift never duplicates a channel across owners") {
     val pool      = new FakePool
     val placement = new Placement(sink("a", "b"), Vector("a", "b"))
