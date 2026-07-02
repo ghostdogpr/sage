@@ -22,9 +22,13 @@ final private[sage] case class Shard(master: Node, replicas: Vector[Node], slots
   * A pure snapshot of which masters own which slots. Routing and splitting are total classifications over it — they never raise, choose a
   * connection, or decide a retry.
   */
-final private[sage] class ClusterTopology private (val shards: Vector[Shard], owners: Array[Node], shardOwners: Array[Shard]) {
+final private[sage] class ClusterTopology private (val shards: Vector[Shard], private val owners: Array[Node], shardOwners: Array[Shard]) {
 
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
+
+  // same slot -> owning master mapping; lets a refresh that adopts an unchanged topology skip re-homing shard subscriptions
+  def sameOwnership(other: ClusterTopology): Boolean =
+    java.util.Arrays.equals(owners.asInstanceOf[Array[AnyRef]], other.owners.asInstanceOf[Array[AnyRef]])
 
   // the core only locates the owning shard; selecting a live replica and applying the read policy is the runtime's job
   def shardForSlot(slot: Slot): Option[Shard] = Option(shardOwners(slot.value))
