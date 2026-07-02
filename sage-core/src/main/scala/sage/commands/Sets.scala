@@ -65,11 +65,11 @@ private[sage] object Sets {
     storeOp("SINTERSTORE", destination, first +: rest.toVector)
 
   def sInterCard[K](first: K, rest: K*)(limit: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Long] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
+    val (keyIndices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
     Command.read(
       "SINTERCARD",
-      keyIndices = Vector.tabulate(keys.size)(_ + 1),
-      args = (Bytes.utf8(keys.size.toString) +: keys) ++ limit.toVector.flatMap(n => Vector(Limit, Bytes.utf8(n.toString))),
+      keyIndices,
+      args = prefix ++ limit.toVector.flatMap(n => Vector(Limit, Bytes.utf8(n.toString))),
       Decode.long
     )
   }

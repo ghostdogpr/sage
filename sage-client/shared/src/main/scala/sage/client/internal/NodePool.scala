@@ -46,6 +46,14 @@ final private[client] class NodePool(
 
   def existingLive(node: Node): Option[NodeClient] = locked(established.get(node)).filter(_.isLive)
 
+  def firstLiveNode: Option[Node] = locked(established.collectFirst { case (node, nc) if nc.isLive => node })
+
+  // live nodes first, so a refresh prefers a known-good node
+  def candidatesByLiveness: Vector[Node] = {
+    val (live, others) = locked(established.toVector).partition(_._2.isLive)
+    live.map(_._1) ++ others.map(_._1)
+  }
+
   def getOrEstablish(node: Node): NodeClient = {
     var existing: NodeClient       = null
     var waitOn: NodePool.Establish = null

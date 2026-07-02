@@ -1,7 +1,5 @@
 package sage.backend
 
-import java.util.concurrent.TimeUnit
-
 import scala.annotation.unused
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration.FiniteDuration
@@ -106,7 +104,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     key: K,
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   ): Source[StreamEntry[F, V], NotUsed] =
     SageClient.boundedPoll(block, "xTail") match {
       case Left(e)     => Source.failed(e)
@@ -130,7 +128,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     consumer: String,
     key: K,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   )(handle: StreamEntry[F, V] => Future[Unit])(using system: ActorSystem[?]): RunningConsumer =
     SageClient.boundedPoll(block, "xConsume") match {
       case Left(e)     => RunningConsumer.failed(e)
@@ -230,9 +228,6 @@ object SageClient {
     * use `as` to reach any other key type over the same connection.
     */
   type Keyed[K] = Client[Future, K]
-
-  // bounded poll so xConsume's blocking read returns periodically, keeping RunningConsumer.stop() responsive
-  private[backend] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
   /**
     * Connects and returns a Pekko-native client. The caller owns the client lifecycle and must call `close` explicitly.

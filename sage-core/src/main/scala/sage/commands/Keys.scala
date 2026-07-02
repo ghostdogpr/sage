@@ -379,17 +379,9 @@ private[sage] object Keys {
       case ExpireCondition.IfLess      => Vector(Lt)
     }
 
-  private def ttlDecode(unit: scala.concurrent.duration.TimeUnit): Frame => Either[DecodeError, Ttl] = {
-    case Frame.Integer(-2)                    => Right(Ttl.NoKey)
-    case Frame.Integer(-1)                    => Right(Ttl.NoExpiry)
-    case Frame.Integer(amount) if amount >= 0 => Right(Ttl.Expires(FiniteDuration(amount, unit)))
-    case other                                => Left(DecodeError("ttl integer", Frame.describe(other)))
-  }
+  private def ttlDecode(unit: scala.concurrent.duration.TimeUnit): Frame => Either[DecodeError, Ttl] =
+    Decode.expiryInteger(Ttl.NoKey, Ttl.NoExpiry, "ttl integer")(amount => Ttl.Expires(FiniteDuration(amount, unit)))
 
-  private def expiryTimeDecode(toInstant: Long => Instant): Frame => Either[DecodeError, ExpiryTime] = {
-    case Frame.Integer(-2)                    => Right(ExpiryTime.NoKey)
-    case Frame.Integer(-1)                    => Right(ExpiryTime.NoExpiry)
-    case Frame.Integer(amount) if amount >= 0 => Right(ExpiryTime.At(toInstant(amount)))
-    case other                                => Left(DecodeError("expiry time integer", Frame.describe(other)))
-  }
+  private def expiryTimeDecode(toInstant: Long => Instant): Frame => Either[DecodeError, ExpiryTime] =
+    Decode.expiryInteger(ExpiryTime.NoKey, ExpiryTime.NoExpiry, "expiry time integer")(amount => ExpiryTime.At(toInstant(amount)))
 }

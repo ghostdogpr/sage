@@ -135,7 +135,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     key: K,
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   )(using Tag[F], Tag[V]): Stream[StreamEntry[F, V], Abort[SageException] & Async] =
     paged[StreamId, StreamEntry[F, V]](from)(
       Paged.tail(last =>
@@ -153,7 +153,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     consumer: String,
     key: K,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   )(handle: StreamEntry[F, V] => Unit < (Abort[SageException] & Async))(using Tag[F], Tag[V], Frame): Unit < (Abort[SageException] & Async) =
     consumeStream[F, V](group, consumer, key, count, block)
       .foreach(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
@@ -258,10 +258,6 @@ object SageClient {
     * use `as` to reach any other key type over the same connection.
     */
   type Keyed[K] = Client[[A] =>> A < (Abort[SageException] & Async), K]
-
-  // bounded poll so xConsume's blocking read returns periodically, keeping cancellation responsive
-  private[backend] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, java.util.concurrent.TimeUnit.SECONDS))
-
   def connect(config: SageConfig): SageClient < (Abort[SageException] & Async) =
     refine(Client.connect(config).lower).map(new Lowered(_))
 

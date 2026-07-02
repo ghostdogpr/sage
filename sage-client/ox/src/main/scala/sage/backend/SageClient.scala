@@ -1,6 +1,5 @@
 package sage.backend
 
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.annotation.unused
@@ -64,20 +63,16 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
   ): Ox ?=> Flow[(V, Double)] =
     scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
+  // drives a shared Paged step machine as a Flow, flattening each page into individual elements
+  private def paged[S, A](init: S)(step: Paged.Step[S, A]): Ox ?=> Flow[A] =
+    CStream.unfold[S, Vector[A]](init)(step).flatMap(items => CStream.init(items)).lower
+
   private def scanStream[A](fetch: ScanCursor => (Ox ?=> ScanPage[A])): Ox ?=> Flow[A] =
-    CStream
-      .unfold[Option[ScanCursor], Vector[A]](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
 
   // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
   private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => (Ox ?=> ScanPage[A])): Ox ?=> Flow[A] =
-    CStream
-      .unfold[ScanStep, Vector[A]](ScanStep.Begin)(
-        Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor)))
-      )
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[ScanStep, A](ScanStep.Begin)(Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor))))
 
   /**
     * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
@@ -88,12 +83,9 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     end: StreamRangeId = StreamRangeId.Max,
     batch: Long = 100L
   ): Ox ?=> Flow[StreamEntry[F, V]] =
-    CStream
-      .unfold[Option[StreamRangeId], Vector[StreamEntry[F, V]]](Some(start))(
-        Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
-      )
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[StreamRangeId], StreamEntry[F, V]](Some(start))(
+      Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
+    )
 
   /**
     * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Tombstone
@@ -108,12 +100,9 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     start: StreamId = StreamId.Zero,
     count: Option[Long] = None
   ): Ox ?=> Flow[StreamEntry[F, V]] =
-    CStream
-      .unfold[Option[StreamId], Vector[StreamEntry[F, V]]](Some(start))(
-        Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
-      )
-      .flatMap(items => CStream.init(items))
-      .lower
+    paged[Option[StreamId], StreamEntry[F, V]](Some(start))(
+      Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
+    )
 
   /**
     * Follows a stream without a consumer group: replays every entry after `from`, then blocks for new entries forever, advancing past the
@@ -124,16 +113,13 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     key: K,
     from: StreamId = StreamId.Zero,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   ): Ox ?=> Flow[StreamEntry[F, V]] =
-    CStream
-      .unfold[StreamId, Vector[StreamEntry[F, V]]](from)(
-        Paged.tail(last =>
-          CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
-        )
+    paged[StreamId, StreamEntry[F, V]](from)(
+      Paged.tail(last =>
+        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
       )
-      .flatMap(items => CStream.init(items))
-      .lower
+    )
 
   /**
     * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
@@ -145,7 +131,7 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     consumer: String,
     key: K,
     count: Option[Long] = None,
-    block: BlockTimeout = SageClient.defaultPoll
+    block: BlockTimeout = Paged.defaultPoll
   )(handle: StreamEntry[F, V] => (Ox ?=> Unit)): Ox ?=> Unit =
     consumeStream[F, V](group, consumer, key, count, block).runForeach { entry =>
       handle(entry)
@@ -160,18 +146,15 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     count: Option[Long],
     block: BlockTimeout
   ): Ox ?=> Flow[StreamEntry[F, V]] =
-    CStream
-      .unfold[Either[StreamId, Unit], Vector[StreamEntry[F, V]]](Left(StreamId.Zero))(
-        Paged.consume(
-          drainPending = after =>
-            CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map(_.flatMap(_._2)),
-          tailNew = CIO
-            .lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))))
-            .map(_.flatMap(_._2))
-        )
+    paged[Either[StreamId, Unit], StreamEntry[F, V]](Left(StreamId.Zero))(
+      Paged.consume(
+        drainPending = after =>
+          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map(_.flatMap(_._2)),
+        tailNew = CIO
+          .lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))))
+          .map(_.flatMap(_._2))
       )
-      .flatMap(items => CStream.init(items))
-      .lower
+    )
 
   /**
     * Subscribes to one or more channels, returning once the server has confirmed the SUBSCRIBE so a publish issued after this call cannot
@@ -220,10 +203,6 @@ object SageClient {
     * use `as` to reach any other key type over the same connection.
     */
   type Keyed[K] = Client[[A] =>> Ox ?=> A, K]
-
-  // bounded poll so xConsume's blocking read returns periodically, keeping cancellation responsive
-  private[backend] val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
-
   def connect(config: SageConfig): Ox ?=> SageClient = new Lowered(Client.connect(config).lower)
 
   def scoped(config: SageConfig): Ox ?=> SageClient =

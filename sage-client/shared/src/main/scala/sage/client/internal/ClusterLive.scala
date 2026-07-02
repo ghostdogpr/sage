@@ -4,7 +4,6 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
-import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
@@ -78,19 +77,22 @@ final private[client] class ClusterLive(
     () => pickNode(topologyRef.get())
   )
 
-  private val nodesLock        = new ReentrantLock()
-  private val established      = mutable.HashMap.empty[Node, NodeClient]
-  private val pendingEstablish = mutable.HashMap.empty[Node, ClusterLive.Establish]
-  // set once by close; routing and node establishment refuse afterwards, so close is terminal like the standalone client's
+  // the master registry, driving redirects/refresh; read-write bootstrap (no READONLY) keeps it distinct from replicaPool
+  private val masterPool       = new NodePool(
+    nodeFactory,
+    scheduler,
+    bootstrap,
+    reconnect,
+    watchdog,
+    connectTimeout,
+    closeTimeout,
+    dedicatedPool,
+    events = events
+  )
+  // set once by close; routing refuses afterwards, so close is terminal like the standalone client's
   @volatile private var closed = false
 
   private val refreshThrottle = new RefreshThrottle(scheduler, cluster.minRefreshInterval.toMillis)
-
-  private inline def lockedNodes[A](inline body: A): A = {
-    nodesLock.lock()
-    try body
-    finally nodesLock.unlock()
-  }
 
   // if no seed answers, throws the last failure so the first connect surfaces a handshake/TLS error like a standalone connect, not None
   private[client] def bootstrapTopology(): Unit = {
@@ -414,8 +416,7 @@ final private[client] class ClusterLive(
   private def resolve(target: Node, from: Node): Node = if (target.host.isEmpty) Node(from.host, target.port) else target
 
   private def pickNode(topology: ClusterTopology): Option[Node] =
-    lockedNodes(established.collectFirst { case (node, nc) if nc.isLive => node })
-      .orElse(topology.shards.headOption.map(_.master))
+    masterPool.firstLiveNode.orElse(topology.shards.headOption.map(_.master))
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
@@ -770,52 +771,7 @@ final private[client] class ClusterLive(
     }
   }
 
-  // --- node registry (single-flight establish) -----------------------------------------------------------------------------------------
-
-  private def getOrEstablish(node: Node): NodeClient = {
-    var existing: NodeClient          = null
-    var waitOn: ClusterLive.Establish = null
-    var mine: ClusterLive.Establish   = null
-    lockedNodes {
-      if (closed) throw NotConnected()
-      established.get(node) match {
-        case Some(nc) => existing = nc
-        case None     =>
-          pendingEstablish.get(node) match {
-            case Some(p) => waitOn = p
-            case None    => mine = new ClusterLive.Establish; pendingEstablish.put(node, mine)
-          }
-      }
-    }
-    if (existing != null) existing
-    else if (waitOn != null) waitOn.get()
-    else
-      try {
-        val nc    =
-          NodeClient.connect(
-            nodeFactory(node),
-            scheduler,
-            bootstrap,
-            reconnect,
-            watchdog,
-            connectTimeout,
-            closeTimeout,
-            dedicatedPool,
-            node = Some(node),
-            events = events
-          )
-        // a close that landed during the blocking connect must not re-publish this bundle into a closed client
-        val stale = lockedNodes { pendingEstablish.remove(node); if (closed) true else { established.put(node, nc); false } }
-        if (stale) { nc.close(); throw NotConnected() }
-        mine.succeed(nc)
-        nc
-      } catch {
-        case error: Throwable =>
-          lockedNodes(pendingEstablish.remove(node))
-          mine.fail(error)
-          throw error
-      }
-  }
+  private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
 
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
@@ -824,10 +780,7 @@ final private[client] class ClusterLive(
   private def refresh(force: Boolean): Unit =
     refreshThrottle(force)(querySlots(refreshCandidates()).foreach { case (from, shards) => adopt(from, shards) })
 
-  private def refreshCandidates(): Vector[Node] = {
-    val (live, others) = lockedNodes(established.toVector).partition(_._2.isLive)
-    (live.map(_._1) ++ others.map(_._1) ++ seeds).distinct
-  }
+  private def refreshCandidates(): Vector[Node] = (masterPool.candidatesByLiveness ++ seeds).distinct
 
   private def querySlots(candidates: Vector[Node]): Option[(Node, Vector[Shard])] =
     candidates.iterator.flatMap(trySlots).nextOption()
@@ -861,11 +814,7 @@ final private[client] class ClusterLive(
       if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
     }
     val masters      = resolved.map(_.master).toSet
-    val gone         = lockedNodes {
-      val absent = established.keysIterator.filterNot(masters.contains).toVector
-      absent.flatMap(node => established.remove(node))
-    }
-    gone.foreach(nc => offload(nc.close()))
+    masterPool.retain(masters.contains)
     // prune replica connections and their cursors for replicas the new topology no longer lists, mirroring the master prune
     val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
@@ -876,46 +825,15 @@ final private[client] class ClusterLive(
   }
 
   private def closeAll(): Unit = {
-    val (all, waiters) = lockedNodes {
-      closed = true
-      val snapshot = established.values.toVector
-      val pending  = pendingEstablish.values.toVector
-      established.clear()
-      pendingEstablish.clear()
-      (snapshot, pending)
-    }
-    // release callers blocked on an in-flight connect; the establisher observes `closed` on return and closes the node it opened
-    waiters.foreach(_.fail(NotConnected()))
+    closed = true
+    masterPool.close()
     subscriptions.close()
     replicaPool.close()
-    all.foreach(_.close())
     events.close()
   }
 }
 
 private[client] object ClusterLive {
-
-  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get`. First settle wins, so a `close` that
-  // fails the waiters cannot be overwritten by a late establisher.
-  final private class Establish {
-    private val latch                                           = new CountDownLatch(1)
-    private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)
-    @volatile private var result: Either[Throwable, NodeClient] = null
-
-    def succeed(nc: NodeClient): Unit = settle(Right(nc))
-    def fail(error: Throwable): Unit  = settle(Left(error))
-
-    private def settle(outcome: Either[Throwable, NodeClient]): Unit =
-      if (settled.compareAndSet(false, true)) { result = outcome; latch.countDown() }
-
-    def get(): NodeClient = {
-      latch.await()
-      result match {
-        case Right(nc)   => nc
-        case Left(error) => throw error
-      }
-    }
-  }
 
   def connect(
     config: SageConfig,

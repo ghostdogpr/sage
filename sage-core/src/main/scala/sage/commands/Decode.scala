@@ -37,6 +37,14 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
   }
 
+  // shared TTL/expiry shape (TTL, EXPIRETIME, HTTL, …): `-2` absent, `-1` no expiry, else present
+  def expiryInteger[A](absent: A, noExpiry: A, expected: String)(present: Long => A): Frame => Either[DecodeError, A] = {
+    case Frame.Integer(-2)                    => Right(absent)
+    case Frame.Integer(-1)                    => Right(noExpiry)
+    case Frame.Integer(amount) if amount >= 0 => Right(present(amount))
+    case other                                => Left(DecodeError(expected, Frame.describe(other)))
+  }
+
   def value[V](using codec: ValueCodec[V]): Frame => Either[DecodeError, V] = {
     case Frame.BulkString(bytes) => codec.decode(bytes)
     case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
@@ -301,19 +309,11 @@ private[commands] object Decode {
       buildPairs(elements, Vector.newBuilder[(V, Double)]) { (memberFrame, scoreFrame) =>
         for {
           member <- value(memberFrame)
-          s      <- scoreText(scoreFrame)
+          s      <- double(scoreFrame)
         } yield member -> s
       }
     case other => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
   }
-
-  private def scoreText(frame: Frame): Either[DecodeError, Double] =
-    frame match {
-      case Frame.BulkString(bytes) =>
-        val text = bytes.asUtf8String
-        Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
-      case other                   => Left(DecodeError("score bulk string", Frame.describe(other)))
-    }
 }
 
 private[commands] object TimeArgs {

@@ -2396,29 +2396,32 @@ object Client {
     def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close(); events.close() }
   }
 
-  // wrap a raw subscription as the effect-typed interface each backend lowers into its native stream; a channel/shard delivery is a Message
-  private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
-    new Subscription[CIO, Message[V]] {
+  // wrap a raw subscription as the effect-typed interface each backend lowers into its native stream; `build` returns None to end the stream
+  private def messages[M](raw: SubscriptionConnection.RawSubscription)(
+    build: SubscriptionConnection.Delivery => Option[M]
+  ): Subscription[CIO, M] =
+    new Subscription[CIO, M] {
       // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
-      def next: CIO[Option[Message[V]]] = CIO.async { complete =>
+      def next: CIO[Option[M]] = CIO.async { complete =>
         raw.next {
-          case Some(SubscriptionConnection.Delivery.Channel(ch, payload)) => complete(Try(Some(Message(ch, decodeOrThrow[V](payload)))))
-          case _                                                          => complete(Success(None))
+          case Some(delivery) => complete(Try(build(delivery)))
+          case None           => complete(Success(None))
         }
       }
-      def close: CIO[Unit]              = CIO.blocking(raw.close())
+      def close: CIO[Unit]     = CIO.blocking(raw.close())
+    }
+
+  // a channel/shard delivery is a Message
+  private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
+    messages(raw) {
+      case SubscriptionConnection.Delivery.Channel(ch, payload) => Some(Message(ch, decodeOrThrow[V](payload)))
+      case _                                                    => None
     }
 
   private[internal] def patternMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, PatternMessage[V]] =
-    new Subscription[CIO, PatternMessage[V]] {
-      def next: CIO[Option[PatternMessage[V]]] = CIO.async { complete =>
-        raw.next {
-          case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, payload)) =>
-            complete(Try(Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))))
-          case _                                                               => complete(Success(None))
-        }
-      }
-      def close: CIO[Unit]                     = CIO.blocking(raw.close())
+    messages(raw) {
+      case SubscriptionConnection.Delivery.Pattern(pat, ch, payload) => Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))
+      case _                                                         => None
     }
 
   // fail the stream on a bad payload rather than dropping it

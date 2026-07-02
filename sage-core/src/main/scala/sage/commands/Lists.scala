@@ -135,11 +135,11 @@ private[sage] object Lists {
     first: K,
     rest: K*
   )(side: ListSide, count: Option[Long] = None)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, Vector[V])]] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
+    val (keyIndices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
     Command(
       "LMPOP",
-      keyIndices = Vector.tabulate(keys.size)(_ + 1),
-      args = (Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ longArg(Count, count),
+      keyIndices,
+      args = (prefix :+ ListSide.wire(side)) ++ longArg(Count, count),
       decode = mpopReply[K, V]
     )
   }

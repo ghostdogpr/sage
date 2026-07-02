@@ -217,8 +217,8 @@ final private[sage] class RespParser {
           if (cr < 0) Incomplete
           else if (cr != pos + 1) fail(s"unexpected content in null frame: '${stringAt(pos + 1, cr)}'")
           else leaf(cr + 2, Frame.Null)
-        case '$'   => bulk(pos, allowNull = true, "invalid bulk string length", (start, length) => Frame.BulkString(bytesAt(start, start + length)))
-        case '!'   => bulk(pos, allowNull = false, "invalid bulk error length", (start, length) => Frame.BulkError(bytesAt(start, start + length)))
+        case '$'   => bulk(pos, allowNull = true, "invalid bulk string length", isError = false)
+        case '!'   => bulk(pos, allowNull = false, "invalid bulk error length", isError = true)
         case '='   => verbatim(pos)
         case '*'   => openElements(pos, Arr, allowNull = true)
         case '~'   => openElements(pos, Set, allowNull = false)
@@ -236,7 +236,7 @@ final private[sage] class RespParser {
     Produced
   }
 
-  private def bulk(pos: Int, allowNull: Boolean, lengthError: String, make: (Int, Int) => Frame): Int = {
+  private def bulk(pos: Int, allowNull: Boolean, lengthError: String, isError: Boolean): Int = {
     val length = readLength(pos + 1, allowNull)
     if (length == Incomplete) Incomplete
     else if (length == Invalid) fail(s"$lengthError: '${headerText(pos + 1)}'")
@@ -246,7 +246,10 @@ final private[sage] class RespParser {
       val end   = payloadEnd(start, length)
       if (end == Incomplete) Incomplete
       else if (end == Invalid) Invalid // payloadEnd set failMessage
-      else leaf(end, make(start, length))
+      else {
+        val bytes = bytesAt(start, start + length)
+        leaf(end, if (isError) Frame.BulkError(bytes) else Frame.BulkString(bytes))
+      }
     }
   }
 

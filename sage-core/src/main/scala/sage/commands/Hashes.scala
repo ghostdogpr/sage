@@ -277,19 +277,13 @@ private[sage] object Hashes {
     case other             => Left(DecodeError("field expiry integer", Frame.describe(other)))
   }
 
-  private def fieldTtl(unit: TimeUnit): Frame => Either[DecodeError, FieldTtl] = {
-    case Frame.Integer(-2)                    => Right(FieldTtl.NoField)
-    case Frame.Integer(-1)                    => Right(FieldTtl.NoExpiry)
-    case Frame.Integer(amount) if amount >= 0 => Right(FieldTtl.Expires(FiniteDuration(amount, unit)))
-    case other                                => Left(DecodeError("field ttl integer", Frame.describe(other)))
-  }
+  private def fieldTtl(unit: TimeUnit): Frame => Either[DecodeError, FieldTtl] =
+    Decode.expiryInteger(FieldTtl.NoField, FieldTtl.NoExpiry, "field ttl integer")(amount => FieldTtl.Expires(FiniteDuration(amount, unit)))
 
-  private def fieldExpiryTime(toInstant: Long => Instant): Frame => Either[DecodeError, FieldExpiryTime] = {
-    case Frame.Integer(-2)                    => Right(FieldExpiryTime.NoField)
-    case Frame.Integer(-1)                    => Right(FieldExpiryTime.NoExpiry)
-    case Frame.Integer(amount) if amount >= 0 => Right(FieldExpiryTime.At(toInstant(amount)))
-    case other                                => Left(DecodeError("field expiry time integer", Frame.describe(other)))
-  }
+  private def fieldExpiryTime(toInstant: Long => Instant): Frame => Either[DecodeError, FieldExpiryTime] =
+    Decode.expiryInteger(FieldExpiryTime.NoField, FieldExpiryTime.NoExpiry, "field expiry time integer")(amount =>
+      FieldExpiryTime.At(toInstant(amount))
+    )
 
   private val fieldPersist: Frame => Either[DecodeError, FieldPersist] = {
     case Frame.Integer(-2) => Right(FieldPersist.NoField)

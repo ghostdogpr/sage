@@ -1,7 +1,12 @@
 package sage.client.internal
 
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.duration.FiniteDuration
+
 import kyo.compat.*
 
+import sage.BlockTimeout
 import sage.commands.{ScanCursor, ScanPage, StreamEntry, StreamId, StreamRangeId, XAutoClaimResult}
 
 /**
@@ -17,6 +22,9 @@ private[sage] object Paged {
     * A page step: from state `S`, fetch the next page of `A`s and the state to resume from, or `None` to end the stream.
     */
   type Step[S, A] = S => CIO[Option[(Vector[A], S)]]
+
+  // the tailing streams' default poll (xTail/xConsume); bounded so the blocking read returns periodically and cancellation stays responsive
+  val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
   /**
     * Cursor scan (HSCAN/SSCAN/ZSCAN, and a single SCAN target): page until the server returns no continuation cursor. Termination is on the
