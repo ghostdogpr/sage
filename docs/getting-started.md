@@ -272,12 +272,12 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Ending the stream, or closing its scope, unsubscribes.
 
-Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO and Kyo, `subscribeResource` on Cats Effect, and plain `subscribe` on Ox (where the call is already synchronous). On Pekko, `subscribe` returns a `Source` whose materialized value is a `Future[Done]` that completes once the subscription is registered, so awaiting it before publishing closes the same gap on a standalone or master-replica server (in cluster mode that confirmation is best-effort, as on every backend). The plain stream-returning `subscribe` registers lazily on first pull and is the right choice for a long-lived consumer that isn't racing its own publisher.
+Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO, Kyo, and Ox, and `subscribeResource` on Cats Effect. On Pekko, `subscribe` returns a `Source` whose materialized value is a `Future[Done]` that completes once the subscription is registered, so awaiting it before publishing closes the same gap on a standalone or master-replica server (in cluster mode that confirmation is best-effort, as on every backend). The plain stream-returning `subscribe` registers lazily on each run and is the right choice for a long-lived consumer that isn't racing its own publisher.
 
 ::: code-group
 
 ```scala [Ox]
-val news = client.subscribe[String]("news")
+val news = client.subscribeScoped[String]("news")
 (1 to 3).foreach(i => client.publish("news", s"item-$i"))
 val messages = news.take(3).runToList()
 ```

@@ -12,7 +12,8 @@ import sage.backend.*
 object PubSubExample {
 
   def run(client: SageClient)(using Ox): Unit = {
-    val news     = client.subscribe[String]("news")
+    // subscribeScoped confirms before returning, so the publishes below can't outrun the registration
+    val news     = client.subscribeScoped[String]("news")
     (1 to 3).foreach { i =>
       val _ = client.publish("news", s"item-$i")
     }

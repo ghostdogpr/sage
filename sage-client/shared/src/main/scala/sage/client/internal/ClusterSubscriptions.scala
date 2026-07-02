@@ -137,8 +137,11 @@ final private[client] class ClusterSubscriptions(
         // would otherwise strand every classic sub: drop the dead connection and retry rather than wait for a termination that never comes
         var failed = false
         subs.foreach { sub =>
-          try conn.attach(sub.sink, sub.names, sub.kind)
-          catch { case NonFatal(_) => failed = true }
+          try {
+            conn.attach(sub.sink, sub.names, sub.kind)
+            // closed during attach: closeClassic couldn't detach a not-yet-attached sub, so detach here or its channels leak on `conn`
+            if (!locked(classicSubs.contains(sub))) { val _ = conn.detach(sub.sink, sub.names, sub.kind) }
+          } catch { case NonFatal(_) => failed = true }
         }
         if (failed) {
           locked(if (classicConn eq conn) classicConn = null)
@@ -222,7 +225,11 @@ final private[client] class ClusterSubscriptions(
     if (subs.nonEmpty) {
       if (subs.exists(sub => hasUnownedSlot(sub.channels))) refresh()
       var incomplete = false
-      subs.foreach(sub => if (sub.placement.reconcile(planFor(sub.channels), conns)) incomplete = true)
+      subs.foreach { sub =>
+        if (sub.placement.reconcile(planFor(sub.channels), conns)) incomplete = true
+        // closed during this pass: a racing closeShard may have detached before we re-attached, so reconcile back to empty
+        if (!locked(shardSubs.contains(sub))) { val _ = sub.placement.reconcile(Map.empty, conns) }
+      }
       evictEmptyShardConns()
       if (incomplete) scheduleRetry()
     }

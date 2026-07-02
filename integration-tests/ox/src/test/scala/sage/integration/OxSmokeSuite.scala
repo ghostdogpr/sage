@@ -74,13 +74,39 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       supervised {
         val client   = SageClient.scoped(configOf(server))
-        val stream   = client.subscribe[String]("smoke")
+        val stream   = client.subscribeScoped[String]("smoke")
         (1 to 3).foreach { i =>
           val _ = client.publish("smoke", s"m$i")
         }
         val messages = stream.take(3).runToList()
         assertEquals(messages.map(_.channel).toSet, Set("smoke"))
         assertEquals(messages.map(_.payload), List("m1", "m2", "m3"))
+      }
+    }
+  }
+
+  test("a plain subscribe Flow resubscribes on every run instead of yielding an empty stream on re-run") {
+    withContainers { server =>
+      supervised {
+        val client    = SageClient.scoped(configOf(server))
+        val stream    = client.subscribe[String]("rerun")
+        // publish continuously so each run's subscription receives one; the second run must resubscribe, not complete empty
+        val running   = new java.util.concurrent.atomic.AtomicBoolean(true)
+        val publisher = fork {
+          while (running.get()) {
+            val _ = client.publish("rerun", "tick")
+            Thread.sleep(50)
+          }
+        }
+        try {
+          val first  = stream.take(1).runToList()
+          val second = stream.take(1).runToList()
+          assertEquals(first.map(_.payload), List("tick"))
+          assertEquals(second.map(_.payload), List("tick"))
+        } finally {
+          running.set(false)
+          publisher.join()
+        }
       }
     }
   }
