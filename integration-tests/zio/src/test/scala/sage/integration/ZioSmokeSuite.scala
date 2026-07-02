@@ -93,6 +93,26 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("re-running the same blocking command value succeeds each round instead of hanging after the first") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(configOf(server))
+            blPop   = client.blPop[String]("h1:reuse")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
+            first  <- blPop
+            second <- blPop.timeout(Duration.fromSeconds(5))
+          } yield {
+            assertEquals(first, None)
+            assert(second.isDefined, "re-running the same blocking effect hung: its lease was captured and single-shot")
+            assertEquals(second.flatten, None)
+          }
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
   test("scanAll streams every key as a native ZStream") {
     withContainers { server =>
       val program: Task[Unit] =

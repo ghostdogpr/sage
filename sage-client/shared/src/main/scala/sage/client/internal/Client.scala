@@ -2338,8 +2338,8 @@ object Client {
             Client.completing(tracked)(connection.submit(command, tracked))
           }
         case Execution.Blocking =>
-          val lease = new DedicatedPool.Lease
-          CIO.ensure(CIO.blocking(lease.cancel())) {
+          // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
+          CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel())) { lease =>
             CIO.async { callback =>
               val tracked = Events.trackCommand(events, command, callback)
               Client.completing(tracked)(pool.use(command, tracked, lease))

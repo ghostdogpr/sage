@@ -91,6 +91,43 @@ class DedicatedPoolSpec extends munit.FunSuite {
     assertEquals(transports.size, 2)
   }
 
+  test("interrupting an in-flight blocking command settles the tracked callback and discards the slot") {
+    val (pool, scheduler, transports)                 = make(replyWith(Nil)) // the BLPOP parks, never replying
+    val lease                                         = new DedicatedPool.Lease
+    var result: Option[Try[Option[(String, String)]]] = None
+    pool.use(blPop, r => result = Some(r), lease)
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, None)
+
+    lease.cancel()
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.head.closeCount, 1)
+  }
+
+  test("interrupting before the lease attaches (offloaded acquire window) still settles the tracked callback") {
+    val (pool, scheduler, transports)                 = make(replyWith(Seq(popReply)))
+    val lease                                         = new DedicatedPool.Lease
+    var result: Option[Try[Option[(String, String)]]] = None
+    pool.use(blPop, r => result = Some(r), lease)
+    lease.cancel()
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.headOption.map(_.closeCount), Some(1))
+  }
+
+  test("cancelling a lease after the blocking reply landed does not re-fire the callback") {
+    val (pool, scheduler, _) = make(replyWith(Seq(popReply)))
+    val lease                = new DedicatedPool.Lease
+    var count                = 0
+    pool.use(blPop, _ => count += 1, lease)
+    scheduler.advance(Duration.Zero)
+    assertEquals(count, 1)
+    lease.cancel()
+    assertEquals(count, 1)
+  }
+
   test("a dropped queued command marks the connection dead before failing the work, so the pool cannot recycle it") {
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
