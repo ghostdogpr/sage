@@ -22,26 +22,37 @@ enum ExpireCondition {
 }
 
 /**
-  * The data type a key holds, as reported by `TYPE`.
+  * The data type a key holds, as reported by `TYPE`. `Other` carries the wire name of any type this library does not classify as one of the
+  * six classic types — a preview type (Arrays, vector sets) or a module type — so `TYPE` never fails to decode.
   */
 enum RedisType {
   case String, List, Set, ZSet, Hash, Stream
+  case Other(name: java.lang.String)
 }
 
 object RedisType {
 
   private[commands] def wireName(tpe: RedisType): java.lang.String =
     tpe match {
-      case String => "string"
-      case List   => "list"
-      case Set    => "set"
-      case ZSet   => "zset"
-      case Hash   => "hash"
-      case Stream => "stream"
+      case String      => "string"
+      case List        => "list"
+      case Set         => "set"
+      case ZSet        => "zset"
+      case Hash        => "hash"
+      case Stream      => "stream"
+      case Other(name) => name
     }
 
-  private[commands] def fromWireName(name: java.lang.String): scala.Option[RedisType] =
-    RedisType.values.find(wireName(_) == name)
+  private[commands] def fromWireName(name: java.lang.String): RedisType =
+    name match {
+      case "string" => String
+      case "list"   => List
+      case "set"    => Set
+      case "zset"   => ZSet
+      case "hash"   => Hash
+      case "stream" => Stream
+      case other    => Other(other)
+    }
 }
 
 /**
@@ -229,8 +240,7 @@ private[sage] object Keys {
       Vector(keyCodec.encode(key)),
       decode = {
         case Frame.SimpleString("none") => Right(None)
-        case Frame.SimpleString(name)   =>
-          RedisType.fromWireName(name).map(Some(_)).toRight(DecodeError("key type", s"simple string '$name'"))
+        case Frame.SimpleString(name)   => Right(Some(RedisType.fromWireName(name)))
         case other                      => Left(DecodeError("key type simple string", Frame.describe(other)))
       }
     )

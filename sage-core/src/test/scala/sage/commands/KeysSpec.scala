@@ -5,7 +5,6 @@ import java.time.Instant
 import scala.concurrent.duration.*
 
 import sage.Bytes
-import sage.SageException.DecodeError
 import sage.protocol.Frame
 
 class KeysSpec extends munit.FunSuite {
@@ -28,7 +27,7 @@ class KeysSpec extends munit.FunSuite {
     )
   }
 
-  test("TYPE decodes every key type, none as None, and rejects unknown types") {
+  test("TYPE decodes every key type, none as None, and an unclassified type as Other") {
     val expected = Map(
       "string" -> RedisType.String,
       "list"   -> RedisType.List,
@@ -41,10 +40,7 @@ class KeysSpec extends munit.FunSuite {
       assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString(wire)), Right(Some(tpe)))
     }
     assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString("none")), Right(None))
-    Reply.run(Keys.typeOf("k"), Frame.SimpleString("ReJSON-RL")) match {
-      case Left(error: DecodeError) => assertEquals(error.actual, "simple string 'ReJSON-RL'")
-      case other                    => fail(s"expected a DecodeError, got $other")
-    }
+    assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString("ReJSON-RL")), Right(Some(RedisType.Other("ReJSON-RL"))))
   }
 
   test("SCAN decodes a mid-iteration page with a next cursor") {
