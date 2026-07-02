@@ -43,12 +43,14 @@ final private[client] class ClusterSubscriptions(
   // --- classic state (guarded by lock) ---
   private var classicConn: SubscriptionConnection = null
   private val classicSubs                         = mutable.LinkedHashSet.empty[ClassicSub]
-  private var rehomePending                       = false
+  private var rehomeRunning                       = false
+  private var rehomeQueued                        = false
 
   // --- sharded state (guarded by lock) ---
   private val shardConns       = mutable.HashMap.empty[Node, SubscriptionConnection]
   private val shardSubs        = mutable.LinkedHashSet.empty[ShardSub]
-  private var reconcilePending = false
+  private var reconcileRunning = false
+  private var reconcileQueued  = false
 
   private var closed = false
 
@@ -114,11 +116,24 @@ final private[client] class ClusterSubscriptions(
     scheduleRehomeClassic()
   }
 
-  // coalesce passes: at most one queued plus one running. Refresh the topology first — the master may be gone, so the re-home target comes
-  // from the current topology, not the stale one.
+  // single-flight (one running, at most one queued): a mid-pass trigger queues a follow-up rather than racing a concurrent pass. Refresh the
+  // topology first — the master may be gone, so the re-home target comes from the current topology, not the stale one.
   private def scheduleRehomeClassic(): Unit = {
-    val go = locked(if (rehomePending || closed) false else { rehomePending = true; true })
-    if (go) offload { locked { rehomePending = false }; refresh(); rehomeClassic() }
+    val go = locked {
+      if (closed) false
+      else if (rehomeRunning) { rehomeQueued = true; false }
+      else { rehomeRunning = true; true }
+    }
+    if (go) offload(runRehomeClassicPass())
+  }
+
+  private def runRehomeClassicPass(): Unit = {
+    refresh()
+    rehomeClassic()
+    val again = locked(if (!closed && rehomeQueued) {
+      rehomeQueued = false; true
+    } else { rehomeRunning = false; false })
+    if (again) offload(runRehomeClassicPass())
   }
 
   private def rehomeClassic(): Unit = {
@@ -213,10 +228,22 @@ final private[client] class ClusterSubscriptions(
 
   def onTopologyChanged(): Unit = scheduleReconcile()
 
-  // coalesce passes: at most one queued plus one running, so a burst of triggers collapses into a single pass
+  // single-flight (one running, at most one queued): a mid-pass trigger queues a follow-up rather than racing a concurrent pass that would corrupt the ledger
   private def scheduleReconcile(): Unit = {
-    val go = locked(if (reconcilePending || closed) false else { reconcilePending = true; true })
-    if (go) offload { locked { reconcilePending = false }; reconcileShard() }
+    val go = locked {
+      if (closed) false
+      else if (reconcileRunning) { reconcileQueued = true; false }
+      else { reconcileRunning = true; true }
+    }
+    if (go) offload(runReconcilePass())
+  }
+
+  private def runReconcilePass(): Unit = {
+    reconcileShard()
+    val again = locked(if (!closed && reconcileQueued) {
+      reconcileQueued = false; true
+    } else { reconcileRunning = false; false })
+    if (again) offload(runReconcilePass())
   }
 
   // re-home each sub onto its channels' current owners. One refresh per pass; an incomplete pass retries so a transient failover failure converges.

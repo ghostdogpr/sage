@@ -805,7 +805,8 @@ final private[client] class ClusterLive(
   // means "the node I queried", so substitute `from` as redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
     val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
-    val previous     = if (events.emitsEvents) slotOwningMasters(topologyRef.get()).toSet else Set.empty[Node]
+    val oldTopology  = topologyRef.get()
+    val previous     = if (events.emitsEvents) slotOwningMasters(oldTopology).toSet else Set.empty[Node]
     val newTopology  = ClusterTopology.from(resolved)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change
@@ -819,9 +820,9 @@ final private[client] class ClusterLive(
     val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
     replicaCursors.keySet.removeIf(node => !masters.contains(node))
-    // re-home Shard Channel subscriptions onto the new slot owners; a classic subscription follows the cluster bus, so it only re-homes when
-    // its pinned master's socket actually drops, not on every topology change
-    subscriptions.onTopologyChanged()
+    // re-home shard subscriptions only when slot ownership changed; else a forced refresh mid-failover loops (refresh -> adopt -> reconcile ->
+    // refresh) at RTT. A classic subscription follows the cluster bus, so it re-homes only when its pinned master's socket drops, never here.
+    if (!newTopology.sameOwnership(oldTopology)) subscriptions.onTopologyChanged()
   }
 
   private def closeAll(): Unit = {
