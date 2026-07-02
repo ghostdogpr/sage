@@ -67,4 +67,13 @@ class TopologySpec extends munit.FunSuite {
     assertEquals(whole.route(Command("BAD", Vector(5), Vector(Bytes.utf8("k")), _ => Right(0L))), Route.Malformed)
     assertEquals(whole.route(Command("BAD", Vector(-1), Vector(Bytes.utf8("k")), _ => Right(0L))), Route.Malformed)
   }
+
+  test("sameOwnership compares the slot->owner mapping, ignoring shard order but catching a migration") {
+    val ab        = ClusterTopology.from(Vector(covering(a, 0, 100), covering(b, 101, 200)))
+    val reordered = ClusterTopology.from(Vector(covering(b, 101, 200), covering(a, 0, 100)))
+    val migrated  = ClusterTopology.from(Vector(covering(a, 0, 150), covering(b, 151, 200)))
+    assert(ab.sameOwnership(reordered), "same slot ownership regardless of shard order")
+    assert(!ab.sameOwnership(migrated), "a slot moving from b to a is a change")
+    assert(!whole.sameOwnership(ab), "differing covered ranges are a change")
+  }
 }

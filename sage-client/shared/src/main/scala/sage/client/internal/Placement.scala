@@ -14,7 +14,8 @@ import sage.cluster.Node
   * is the single place that keeps that record in step with the wire. A Node owning several slot ranges needs one `SSUBSCRIBE` per Slot (a
   * batched cross-slot subscribe returns `CROSSSLOT`), so a plan groups a Node's channels into the groups that each become one `SSUBSCRIBE`.
   *
-  * Two ways to apply a plan:
+  * Two ways to apply a plan, each applied atomically under the ledger lock so a concurrent unsubscribe/re-home of the same subscription can't
+  * interleave and strand an SSUBSCRIBE on an old owner:
   *   - [[place]] is the initial subscribe: it records each group as it lands and leaves a failed attach unplaced for the caller to retry
   *     (see `fullyPlaced`), so a transient owner/connection failure converges instead of surfacing to the subscriber; `placedAt` still
   *     reflects exactly what landed, so a roll-back ([[reconcile]] to the empty plan) detaches it.
@@ -33,40 +34,43 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
   }
 
   def place(plan: Placement.Plan, conns: Placement.Conns): Unit =
-    plan.foreach { case (node, groups) =>
-      conns.ensure(node).foreach { conn =>
-        groups.foreach { group =>
-          // a concurrent eviction can close `conn` before attach; leave it unplaced to retry, don't propagate
-          try {
-            conn.attach(sink, group, Kind.Shard)
-            locked { placedAt = placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group)) }
-          } catch { case NonFatal(_) => () }
+    locked {
+      plan.foreach { case (node, groups) =>
+        conns.ensure(node).foreach { conn =>
+          groups.foreach { group =>
+            // a concurrent eviction can close `conn` before attach; leave it unplaced to retry, don't propagate
+            try {
+              conn.attach(sink, group, Kind.Shard)
+              placedAt = placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group))
+            } catch { case NonFatal(_) => () }
+          }
         }
       }
     }
 
   // true when some attach failed (an unowned Slot is dropped from the plan by the caller, not reported here); the caller retries until it converges
-  def reconcile(plan: Placement.Plan, conns: Placement.Conns): Boolean = {
-    val desired    = plan.view.mapValues(_.flatten.toSet).toMap
-    var incomplete = false
-    locked(placedAt).foreach { case (node, had) =>
-      val gone = (had -- desired.getOrElse(node, Set.empty)).toVector
-      if (gone.nonEmpty) conns.get(node).foreach(_.detach(sink, gone, Kind.Shard))
-    }
-    val actual     = mutable.HashMap.empty[Node, Set[String]]
-    plan.foreach { case (node, groups) =>
-      conns.ensure(node) match {
-        case None       => incomplete = true
-        case Some(conn) =>
-          groups.foreach { group =>
-            try { conn.attach(sink, group, Kind.Shard); actual.update(node, actual.getOrElse(node, Set.empty) ++ group) }
-            catch { case NonFatal(_) => incomplete = true }
-          }
+  def reconcile(plan: Placement.Plan, conns: Placement.Conns): Boolean =
+    locked {
+      val desired    = plan.view.mapValues(_.flatten.toSet).toMap
+      var incomplete = false
+      placedAt.foreach { case (node, had) =>
+        val gone = (had -- desired.getOrElse(node, Set.empty)).toVector
+        if (gone.nonEmpty) conns.get(node).foreach(_.detach(sink, gone, Kind.Shard))
       }
+      val actual     = mutable.HashMap.empty[Node, Set[String]]
+      plan.foreach { case (node, groups) =>
+        conns.ensure(node) match {
+          case None       => incomplete = true
+          case Some(conn) =>
+            groups.foreach { group =>
+              try { conn.attach(sink, group, Kind.Shard); actual.update(node, actual.getOrElse(node, Set.empty) ++ group) }
+              catch { case NonFatal(_) => incomplete = true }
+            }
+        }
+      }
+      placedAt = actual.toMap
+      incomplete
     }
-    locked { placedAt = actual.toMap }
-    incomplete
-  }
 
   // every requested channel is placed on some owner; false means an unowned Slot or unreachable owner is still outstanding
   def fullyPlaced: Boolean = locked(placedAt.valuesIterator.map(_.size).sum) >= requested.distinct.size
