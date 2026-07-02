@@ -2331,12 +2331,20 @@ object Client {
   ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
-      CIO.async { callback =>
-        val tracked = Events.trackCommand(events, command, callback)
-        command.execution match {
-          case Execution.Ordinary => Client.completing(tracked)(connection.submit(command, tracked))
-          case Execution.Blocking => Client.completing(tracked)(pool.use(command, tracked))
-        }
+      command.execution match {
+        case Execution.Ordinary =>
+          CIO.async { callback =>
+            val tracked = Events.trackCommand(events, command, callback)
+            Client.completing(tracked)(connection.submit(command, tracked))
+          }
+        case Execution.Blocking =>
+          val lease = new DedicatedPool.Lease
+          CIO.ensure(CIO.blocking(lease.cancel())) {
+            CIO.async { callback =>
+              val tracked = Events.trackCommand(events, command, callback)
+              Client.completing(tracked)(pool.use(command, tracked, lease))
+            }
+          }
       }
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =

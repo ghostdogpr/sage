@@ -111,14 +111,18 @@ final private[client] class ClusterLive(
     throw lastError
   }
 
-  def run[A](command: Command[A]): CIO[A] =
-    CIO.async[A] { complete =>
-      val span = Events.startSpan(events, command)
-      offload {
-        val tracked = Events.trackCommand(events, command, complete, span)
-        Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked))
+  def run[A](command: Command[A]): CIO[A] = {
+    val lease = if (command.isBlocking) new DedicatedPool.Lease else null
+    val body  =
+      CIO.async[A] { complete =>
+        val span = Events.startSpan(events, command)
+        offload {
+          val tracked = Events.trackCommand(events, command, complete, span)
+          Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, lease = lease))
+        }
       }
-    }
+    if (lease != null) CIO.ensure(CIO.blocking(lease.cancel()))(body) else body
+  }
 
   // caching is not applied in cluster mode (per-node tracking through redirects/failover is unsupported): the read runs uncached but on the
   // master (allowReplica = false), so it never honors ReadFrom and the call stays portable; the cacheability guard still applies
@@ -179,7 +183,13 @@ final private[client] class ClusterLive(
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
-  private def dispatch[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, allowReplica: Boolean = true): Unit =
+  private def dispatch[A](
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    allowReplica: Boolean = true,
+    lease: DedicatedPool.Lease = null
+  ): Unit =
     if (closed) complete(Failure(NotConnected()))
     else {
       val topology = topologyRef.get()
@@ -191,12 +201,12 @@ final private[client] class ClusterLive(
           case Route.ToNode(node, slot) =>
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendRead(command, node, slot, redirectsLeft, complete)
-            else sendTo(node, command, asking = false, redirectsLeft, complete)
+            else sendTo(node, command, asking = false, redirectsLeft, complete, lease)
           case Route.Keyless            =>
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendKeylessRead(topology, command, redirectsLeft, complete)
-            else sendToAny(topology, command, redirectsLeft, complete)
-          case Route.Unowned(_)         => onUnowned(command, redirectsLeft, complete)
+            else sendToAny(topology, command, redirectsLeft, complete, lease)
+          case Route.Unowned(_)         => onUnowned(command, redirectsLeft, complete, lease)
           case Route.CrossSlot(slots)   => complete(Failure(crossSlot(command.name, slots)))
           case Route.Malformed          =>
             complete(Failure(malformedKeys(command.name)))
@@ -345,70 +355,98 @@ final private[client] class ClusterLive(
 
   private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] = Reply.decode(command, merged)
 
-  private def sendToAny[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+  private def sendToAny[A](
+    topology: ClusterTopology,
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease = null
+  ): Unit =
     pickNode(topology) match {
-      case Some(node) => sendTo(node, command, asking = false, redirectsLeft, complete)
+      case Some(node) => sendTo(node, command, asking = false, redirectsLeft, complete, lease)
       case None       => complete(Failure(NotConnected()))
     }
 
-  private def sendTo[A](node: Node, command: Command[A], asking: Boolean, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
+  private def sendTo[A](
+    node: Node,
+    command: Command[A],
+    asking: Boolean,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease = null
+  ): Unit = {
     val nc =
       try getOrEstablish(node)
       catch { case NonFatal(_) => null }
-    if (nc == null) onUnreachable(command, redirectsLeft, complete)
+    if (nc == null) onUnreachable(command, redirectsLeft, complete, lease)
     else
       nc.submit[A](
         command,
         asking,
         {
           case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
-          case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete))
-        }
+          case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete, lease))
+        },
+        lease
       )
   }
 
-  private def onFailure[A](node: Node, command: Command[A], error: Throwable, redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+  private def onFailure[A](
+    node: Node,
+    command: Command[A],
+    error: Throwable,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease
+  ): Unit =
     Fault.categorize(error) match {
-      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete)
-      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete)
+      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease)
+      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
-  private def onRedirect[A](from: Node, redirect: Redirect, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+  private def onRedirect[A](
+    from: Node,
+    redirect: Redirect,
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease = null
+  ): Unit =
     if (redirectsLeft <= 0)
       complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
     else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
-        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete)
-        case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete)
+        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease)
+        case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease)
       }
     }
 
   // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
   // failover is not hammered; redirectsLeft bounds it.
-  private def onUnreachable[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
+  private def onUnreachable[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
     if (redirectsLeft <= 0) complete(Failure(NotConnected()))
     else {
       refresh(force = true)
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
-      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete))
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete, lease = lease))
     }
 
-  private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
+  private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease): Unit = {
     refresh(force = false)
     val topology = topologyRef.get()
     topology.route(command) match {
       // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
       case Route.ToNode(node, slot)                                                  =>
         if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, node, slot, redirectsLeft, complete)
-        else sendTo(node, command, asking = false, redirectsLeft, complete)
+        else sendTo(node, command, asking = false, redirectsLeft, complete, lease)
       // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
       case _ if readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
-        onUnreachable(command, redirectsLeft, complete)
+        onUnreachable(command, redirectsLeft, complete, lease)
       // still unowned after refresh: any master, trusting its reply (a MOVED to follow, or CLUSTERDOWN)
-      case _                                                                         => sendToAny(topology, command, redirectsLeft, complete)
+      case _                                                                         => sendToAny(topology, command, redirectsLeft, complete, lease)
     }
   }
 

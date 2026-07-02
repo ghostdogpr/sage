@@ -152,16 +152,21 @@ final private[client] class MasterReplicaLive(
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
-  def run[A](command: Command[A]): CIO[A] =
-    CIO.async[A] { complete =>
-      val span = Events.startSpan(events, command)
-      offload {
-        val tracked = Events.trackCommand(events, command, complete, span)
-        Client.completing(tracked) {
-          if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked) else sendMaster(command, tracked)
+  def run[A](command: Command[A]): CIO[A] = {
+    val lease = if (command.isBlocking) new DedicatedPool.Lease else null
+    val body  =
+      CIO.async[A] { complete =>
+        val span = Events.startSpan(events, command)
+        offload {
+          val tracked = Events.trackCommand(events, command, complete, span)
+          Client.completing(tracked) {
+            if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked)
+            else sendMaster(command, tracked, lease)
+          }
         }
       }
-    }
+    if (lease != null) CIO.ensure(CIO.blocking(lease.cancel()))(body) else body
+  }
 
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
@@ -179,8 +184,8 @@ final private[client] class MasterReplicaLive(
         offload(Client.completing(complete)(sendMasterCached(command, ttl.toMillis, complete, deferred)))
       }
 
-  private def sendMaster[A](command: Command[A], complete: Try[A] => Unit): Unit =
-    onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb))
+  private def sendMaster[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
+    onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb, lease))
 
   private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
     var reached = false

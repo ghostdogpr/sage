@@ -14,9 +14,12 @@ import sage.commands.Command
   */
 final private[client] class NodeClient(connection: MultiplexedConnection, pool: DedicatedPool) {
 
-  def submit[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit): Unit =
-    if (command.isBlocking) { if (asking) pool.useAsking(command, callback) else pool.use(command, callback) }
-    else if (asking) connection.submitAsking(command, callback)
+  // `lease` (blocking only) lets an interrupted caller release the leased slot; null falls back to a private, uncancellable lease
+  def submit[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
+    if (command.isBlocking) {
+      val l = if (lease != null) lease else new DedicatedPool.Lease
+      if (asking) pool.useAsking(command, callback, l) else pool.use(command, callback, l)
+    } else if (asking) connection.submitAsking(command, callback)
     else connection.submit(command, callback)
 
   def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =

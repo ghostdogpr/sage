@@ -1,5 +1,9 @@
 package sage.integration
 
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.duration.FiniteDuration
+
 import zio.*
 
 import sage.*
@@ -65,6 +69,24 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
                         } yield res
                       }
           } yield assertEquals(out, Some((2L, 6L)))
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
+
+  test("an interrupted blocking command releases its pooled slot instead of leaking it") {
+    withContainers { server =>
+      val config              = configOf(server).copy(dedicatedPool =
+        sage.client.DedicatedPoolConfig(maxConnections = 2, acquireTimeout = FiniteDuration(1L, TimeUnit.SECONDS))
+      )
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(config)
+            _      <- ZIO.foreachDiscard(1 to 4)(_ => client.blPop[String]("leak:empty")(BlockTimeout.Forever).timeout(Duration.fromMillis(150)))
+            none   <- client.blPop[String]("leak:empty")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
+          } yield assertEquals(none, None)
         }
 
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())

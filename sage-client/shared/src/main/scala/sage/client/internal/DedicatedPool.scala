@@ -1,5 +1,6 @@
 package sage.client.internal
 
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
@@ -49,15 +50,21 @@ final private[client] class DedicatedPool(
     * Runs a blocking command on a borrowed Dedicated Connection, releasing it when the reply (or a failure) arrives. Returns immediately;
     * the acquire — which may wait for a slot or open a socket — is offloaded so the calling fiber is never blocked.
     */
-  def use[A](command: Command[A], callback: Try[A] => Unit): Unit = lease(command, asking = false, callback)
+  def use[A](command: Command[A], callback: Try[A] => Unit): Unit = leaseAndSubmit(command, asking = false, callback, new DedicatedPool.Lease)
+
+  def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
+    leaseAndSubmit(command, asking = false, callback, lease)
 
   /**
     * Runs a blocking command redirected by `ASK`: `ASKING` then the command, back-to-back on one exclusively-leased connection, so their
     * wire adjacency is automatic. The `ASKING` reply is discarded; the command's reply releases the connection.
     */
-  def useAsking[A](command: Command[A], callback: Try[A] => Unit): Unit = lease(command, asking = true, callback)
+  def useAsking[A](command: Command[A], callback: Try[A] => Unit): Unit = leaseAndSubmit(command, asking = true, callback, new DedicatedPool.Lease)
 
-  private def lease[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit): Unit =
+  def useAsking[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
+    leaseAndSubmit(command, asking = true, callback, lease)
+
+  private def leaseAndSubmit[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
     if (!isLive()) callback(scala.util.Failure(NotConnected()))
     else
       scheduler.after(Duration.Zero) {
@@ -70,15 +77,12 @@ final private[client] class DedicatedPool(
           }
         acquired match {
           case Left(error) => callback(scala.util.Failure(error))
+          // attach fails only if the caller was already interrupted; the connection is discarded, so skip the submit
           case Right(conn) =>
-            if (asking) conn.submit[Unit](Connection.asking, _ => ())
-            conn.submit(
-              command,
-              result => {
-                release(conn)
-                callback(result)
-              }
-            )
+            if (lease.attach(this, conn)) {
+              if (asking) conn.submit[Unit](Connection.asking, _ => ())
+              conn.submit(command, result => if (lease.finish(conn)) { release(conn); callback(result) })
+            }
         }
       }
 
@@ -257,4 +261,31 @@ private[client] object DedicatedPool {
   }
 
   final case class Idle(connection: DedicatedConnection, idleSinceMillis: Long)
+
+  /**
+    * Tracks the one Dedicated Connection a single (possibly ASK/MOVED-redirected) blocking command currently holds, so an interrupted caller
+    * can release it. `attach` records a freshly leased connection; `finish` clears it when the reply lands; `cancel` discards whatever is held
+    * and, via the terminal state, makes any later `attach` (a redirect leasing again after the interrupt) discard immediately instead of leak.
+    */
+  final class Lease {
+    private val state = new AtomicReference[AnyRef]() // null idle, a Held while leased, Cancelled terminal
+
+    private[internal] def attach(pool: DedicatedPool, conn: DedicatedConnection): Boolean =
+      if (state.compareAndSet(null, Held(pool, conn))) true
+      else { pool.releaseTransaction(conn, reusable = false); false }
+
+    private[internal] def finish(conn: DedicatedConnection): Boolean =
+      state.get() match {
+        case h: Held if h.conn eq conn => state.compareAndSet(h, null)
+        case _                         => false
+      }
+
+    def cancel(): Unit = state.getAndSet(Cancelled) match {
+      case h: Held => h.pool.releaseTransaction(h.conn, reusable = false)
+      case _       => ()
+    }
+  }
+
+  final private case class Held(pool: DedicatedPool, conn: DedicatedConnection)
+  private case object Cancelled
 }
