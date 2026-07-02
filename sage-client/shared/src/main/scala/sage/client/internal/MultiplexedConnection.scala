@@ -202,6 +202,7 @@ final private[client] class MultiplexedConnection private (
             current = conn
             generation = generation.next
             transition(State.Live)
+            startWatchdog()
             events.emit(SageEvent.Connection.Connected(node))
             true
           } else false

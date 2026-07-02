@@ -512,6 +512,35 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(ts.size, 1)
   }
 
+  test("the watchdog starts even when the initial connection dies in the establish window") {
+    val watchdog                                        = WatchdogConfig(pingInterval = 10.millis, pingTimeout = 5.millis, enabled = true)
+    val scheduler                                       = new ManualScheduler
+    val live                                            = mutable.ArrayBuffer.empty[FakeTransport]
+    var first                                           = true
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
+      if (first) {
+        first = false
+        new Transport {
+          def start(): Unit                    = onClosed()
+          def send(item: Transport.Item): Unit = ()
+          def close(): Unit                    = ()
+        }
+      } else {
+        val t = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+        live += t
+        t
+      }
+    val connection                                      =
+      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], fixedBackoff, watchdog, 1.second, Duration.Zero)
+
+    scheduler.advance(1.milli)
+    assertEquals(connection.currentState, MultiplexedConnection.State.Live)
+    assertEquals(live.size, 1)
+
+    scheduler.advance(10.millis)
+    assertEquals(live.head.written.count(_.asUtf8String.contains("PING")), 1)
+  }
+
   test("graceful drain lets an in-flight reply complete before close finishes") {
     val (connection, _, transports) = make(autoWrite = false, closeTimeout = 2.seconds)
     var result: Option[Try[String]] = None
