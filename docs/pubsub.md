@@ -9,7 +9,7 @@ Subscribing yields a stream of messages in your ecosystem's native stream type: 
 ::: code-group
 
 ```scala [Ox]
-val news = client.subscribe[String]("news")
+val news = client.subscribeScoped[String]("news")
 (1 to 3).foreach(i => client.publish("news", s"item-$i"))
 val messages = news.take(3).runToList()
 ```
@@ -69,7 +69,7 @@ The plain `subscribe` returns the stream immediately and registers the subscript
 
 - **ZIO / Kyo**: `subscribeScoped`, a scoped effect.
 - **Cats Effect**: `subscribeResource`, a `Resource`.
-- **Ox**: plain `subscribe` already blocks until confirmed.
+- **Ox**: `subscribeScoped`, bound to the enclosing Ox scope.
 - **Pekko**: plain `subscribe` returns a `Source` whose materialized `Future[Done]` completes once registered; await it before publishing.
 
 The examples above use these. Confirmation closes the race on a standalone or master-replica server; in cluster mode it is best-effort, as on every backend. With the scoped and resource variants that scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes; on Pekko, ending the `Source` (cancel, complete, or fail) unsubscribes.

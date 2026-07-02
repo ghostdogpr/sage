@@ -157,9 +157,9 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     )
 
   /**
-    * Subscribes to one or more channels, returning once the server has confirmed the SUBSCRIBE so a publish issued after this call cannot
-    * race the registration. Ending the flow unsubscribes. Survives reconnects via auto-resubscribe, dropping messages published during the
-    * reconnect gap.
+    * Subscribes to one or more channels; the SUBSCRIBE is issued each time the returned flow is run, so a re-run resubscribes (an Ox `Flow`
+    * is a reusable description). Ending the flow unsubscribes. Survives reconnects via auto-resubscribe, dropping messages published during
+    * the reconnect gap. To confirm the SUBSCRIBE before a publish (so the publish cannot race the registration), use [[subscribeScoped]].
     */
   def subscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
     streamOf(client.subscribeChannels[V](channel, rest*))
@@ -177,8 +177,42 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
-  // subscribe eagerly so the SUBSCRIBE is confirmed before returning; unsubscribe once, when the flow ends or (if never run) at scope close
-  private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] = {
+  /**
+    * Like [[subscribe]], but subscribes eagerly and returns only once the server has confirmed the SUBSCRIBE, so a publish sequenced after
+    * this call cannot race the registration. The subscription is bound to the enclosing Ox scope and unsubscribes when it closes.
+    */
+  def subscribeScoped[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
+    scopedStreamOf(client.subscribeChannels[V](channel, rest*))
+
+  /**
+    * Like [[pSubscribe]], but subscribes eagerly and returns only once the server has confirmed the PSUBSCRIBE. Bound to the enclosing Ox
+    * scope, which unsubscribes on close.
+    */
+  def pSubscribeScoped[V: ValueCodec](pattern: String, rest: String*): Ox ?=> Flow[PatternMessage[V]] =
+    scopedStreamOf(client.subscribePatterns[V](pattern, rest*))
+
+  /**
+    * Like [[sSubscribe]], but subscribes eagerly and returns only once the server has confirmed the SSUBSCRIBE. Bound to the enclosing Ox
+    * scope, which unsubscribes on close.
+    */
+  def sSubscribeScoped[V: ValueCodec](channel: String, rest: String*): Ox ?=> Flow[Message[V]] =
+    scopedStreamOf(client.subscribeShardChannels[V](channel, rest*))
+
+  // open per run, not once: an Ox Flow is reusable, so opening eagerly would leave a re-run empty (the first run's finally already unsubscribed)
+  private def streamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] =
+    Flow.usingEmit { emit =>
+      val sub = open
+      try {
+        var continue = true
+        while (continue)
+          sub.next match {
+            case Some(a) => emit(a)
+            case None    => continue = false
+          }
+      } finally sub.close
+    }
+
+  private def scopedStreamOf[A](open: => Subscription[[X] =>> Ox ?=> X, A]): Ox ?=> Flow[A] = {
     val sub                 = open
     val closed              = new AtomicBoolean(false)
     def unsubscribe(): Unit = if (closed.compareAndSet(false, true)) sub.close

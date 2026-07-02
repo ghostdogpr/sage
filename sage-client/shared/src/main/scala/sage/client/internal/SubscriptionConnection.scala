@@ -60,6 +60,7 @@ final private[client] class SubscriptionConnection(
   private var watchdogHandle: Scheduler.Cancelable     = null
   @volatile private var readerBlocked: Boolean         = false
   @volatile private var lastReplyAtMillis: Long        = scheduler.nowMillis
+  @volatile private var lastBackpressureMillis: Long   = 0L
   @volatile private var pingSentAtMillis: Long         = 0L
   @volatile private var bootstrapWaiter: Frame => Unit = null
 
@@ -162,10 +163,12 @@ final private[client] class SubscriptionConnection(
   // bring a freshly-established socket Live, resubscribing everything registered (counters reset to this generation). In cluster mode it runs
   // once per connection with at most one Slot's worth of Shard channels registered, so the single SSUBSCRIBE never spans slots (CROSSSLOT).
   private def goLive(conn: Conn): Unit = {
-    var reconnect = false
-    var notify    = false
+    var reconnect      = false
+    var notify         = false
+    // conn.close() joins the reader whose onConnClosed needs `lock`, so tear down after releasing it (as closeOwned/close do)
+    var teardown: Conn = null
     locked {
-      if (state != State.Establishing && state != State.Reconnecting) conn.close()
+      if (state != State.Establishing && state != State.Reconnecting) teardown = conn
       else if (conn.isTerminated) {
         if (cluster) { stopWatchdog(); current = null; state = State.Closed; notify = true }
         else { state = State.Reconnecting; reconnect = true }
@@ -185,7 +188,7 @@ final private[client] class SubscriptionConnection(
         if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
         if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
           // everything closed during the establish; tear back down rather than hold an idle socket open
-          conn.close()
+          teardown = conn
           current = null
           state = State.Idle
         } else {
@@ -197,6 +200,7 @@ final private[client] class SubscriptionConnection(
         confirmed.signalAll()
       }
     }
+    if (teardown != null) teardown.close()
     if (reconnect) scheduleReconnect(0)
     if (notify) onTerminated()
   }
@@ -319,8 +323,11 @@ final private[client] class SubscriptionConnection(
     val targets = locked(map.get(key).map(_.toVector).getOrElse(Vector.empty))
     if (targets.nonEmpty) {
       readerBlocked = true
-      try targets.foreach(_.offer(delivery))
-      finally readerBlocked = false
+      try {
+        var blocked = false
+        targets.foreach(sink => if (sink.offer(delivery)) blocked = true)
+        if (blocked) lastBackpressureMillis = scheduler.nowMillis
+      } finally readerBlocked = false
     }
   }
 
@@ -401,7 +408,9 @@ final private[client] class SubscriptionConnection(
     if (conn != null) {
       val now = scheduler.nowMillis
       if (pingSentAtMillis != 0L) {
-        if (now - pingSentAtMillis >= watchdog.pingTimeout.toMillis) scheduler.after(Duration.Zero)(conn.close())
+        // recent backpressure means the reader hasn't reached the queued PONG yet; a sink with room never blocks, so an unanswered PING there still kills
+        val backpressured = now - lastBackpressureMillis < watchdog.pingTimeout.toMillis
+        if (!backpressured && now - pingSentAtMillis >= watchdog.pingTimeout.toMillis) scheduler.after(Duration.Zero)(conn.close())
       } else if (now - lastReplyAtMillis >= watchdog.pingInterval.toMillis) {
         pingSentAtMillis = now
         conn.send(Connection.ping(None).encode)
@@ -502,8 +511,9 @@ private[client] object SubscriptionConnection {
       if (ready != null) callback(ready)
     }
 
-    def offer(delivery: Delivery): Unit = {
+    def offer(delivery: Delivery): Boolean = {
       var hungry: Option[Delivery] => Unit = null
+      var blocked                          = false
       lock.lock()
       try {
         var settled = false
@@ -511,9 +521,10 @@ private[client] object SubscriptionConnection {
           if (closed) settled = true
           else if (waiter != null) { hungry = waiter; waiter = null; settled = true }
           else if (backlog.size < cap) { backlog.add(delivery); settled = true }
-          else notFull.await() // backlog full, no consumer: backpressure the reader
+          else { blocked = true; notFull.await() } // backlog full, no consumer: backpressure the reader
       } finally lock.unlock()
       if (hungry != null) hungry(Some(delivery))
+      blocked
     }
 
     def terminate(): Unit = {

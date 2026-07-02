@@ -166,6 +166,30 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
       program.unsafeRun
     }
   }
+
+  test("pub/sub works when a subscription is the client's first operation") {
+    withContainers { server =>
+      val host = server.host
+      val pm   = server.mappedPort(masterPort)
+      val pr   = server.mappedPort(replicaPort)
+
+      val program =
+        connectAndUse(standalone(host, pr))(ensureReplicating(_, host, pr)).flatMap { _ =>
+          connectAndUse(masterReplica(host, pm, ReadFrom.ReplicaPreferred)) { client =>
+            for {
+              sub     <- client.subscribeChannels[String]("mr:first")
+              count   <- client.publish("mr:first", "hello")
+              message <- sub.next
+              _       <- sub.close
+            } yield {
+              assertEquals(count, 1L)
+              assertEquals(message, Some(Message("mr:first", "hello")))
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
 }
 
 /**
