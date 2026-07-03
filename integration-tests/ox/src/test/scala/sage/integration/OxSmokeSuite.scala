@@ -85,6 +85,21 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
+  test("a scoped subscription survives a flow run ending — take(1) must not unsubscribe, only scope close does") {
+    withContainers { server =>
+      supervised {
+        val client = SageClient.scoped(configOf(server))
+        val stream = client.subscribeScoped[String]("scoped-live")
+        val _      = client.publish("scoped-live", "a")
+        val first  = stream.take(1).runToList()
+        val _      = client.publish("scoped-live", "b")
+        val second = stream.take(1).runToList()
+        assertEquals(first.map(_.payload), List("a"))
+        assertEquals(second.map(_.payload), List("b"))
+      }
+    }
+  }
+
   test("a plain subscribe Flow resubscribes on every run instead of yielding an empty stream on re-run") {
     withContainers { server =>
       supervised {
