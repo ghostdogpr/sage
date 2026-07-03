@@ -135,8 +135,8 @@ final private[client] class SubscriptionConnection(
       try goLive(establish())
       catch {
         case e: Throwable =>
-          // establish failed after the sink was registered; drop it so a later reconnect doesn't resubscribe a phantom name
-          locked { deregister(sink, names, kind); state = State.Idle; established.signalAll() }
+          // drop the phantom sink, but only if a concurrent close/goLive hasn't already moved us off Establishing
+          locked(if (state == State.Establishing) { deregister(sink, names, kind); state = State.Idle; established.signalAll() })
           throw e
       }
     awaitActive(failIfUnconfirmed, confirmTarget)
@@ -307,7 +307,9 @@ final private[client] class SubscriptionConnection(
           case Some(Pubsub.Event.Message(channel, payload))            => dispatch(channelSinks, channel, Delivery.Channel(channel, payload))
           case Some(Pubsub.Event.ShardMessage(channel, payload))       => dispatch(shardSinks, channel, Delivery.Channel(channel, payload))
           case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) => dispatch(patternSinks, pattern, Delivery.Pattern(pattern, ch, payload))
-          case Some(_: Pubsub.Event.Subscribed)                        => locked { subscribeConfirmed += 1; confirmed.signalAll() }
+          case Some(_: Pubsub.Event.Subscribed)                        =>
+            // conn eq current: a late ack from a superseded generation must not advance this generation's count
+            locked(if (conn eq current) { subscribeConfirmed += 1; confirmed.signalAll() })
           case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
@@ -544,6 +546,8 @@ private[client] object SubscriptionConnection {
       var ready: Option[Delivery] = null // null = parked on the waiter; non-null = deliver synchronously
       lock.lock()
       try {
+        // an existing waiter means a concurrent consumer; fail loud rather than silently evict it
+        if (waiter != null) throw new IllegalStateException("a subscription is single-consumer; concurrent next is not supported")
         val head = backlog.poll()
         if (head != null) { notFull.signal(); ready = Some(head) }
         else if (closed) ready = None
