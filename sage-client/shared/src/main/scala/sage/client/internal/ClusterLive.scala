@@ -153,13 +153,17 @@ final private[client] class ClusterLive(
   def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] =
     target.node match {
       case Some(node) =>
-        CIO.async[A] { complete =>
-          val span = Events.startSpan(events, command)
-          offload {
-            val tracked = Events.trackCommand(events, command, complete, span)
-            Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked))
+        def body(lease: DedicatedPool.Lease): CIO[A] =
+          CIO.async[A] { complete =>
+            val span = Events.startSpan(events, command)
+            offload {
+              val tracked = Events.trackCommand(events, command, complete, span)
+              Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked, lease))
+            }
           }
-        }
+        // mirror run: a blocking command needs a cancelable lease so an interrupt releases the slot instead of leaking it
+        if (!command.isBlocking) body(null)
+        else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
       case None       => run(command)
     }
 
@@ -374,7 +378,7 @@ final private[client] class ClusterLive(
     asking: Boolean,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease = null
+    lease: DedicatedPool.Lease
   ): Unit = {
     val nc =
       try getOrEstablish(node)
