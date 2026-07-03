@@ -136,7 +136,7 @@ final private[client] class SubscriptionConnection(
       catch {
         case e: Throwable =>
           // drop the phantom sink, but only if a concurrent close/goLive hasn't already moved us off Establishing
-          locked { if (state == State.Establishing) { deregister(sink, names, kind); state = State.Idle; established.signalAll() } }
+          locked(if (state == State.Establishing) { deregister(sink, names, kind); state = State.Idle; established.signalAll() })
           throw e
       }
     awaitActive(failIfUnconfirmed, confirmTarget)
@@ -309,7 +309,7 @@ final private[client] class SubscriptionConnection(
           case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) => dispatch(patternSinks, pattern, Delivery.Pattern(pattern, ch, payload))
           case Some(_: Pubsub.Event.Subscribed)                        =>
             // conn eq current: a late ack from a superseded generation must not advance this generation's count
-            locked { if (conn eq current) { subscribeConfirmed += 1; confirmed.signalAll() } }
+            locked(if (conn eq current) { subscribeConfirmed += 1; confirmed.signalAll() })
           case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
