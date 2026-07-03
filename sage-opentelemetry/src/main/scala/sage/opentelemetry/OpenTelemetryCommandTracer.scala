@@ -56,14 +56,14 @@ object OpenTelemetryCommandTracer {
   private val ServerPort    = AttributeKey.longKey("server.port")
 
   /**
-    * Builds a tracer from an explicit [[OpenTelemetry]] (the testable form: inject an in-memory SDK), reading the thread-local current context
+    * Builds a tracer from an explicit `OpenTelemetry` (the testable form: inject an in-memory SDK), reading the thread-local current context
     * as each command's parent. `peerService` is the name every Redis node reports as, so a cluster shows as a single dependency; default `redis`.
     */
   def apply(openTelemetry: OpenTelemetry, peerService: String = "redis"): CommandTracer =
     new OpenTelemetryCommandTracer(openTelemetry.getTracer("sage"), peerService, () => Context.current())
 
   /**
-    * Builds a tracer from the globally-registered [[OpenTelemetry]] — the zero-configuration form for an APM agent (e.g. the Datadog Java agent
+    * Builds a tracer from the globally-registered `OpenTelemetry` — the zero-configuration form for an APM agent (e.g. the Datadog Java agent
     * with `dd.trace.otel.enabled=true`) that installs itself as the global instance.
     */
   def global(peerService: String = "redis"): CommandTracer =

@@ -1,6 +1,8 @@
 import _root_.io.getkyo.compat.CompatBackendAxis
 import sbt.VirtualAxis
 
+val scaladocTag = Tags.Tag("scaladoc")
+
 val scala3Version     = "3.3.8"
 val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
 val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
@@ -37,7 +39,8 @@ inThisBuild(
     scmInfo          := Some(ScmInfo(url("https://github.com/ghostdogpr/sage/"), "scm:git:git@github.com:ghostdogpr/sage.git")),
     developers       := List(Developer("ghostdogpr", "Pierre Ricadat", "ghostdogpr@gmail.com", url("https://github.com/ghostdogpr"))),
     resolvers += Resolver.sonatypeCentralSnapshots,
-    compatKyoVersion := kyoVersion
+    compatKyoVersion := kyoVersion,
+    concurrentRestrictions += Tags.limit(scaladocTag, 1)
   )
 )
 
@@ -72,7 +75,7 @@ addCommandAlias("exampleKyo", s"examplesKyo$scala3NextSuffix/run")
 
 addCommandAlias(
   "docAll",
-  s"all core/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo$scala3NextSuffix/doc"
+  s"all core/doc opentelemetry/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo$scala3NextSuffix/doc"
 )
 
 lazy val root = project
@@ -248,7 +251,8 @@ lazy val commonSettings = Def.settings(
     else base ++ Seq("-Xfatal-warnings", "-Ykind-projector", "-Yfuture-lazy-vals")
   },
   libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test,
-  Test / fork                            := true
+  Test / fork                            := true,
+  Compile / doc                          := (Compile / doc).tag(scaladocTag).value
 )
 
 // only for container-free cells: integration suites each boot their own container, so running them in
