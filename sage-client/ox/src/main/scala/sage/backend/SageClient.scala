@@ -218,14 +218,12 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
     def unsubscribe(): Unit = if (closed.compareAndSet(false, true)) sub.close
     val _                   = useInScope(sub)(_ => unsubscribe())
     Flow.usingEmit { emit =>
-      try {
-        var continue = true
-        while (continue)
-          sub.next match {
-            case Some(a) => emit(a)
-            case None    => continue = false
-          }
-      } finally unsubscribe()
+      var continue = true
+      while (continue)
+        sub.next match {
+          case Some(a) => emit(a)
+          case None    => continue = false
+        }
     }
   }
 }
