@@ -50,7 +50,8 @@ class ClusterClientSpec extends munit.FunSuite {
     behaviour: (Node, String) => Seq[Frame],
     seeds: Vector[Node],
     unreachable: Set[Node] = Set.empty,
-    readFrom: ReadFrom = ReadFrom.Master
+    readFrom: ReadFrom = ReadFrom.Master,
+    connectGate: (Node, Int) => Unit = (_, _) => () // blocks a node's nth transport creation, to park an establish mid-flight
   ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
@@ -62,6 +63,7 @@ class ClusterClientSpec extends munit.FunSuite {
 
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
+        connectGate(node, transports.get(node).map(_.size).getOrElse(0))
         val respond: Bytes => Seq[Frame] = payload => {
           val text = payload.asUtf8String
           if (text.contains("HELLO"))
@@ -372,6 +374,31 @@ class ClusterClientSpec extends munit.FunSuite {
       Thread.sleep(150)
       val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
       assert(clusterCalls >= 3, s"each tx fault must force a refresh despite the throttle; CLUSTER calls: $clusterCalls")
+    }
+  }
+
+  test("an interrupted transaction releases promptly while its first acquire is mid-connect, and the acquired connection is recycled") {
+    val gate      = new java.util.concurrent.CountDownLatch(1)
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI"))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("v")))))
+      else Seq(Frame.SimpleString("OK"))
+    // gate the dedicated (second) transport of nodeA so the transaction's first acquire parks mid-connect
+    val fixture   = new Fixture(behaviour, Vector(nodeA), connectGate = (node, index) => if (node == nodeA && index == 1) gate.await())
+
+    val started = System.nanoTime()
+    CIO.timeout(500.millis)(fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))).unsafeRun.flatMap { result =>
+      val elapsedMs = (System.nanoTime() - started) / 1000000L
+      assert(result.isEmpty, s"expected the timeout to win, got $result")
+      assert(elapsedMs < 3000L, s"the finalizer stalled behind the parked acquire: ${elapsedMs}ms")
+      gate.countDown()
+      Thread.sleep(300) // let the orphaned acquire finish and hand its never-used connection back
+      fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1")))).unsafeRun.map { committed =>
+        assertEquals(committed, Some(Vector(Some("v"))))
+        val hellos = fixture.written(nodeA).count(_.contains("HELLO"))
+        assertEquals(hellos, 2, "the recycled dedicated connection must be reused, not re-established")
+      }
     }
   }
 

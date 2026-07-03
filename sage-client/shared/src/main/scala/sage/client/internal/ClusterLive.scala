@@ -697,40 +697,63 @@ final private[client] class ClusterLive(
           }
 
     // validates the whole pipeline's slots against the pin *before* sending MULTI, so a cross-slot transaction is rejected with nothing on the wire
-    private def submitExec[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Frame]] => Unit): Unit = {
-      lock.lock()
-      try
-        if (released) complete(Failure(TxSupport.scopeReleasedError))
-        else
-          pipelineSlot(p).flatMap(ensureConn) match {
-            case Left(error) => refreshOnFault(error); complete(Failure(error))
-            case Right(_)    => Client.completing(complete)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
+    private def submitExec[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Frame]] => Unit): Unit =
+      onConn(pipelineSlot(p), complete)(c => c.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
+
+    private def withConn[A](command: Command[?], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit =
+      onConn(commandSlot(command), complete)(use)
+
+    // checks and submits stay under `lock` (release-vs-late-submit is atomic); the slow acquire runs outside it so release() never stalls behind it
+    private def onConn[A](slotResult: Either[Throwable, Option[Slot]], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit = {
+      var retry = true
+      while (retry) {
+        retry = false
+        var fault: Throwable   = null
+        var acquire            = false
+        var slot: Option[Slot] = None
+        lock.lock()
+        try
+          if (released) complete(Failure(TxSupport.scopeReleasedError))
+          else
+            slotResult match {
+              case Left(error) => fault = error; complete(Failure(error))
+              case Right(s)    =>
+                if (conn == null) { acquire = true; slot = s }
+                else
+                  checkPin(s) match {
+                    case Left(error) => fault = error; complete(Failure(error))
+                    case Right(())   => Client.completing(complete)(use(conn))
+                  }
+            }
+        finally lock.unlock()
+        if (fault != null) refreshOnFault(fault)
+        else if (acquire)
+          acquireConn(slot) match {
+            case Left(error)               => refreshOnFault(error); complete(Failure(error))
+            case Right((nc, c, node, pin)) =>
+              var giveBack = false
+              lock.lock()
+              try
+                if (released) { giveBack = true; complete(Failure(TxSupport.scopeReleasedError)) }
+                else if (conn != null) { giveBack = true; retry = true } // lost the acquire race; re-validate against the winner's pin
+                else {
+                  nodeClient = nc
+                  conn = c
+                  pinnedNode = node
+                  pinnedSlot = pin
+                  Client.completing(complete)(use(conn))
+                }
+              finally lock.unlock()
+              if (giveBack) nc.releaseTransaction(c, reusable = true)
           }
-      finally lock.unlock()
+      }
     }
 
-    private def withConn[A](command: Command[?], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit = {
-      lock.lock()
-      try
-        if (released) complete(Failure(TxSupport.scopeReleasedError))
-        else
-          commandSlot(command).flatMap(ensureConn) match {
-            case Left(error) => refreshOnFault(error); complete(Failure(error))
-            case Right(_)    => Client.completing(complete)(use(conn))
-          }
-      finally lock.unlock()
-    }
-
-    // called under `lock`; the blocking acquire is safe here — the finalizer never runs concurrently with a live block. With a slot: pin its
-    // owner on the first key, then require every later key to match; a keyless-acquired pin adopts the slot only if its node already owns it.
-    private def ensureConn(slot: Option[Slot]): Either[Throwable, Unit] =
+    // must hold `lock`, conn != null; a keyless-acquired pin adopts the first keyed slot only if its node already owns it
+    private def checkPin(slot: Option[Slot]): Either[Throwable, Unit] =
       slot match {
-        case Some(s) if conn == null =>
-          nodeForSlotRefreshing(s) match {
-            case Some(node) => acquireOn(node).map(_ => pinnedSlot = Some(s))
-            case None       => Left(NotConnected())
-          }
-        case Some(s)                 =>
+        case None    => Right(())
+        case Some(s) =>
           pinnedSlot match {
             case Some(ps) if ps == s => Right(())
             case Some(ps)            =>
@@ -739,28 +762,29 @@ final private[client] class ClusterLive(
               if (topologyRef.get().nodeForSlot(s).contains(pinnedNode)) { pinnedSlot = Some(s); Right(()) }
               else Left(CrossSlot(s"transaction touches slot ${s.value} on a node other than its pinned one; MULTI/EXEC requires a single slot"))
           }
-        case None if conn != null    => Right(())
-        case None                    =>
-          pickNode(topologyRef.get()) match {
-            case Some(node) => acquireOn(node)
-            case None       => Left(NotConnected())
+      }
+
+    // runs outside `lock`: may force a topology refresh, connect, or wait for a pool slot
+    private def acquireConn(slot: Option[Slot]): Either[Throwable, (NodeClient, DedicatedConnection, Node, Option[Slot])] = {
+      val target = slot match {
+        case Some(s) => nodeForSlotRefreshing(s).map(_ -> slot)
+        case None    => pickNode(topologyRef.get()).map(_ -> None)
+      }
+      target match {
+        case None              => Left(NotConnected())
+        case Some((node, pin)) =>
+          try {
+            val nc = getOrEstablish(node)
+            Right((nc, nc.acquireForTransaction(), node, pin))
+          } catch {
+            case error: SageException => Left(error)
+            case NonFatal(_)          => Left(ConnectionLost(mayHaveExecuted = false))
           }
       }
+    }
 
     private def nodeForSlotRefreshing(slot: Slot): Option[Node] =
       topologyRef.get().nodeForSlot(slot).orElse { refresh(force = true); topologyRef.get().nodeForSlot(slot) }
-
-    private def acquireOn(node: Node): Either[Throwable, Unit] =
-      try {
-        val nc = getOrEstablish(node)
-        conn = nc.acquireForTransaction()
-        nodeClient = nc
-        pinnedNode = node
-        Right(())
-      } catch {
-        case error: SageException => Left(error)
-        case NonFatal(_)          => Left(ConnectionLost(mayHaveExecuted = false))
-      }
 
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       if (command.hasMalformedKeys)
