@@ -1,1 +1,5 @@
 -Dsbt.io.implicit.relative.glob.conversion=allow
+# Work around scala/scala3#24183: on JDK 25 the C2 JIT miscompiles a combinator in scaladoc's SignatureBuilder,
+# so content() returns null and doc generation NPEs once that method is JIT-compiled (after several doc runs in one
+# JVM). Excluding just that class from JIT sidesteps it; fixed upstream in Scala 3.9.0 (scala/scala3#25779).
+-XX:CompileCommand=exclude,dotty/tools/scaladoc/translators/SignatureBuilder.*
