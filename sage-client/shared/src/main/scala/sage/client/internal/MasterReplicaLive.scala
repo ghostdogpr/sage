@@ -322,14 +322,14 @@ final private[client] class MasterReplicaLive(
       val nc =
         try masterPool.getOrEstablish(masterNodeRef.get())
         catch {
-          case e: NotConnected => triggerRefresh(); throw e
-          case NonFatal(_)     => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
+          case e: SageException => triggerRefresh(); throw e
+          case NonFatal(_)      => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
         }
       try new MasterReplicaLive.TxLease(new Client.TxScope(nc.acquireForTransaction(), refreshOnTxFault, events), nc)
       catch {
-        case e: NotConnected => triggerRefresh(); throw e
-        case e: TimedOut     => throw e
-        case NonFatal(_)     => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
+        case e: TimedOut      => throw e
+        case e: SageException => triggerRefresh(); throw e
+        case NonFatal(_)      => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
       }
     }
 

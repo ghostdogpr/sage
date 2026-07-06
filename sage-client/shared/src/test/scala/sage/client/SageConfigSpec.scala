@@ -77,4 +77,12 @@ class SageConfigSpec extends munit.FunSuite {
     assert(SageConfig.fromUri("redis://h/x").isLeft)        // non-numeric database
     assert(SageConfig.fromUri("redis://h?ssl=true").isLeft) // query params unsupported
   }
+
+  test("a parse error never echoes the password back") {
+    def problem(uri: String): String = SageConfig.fromUri(uri).swap.getOrElse(fail(s"expected a Left for $uri"))
+    assert(!problem("redis://alice:hunter2@h:0").contains("hunter2"))
+    assert(!problem("redis://:hunter2@h:0").contains("hunter2"))
+    assert(!problem("redis://:p%40ss@h?x=1").contains("p%40ss"))
+    assertEquals(problem("redis://alice:hunter2@h:0"), "invalid redis URI 'redis://alice:<redacted>@h:0': invalid port in 'h:0'")
+  }
 }

@@ -189,7 +189,8 @@ object SageConfig {
     * is intentionally no way to select insecure TLS from a URI.
     */
   def fromUri(uri: String): Either[String, SageConfig] = {
-    def fail[A](msg: String): Either[String, A] = Left(s"invalid redis URI '$uri': $msg")
+    val shown                                   = redactCredentials(uri)
+    def fail[A](msg: String): Either[String, A] = Left(s"invalid redis URI '$shown': $msg")
 
     uri.split("://", 2) match {
       case Array(scheme, rest) =>
@@ -205,10 +206,10 @@ object SageConfig {
           pathPart   = if (slash < 0) "" else rest.substring(slash + 1)
           at         = authority.lastIndexOf('@')
           userinfo   = if (at < 0) "" else authority.substring(0, at)
-          auth      <- if (userinfo.isEmpty) Right(None) else parseAuth(uri, userinfo)
-          endpoints <- parseEndpoints(uri, if (at < 0) authority else authority.substring(at + 1))
+          auth      <- if (userinfo.isEmpty) Right(None) else parseAuth(shown, userinfo)
+          endpoints <- parseEndpoints(shown, if (at < 0) authority else authority.substring(at + 1))
           db        <- if (pathPart.isEmpty) Right(0)
-                       else pathPart.toIntOption.filter(_ >= 0).toRight(s"invalid redis URI '$uri': invalid database '$pathPart'")
+                       else pathPart.toIntOption.filter(_ >= 0).toRight(s"invalid redis URI '$shown': invalid database '$pathPart'")
           topology   = endpoints match {
                          case Vector(one) => Topology.Standalone(one)
                          case seeds       => Topology.Cluster(seeds)
@@ -221,6 +222,24 @@ object SageConfig {
       case _                   => fail("expected redis:// or rediss://")
     }
   }
+
+  private def redactCredentials(uri: String): String =
+    uri.split("://", 2) match {
+      case Array(scheme, rest) =>
+        val slash     = rest.indexOf('/')
+        val authority = if (slash < 0) rest else rest.substring(0, slash)
+        val tail      = if (slash < 0) "" else rest.substring(slash)
+        authority.lastIndexOf('@') match {
+          case -1 => uri
+          case at =>
+            val redacted = authority.substring(0, at).indexOf(':') match {
+              case -1 => "<redacted>"
+              case i  => s"${authority.substring(0, i)}:<redacted>"
+            }
+            s"$scheme://$redacted${authority.substring(at)}$tail"
+        }
+      case _                   => uri
+    }
 
   // split on the first literal ':' (a ':' inside a credential is percent-encoded as %3A), then decode each half
   private def parseAuth(uri: String, userinfo: String): Either[String, Option[AuthConfig]] =
