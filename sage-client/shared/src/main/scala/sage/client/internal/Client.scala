@@ -2372,9 +2372,8 @@ object Client {
       CIO.blocking {
         try new TxScope(pool.acquireForTransaction(), events = events)
         catch {
-          case e: NotConnected => throw e
-          case e: TimedOut     => throw e
-          case NonFatal(_)     => throw ConnectionLost(mayHaveExecuted = false)
+          case e: SageException => throw e
+          case NonFatal(_)      => throw ConnectionLost(mayHaveExecuted = false)
         }
       }
 

@@ -28,16 +28,23 @@ private[client] object Tls {
       case Some(config) =>
         val (context, verifyHostname) = contextFor(config.trust)
         val factory                   = context.getSocketFactory
-        plain => {
-          val ssl = factory.createSocket(plain, host, port, /*autoClose*/ true).asInstanceOf[SSLSocket]
-          if (verifyHostname) {
-            val params = ssl.getSSLParameters
-            params.setEndpointIdentificationAlgorithm("HTTPS")
-            ssl.setSSLParameters(params)
+        plain =>
+          try {
+            val ssl = factory.createSocket(plain, host, port, /*autoClose*/ true).asInstanceOf[SSLSocket]
+            if (verifyHostname) {
+              val params = ssl.getSSLParameters
+              params.setEndpointIdentificationAlgorithm("HTTPS")
+              ssl.setSSLParameters(params)
+            }
+            ssl.startHandshake()
+            ssl
+          } catch {
+            case e: TlsError => throw e
+            case NonFatal(e) =>
+              val wrapped = TlsError(s"TLS handshake with $host:$port failed: $e")
+              wrapped.initCause(e)
+              throw wrapped
           }
-          ssl.startHandshake()
-          ssl
-        }
     }
 
   private def contextFor(trust: TrustSource): (SSLContext, Boolean) =

@@ -8,6 +8,7 @@ import scala.concurrent.duration.*
 import scala.util.Try
 import scala.util.control.NonFatal
 
+import sage.SageException
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.DedicatedPoolConfig
 import sage.commands.{Command, Connection}
@@ -71,9 +72,8 @@ final private[client] class DedicatedPool(
         val acquired =
           try Right(acquire())
           catch {
-            case e: NotConnected => Left(e)
-            case e: TimedOut     => Left(e)
-            case NonFatal(_)     => Left(ConnectionLost(mayHaveExecuted = false)) // never reached the wire
+            case e: SageException => Left(e)
+            case NonFatal(_)      => Left(ConnectionLost(mayHaveExecuted = false)) // never reached the wire
           }
         acquired match {
           case Left(error) => callback(scala.util.Failure(error))
