@@ -362,4 +362,27 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     sink.cancelNext(_ => ())
     intercept[IllegalStateException](sink.next(_ => ()))
   }
+
+  test("a resubscribe write that fails during goLive tears the socket down instead of orphaning a subscribed connection") {
+    final class FailingSubscribe(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
+      var closeCount                       = 0
+      def start(): Unit                    = ()
+      def send(item: Transport.Item): Unit = {
+        if (item.payload.asUtf8String.contains("\r\nSUBSCRIBE\r\n")) throw new RuntimeException("write failed")
+        item.writeAttempted()
+        serverResponder(item.payload).foreach(onFrame)
+      }
+      def close(): Unit                    = { closeCount += 1; onClosed() }
+    }
+    val transports = mutable.ArrayBuffer.empty[FailingSubscribe]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FailingSubscribe(onFrame, onClosed); transports += t; t
+    }
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
+
+    intercept[RuntimeException](connection.subscribeChannels(Vector("news")))
+    assertEquals(transports.head.closeCount, 1, "the socket whose resubscribe failed must be closed, not left dispatching")
+    assert(connection.isEmpty, "the phantom sink is deregistered so the connection holds nothing")
+  }
 }

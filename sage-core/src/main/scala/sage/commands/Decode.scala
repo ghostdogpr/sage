@@ -326,8 +326,17 @@ private[commands] object TimeArgs {
   // an expiry must never land earlier than asked, and truncation would turn a sub-millisecond expiry into 0 (immediate)
   def millis(duration: FiniteDuration): Long = Math.ceilDiv(duration.toNanos, 1000000L)
 
+  // saturate rather than overflow: an extreme Instant must not throw while building a command, and clamping up never lands earlier than asked
   def millis(timestamp: Instant): Long =
-    Math.addExact(Math.multiplyExact(timestamp.getEpochSecond, 1000L), Math.ceilDiv(timestamp.getNano.toLong, 1000000L))
+    satAdd(satMul(timestamp.getEpochSecond, 1000L), Math.ceilDiv(timestamp.getNano.toLong, 1000000L))
+
+  private def satMul(a: Long, b: Long): Long =
+    try Math.multiplyExact(a, b)
+    catch { case _: ArithmeticException => if ((a ^ b) < 0L) Long.MinValue else Long.MaxValue }
+
+  private def satAdd(a: Long, b: Long): Long =
+    try Math.addExact(a, b)
+    catch { case _: ArithmeticException => if (a < 0L) Long.MinValue else Long.MaxValue }
 
   def relative(duration: FiniteDuration): Vector[Bytes] =
     if (wholeSeconds(duration)) Vector(Ex, Bytes.utf8(duration.toSeconds.toString))

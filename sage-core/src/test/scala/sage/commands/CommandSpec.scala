@@ -1,9 +1,17 @@
 package sage.commands
 
+import java.time.Instant
+
 import sage.{Bytes, SageException}
 import sage.protocol.{Frame, RespParser}
 
 class CommandSpec extends munit.FunSuite {
+
+  test("expireAt with an extreme instant saturates instead of throwing while building the command") {
+    val command = Keys.expireAt("k", Instant.MAX)
+    assertEquals(command.name, "PEXPIREAT")
+    assert(command.args.exists(_.sameBytes(Bytes.utf8(Long.MaxValue.toString))), command.args.map(_.asUtf8String))
+  }
 
   test("GET encodes against the golden wire frame") {
     assertEquals(Strings.get[String, String]("foo").encode.asUtf8String, "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n")

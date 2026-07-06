@@ -220,6 +220,57 @@ class EventsSpec extends munit.FunSuite {
     )
   }
 
+  test("a failed reconnect establish surfaces the cause as ReconnectFailed instead of retrying opaquely") {
+    val node                                            = Some(Node("shard-a", 6379))
+    val rec                                             = new Recording
+    val scheduler                                       = new ManualScheduler
+    var healthy                                         = true // first establish's PING succeeds; the reconnect's is rejected, as a rotated password would be
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val respond: Bytes => Seq[Frame] = _ => Seq(if (healthy) Frame.SimpleString("PONG") else Frame.SimpleError("WRONGPASS invalid password"))
+      val t                            = new FakeTransport(onFrame, onClosed, respond)
+      transports += t
+      t
+    }
+    val connection                                      =
+      MultiplexedConnection
+        .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec)
+    val _                                               = connection
+
+    healthy = false
+    transports.head.close()
+    scheduler.advance(1.milli)
+    assert(
+      rec.events.exists { case SageEvent.Connection.ReconnectFailed(`node`, _: sage.SageException.ServerError) => true; case _ => false },
+      rec.events
+    )
+  }
+
+  test("a reconnect establish aborted by close() is silent: shutdown is intentional, not a reconnect failure") {
+    val node                                            = Some(Node("shard-a", 6379))
+    val rec                                             = new Recording
+    val scheduler                                       = new ManualScheduler
+    var attempt                                         = 0
+    var connection: MultiplexedConnection               = null
+    val first                                           = new java.util.concurrent.atomic.AtomicReference[FakeTransport]()
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      attempt += 1
+      if (attempt == 1) { val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG"))); first.set(t); t }
+      else
+        new Transport {
+          def start(): Unit                    = { connection.close(); throw new RuntimeException("aborted by close") }
+          def send(item: Transport.Item): Unit = ()
+          def close(): Unit                    = ()
+        }
+    }
+    connection = MultiplexedConnection
+      .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec)
+
+    first.get().close()
+    scheduler.advance(1.milli)
+    assert(!rec.events.exists { case _: SageEvent.Connection.ReconnectFailed => true; case _ => false }, rec.events)
+  }
+
   // --- cache -----------------------------------------------------------------------------------------------------------------------------
 
   test("a cached read misses then hits") {

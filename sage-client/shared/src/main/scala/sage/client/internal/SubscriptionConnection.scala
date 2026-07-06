@@ -162,10 +162,11 @@ final private[client] class SubscriptionConnection(
   // bring a freshly-established socket Live, resubscribing everything registered (counters reset to this generation). In cluster mode it runs
   // once per connection with at most one Slot's worth of Shard channels registered, so the single SSUBSCRIBE never spans slots (CROSSSLOT).
   private def goLive(conn: Conn): Unit = {
-    var reconnect      = false
-    var notify         = false
+    var reconnect          = false
+    var notify             = false
     // conn.close() joins the reader whose onConnClosed needs `lock`, so tear down after releasing it (as closeOwned/close do)
-    var teardown: Conn = null
+    var teardown: Conn     = null
+    var failure: Throwable = null
     locked {
       if (state != State.Establishing && state != State.Reconnecting) teardown = conn
       else if (conn.isTerminated) {
@@ -182,19 +183,25 @@ final private[client] class SubscriptionConnection(
         val channels = channelSinks.keys.toVector
         val patterns = patternSinks.keys.toVector
         val shards   = shardSinks.keys.toVector
-        if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
-        if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
-        if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
-        if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
-          // everything closed during the establish; tear back down rather than hold an idle socket open
-          teardown = conn
-          current = null
-          state = State.Idle
-        } else {
-          state = State.Live
-          startWatchdog()
-          liveTarget = subscribeSent
+        try {
+          if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
+          if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
+          if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
+        } catch {
+          // resubscribe write failed: drop this socket and clear current so a superseded generation can't keep dispatching, then rethrow
+          case e: Throwable => current = null; teardown = conn; failure = e
         }
+        if (failure == null)
+          if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
+            // everything closed during the establish; tear back down rather than hold an idle socket open
+            teardown = conn
+            current = null
+            state = State.Idle
+          } else {
+            state = State.Live
+            startWatchdog()
+            liveTarget = subscribeSent
+          }
         established.signalAll()
         confirmed.signalAll()
       }
@@ -202,6 +209,7 @@ final private[client] class SubscriptionConnection(
     if (teardown != null) teardown.close()
     if (reconnect) scheduleReconnect(0)
     if (notify) onTerminated()
+    if (failure != null) throw failure
   }
 
   private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {

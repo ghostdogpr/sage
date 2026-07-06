@@ -212,7 +212,8 @@ final private[client] class MultiplexedConnection private (
           locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1))
         }
       } catch {
-        case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1))
+        case NonFatal(error) =>
+          locked(if (state == State.Reconnecting) { events.emit(SageEvent.Connection.ReconnectFailed(node, error)); scheduleReconnect(attempt + 1) })
       }
   }
 

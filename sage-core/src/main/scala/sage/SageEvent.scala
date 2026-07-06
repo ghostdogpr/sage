@@ -35,6 +35,14 @@ object SageEvent {
   object Connection {
     final case class Connected(node: Option[Node])    extends Connection
     final case class Disconnected(node: Option[Node]) extends Connection
+
+    /**
+      * A reconnect attempt failed to establish, carrying the cause so a permanent failure (a rejected password, an unsupported server, bad
+      * TLS material) is visible rather than looking like an endless generic reconnect. The runtime still backs off and retries — the server
+      * side may recover. The error carries no credentials (a `WRONGPASS` names no password). Not fired for the initial connect, whose failure
+      * the caller already sees.
+      */
+    final case class ReconnectFailed(node: Option[Node], error: Throwable) extends Connection
   }
 
   /**
