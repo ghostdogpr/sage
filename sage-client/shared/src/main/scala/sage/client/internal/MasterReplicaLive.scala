@@ -313,7 +313,7 @@ final private[client] class MasterReplicaLive(
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
 
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
-    CIO.acquireReleaseWith(acquireScope)(releaseScope)(lease => body(lease.scope))
+    CIO.acquireReleaseWith(acquireScope)(releaseScope)(lease => CIO.unit.flatMap(_ => body(lease.scope)))
 
   private def refreshOnTxFault(error: Throwable): Unit = if (isOwnershipFault(error)) triggerRefresh()
 

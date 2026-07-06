@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 import javax.net.ssl.SSLException
 
@@ -2366,7 +2366,7 @@ object Client {
     // connection's WATCH/MULTI state, no reply outstanding) recycles the connection; a scope left armed or interrupted mid-command is
     // discarded rather than handed to the next borrower dirty.
     def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
-      CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
+      CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => CIO.unit.flatMap(_ => body(scope)))
 
     private def acquireScope: CIO[TxScope] =
       CIO.blocking {
@@ -2410,10 +2410,18 @@ object Client {
   ): Subscription[CIO, M] =
     new Subscription[CIO, M] {
       // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
-      def next: CIO[Option[M]] = CIO.async { complete =>
-        raw.next {
-          case Some(delivery) => complete(Try(build(delivery)))
-          case None           => complete(Success(None))
+      def next: CIO[Option[M]] = {
+        // deregister the parked waiter if this next is interrupted, else a stale waiter trips the single-consumer guard
+        val registered = new AtomicReference[Option[SubscriptionConnection.Delivery] => Unit]()
+        CIO.ensure(CIO.defer { val cb = registered.getAndSet(null); if (cb ne null) raw.cancelNext(cb) }) {
+          CIO.async { complete =>
+            val cb: Option[SubscriptionConnection.Delivery] => Unit = {
+              case Some(delivery) => complete(Try(build(delivery)))
+              case None           => complete(Success(None))
+            }
+            registered.set(cb)
+            raw.next(cb)
+          }
         }
       }
       def close: CIO[Unit]     = CIO.blocking(raw.close())

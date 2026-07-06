@@ -4,7 +4,6 @@ import scala.annotation.unused
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success}
-import scala.util.control.NonFatal
 
 import kyo.compat.*
 import org.apache.pekko.{Done, NotUsed}
@@ -241,12 +240,14 @@ object SageClient {
     * `scoped`/`resource` helpers. Prefer this over `connect` + manual `close` unless you need to own the lifecycle yourself.
     */
   def use[A](config: SageConfig)(f: SageClient => Future[A])(using ExecutionContext): Future[A] =
-    connect(config).flatMap { client =>
-      val ran =
-        try f(client)
-        catch { case NonFatal(e) => Future.failed(e) }
-      ran.transformWith(result => client.close.transformWith(_ => Future.fromTry(result)))
-    }
+    connect(config).flatMap(client => useConnected(client)(f))
+
+  private[backend] def useConnected[A](client: SageClient)(f: SageClient => Future[A])(using ExecutionContext): Future[A] = {
+    val ran =
+      try f(client)
+      catch { case e: Throwable => Future.failed(e) }
+    ran.transformWith(result => client.close.transformWith(_ => Future.fromTry(result)))
+  }
 
   private[backend] def boundedPoll(block: BlockTimeout, method: String): Either[IllegalArgumentException, BlockTimeout] =
     block match {

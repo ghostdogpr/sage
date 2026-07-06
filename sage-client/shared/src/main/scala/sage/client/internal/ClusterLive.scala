@@ -171,7 +171,7 @@ final private[client] class ClusterLive(
   private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
-    CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => body(scope))
+    CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => CIO.unit.flatMap(_ => body(scope)))
 
   // classic subscriptions ride one connection pinned to an arbitrary master (classic PUBLISH broadcasts cluster-wide); the manager re-homes it
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =

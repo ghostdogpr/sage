@@ -333,4 +333,33 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
     assert(terminatedCalled, "a connection that died in the establish->live window must notify the manager, not go silently Live")
   }
+
+  test("a concurrent consumer on one sink is rejected rather than silently evicting the parked waiter") {
+    val sink                                                    = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    val parked: Option[SubscriptionConnection.Delivery] => Unit = _ => ()
+    sink.next(parked)
+    intercept[IllegalStateException](sink.next(_ => ()))
+  }
+
+  test("deregistering an interrupted waiter lets the next poll re-arm instead of tripping the single-consumer guard") {
+    val sink                                                       = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    val abandoned: Option[SubscriptionConnection.Delivery] => Unit = _ => ()
+    sink.next(abandoned)
+    sink.cancelNext(abandoned)
+
+    val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
+    val latch = new CountDownLatch(1)
+    sink.next { delivery => box.set(delivery); latch.countDown() }
+    sink.offer(SubscriptionConnection.Delivery.Channel("news", Bytes.utf8("hello")))
+    latch.await()
+    assertChannel(box.get(), "news", "hello")
+  }
+
+  test("cancelNext is identity-checked and does not evict a live waiter registered by another call") {
+    val sink                                                  = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    val live: Option[SubscriptionConnection.Delivery] => Unit = _ => ()
+    sink.next(live)
+    sink.cancelNext(_ => ())
+    intercept[IllegalStateException](sink.next(_ => ()))
+  }
 }

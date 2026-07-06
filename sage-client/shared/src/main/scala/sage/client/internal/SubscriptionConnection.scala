@@ -556,6 +556,12 @@ private[client] object SubscriptionConnection {
       if (ready != null) callback(ready)
     }
 
+    def cancelNext(callback: Option[Delivery] => Unit): Unit = {
+      lock.lock()
+      try if (waiter eq callback) waiter = null
+      finally lock.unlock()
+    }
+
     def offer(delivery: Delivery): Boolean = {
       var hungry: Option[Delivery] => Unit = null
       var blocked                          = false
@@ -589,6 +595,8 @@ private[client] object SubscriptionConnection {
   final class RawSubscription private[internal] (sink: Sink, onClose: () => Unit) {
 
     def next(callback: Option[Delivery] => Unit): Unit = sink.next(callback)
+
+    def cancelNext(callback: Option[Delivery] => Unit): Unit = sink.cancelNext(callback)
 
     def close(): Unit = onClose()
   }
