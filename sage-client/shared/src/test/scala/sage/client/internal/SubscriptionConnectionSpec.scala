@@ -385,4 +385,110 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assertEquals(transports.head.closeCount, 1, "the socket whose resubscribe failed must be closed, not left dispatching")
     assert(connection.isEmpty, "the phantom sink is deregistered so the connection holds nothing")
   }
+
+  test("a failed unsubscribe write during close still wakes the parked consumer and tears the socket down") {
+    final class FailingUnsubscribe(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
+      var closeCount                       = 0
+      def start(): Unit                    = ()
+      def send(item: Transport.Item): Unit = {
+        if (item.payload.asUtf8String.contains("\r\nUNSUBSCRIBE\r\n")) throw new RuntimeException("write failed")
+        item.writeAttempted()
+        serverResponder(item.payload).foreach(onFrame)
+      }
+      def close(): Unit                    = { closeCount += 1; onClosed() }
+    }
+    val transports = mutable.ArrayBuffer.empty[FailingUnsubscribe]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FailingUnsubscribe(onFrame, onClosed); transports += t; t
+    }
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
+
+    val sub   = connection.subscribeChannels(Vector("news"))
+    val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
+    val latch = new CountDownLatch(1)
+    sub.next { delivery => box.set(delivery); latch.countDown() }
+
+    intercept[RuntimeException](sub.close())
+    assert(latch.await(1, java.util.concurrent.TimeUnit.SECONDS), "the parked consumer must be woken, not left hanging")
+    assertEquals(box.get(), None)
+    assertEquals(transports.head.closeCount, 1)
+  }
+
+  test("a connect failure on the subscribe path surfaces as a modeled ConnectionFailed, not a raw defect") {
+    val factory: MultiplexedConnection.TransportFactory = (_, _) =>
+      new Transport {
+        def start(): Unit                    = throw new java.net.ConnectException("connection refused")
+        def send(item: Transport.Item): Unit = ()
+        def close(): Unit                    = ()
+      }
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
+
+    intercept[sage.SageException.ConnectionFailed](connection.subscribeChannels(Vector("news")))
+  }
+
+  test("a failed subscription reconnect emits ReconnectFailed instead of retrying in silence") {
+    val recorded                                        = new java.util.concurrent.ConcurrentLinkedQueue[sage.SageEvent]()
+    val events                                          = new Events {
+      def enabled: Boolean                      = true
+      def emitsEvents: Boolean                  = true
+      def tracer: Option[sage.CommandTracer]    = None
+      def serverNode: Option[sage.cluster.Node] = None
+      def emit(event: sage.SageEvent): Unit     = { val _ = recorded.add(event) }
+      def close(): Unit                         = ()
+    }
+    var healthy                                         = true
+    val respond: Bytes => Seq[Frame]                    = payload =>
+      if (!healthy && payload.asUtf8String.contains("\r\nPING\r\n")) Seq(Frame.SimpleError("WRONGPASS invalid password"))
+      else serverResponder(payload)
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FakeTransport(onFrame, onClosed, respond); transports += t; t
+    }
+    val scheduler                                       = new ManualScheduler
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), scheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true, events = events)
+
+    connection.subscribeChannels(Vector("news"))
+    healthy = false
+    transports.head.close()
+    scheduler.advance(1.milli)
+    assert(
+      recorded.toArray.exists {
+        case sage.SageEvent.Connection.ReconnectFailed(None, _: sage.SageException.ServerError) => true
+        case _                                                                                  => false
+      },
+      recorded.toArray.mkString(", ")
+    )
+  }
+
+  test("detach swallows an interrupted unsubscribe write so a cluster close can still terminate the sink") {
+    final class InterruptingUnsubscribe(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
+      def start(): Unit                    = ()
+      def send(item: Transport.Item): Unit = {
+        if (item.payload.asUtf8String.contains("\r\nUNSUBSCRIBE\r\n")) throw new InterruptedException("interrupted")
+        item.writeAttempted()
+        serverResponder(item.payload).foreach(onFrame)
+      }
+      def close(): Unit                    = onClosed()
+    }
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => new InterruptingUnsubscribe(onFrame, onClosed)
+    val connection =
+      new SubscriptionConnection(
+        factory,
+        Vector(Connection.ping()),
+        new ManualScheduler,
+        fixedBackoff,
+        noWatchdog,
+        1000L,
+        16,
+        () => true,
+        cluster = true
+      )
+
+    val sink = new SubscriptionConnection.Sink(Vector("news"), SubscriptionConnection.Kind.Channel, 16)
+    connection.attach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)
+    assert(connection.detach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)) // must return, not throw the interrupt
+  }
 }

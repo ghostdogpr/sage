@@ -224,21 +224,17 @@ object SageConfig {
   }
 
   private def redactCredentials(uri: String): String =
-    uri.split("://", 2) match {
-      case Array(scheme, rest) =>
-        val slash     = rest.indexOf('/')
-        val authority = if (slash < 0) rest else rest.substring(0, slash)
-        val tail      = if (slash < 0) "" else rest.substring(slash)
-        authority.lastIndexOf('@') match {
-          case -1 => uri
-          case at =>
-            val redacted = authority.substring(0, at).indexOf(':') match {
-              case -1 => "<redacted>"
-              case i  => s"${authority.substring(0, i)}:<redacted>"
-            }
-            s"$scheme://$redacted${authority.substring(at)}$tail"
+    uri.lastIndexOf('@') match {
+      case -1 => uri
+      case at =>
+        val prefix    = uri.substring(0, at)
+        val schemeEnd = prefix.indexOf("://") match { case -1 => 0; case i => i + 3 }
+        val userinfo  = prefix.substring(schemeEnd)
+        val redacted  = userinfo.indexOf(':') match {
+          case -1 => "<redacted>"
+          case i  => s"${userinfo.substring(0, i)}:<redacted>"
         }
-      case _                   => uri
+        s"${prefix.substring(0, schemeEnd)}$redacted${uri.substring(at)}"
     }
 
   // split on the first literal ':' (a ':' inside a credential is percent-encoded as %3A), then decode each half

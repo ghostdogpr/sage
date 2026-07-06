@@ -8,9 +8,10 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
-import sage.Bytes
-import sage.SageException.NotConnected
+import sage.{Bytes, SageEvent, SageException}
+import sage.SageException.{ConnectionFailed, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.cluster.Node
 import sage.commands.{Command, Connection, Pubsub, Reply}
 import sage.protocol.Frame
 
@@ -37,7 +38,9 @@ final private[client] class SubscriptionConnection(
   isLive: () => Boolean,
   cluster: Boolean = false,
   onTerminated: () => Unit = () => (),
-  onReconnect: () => Unit = () => ()
+  onReconnect: () => Unit = () => (),
+  events: Events = Events.disabled,
+  node: Option[Node] = None
 ) extends Placement.ShardConn {
   import SubscriptionConnection.*
 
@@ -149,7 +152,10 @@ final private[client] class SubscriptionConnection(
   def detach(sink: Sink, names: Vector[String], kind: Kind): Boolean =
     locked {
       val emptied = deregister(sink, names, kind)
-      if (emptied.nonEmpty && state == State.Live) current.send(kind.unsubscribeWire(emptied))
+      // best-effort: swallow a failed (or interrupted) unsubscribe write so the caller still learns emptiness and terminates the sink
+      if (emptied.nonEmpty && state == State.Live)
+        try current.send(kind.unsubscribeWire(emptied))
+        catch { case NonFatal(_) | _: InterruptedException => () }
       isEmptyUnlocked
     }
 
@@ -250,7 +256,14 @@ final private[client] class SubscriptionConnection(
 
   private def establish(): Conn = {
     val conn = new Conn
-    conn.start()
+    try conn.start()
+    catch {
+      case e: SageException => throw e
+      case NonFatal(e)      =>
+        val failed = ConnectionFailed(s"could not open the subscription connection: $e")
+        failed.initCause(e)
+        throw failed
+    }
     runBootstrap(conn)
     conn
   }
@@ -277,7 +290,10 @@ final private[client] class SubscriptionConnection(
     if (proceed) {
       onReconnect()
       try goLive(establish())
-      catch { case NonFatal(_) => locked(if (state == State.Reconnecting) scheduleReconnect(attempt + 1)) }
+      catch {
+        case NonFatal(error) =>
+          locked(if (state == State.Reconnecting) { events.emit(SageEvent.Connection.ReconnectFailed(node, error)); scheduleReconnect(attempt + 1) })
+      }
     }
   }
 
@@ -347,10 +363,12 @@ final private[client] class SubscriptionConnection(
 
   // standalone: the connection owns the sink, so it both unsubscribes and terminates it; tears the socket down when its last sink closes
   private def closeOwned(sink: Sink): Unit = {
-    var teardown: Conn = null
+    var teardown: Conn     = null
+    var failure: Throwable = null
     locked {
       val emptied = deregister(sink, sink.names, sink.kind)
-      if (emptied.nonEmpty && state == State.Live) current.send(sink.kind.unsubscribeWire(emptied))
+      try if (emptied.nonEmpty && state == State.Live) current.send(sink.kind.unsubscribeWire(emptied))
+      catch { case e: Throwable => failure = e }
       if (isEmptyUnlocked && (state == State.Live || state == State.Reconnecting)) {
         stopWatchdog()
         teardown = current
@@ -360,6 +378,7 @@ final private[client] class SubscriptionConnection(
     }
     sink.terminate()
     if (teardown != null) teardown.close()
+    if (failure != null) throw failure
   }
 
   // atomic empty-check + Closed transition, so a racing attach can't bind a sink to a connection about to close
