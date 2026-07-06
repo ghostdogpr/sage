@@ -2298,7 +2298,8 @@ object Client {
           watchdog,
           connectTimeout.toMillis,
           pubsub.bufferSize,
-          () => connection.isLive
+          () => connection.isLive,
+          events = events
         )
         new Live(connection, pool, subscriptions, cachingEnabled, events)
       }

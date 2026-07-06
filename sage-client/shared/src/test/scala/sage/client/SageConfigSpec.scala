@@ -78,11 +78,14 @@ class SageConfigSpec extends munit.FunSuite {
     assert(SageConfig.fromUri("redis://h?ssl=true").isLeft) // query params unsupported
   }
 
-  test("a parse error never echoes the password back") {
+  test("a parse error never echoes the password back, even when the URI is the kind that fails to parse") {
     def problem(uri: String): String = SageConfig.fromUri(uri).swap.getOrElse(fail(s"expected a Left for $uri"))
     assert(!problem("redis://alice:hunter2@h:0").contains("hunter2"))
     assert(!problem("redis://:hunter2@h:0").contains("hunter2"))
     assert(!problem("redis://:p%40ss@h?x=1").contains("p%40ss"))
+    assert(!problem("memcache://alice:hunter2@h").contains("hunter2")) // unsupported scheme still parses far enough to leak
+    assert(!problem("alice:hunter2@h").contains("hunter2"))            // missing scheme
+    assert(!problem("redis://alice:hun/ter2@h").contains("hun/ter2"))  // unencoded '/' in the password
     assertEquals(problem("redis://alice:hunter2@h:0"), "invalid redis URI 'redis://alice:<redacted>@h:0': invalid port in 'h:0'")
   }
 }

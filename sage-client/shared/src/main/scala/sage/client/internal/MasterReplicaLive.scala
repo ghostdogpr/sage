@@ -357,7 +357,8 @@ final private[client] class MasterReplicaLive(
             config.pubsub.bufferSize,
             // the subscription opens its own socket, so gate on a resolved master, not a live pooled connection a pub/sub-only client never creates
             () => !closed && masterNodeRef.get() != null,
-            onReconnect = () => refreshRolesBeforeRehome()
+            onReconnect = () => refreshRolesBeforeRehome(),
+            events = events
           )
         }
         s = subscriptions
