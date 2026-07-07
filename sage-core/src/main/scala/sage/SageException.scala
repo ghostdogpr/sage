@@ -21,7 +21,7 @@ object SageException {
 
   object DecodeError {
 
-    private[sage] def fromThrowable(error: Throwable): DecodeError = {
+    def fromThrowable(error: Throwable): DecodeError = {
       val wrapped = DecodeError("a value the codec could decode", s"the codec threw $error")
       wrapped.initCause(error)
       wrapped
