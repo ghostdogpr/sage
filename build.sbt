@@ -5,7 +5,7 @@ val scala3Version     = "3.3.8"
 val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
 val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
 
-val munitVersion          = "1.3.3"
+val munitVersion          = "1.3.4"
 val testcontainersVersion = "0.44.1"
 val otelVersion           = "1.63.0"
 
