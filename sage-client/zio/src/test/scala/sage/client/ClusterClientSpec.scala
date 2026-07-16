@@ -562,6 +562,84 @@ class ClusterClientSpec extends munit.FunSuite {
       .map(result => assertEquals(result, Some(Vector(Some("v")))))
   }
 
+  test("a cluster transaction rejects DBSIZE on the immediate-run path, with no MULTI sent") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(_.dbSize)
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+        assert(!fixture.written(nodeA).exists(_.contains("DBSIZE")), "a rejected DBSIZE must not reach the wire")
+      }
+  }
+
+  test("a cluster transaction rejects DBSIZE inside exec, with no MULTI sent") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(_.exec(Vector(Server.dbSize)))
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+        assert(!fixture.written(nodeA).exists(_.contains("MULTI")), "a rejected exec must not open MULTI")
+      }
+  }
+
+  test("a cluster transaction still accepts WAIT inside exec, whose node-local reply is a valid transaction result") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI")) Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(Frame.Integer(1L))))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(_.exec(Vector(Server.waitReplicas(1L, 100.millis))))
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, Some(Vector(1L)))
+        assert(fixture.written(nodeA).exists(_.contains("WAIT")), "WAIT should ride the pinned transaction connection")
+      }
+  }
+
+  test("a cluster transaction accepts immediate WAIT and WAITAOF on the run path, whose node-local replies are valid results") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("WAITAOF")) Seq(Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L))))
+      else if (text.contains("WAIT")) Seq(Frame.Integer(1L))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(tx => tx.run(Server.waitReplicas(1L, 100.millis)).flatMap(_ => tx.run(Server.waitAof(1L, 1L, 100.millis))))
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, (1L, 1L))
+        assert(fixture.written(nodeA).exists(_.contains("WAIT\r\n")), "WAIT should ride the pinned transaction connection")
+        assert(fixture.written(nodeA).exists(_.contains("WAITAOF")), "WAITAOF should ride the pinned transaction connection")
+      }
+  }
+
+  test("a cluster transaction still accepts KEYS, an existing broadcast command, returning the pinned node's keys") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("KEYS")) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("k1")))))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live
+      .transaction(_.run(Keys.keys[String]("*")))
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, Vector("k1"))
+        assert(fixture.written(nodeA).exists(_.contains("KEYS")), "KEYS should ride the pinned transaction connection")
+      }
+  }
+
   test("a sharded subscribe routes SSUBSCRIBE to the channel's slot owner, not other nodes") {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(splitOn(slotB))

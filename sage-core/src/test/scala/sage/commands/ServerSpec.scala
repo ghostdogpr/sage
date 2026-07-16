@@ -84,6 +84,16 @@ class ServerSpec extends munit.FunSuite {
     assert(Server.waitReplicas(1L, 1.second).allMasters)
   }
 
+  test(
+    "only DBSIZE requires a cluster-wide transaction result; other broadcasts stay transaction-legal like Redis, which never flags them no-multi"
+  ) {
+    assert(!Server.waitReplicas(1L, 1.second).requiresClusterWideTxResult, "WAIT stays legal in a cluster transaction with node-local semantics")
+    assert(!Server.waitAof(1L, 0L, 1.second).requiresClusterWideTxResult, "WAITAOF stays legal in a cluster transaction with node-local semantics")
+    assert(!Keys.keys[String]("*").requiresClusterWideTxResult, "KEYS stays legal in a cluster transaction, returning the pinned node's keys")
+    assert(!Server.flushAll().requiresClusterWideTxResult, "FLUSHALL stays legal in a cluster transaction")
+    assert(!Server.flushDb().requiresClusterWideTxResult, "FLUSHDB stays legal in a cluster transaction")
+  }
+
   private def fold(command: Command[?]): (Frame, Frame) => Frame =
     command.broadcast match {
       case BroadcastReduce.Fold(f) => f
@@ -120,6 +130,10 @@ class ServerSpec extends munit.FunSuite {
 
   test("DBSIZE broadcasts per master and folds shard counts into the cluster total, with checked overflow and malformed passthrough") {
     assert(Server.dbSize.allMasters)
+    assert(
+      Server.dbSize.requiresClusterWideTxResult,
+      "DBSIZE only produces a total when broadcast, so a single-node cluster transaction must reject it"
+    )
     val sum    = fold(Server.dbSize)
     assertEquals(sum(Frame.Integer(10L), Frame.Integer(20L)), Frame.Integer(30L))
     assertEquals(Reply.run(Server.dbSize, Frame.Integer(30L)), Right(30L))

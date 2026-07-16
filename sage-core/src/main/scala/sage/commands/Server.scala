@@ -143,7 +143,15 @@ private[sage] object Server {
     }
 
   val dbSize: Command[Long] =
-    Command("DBSIZE", Command.NoKeys, Vector.empty, Decode.long, allMasters = true, broadcast = BroadcastReduce.Fold(dbSizeSum))
+    Command(
+      "DBSIZE",
+      Command.NoKeys,
+      Vector.empty,
+      Decode.long,
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold(dbSizeSum),
+      requiresClusterWideTxResult = true
+    )
 
   val time: Command[Instant] =
     Command(

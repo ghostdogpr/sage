@@ -638,6 +638,12 @@ final private[client] class ClusterLive(
     def run[A](command: Command[A]): CIO[A] =
       if (command.isBlocking)
         CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
+      else if (command.requiresClusterWideTxResult)
+        CIO.fail(
+          new IllegalArgumentException(
+            s"${command.name} returns a cluster-wide result that a single-node Transaction cannot produce; run it individually on the client"
+          )
+        )
       else
         CIO.async[A] { complete =>
           val tracked = Events.trackSpan(events, command, complete)
@@ -693,6 +699,12 @@ final private[client] class ClusterLive(
         CIO.value(Some(Vector.empty))
       else if (p.commands.exists(_.isBlocking))
         CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
+      else if (p.commands.exists(_.requiresClusterWideTxResult))
+        CIO.fail(
+          new IllegalArgumentException(
+            "a Transaction cannot carry a command that returns a cluster-wide result; run it individually on the client"
+          )
+        )
       else
         CIO
           .async[Vector[Frame]] { complete =>
