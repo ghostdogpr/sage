@@ -176,7 +176,8 @@ class NodePoolSpec extends munit.FunSuite {
     val result       = new AtomicReference[Try[NodeClient]]()
     val establishing = new Thread(() => result.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
-    awaitTrue(connecting.get() != null, "the establish never reached the connect phase")
+    awaitTrue(connecting.get() != null, "the establish never started")
+    assert(connecting.get().reached.await(2, TimeUnit.SECONDS), "the establish never reached the connect phase")
 
     pool.close()
     establishing.join(2000)

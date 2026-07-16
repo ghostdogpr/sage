@@ -521,12 +521,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   }
 
   test("close unblocks a subscriber parked waiting for the bootstrap reply") {
-    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
-    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, _ => Nil)
-      transports += t
-      t
-    }
+    val pinged                                          = new CountDownLatch(1)
+    val factory: MultiplexedConnection.TransportFactory =
+      (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, payload => { if (payload.asUtf8String.contains("PING")) pinged.countDown(); Nil })
     val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 60000L, 16, () => true)
 
@@ -535,11 +532,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       catch { case _: Throwable => () }
     )
     subscribing.start()
-
-    val deadline = System.currentTimeMillis() + 2000
-    def pinged   = transports.headOption.exists(_.written.exists(_.asUtf8String.contains("PING")))
-    while (!pinged && System.currentTimeMillis() < deadline) Thread.sleep(1)
-    assert(pinged, "the bootstrap PING was never sent")
+    assert(pinged.await(2, TimeUnit.SECONDS), "the bootstrap PING was never sent")
 
     connection.close()
     subscribing.join(2000)

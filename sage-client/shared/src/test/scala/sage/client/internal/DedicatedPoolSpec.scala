@@ -344,7 +344,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
 
     val deadline = System.currentTimeMillis() + 2000
     while (connecting.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(1)
-    assert(connecting.get() != null, "the establish never reached the connect phase")
+    assert(connecting.get() != null, "the establish never started")
+    assert(connecting.get().reached.await(2, java.util.concurrent.TimeUnit.SECONDS), "the establish never reached the connect phase")
 
     pool.close()
     establishing.join(2000)
