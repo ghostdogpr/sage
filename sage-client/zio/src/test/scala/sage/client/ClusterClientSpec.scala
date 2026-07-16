@@ -61,9 +61,14 @@ class ClusterClientSpec extends munit.FunSuite {
     // nodes whose *next* HELLO fails and then clears: simulates an establish that fails once mid-recovery, so a re-home must retry to converge
     val flakyHello = mutable.Set.empty[Node]
 
+    private def transportsOf(node: Node): Vector[FakeTransport] =
+      transports.synchronized(transports.get(node).map(_.toVector).getOrElse(Vector.empty))
+
+    private def allTransports: Vector[FakeTransport] = transports.synchronized(transports.values.flatten.toVector)
+
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
-        connectGate(node, transports.get(node).map(_.size).getOrElse(0))
+        connectGate(node, transportsOf(node).size)
         val respond: Bytes => Seq[Frame] = payload => {
           val text = payload.asUtf8String
           if (text.contains("HELLO"))
@@ -71,7 +76,7 @@ class ClusterClientSpec extends munit.FunSuite {
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
-        transports.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += transport
+        transports.synchronized { val _ = transports.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += transport }
         transport
       }
 
@@ -93,27 +98,20 @@ class ClusterClientSpec extends munit.FunSuite {
 
     live.bootstrapTopology()
 
-    def written(node: Node): Vector[String] =
-      transports.getOrElse(node, mutable.ArrayBuffer.empty).toVector.flatMap(_.written.map(_.asUtf8String))
+    def written(node: Node): Vector[String] = transportsOf(node).flatMap(_.written.map(_.asUtf8String))
 
     // simulate the server dropping a node's Sharded Subscription Connection (the post-migration disconnect): close the transport that
     // carried the SSUBSCRIBE so its onClosed fires and the manager re-homes
     def dropShardConn(node: Node): Unit =
-      transports
-        .getOrElse(node, mutable.ArrayBuffer.empty)
-        .find(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE")))
-        .foreach(_.close())
+      transportsOf(node).find(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE"))).foreach(_.close())
 
     // close the master's classic Subscription Connection so its onClosed fires and the manager re-homes
     def dropClassicConn(): Unit =
-      transports.values.flatten
-        .find(_.written.exists(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n")))
-        .foreach(_.close())
+      allTransports.find(_.written.exists(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n"))).foreach(_.close())
 
-    def drop(node: Node): Unit = transports.getOrElse(node, mutable.ArrayBuffer.empty).foreach(_.close())
+    def drop(node: Node): Unit = transportsOf(node).foreach(_.close())
 
-    def deliver(node: Node, frame: Frame): Unit =
-      transports.getOrElse(node, mutable.ArrayBuffer.empty).lastOption.foreach(_.emit(frame))
+    def deliver(node: Node, frame: Frame): Unit = transportsOf(node).lastOption.foreach(_.emit(frame))
   }
 
   private def awaitWritten(fixture: Fixture, node: Node, token: String): Unit = {

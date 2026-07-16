@@ -16,8 +16,10 @@ final class FakeTransport(
   var autoWrite: Boolean = true
 ) extends Transport {
 
-  val written: mutable.ArrayBuffer[Bytes]                 = mutable.ArrayBuffer.empty
+  private val writes: mutable.ArrayBuffer[Bytes]          = mutable.ArrayBuffer.empty
   private val queued: mutable.ArrayBuffer[Transport.Item] = mutable.ArrayBuffer.empty
+
+  def written: Vector[Bytes] = synchronized(writes.toVector)
 
   var closeCount: Int = 0
 
@@ -47,7 +49,7 @@ final class FakeTransport(
 
   private def write(item: Transport.Item): Unit = {
     item.writeAttempted()
-    val _ = written += item.payload
+    synchronized { val _ = writes += item.payload }
     respond(item.payload).foreach(onFrame)
   }
 }
