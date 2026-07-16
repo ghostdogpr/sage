@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference, AtomicReferenceArray}
 
 import scala.concurrent.duration.*
 import scala.util.Try
@@ -40,19 +40,25 @@ class NodePoolSpec extends munit.FunSuite {
       DedicatedPoolConfig()
     )
 
-  // a factory that blocks the first (multiplexed) connect on `gate`, signalling `reached` first, and captures the opened transport
-  private def gatedFactory(
-    reached: CountDownLatch,
-    gate: CountDownLatch,
-    transport: AtomicReference[FakeTransport]
-  ): Node => MultiplexedConnection.TransportFactory =
-    _ =>
+  // gates the nth connect attempt: it signals `reached(n)`, blocks until `release(n)`, then opens a transport captured at `transport(n)`
+  final private class GatedFactory(count: Int) {
+    val reached                                                 = Vector.fill(count)(new CountDownLatch(1))
+    private val gate                                            = Vector.fill(count)(new CountDownLatch(1))
+    private val opened                                          = new AtomicReferenceArray[FakeTransport](count)
+    private val attempt                                         = new AtomicInteger(0)
+    val factory: Node => MultiplexedConnection.TransportFactory = _ =>
       (onFrame, onClosed) => {
-        if (transport.get() == null) { reached.countDown(); gate.await() }
+        val i = attempt.getAndIncrement()
+        reached(i).countDown()
+        gate(i).await()
         val t = new FakeTransport(onFrame, onClosed, respond)
-        transport.compareAndSet(null, t)
+        opened.set(i, t)
         t
       }
+    def awaitReached(i: Int): Unit                              = assert(reached(i).await(2, TimeUnit.SECONDS), s"attempt $i never reached connect")
+    def release(i: Int): Unit                                   = gate(i).countDown()
+    def transport(i: Int): FakeTransport                        = opened.get(i)
+  }
 
   private def awaitTrue(cond: => Boolean, clue: String): Unit = {
     val deadline = System.nanoTime() + 2.seconds.toNanos
@@ -60,17 +66,20 @@ class NodePoolSpec extends munit.FunSuite {
     assert(cond, clue)
   }
 
+  // every waiter parks on the single-flight latch (or, briefly, the pool lock); once all are WAITING at once none holds the lock, so each
+  // must be blocked on the establishment, not still racing toward it
+  private def awaitAllWaiting(threads: Seq[Thread]): Unit =
+    awaitTrue(threads.forall(_.getState == Thread.State.WAITING), "a waiter never blocked on the in-flight establishment")
+
   test("retain invalidates an in-flight establishment for a rejected node: the client is closed, absent, and every waiter fails") {
-    val node      = Node("gated", 6379)
-    val reached   = new CountDownLatch(1)
-    val gate      = new CountDownLatch(1)
-    val transport = new AtomicReference[FakeTransport]()
-    val pool      = newPool(gatedFactory(reached, gate, transport))
+    val node  = Node("gated", 6379)
+    val gated = new GatedFactory(1)
+    val pool  = newPool(gated.factory)
 
     val establisher  = new AtomicReference[Try[NodeClient]]()
     val establishing = new Thread(() => establisher.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
-    assert(reached.await(2, TimeUnit.SECONDS), "the establisher never reached connect")
+    gated.awaitReached(0)
 
     val waiters = (1 to 3).map { i =>
       val result = new AtomicReference[Try[NodeClient]]()
@@ -78,7 +87,7 @@ class NodePoolSpec extends munit.FunSuite {
       thread.start()
       (thread, result)
     }
-    Thread.sleep(100) // let the waiters block on the shared establishment before retain runs
+    awaitAllWaiting(waiters.map(_._1)) // every waiter is parked on the original token before retain runs
 
     pool.retain(_ => false)
 
@@ -88,39 +97,68 @@ class NodePoolSpec extends munit.FunSuite {
       assert(result.get().failed.get.isInstanceOf[NotConnected], s"unexpected waiter error: ${result.get()}")
     }
 
-    gate.countDown()
+    gated.release(0)
     establishing.join(2000)
     assert(
       establisher.get() != null && establisher.get().isFailure && establisher.get().failed.get.isInstanceOf[NotConnected],
       s"establisher: ${establisher.get()}"
     )
 
-    val opened = transport.get()
-    assert(opened != null, "no transport was ever created")
-    awaitTrue(opened.closeCount > 0, "the discarded NodeClient was not closed")
+    awaitTrue(gated.transport(0).closeCount > 0, "the discarded NodeClient was not closed")
     assert(pool.existingLive(node).isEmpty, "the rejected node leaked into the pool")
     assert(!pool.candidatesByLiveness.contains(node), "the rejected node leaked into refresh candidates")
     pool.close()
   }
 
   test("retain leaves an accepted in-flight establishment to complete and publish") {
-    val node      = Node("kept", 6379)
-    val reached   = new CountDownLatch(1)
-    val gate      = new CountDownLatch(1)
-    val transport = new AtomicReference[FakeTransport]()
-    val pool      = newPool(gatedFactory(reached, gate, transport))
+    val node  = Node("kept", 6379)
+    val gated = new GatedFactory(1)
+    val pool  = newPool(gated.factory)
 
     val result       = new AtomicReference[Try[NodeClient]]()
     val establishing = new Thread(() => result.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
-    assert(reached.await(2, TimeUnit.SECONDS), "the establisher never reached connect")
+    gated.awaitReached(0)
 
     pool.retain(_ => true)
 
-    gate.countDown()
+    gated.release(0)
     establishing.join(2000)
     assert(result.get() != null && result.get().isSuccess, s"expected success, got ${result.get()}")
     assert(pool.existingLive(node).isDefined, "the accepted node should be live in the pool")
+    pool.close()
+  }
+
+  test("an attempt invalidated by retain neither removes nor prevents a newer attempt for the same node") {
+    val node  = Node("racing", 6379)
+    val gated = new GatedFactory(2)
+    val pool  = newPool(gated.factory)
+
+    val first       = new AtomicReference[Try[NodeClient]]()
+    val firstThread = new Thread(() => first.set(Try(pool.getOrEstablish(node))), "attempt-1")
+    firstThread.start()
+    gated.awaitReached(0)
+
+    pool.retain(_ => false) // clears attempt 1 from pending while its connect is still in flight
+
+    val second       = new AtomicReference[Try[NodeClient]]()
+    val secondThread = new Thread(() => second.set(Try(pool.getOrEstablish(node))), "attempt-2")
+    secondThread.start()
+    gated.awaitReached(1) // a fresh attempt, since attempt 1 is no longer pending
+
+    gated.release(0) // attempt 1 completes last: it must discard without touching attempt 2
+    firstThread.join(2000)
+    assert(
+      first.get() != null && first.get().isFailure && first.get().failed.get.isInstanceOf[NotConnected],
+      s"attempt 1: ${first.get()}"
+    )
+    awaitTrue(gated.transport(0).closeCount > 0, "attempt 1's discarded client was not closed")
+
+    gated.release(1)
+    secondThread.join(2000)
+    assert(second.get() != null && second.get().isSuccess, s"attempt 2: ${second.get()}")
+    assert(pool.existingLive(node).isDefined, "attempt 2 did not publish")
+    assertEquals(gated.transport(1).closeCount, 0, "attempt 2's published client must not be closed")
     pool.close()
   }
 }
