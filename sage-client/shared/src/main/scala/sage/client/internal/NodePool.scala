@@ -36,8 +36,7 @@ final private[client] class NodePool(
   private val lock             = new ReentrantLock()
   private val established      = mutable.HashMap.empty[Node, NodeClient]
   private val pendingEstablish = mutable.HashMap.empty[Node, NodePool.Establish]
-  // connections whose socket is still being opened, retained so close() can abort one stuck in connect rather than waiting out the connect
-  // timeout; each establisher removes its own entry once the connect settles
+  // connections whose socket is still being opened, so close() can abort one still connecting
   private val establishing     = mutable.Set.empty[MultiplexedConnection]
   @volatile private var closed = false
 
@@ -91,7 +90,6 @@ final private[client] class NodePool(
             Some(node),
             events,
             dedicatedBootstrap,
-            // register the connection before its blocking connect; if close() already fired, abort it now so it doesn't strand the socket
             onConstructed = conn => { connRef.set(conn); if (locked { establishing += conn; closed }) conn.close() }
           )
         catch {
@@ -142,7 +140,6 @@ final private[client] class NodePool(
     // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still
     // observes `closed` on return and closes the node it opened
     waiters.foreach(_.fail(NotConnected()))
-    // abort connections still opening their socket, rather than stranding them for the connect timeout
     opening.foreach(_.close())
     all.foreach(_.close())
   }

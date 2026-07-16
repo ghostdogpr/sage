@@ -157,7 +157,7 @@ final private[client] class MultiplexedConnection private (
     // emit under the lock so the enqueue is ordered with the state transition: a socket dropping immediately after cannot deliver
     // Disconnected before this Connected (the same lock serializes both)
     val teardown = locked {
-      // a close() that arrived while establish() ran (e.g. the owning pool shutting down) wins: don't publish this connection Live
+      // a close() during establish() wins: tear down rather than publish Live
       if (state == State.Closed) conn
       else if (conn.isTerminated) { scheduleReconnect(0); null }
       else {
@@ -174,7 +174,6 @@ final private[client] class MultiplexedConnection private (
 
   private def establish(): Conn = {
     val conn = new Conn
-    // register before the blocking connect so a concurrent close() can abort it; if the close already fired, abort right away
     locked { establishing = conn; if (state == State.Closed) conn.close() }
     try {
       conn.start()
@@ -464,8 +463,7 @@ private[client] object MultiplexedConnection {
   ): MultiplexedConnection = {
     val connection =
       new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, node, events)
-    // hand the instance to the caller before the blocking initial connect, so an owner (e.g. a NodePool) can abort it from close() rather
-    // than stranding the socket until the connect timeout
+    // expose the instance before the blocking connect so an owner can abort it from close()
     onConstructed(connection)
     connection.connectInitial()
     connection

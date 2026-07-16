@@ -70,8 +70,6 @@ final private[client] class DedicatedConnection private (
 
   private def start(): Unit = {
     val transport = factory(onFrame, onClosed)
-    // transportRef is published before the blocking connect, so a concurrent close() can abort it; `dead` (set by close before it reads
-    // transportRef) covers the narrow gap where close lands before the transport is published
     transportRef.set(transport)
     if (dead) transport.close()
     else transport.start()
@@ -164,8 +162,7 @@ private[client] object DedicatedConnection {
   }
 
   /**
-    * Builds an unconnected connection; the pool drives the blocking [[DedicatedConnection.establish]] separately so it can hold the reference
-    * and abort one still establishing.
+    * Builds an unconnected connection; the pool runs the blocking [[DedicatedConnection.establish]] separately.
     */
   def create(factory: MultiplexedConnection.TransportFactory, connectTimeoutMillis: Long): DedicatedConnection =
     new DedicatedConnection(factory, connectTimeoutMillis)

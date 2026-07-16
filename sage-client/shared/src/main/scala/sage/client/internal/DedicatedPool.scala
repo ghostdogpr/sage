@@ -39,8 +39,7 @@ final private[client] class DedicatedPool(
 
   private val idle                              = mutable.ArrayDeque.empty[DedicatedPool.Idle]
   private val live                              = mutable.Set.empty[DedicatedConnection]
-  // connections whose socket is being opened outside the lock; retained so close() can abort one still stuck in connect rather than
-  // stranding it until the connect timeout. The establisher removes its own entry on return.
+  // connections whose socket is being opened outside the lock, so close() can abort one still connecting
   private val establishing                      = mutable.Set.empty[DedicatedConnection]
   private var reserved                          = 0
   private var closing                           = false
@@ -148,7 +147,7 @@ final private[client] class DedicatedPool(
   }
 
   // entered holding the lock with `reserved` already incremented; registers the connection, drops the lock for the blocking establish, then
-  // re-accounts under it. Registering before the unlock lets a concurrent close() abort the socket instead of stranding it in connect.
+  // re-accounts under it.
   private def establishOutsideLock(): DedicatedConnection = {
     val connection = DedicatedConnection.create(factory, connectTimeoutMillis)
     establishing += connection

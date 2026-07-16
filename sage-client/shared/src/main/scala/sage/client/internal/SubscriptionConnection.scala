@@ -49,8 +49,7 @@ final private[client] class SubscriptionConnection(
   private val confirmed          = lock.newCondition()
   private var state: State       = State.Idle
   private var current: Conn      = null
-  // the connection whose socket is being opened (an attach or a reconnect), retained so a shutdown can abort one still stuck in connect
-  // rather than stranding it until the connect timeout; the establisher clears it when the connect unwinds
+  // the connection whose socket is being opened, so a shutdown can abort one still connecting
   private var establishing: Conn = null
   private val channelSinks       = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
   private val patternSinks       = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
@@ -259,7 +258,6 @@ final private[client] class SubscriptionConnection(
 
   private def establish(): Conn = {
     val conn = new Conn
-    // register before the blocking connect so a concurrent shutdown can abort it; if the shutdown already fired, abort right away
     locked { establishing = conn; if (state == State.Closed) conn.close() }
     try {
       try conn.start()
@@ -517,8 +515,6 @@ final private[client] class SubscriptionConnection(
 
     def start(): Unit = {
       val transport = factory(frame => onFrame(this, frame), () => { terminated = true; onConnClosed(this) })
-      // transportRef is published before the blocking connect so a concurrent close() can abort it; `aborted` (set by close before it reads
-      // transportRef) covers the narrow gap where close lands before the transport is published
       transportRef.set(transport)
       if (aborted) transport.close()
       else transport.start()
