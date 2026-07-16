@@ -268,6 +268,34 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("DBSIZE broadcasts to every slot-owning master and sums shard counts into the cluster total") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("DBSIZE")) Seq(Frame.Integer(if (node == nodeA) 2L else 3L))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.dbSize).unsafeRun.map { result =>
+      assertEquals(result, 5L)
+      assert(fixture.written(nodeA).exists(_.contains("DBSIZE")), "nodeA did not receive DBSIZE")
+      assert(fixture.written(nodeB).exists(_.contains("DBSIZE")), "nodeB did not receive DBSIZE")
+    }
+  }
+
+  test("DBSIZE fails when any master fails, rather than reporting a partial count") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("DBSIZE")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.SimpleError("ERR unavailable"))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.dbSize).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+    }
+  }
+
   test("under a Replica policy an eligible read routes to the shard's replica, which gets READONLY at setup") {
     val nodeR                   = Node("r", 6379)
     // CLUSTER SLOTS lists nodeR as nodeA's replica for the whole keyspace

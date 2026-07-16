@@ -118,6 +118,18 @@ class ServerSpec extends munit.FunSuite {
     assert(Reply.run(Server.waitAof(1L, 0L, 1.second), aofFold(validPair, badPair)).isLeft)
   }
 
+  test("DBSIZE broadcasts per master and folds shard counts into the cluster total, with checked overflow and malformed passthrough") {
+    assert(Server.dbSize.allMasters)
+    val sum    = fold(Server.dbSize)
+    assertEquals(sum(Frame.Integer(10L), Frame.Integer(20L)), Frame.Integer(30L))
+    assertEquals(Reply.run(Server.dbSize, Frame.Integer(30L)), Right(30L))
+    intercept[ArithmeticException](sum(Frame.Integer(Long.MaxValue), Frame.Integer(1L)))
+    val badInt = Frame.SimpleString("nonsense")
+    assertEquals(sum(Frame.Integer(10L), badInt), badInt)
+    assertEquals(sum(badInt, Frame.Integer(10L)), badInt)
+    assert(Reply.run(Server.dbSize, sum(Frame.Integer(10L), badInt)).isLeft)
+  }
+
   test("MEMORY USAGE decodes a present count and a missing key as None, and is keyed") {
     assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Integer(64L)), Right(Some(64L)))
     assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Null), Right(None))
