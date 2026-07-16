@@ -216,7 +216,8 @@ private[sage] object Server {
       case (bad, _)                                                                                                               => bad
     }
 
-  // WAIT/WAITAOF read a wire 0 as block-forever, so only an explicit zero emits 0; any other duration rounds up to at least 1ms so a sub-millisecond (or negative) wait never truncates to 0 (mirrors BlockTimeout.millisWire)
+  // WAIT/WAITAOF read a wire 0 as block-forever, so only an explicit zero emits 0; any other duration (including a negative) rounds up to at
+  // least 1ms so a sub-millisecond wait never truncates to 0 (mirrors BlockTimeout.millisWire)
   private def waitTimeoutMillis(timeout: FiniteDuration): Long =
     if (timeout == Duration.Zero) 0L else Math.max(1L, Math.ceilDiv(timeout.toNanos, 1000000L))
 
