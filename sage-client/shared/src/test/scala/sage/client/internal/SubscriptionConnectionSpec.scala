@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.collection.mutable
@@ -493,15 +493,6 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   }
 
   test("close aborts a subscription connection still blocked in the connect (start) phase") {
-    // a transport whose start() blocks like socket.connect until close() aborts it
-    final class ConnectingTransport(onClosed: () => Unit) extends Transport {
-      private val gate                     = new CountDownLatch(1)
-      @volatile var wasClosed: Boolean     = false
-      def start(): Unit                    = { gate.await(); throw new java.io.IOException("connect aborted") }
-      def send(item: Transport.Item): Unit = item.dropped()
-      def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
-    }
-
     val connecting                                      = new AtomicReference[ConnectingTransport]()
     val factory: MultiplexedConnection.TransportFactory = (_, onClosed) => {
       val transport = new ConnectingTransport(onClosed)
@@ -517,14 +508,59 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     )
     subscribing.start() // blocks inside ConnectingTransport.start()
 
-    val deadline = System.currentTimeMillis() + 2000
-    while (connecting.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(1)
-    assert(connecting.get() != null, "the establish never reached the connect phase")
+    assert(connecting.get() != null || { Thread.sleep(50); connecting.get() != null }, "the establish never started")
+    assert(connecting.get().reached.await(2, TimeUnit.SECONDS), "the establish never reached the connect phase")
 
     connection.close()
     subscribing.join(2000)
 
     assert(!subscribing.isAlive, "close must abort the establishing connection, not wait out the connect")
     assert(connecting.get().wasClosed, "close must abort the establishing transport")
+  }
+
+  test("close aborts every overlapping establishment, not just the most recent") {
+    // a reconnect attempt and a fresh attach can both be establishing at once once closeOwned flips Reconnecting -> Idle; close must abort both
+    val scheduler                                       = new ManualScheduler
+    val attempt                                         = new java.util.concurrent.atomic.AtomicInteger(0)
+    val connecting                                      = new java.util.concurrent.CopyOnWriteArrayList[ConnectingTransport]()
+    var fake: FakeTransport                             = null
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
+      if (attempt.getAndIncrement() == 0) { fake = new FakeTransport(onFrame, onClosed, serverResponder); fake }
+      else { val t = new ConnectingTransport(onClosed); connecting.add(t); t }
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), scheduler, fixedBackoff, noWatchdog, 5000L, 16, () => true)
+
+    def awaitReached(i: Int): ConnectingTransport = {
+      val deadline = System.currentTimeMillis() + 2000
+      while (connecting.size <= i && System.currentTimeMillis() < deadline) Thread.sleep(1)
+      assert(connecting.size > i, s"establishment $i never started")
+      val t        = connecting.get(i)
+      assert(t.reached.await(2, TimeUnit.SECONDS), s"establishment $i never reached connect")
+      t
+    }
+
+    val sub = connection.subscribeChannels(Vector("a"))
+    fake.close() // the socket drops -> Reconnecting, reconnect scheduled
+
+    val reconnect = new Thread(() => scheduler.advance(1.milli)) // blocks inside the reconnect's ConnectingTransport.start()
+    reconnect.start()
+    val conn1     = awaitReached(0)
+
+    sub.close() // closeOwned: Reconnecting -> Idle, leaving conn1 still establishing
+
+    val attaching = new Thread(() =>
+      try { val _ = connection.subscribeChannels(Vector("b")) }
+      catch { case _: Throwable => () }
+    )
+    attaching.start() // blocks inside the attach's ConnectingTransport.start()
+    val conn2     = awaitReached(1)
+
+    connection.close()
+    reconnect.join(2000)
+    attaching.join(2000)
+
+    assert(!reconnect.isAlive && !attaching.isAlive, "close must unblock both establishments")
+    assert(conn1.wasClosed, "close must abort the reconnect establishment")
+    assert(conn2.wasClosed, "close must abort the concurrent attach establishment")
   }
 }

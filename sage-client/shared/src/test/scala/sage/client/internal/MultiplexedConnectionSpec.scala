@@ -450,15 +450,6 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
   }
 
   test("close aborts a reconnect still blocked in the connect (start) phase") {
-    // a transport whose start() blocks like socket.connect until close() aborts it — the reconnect generation uses it
-    final class ConnectingTransport(onClosed: () => Unit) extends Transport {
-      private val gate                     = new java.util.concurrent.CountDownLatch(1)
-      @volatile var wasClosed: Boolean     = false
-      def start(): Unit                    = { gate.await(); throw new java.io.IOException("connect aborted") }
-      def send(item: Transport.Item): Unit = item.dropped()
-      def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
-    }
-
     val connecting                                      = new java.util.concurrent.atomic.AtomicReference[ConnectingTransport]()
     var head: FakeTransport                             = null
     val scheduler                                       = new ManualScheduler

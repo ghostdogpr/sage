@@ -163,15 +163,6 @@ class NodePoolSpec extends munit.FunSuite {
   }
 
   test("close aborts an in-flight node establishment still blocked in the connect (start) phase") {
-    // a transport whose start() blocks like socket.connect until close() aborts it
-    final class ConnectingTransport(onClosed: () => Unit) extends Transport {
-      private val gate                     = new CountDownLatch(1)
-      @volatile var wasClosed: Boolean     = false
-      def start(): Unit                    = { gate.await(); throw new java.io.IOException("connect aborted") }
-      def send(item: Transport.Item): Unit = item.dropped()
-      def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
-    }
-
     val connecting                                              = new AtomicReference[ConnectingTransport]()
     val factory: Node => MultiplexedConnection.TransportFactory = _ =>
       (_, onClosed) => {
