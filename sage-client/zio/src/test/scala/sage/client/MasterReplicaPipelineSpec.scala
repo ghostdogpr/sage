@@ -80,7 +80,14 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
   private val readCmd: Command[Unit]  = Command("PREAD", Command.NoKeys, Vector.empty, (_: Frame) => Right(()), isReadOnly = true)
   private val writeCmd: Command[Unit] = Command("PWRITE", Command.NoKeys, Vector.empty, (_: Frame) => Right(()), isReadOnly = false)
 
-  private def build(readFrom: ReadFrom): (MasterReplicaLive, ConcurrentLinkedQueue[SageEvent.CommandCompleted], RoutingTracer, CountDownLatch) = {
+  final private case class Fixture(
+    live: MasterReplicaLive,
+    completions: ConcurrentLinkedQueue[SageEvent.CommandCompleted],
+    tracer: RoutingTracer,
+    latch: CountDownLatch
+  )
+
+  private def build(readFrom: ReadFrom): Fixture = {
     val completions                                             = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
     val latch                                                   = new CountDownLatch(2)
     val listener                                                = new SageListener {
@@ -103,36 +110,36 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         Events(Vector(listener), Some(tracer))
       )
     live.bootstrapRoles()
-    (live, completions, tracer, latch)
+    Fixture(live, completions, tracer, latch)
   }
 
   test("a fully read-only pipeline under ReadFrom.Replica attributes every command to the replica") {
-    val (live, completions, tracer, latch) = build(ReadFrom.Replica)
-    live
+    val f = build(ReadFrom.Replica)
+    f.live
       .pipeline(Seq(readCmd, readCmd))
       .unsafeRun
       .map { _ =>
-        assert(latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
-        val nodes  = completions.asScala.toVector.map(_.node)
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        val nodes  = f.completions.asScala.toVector.map(_.node)
         assertEquals(nodes, Vector(Some(replica), Some(replica)), s"pipeline commands should attribute to the replica, got $nodes")
-        val routed = tracer.routed.asScala.toVector.filter(_._1 == "PREAD").map(_._2)
-        assertEquals(routed, Vector(replica, replica), s"tracer routedTo should carry the replica, got $routed")
-        val _      = live.close.unsafeRun
+        val routed = f.tracer.routed.asScala.toVector.filter(_._1 == "PREAD")
+        assertEquals(routed, Vector("PREAD" -> replica, "PREAD" -> replica), s"tracer should route both reads to the replica, got $routed")
+        val _      = f.live.close.unsafeRun
       }
   }
 
   test("a pipeline containing a write attributes the whole batch to the master") {
-    val (live, completions, tracer, latch) = build(ReadFrom.Replica)
-    live
+    val f = build(ReadFrom.Replica)
+    f.live
       .pipeline(Seq(writeCmd, readCmd))
       .unsafeRun
       .map { _ =>
-        assert(latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
-        val nodes  = completions.asScala.toVector.map(_.node)
-        assertEquals(nodes.toSet, Set(Some(master)), s"a write forces the whole batch to the master, got $nodes")
-        val routed = tracer.routed.asScala.toVector.filter(p => p._1 == "PWRITE" || p._1 == "PREAD").map(_._2)
-        assertEquals(routed.toSet, Set(master), s"tracer routedTo should carry the master, got $routed")
-        val _      = live.close.unsafeRun
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        val nodes  = f.completions.asScala.toVector.map(_.node)
+        assertEquals(nodes, Vector(Some(master), Some(master)), s"a write forces the whole batch to the master, got $nodes")
+        val routed = f.tracer.routed.asScala.toVector.filter(p => p._1 == "PWRITE" || p._1 == "PREAD")
+        assertEquals(routed, Vector("PWRITE" -> master, "PREAD" -> master), s"tracer should route both commands to the master, got $routed")
+        val _      = f.live.close.unsafeRun
       }
   }
 }
