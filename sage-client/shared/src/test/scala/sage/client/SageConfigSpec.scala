@@ -5,6 +5,8 @@ class SageConfigSpec extends munit.FunSuite {
   private def parsed(uri: String): SageConfig =
     SageConfig.fromUri(uri).fold(problem => fail(problem), identity)
 
+  private def problem(uri: String): String = SageConfig.fromUri(uri).swap.getOrElse(fail(s"expected a Left for $uri"))
+
   test("a single host yields a standalone topology, default port 6379") {
     assertEquals(parsed("redis://localhost").topology, Topology.Standalone(Endpoint("localhost", 6379)))
     assertEquals(parsed("redis://cache.internal:6380").topology, Topology.Standalone(Endpoint("cache.internal", 6380)))
@@ -46,6 +48,15 @@ class SageConfigSpec extends munit.FunSuite {
     )
   }
 
+  test("a stray comma leaves an empty seed that is rejected, never silently dropped") {
+    assert(SageConfig.fromUri("redis://a,").isLeft)     // trailing comma would otherwise degrade to standalone a
+    assert(SageConfig.fromUri("redis://a,b,").isLeft)   // trailing comma would otherwise pass as a two-seed cluster
+    assert(SageConfig.fromUri("redis://a,,").isLeft)    // an interior gap
+    assert(SageConfig.fromUri("redis://,a").isLeft)     // a leading gap
+    assert(SageConfig.fromUri("redis://[::1],").isLeft) // trailing comma after an IPv6 literal
+    assertEquals(problem("redis://alice:hunter2@a,"), "invalid redis URI 'redis://alice:<redacted>@a,': empty host in ''")
+  }
+
   test("a bracketed IPv6 literal is the host, brackets stripped, with or without a port") {
     assertEquals(parsed("redis://[::1]").topology, Topology.Standalone(Endpoint("::1", 6379)))
     assertEquals(parsed("redis://[::1]:6380").topology, Topology.Standalone(Endpoint("::1", 6380)))
@@ -79,7 +90,6 @@ class SageConfigSpec extends munit.FunSuite {
   }
 
   test("a parse error never echoes the password back, even when the URI is the kind that fails to parse") {
-    def problem(uri: String): String = SageConfig.fromUri(uri).swap.getOrElse(fail(s"expected a Left for $uri"))
     assert(!problem("redis://alice:hunter2@h:0").contains("hunter2"))
     assert(!problem("redis://:hunter2@h:0").contains("hunter2"))
     assert(!problem("redis://:p%40ss@h?x=1").contains("p%40ss"))
