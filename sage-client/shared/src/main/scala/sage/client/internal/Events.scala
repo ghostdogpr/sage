@@ -81,8 +81,12 @@ private[client] object Events {
     private def dispatch(event: SageEvent): Unit = {
       var i = 0
       while (i < listeners.length) {
+        // InterruptedException too: a shutdown interrupt landing in one listener must not skip its peers or abort the best-effort drain
         try listeners(i).onEvent(event)
-        catch { case NonFatal(_) => () }
+        catch {
+          case _: InterruptedException => ()
+          case NonFatal(_)             => ()
+        }
         i += 1
       }
     }

@@ -103,6 +103,29 @@ class EventsSpec extends munit.FunSuite {
     assert(seen.get() <= 1100, s"expected drops, retained ${seen.get()}")
   }
 
+  test("a listener interrupted during shutdown drain still delivers to peers and completes the drain") {
+    val started   = new CountDownLatch(1)
+    val block     = new CountDownLatch(1) // never released; the first callback parks here until the shutdown interrupt
+    val calls     = new java.util.concurrent.atomic.AtomicInteger(0)
+    val bad       = new SageListener {
+      def onEvent(event: SageEvent): Unit =
+        if (calls.getAndIncrement() == 0) { started.countDown(); block.await() } // await throws InterruptedException on interrupt
+        else throw new InterruptedException("interrupted again during the drain")
+    }
+    val peer      = new ConcurrentLinkedQueue[SageEvent]()
+    val delivered = new CountDownLatch(2)
+    val healthy   = new SageListener {
+      def onEvent(event: SageEvent): Unit = { peer.add(event); delivered.countDown() }
+    }
+    val bus       = Events(Vector(bad, healthy))
+    bus.emit(SageEvent.Cache.Hit("first"))
+    assert(started.await(2, TimeUnit.SECONDS), "the first callback never started")
+    bus.emit(SageEvent.Cache.Hit("second"))
+    bus.close() // running = false, then interrupt: the parked first callback throws, and the drained event throws again
+    assert(delivered.await(2, TimeUnit.SECONDS), "the healthy peer did not receive both events")
+    assertEquals(peer.asScala.toVector, Vector(SageEvent.Cache.Hit("first"), SageEvent.Cache.Hit("second")))
+  }
+
   // --- command completion ----------------------------------------------------------------------------------------------------------------
 
   test("trackCommand emits a completion with name and outcome, and is transparent when disabled") {
