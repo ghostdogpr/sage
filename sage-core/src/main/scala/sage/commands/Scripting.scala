@@ -1,6 +1,7 @@
 package sage.commands
 
 import sage.Bytes
+import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
@@ -59,16 +60,24 @@ private[sage] object Scripting {
   def scriptLoad(script: String): Command[String] =
     Command("SCRIPT", Command.NoKeys, Vector(Load, Bytes.utf8(script)), Decode.utf8String, allMasters = true)
 
+  private def isFlag(n: Long): Boolean = n == 0L || n == 1L
+
+  private def flagFrame(f: Frame): Boolean = f match {
+    case Frame.Integer(n) => isFlag(n)
+    case _                => false
+  }
+
+  private def andFlag(a: Frame, b: Frame): Frame =
+    (a, b) match {
+      case (Frame.Integer(x), Frame.Integer(y)) if isFlag(x) && isFlag(y) => Frame.Integer(if (x == 1L && y == 1L) 1L else 0L)
+      case (bad, _) if !flagFrame(bad)                                    => bad
+      case (_, bad)                                                       => bad
+    }
+
   private val existsAnd: (Frame, Frame) => Frame = (a, b) =>
     (a, b) match {
-      case (Frame.Array(xs), Frame.Array(ys)) if xs.length == ys.length =>
-        Frame.Array(xs.lazyZip(ys).map {
-          case (Frame.Integer(x), Frame.Integer(y)) => Frame.Integer(if (x == 1L && y == 1L) 1L else 0L)
-          case (Frame.Integer(_), bad)              => bad
-          case (bad, _)                             => bad
-        })
-      case (Frame.Array(_), bad)                                        => bad
-      case (bad, _)                                                     => bad
+      case (Frame.Array(xs), Frame.Array(ys)) if xs.length == ys.length => Frame.Array(xs.lazyZip(ys).map(andFlag))
+      case _                                                            => throw DecodeError("SCRIPT EXISTS per-master flag arrays of equal length", s"${Frame.describe(a)} vs ${Frame.describe(b)}")
     }
 
   def scriptExists(first: String, rest: String*): Command[Vector[Boolean]] =

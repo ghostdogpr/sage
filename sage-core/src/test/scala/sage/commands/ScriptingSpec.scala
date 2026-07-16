@@ -1,6 +1,7 @@
 package sage.commands
 
 import sage.Bytes
+import sage.SageException.DecodeError
 import sage.protocol.Frame
 
 class ScriptingSpec extends munit.FunSuite {
@@ -52,5 +53,18 @@ class ScriptingSpec extends munit.FunSuite {
     val a                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L)))
     val b                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L)))
     assertEquals(combine(a, b), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L))))
+  }
+
+  test("SCRIPT EXISTS surfaces a non-binary flag so the strict decode rejects it rather than coercing to false") {
+    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a").broadcast: @unchecked
+    val merged                        = combine(Frame.Array(Vector(Frame.Integer(2L))), Frame.Array(Vector(Frame.Integer(1L))))
+    assert(Reply.run(Scripting.scriptExists("a"), merged).isLeft)
+  }
+
+  test("SCRIPT EXISTS fails a length mismatch across masters rather than hiding the malformed reply") {
+    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a", "b").broadcast: @unchecked
+    val whole                         = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L)))
+    val short                         = Frame.Array(Vector(Frame.Integer(1L)))
+    intercept[DecodeError](combine(whole, short))
   }
 }
