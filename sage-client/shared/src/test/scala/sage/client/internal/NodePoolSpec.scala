@@ -80,7 +80,7 @@ class NodePoolSpec extends munit.FunSuite {
     }
     Thread.sleep(100) // let the waiters block on the shared establishment before retain runs
 
-    pool.retain(_ => false) // topology dropped the node while its connect is still in flight
+    pool.retain(_ => false)
 
     waiters.foreach { case (thread, _) => thread.join(2000) }
     waiters.foreach { case (_, result) =>
@@ -88,7 +88,7 @@ class NodePoolSpec extends munit.FunSuite {
       assert(result.get().failed.get.isInstanceOf[NotConnected], s"unexpected waiter error: ${result.get()}")
     }
 
-    gate.countDown() // the connect completes only after retain rejected it
+    gate.countDown()
     establishing.join(2000)
     assert(
       establisher.get() != null && establisher.get().isFailure && establisher.get().failed.get.isInstanceOf[NotConnected],
@@ -115,7 +115,7 @@ class NodePoolSpec extends munit.FunSuite {
     establishing.start()
     assert(reached.await(2, TimeUnit.SECONDS), "the establisher never reached connect")
 
-    pool.retain(_ => true) // the node survives the refresh
+    pool.retain(_ => true)
 
     gate.countDown()
     establishing.join(2000)
