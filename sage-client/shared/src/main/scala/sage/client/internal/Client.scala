@@ -2147,6 +2147,10 @@ object Client {
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
+  // attributes the node at the completion site, so a batch that never reaches the wire (a false submit) leaves its callbacks unattributed
+  private def attributeOnComplete(cb: Try[Any] => Unit, node: Node): Try[Any] => Unit =
+    result => { Events.attributeNode(cb, node); cb(result) }
+
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
   private[internal] def submitBatchOnOne(
@@ -2154,16 +2158,21 @@ object Client {
     commands: Vector[Command[?]],
     spans: Vector[CommandSpan],
     submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
-    complete: Try[Vector[Either[SageException, Any]]] => Unit
+    complete: Try[Vector[Either[SageException, Any]]] => Unit,
+    node: Option[Node] = None
   ): Unit = {
     val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
-    val callbacks = Vector.tabulate(commands.length) { i =>
+    val tracked   = Vector.tabulate(commands.length) { i =>
       val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
       Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
     }
+    val callbacks = node match {
+      case Some(n) => tracked.map(attributeOnComplete(_, n))
+      case None    => tracked
+    }
     if (!submitAll(commands, callbacks)) {
       val error = NotConnected()
-      callbacks.foreach(Events.abandonSpan(_, error))
+      tracked.foreach(Events.abandonSpan(_, error))
       if (events.emitsEvents)
         commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
       complete(Failure(error))

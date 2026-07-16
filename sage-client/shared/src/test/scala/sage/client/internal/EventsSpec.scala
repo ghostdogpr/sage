@@ -131,6 +131,34 @@ class EventsSpec extends munit.FunSuite {
     }
   }
 
+  test("submitBatchOnOne attributes each completion to the selected node, and routes its span there") {
+    val tracer   = new RecordingTracer
+    val rec      = new Recording(Some(tracer))
+    val node     = Node("replica", 7001)
+    val commands = Vector(Connection.ping(None))
+    Client.submitBatchOnOne(
+      rec,
+      commands,
+      Events.startSpans(rec, commands),
+      (_, cbs) => { cbs.foreach(_(Success("PONG"))); true },
+      _ => (),
+      Some(node)
+    )
+    assertEquals(rec.events.collect { case c: SageEvent.CommandCompleted => c.node }, Vector(Some(node)))
+    assert(tracer.log.contains(s"routed:${node.host}:${node.port}"), s"expected routedTo the selected node, got ${tracer.log.toVector}")
+  }
+
+  test("submitBatchOnOne attributes no node when the batch is not submitted, even if a target was selected") {
+    val tracer                                                             = new RecordingTracer
+    val rec                                                                = new Recording(Some(tracer))
+    val commands                                                           = Vector(Connection.ping(None), Connection.ping(None))
+    var completed: scala.util.Try[Vector[Either[sage.SageException, Any]]] = null
+    Client.submitBatchOnOne(rec, commands, Events.startSpans(rec, commands), (_, _) => false, r => completed = r, Some(Node("replica", 7001)))
+    assert(completed != null && completed.isFailure, s"an unsubmitted batch must fail the effect, got $completed")
+    assertEquals(rec.events.collect { case c: SageEvent.CommandCompleted => c.node }, Vector(None, None))
+    assert(!tracer.log.exists(_.startsWith("routed:")), s"an unsent batch must route no span, got ${tracer.log.toVector}")
+  }
+
   // --- tracing ---------------------------------------------------------------------------------------------------------------------------
 
   test("a tracer-only bus is enabled but emits no events, and drives the span lifecycle through trackCommand") {
