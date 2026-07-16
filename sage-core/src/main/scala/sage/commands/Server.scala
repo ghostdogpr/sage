@@ -216,11 +216,16 @@ private[sage] object Server {
       case (bad, _)                                                                                                               => bad
     }
 
+  // WAIT/WAITAOF read a wire 0 as block-forever, so only an explicit zero emits 0; any other duration (including a negative) rounds up to at
+  // least 1ms so a sub-millisecond wait never truncates to 0 (mirrors BlockTimeout.millisWire)
+  private def waitTimeoutMillis(timeout: FiniteDuration): Long =
+    if (timeout == Duration.Zero) 0L else Math.max(1L, Math.ceilDiv(timeout.toNanos, 1000000L))
+
   def waitReplicas(numReplicas: Long, timeout: FiniteDuration): Command[Long] =
     Command(
       "WAIT",
       Command.NoKeys,
-      Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(timeout.toMillis.toString)),
+      Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(waitTimeoutMillis(timeout).toString)),
       Decode.long,
       allMasters = true,
       broadcast = BroadcastReduce.Fold(waitMinReplicas)
@@ -230,7 +235,7 @@ private[sage] object Server {
     Command(
       "WAITAOF",
       Command.NoKeys,
-      Vector(numLocal, numReplicas, timeout.toMillis).map(n => Bytes.utf8(n.toString)),
+      Vector(numLocal, numReplicas, waitTimeoutMillis(timeout)).map(n => Bytes.utf8(n.toString)),
       {
         case Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas))) => Right((local, replicas))
         case other                                                              => Left(DecodeError("WAITAOF [numlocal, numreplicas]", Frame.describe(other)))
