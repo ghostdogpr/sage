@@ -46,6 +46,11 @@ enum BroadcastReduce {
   * `Concat` appends each node's array slice (`KEYS`, since no single node sees the whole keyspace), `Fold` reduces pairwise (a durability
   * barrier down to its weakest shard). The broadcast always targets masters regardless of the `ReadFrom` policy (a single replica would only
   * see one shard's slice). Inert on a standalone server.
+  *
+  * `requiresClusterWideTxResult` marks a command whose result is correct only when aggregated across every master, so a cluster `MULTI`/
+  * `EXEC` — pinned to a single node — cannot produce it and rejects it before the wire. Only `DBSIZE` sets it: its contract is the cluster-wide
+  * key count, which one shard cannot give. Other broadcasts (`KEYS`, `FLUSHALL`, `SCRIPT LOAD`, `WAIT`) stay transaction-legal with node-local
+  * semantics, matching Redis, which does not flag them `no-multi`. Inert on a standalone server.
   */
 final case class Command[+Out](
   name: String,
@@ -57,19 +62,35 @@ final case class Command[+Out](
   cacheable: Boolean = false,
   allMasters: Boolean = false,
   cursorBound: Boolean = false,
-  broadcast: BroadcastReduce = BroadcastReduce.First
+  broadcast: BroadcastReduce = BroadcastReduce.First,
+  requiresClusterWideTxResult: Boolean = false
 ) {
 
   /**
     * Transforms the decoded result, leaving the wire encoding and routing metadata untouched.
     */
-  def map[B](f: Out => B): Command[B] =
-    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters, cursorBound, broadcast)
+  def map[B](f: Out => B): Command[B] = withDecode(frame => decode(frame).map(f))
 
   /**
     * Whether this command blocks its connection and so needs a Dedicated Connection.
     */
   def isBlocking: Boolean = execution == Execution.Blocking
+
+  // rebuilds the command with a new (possibly re-typed) decoder, carrying every field by name so a future field can't be dropped or misordered
+  private def withDecode[B](decode: Frame => Either[DecodeError, B]): Command[B] =
+    Command(
+      name = name,
+      keyIndices = keyIndices,
+      args = args,
+      decode = decode,
+      execution = execution,
+      isReadOnly = isReadOnly,
+      cacheable = cacheable,
+      allMasters = allMasters,
+      cursorBound = cursorBound,
+      broadcast = broadcast,
+      requiresClusterWideTxResult = requiresClusterWideTxResult
+    )
 
   /**
     * The key bytes the server tracks for this command, in arg order — the keys a cache invalidation evicts by.
@@ -90,8 +111,7 @@ final case class Command[+Out](
     * This command's wire form with decoding replaced by the raw reply frame, preserving routing metadata. The cluster runtime uses it to
     * collect a broadcast's per-node replies and fold them before decoding once.
     */
-  def rawFrame: Command[Frame] =
-    Command(name, keyIndices, args, frame => Right(frame), execution, isReadOnly, cacheable, allMasters, cursorBound, broadcast)
+  def rawFrame: Command[Frame] = withDecode(frame => Right(frame))
 }
 
 object Command {

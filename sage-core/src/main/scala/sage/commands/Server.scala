@@ -135,7 +135,23 @@ private[sage] object Server {
   def info(sections: String*): Command[String] =
     Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text)
 
-  val dbSize: Command[Long] = Command("DBSIZE", Command.NoKeys, Vector.empty, Decode.long)
+  private val dbSizeSum: (Frame, Frame) => Frame = (a, b) =>
+    (a, b) match {
+      case (Frame.Integer(x), Frame.Integer(y)) => Frame.Integer(math.addExact(x, y))
+      case (Frame.Integer(_), bad)              => bad
+      case (bad, _)                             => bad
+    }
+
+  val dbSize: Command[Long] =
+    Command(
+      "DBSIZE",
+      Command.NoKeys,
+      Vector.empty,
+      Decode.long,
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold(dbSizeSum),
+      requiresClusterWideTxResult = true
+    )
 
   val time: Command[Instant] =
     Command(
