@@ -146,7 +146,7 @@ class NodePoolSpec extends munit.FunSuite {
     secondThread.start()
     gated.awaitReached(1) // a fresh attempt, since attempt 1 is no longer pending
 
-    gated.release(0) // attempt 1 completes last: it must discard without touching attempt 2
+    gated.release(0) // attempt 1 completes while attempt 2 is pending: it must discard without touching attempt 2
     firstThread.join(2000)
     assert(
       first.get() != null && first.get().isFailure && first.get().failed.get.isInstanceOf[NotConnected],
