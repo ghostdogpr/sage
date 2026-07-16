@@ -523,11 +523,11 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   test("close unblocks a subscriber parked waiting for the bootstrap reply") {
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, _ => Nil) // never answers the bootstrap
+      val t = new FakeTransport(onFrame, onClosed, _ => Nil)
       transports += t
       t
     }
-    val connection =
+    val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 60000L, 16, () => true)
 
     val subscribing = new Thread(() =>
