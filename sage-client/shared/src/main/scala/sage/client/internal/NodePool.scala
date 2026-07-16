@@ -142,7 +142,7 @@ final private[client] class NodePool(
     // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still
     // observes `closed` on return and closes the node it opened
     waiters.foreach(_.fail(NotConnected()))
-    // abort connections still opening their socket, so a shutdown doesn't wait out the connect timeout; each establisher then removes its entry
+    // abort connections still opening their socket, rather than stranding them for the connect timeout
     opening.foreach(_.close())
     all.foreach(_.close())
   }

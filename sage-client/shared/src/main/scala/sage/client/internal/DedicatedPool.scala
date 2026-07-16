@@ -118,7 +118,6 @@ final private[client] class DedicatedPool(
       closing = true
       if (sweepHandle != null) sweepHandle.cancel()
       available.signalAll()
-      // establishing connections abort their in-flight connect; they still remove their own entry when the establish unwinds
       val snapshot = (live ++ establishing).toVector
       live.clear()
       idle.clear()

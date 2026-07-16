@@ -61,8 +61,7 @@ final private[client] class DedicatedConnection private (
   }
 
   /**
-    * Opens the socket and runs the bootstrap synchronously; throws (no retry) if the connect or handshake fails. Split from the constructor
-    * ([[DedicatedConnection.create]]) so the pool can retain the reference and abort a still-establishing connection from `close`.
+    * Opens the socket and runs the bootstrap synchronously; throws (no retry) if the connect or handshake fails.
     */
   def establish(bootstrap: Vector[Command[?]]): Unit = {
     start()
@@ -165,8 +164,8 @@ private[client] object DedicatedConnection {
   }
 
   /**
-    * Builds an unconnected connection. The pool registers it, then drives the blocking [[DedicatedConnection.establish]] outside its lock, so
-    * a `close` racing the establish can abort the socket rather than stranding it until the connect timeout.
+    * Builds an unconnected connection; the pool drives the blocking [[DedicatedConnection.establish]] separately so it can hold the reference
+    * and abort one still establishing.
     */
   def create(factory: MultiplexedConnection.TransportFactory, connectTimeoutMillis: Long): DedicatedConnection =
     new DedicatedConnection(factory, connectTimeoutMillis)
