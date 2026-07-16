@@ -76,10 +76,46 @@ class ServerSpec extends munit.FunSuite {
     )
   }
 
-  test("WAITAOF decodes the [numlocal, numreplicas] pair and is blocking") {
+  test("WAITAOF decodes the [numlocal, numreplicas] pair; WAIT/WAITAOF ride the multiplexed connection and broadcast per master") {
     assertEquals(Reply.run(Server.waitAof(1L, 0L, 1.second), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L)))), Right((1L, 2L)))
-    assert(Server.waitAof(1L, 0L, 1.second).isBlocking)
-    assert(Server.waitReplicas(1L, 1.second).isBlocking)
+    assert(!Server.waitAof(1L, 0L, 1.second).isBlocking)
+    assert(!Server.waitReplicas(1L, 1.second).isBlocking)
+    assert(Server.waitAof(1L, 0L, 1.second).allMasters)
+    assert(Server.waitReplicas(1L, 1.second).allMasters)
+  }
+
+  private def fold(command: Command[?]): (Frame, Frame) => Frame =
+    command.broadcast match {
+      case BroadcastReduce.Fold(f) => f
+      case other                   => fail(s"expected a Fold broadcast, got $other")
+    }
+
+  test("WAIT/WAITAOF fold differing multi-master replies to the weakest shard") {
+    val waitFold = fold(Server.waitReplicas(1L, 1.second))
+    assertEquals(waitFold(Frame.Integer(2L), Frame.Integer(1L)), Frame.Integer(1L))
+    assertEquals(waitFold(Frame.Integer(0L), Frame.Integer(3L)), Frame.Integer(0L))
+    assertEquals(Reply.run(Server.waitReplicas(1L, 1.second), Frame.Integer(1L)), Right(1L))
+
+    val aofFold = fold(Server.waitAof(1L, 0L, 1.second))
+    assertEquals(
+      aofFold(Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L))), Frame.Array(Vector(Frame.Integer(0L), Frame.Integer(3L)))),
+      Frame.Array(Vector(Frame.Integer(0L), Frame.Integer(2L)))
+    )
+  }
+
+  test("WAIT/WAITAOF folds pass a malformed reply through in either operand position, so it never hides behind a valid one") {
+    val waitFold = fold(Server.waitReplicas(1L, 1.second))
+    val badInt   = Frame.SimpleString("nonsense")
+    assertEquals(waitFold(Frame.Integer(2L), badInt), badInt)
+    assertEquals(waitFold(badInt, Frame.Integer(2L)), badInt)
+    assert(Reply.run(Server.waitReplicas(1L, 1.second), waitFold(Frame.Integer(2L), badInt)).isLeft)
+
+    val aofFold   = fold(Server.waitAof(1L, 0L, 1.second))
+    val validPair = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L)))
+    val badPair   = Frame.Array(Vector(Frame.Integer(1L)))
+    assertEquals(aofFold(validPair, badPair), badPair)
+    assertEquals(aofFold(badPair, validPair), badPair)
+    assert(Reply.run(Server.waitAof(1L, 0L, 1.second), aofFold(validPair, badPair)).isLeft)
   }
 
   test("MEMORY USAGE decodes a present count and a missing key as None, and is keyed") {

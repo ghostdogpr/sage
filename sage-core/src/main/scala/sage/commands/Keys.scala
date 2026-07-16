@@ -185,7 +185,7 @@ private[sage] object Keys {
   def pExpireTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[ExpiryTime] =
     Command.readUncacheable("PEXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochMilli))
 
-  // KEYS is node-local; `allMasters` + `aggregate` makes a cluster sweep every master and merge the slices. Prefer `scanAll` in production.
+  // KEYS is node-local; `allMasters` + `Concat` makes a cluster sweep every master and merge the slices. Prefer `scanAll` in production.
   def keys[K](pattern: String)(using keyCodec: KeyCodec[K]): Command[Vector[K]] =
     Command(
       "KEYS",
@@ -194,7 +194,7 @@ private[sage] object Keys {
       Decode.vector(Decode.key),
       isReadOnly = true,
       allMasters = true,
-      aggregate = true
+      broadcast = BroadcastReduce.Concat
     )
 
   def persist[K](key: K)(using keyCodec: KeyCodec[K]): Command[Boolean] =

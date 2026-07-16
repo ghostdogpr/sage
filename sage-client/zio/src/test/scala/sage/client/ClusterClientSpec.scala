@@ -7,10 +7,10 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{CrossSlot, NotConnected, ServerError}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
-import sage.commands.{Command, Connection, Keys, Strings}
+import sage.commands.{BroadcastReduce, Command, Connection, Keys, Server, Strings}
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -109,6 +109,17 @@ class ClusterClientSpec extends munit.FunSuite {
       transports.values.flatten
         .find(_.written.exists(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n")))
         .foreach(_.close())
+
+    def drop(node: Node): Unit = transports.getOrElse(node, mutable.ArrayBuffer.empty).foreach(_.close())
+
+    def deliver(node: Node, frame: Frame): Unit =
+      transports.getOrElse(node, mutable.ArrayBuffer.empty).lastOption.foreach(_.emit(frame))
+  }
+
+  private def awaitWritten(fixture: Fixture, node: Node, token: String): Unit = {
+    val deadline = System.nanoTime() + 2000000000L
+    while (!fixture.written(node).exists(_.contains(token)) && System.nanoTime() < deadline) Thread.sleep(5)
+    assert(fixture.written(node).exists(_.contains(token)), s"$node never received $token")
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
@@ -148,6 +159,112 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result.toSet, (aKeys ++ bKeys).toSet)
       assert(fixture.written(nodeA).exists(_.contains("KEYS")), "nodeA did not receive KEYS")
       assert(fixture.written(nodeB).exists(_.contains("KEYS")), "nodeB did not receive KEYS")
+    }
+  }
+
+  test("WAIT broadcasts to every slot-owning master and returns the weakest shard's count") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAIT")) Seq(Frame.Integer(if (node == nodeA) 2L else 1L))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.waitReplicas(1L, 100.millis)).unsafeRun.map { result =>
+      assertEquals(result, 1L)
+      assert(fixture.written(nodeA).exists(_.contains("WAIT")), "nodeA did not receive WAIT")
+      assert(fixture.written(nodeB).exists(_.contains("WAIT")), "nodeB did not receive WAIT")
+    }
+  }
+
+  test("WAIT fails when any master fails, rather than reporting a partial durability signal") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAIT")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.SimpleError("ERR replication offset unavailable"))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.waitReplicas(1L, 100.millis)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+    }
+  }
+
+  test("WAIT surfaces a malformed master reply rather than hiding it behind a valid one") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAIT")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.BulkString(Bytes.utf8("nonsense")))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.waitReplicas(1L, 100.millis)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[DecodeError], s"expected DecodeError, got $error")
+    }
+  }
+
+  test("WAIT fails when a master's connection cannot be established, not only on a server error") {
+    val mid       = Slot.Count / 2
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAIT")) Seq(Frame.Integer(2L))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB))
+
+    fixture.live.run(Server.waitReplicas(1L, 100.millis)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[NotConnected], s"expected NotConnected, got $error")
+    }
+  }
+
+  test("a broadcast fold that throws on a reply arriving after dispatch fails the command rather than hanging the caller") {
+    val mid       = Slot.Count / 2
+    val behaviour =
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))) else Nil
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val throwing  = Command[Long](
+      "WAIT",
+      Command.NoKeys,
+      Vector(Bytes.utf8("0"), Bytes.utf8("0")),
+      _ => Right(0L),
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold((_, _) => throw new RuntimeException("boom"))
+    )
+
+    val running = fixture.live.run(throwing).unsafeRun.failed
+    awaitWritten(fixture, nodeA, "WAIT")
+    awaitWritten(fixture, nodeB, "WAIT")
+    fixture.deliver(nodeA, Frame.Integer(1L))
+    fixture.deliver(nodeB, Frame.Integer(1L))
+    running.map(error => assertEquals(error.getMessage, "boom"))
+  }
+
+  test("WAIT fails when a master's connection drops while the barrier is pending, rather than returning partially or hanging") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAIT")) if (node == nodeA) Seq(Frame.Integer(2L)) else Nil
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    val running = fixture.live.run(Server.waitReplicas(1L, 5.seconds)).unsafeRun.failed
+    awaitWritten(fixture, nodeB, "WAIT")
+    fixture.drop(nodeB)
+    running.map(error => assert(error.isInstanceOf[ConnectionLost], s"expected ConnectionLost, got $error"))
+  }
+
+  test("WAITAOF broadcasts to every slot-owning master and returns component-wise minimums") {
+    val mid                               = Slot.Count / 2
+    def pair(local: Long, replicas: Long) = Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas)))
+    val behaviour                         = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("WAITAOF")) Seq(if (node == nodeA) pair(2L, 2L) else pair(1L, 3L))
+      else Seq(Frame.Null)
+    val fixture                           = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Server.waitAof(1L, 1L, 100.millis)).unsafeRun.map { result =>
+      assertEquals(result, (1L, 2L))
+      assert(fixture.written(nodeA).exists(_.contains("WAITAOF")), "nodeA did not receive WAITAOF")
+      assert(fixture.written(nodeB).exists(_.contains("WAITAOF")), "nodeB did not receive WAITAOF")
     }
   }
 

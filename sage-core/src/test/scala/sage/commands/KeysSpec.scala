@@ -97,13 +97,13 @@ class KeysSpec extends munit.FunSuite {
     assertEquals(Keys.randomKey[String].keyIndices, Vector.empty[Int])
   }
 
-  test("KEYS is an aggregating all-masters read, so a cluster sweeps every master and merges the slices") {
+  test("KEYS is a concatenating all-masters read, so a cluster sweeps every master and merges the slices") {
     val command = Keys.keys[String]("*")
     assert(command.allMasters)
-    assert(command.aggregate)
+    assertEquals(command.broadcast, BroadcastReduce.Concat)
     assert(command.isReadOnly)
     assertEquals(command.rawFrame.allMasters, true)
-    assertEquals(command.rawFrame.aggregate, true)
+    assertEquals(command.rawFrame.broadcast, BroadcastReduce.Concat)
   }
 
   test("expire picks the wire command from the duration's precision") {

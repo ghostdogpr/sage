@@ -14,6 +14,18 @@ enum Execution {
 }
 
 /**
+  * How a keyless `allMasters` broadcast folds its per-node replies into one. `First` keeps the first node's reply (identical
+  * acknowledgements like `SCRIPT LOAD`'s SHA); `Concat` appends each node's array slice (`KEYS`); `Fold` reduces pairwise (a durability
+  * barrier down to its weakest shard). A single policy rather than separate flags, so `Concat` and `Fold` cannot both be requested. Inert
+  * unless `allMasters`.
+  */
+enum BroadcastReduce {
+  case First
+  case Concat
+  case Fold(combine: (Frame, Frame) => Frame)
+}
+
+/**
   * A pure value describing one server command. `keyIndices` marks which `args` positions are keys, for cluster routing. `decode` never
   * sees top-level error frames — [[Reply.run]] intercepts them.
   *
@@ -26,15 +38,14 @@ enum Execution {
   * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, and `FLUSHALL`/
   * `FLUSHDB`). Inert on a standalone server.
   *
-  * `aggregate` refines an `allMasters` command whose reply is a per-node *view* rather than an identical acknowledgement (`KEYS`): the
-  * cluster broadcasts it to every slot-owning master and concatenates the array replies into one, since no single node sees the whole
-  * keyspace. The broadcast always targets masters regardless of the `ReadFrom` policy (a single replica would only see one shard's slice).
-  * An `allMasters` command without `aggregate` keeps the first node's reply (every node returns the same `OK`/SHA). Inert on a standalone
-  * server.
-  *
   * `cursorBound` marks a command whose reply carries a continuation cursor valid only on the node that issued it (`SCAN`/`HSCAN`/`SSCAN`/
   * `ZSCAN`). Such a read is excluded from replica round-robin routing: iterating its pages across different replicas would feed a cursor to
   * a node that never minted it, skipping or duplicating entries.
+  *
+  * `broadcast` chooses how an `allMasters` command's per-node replies fold into one: `First` keeps one node's identical acknowledgement,
+  * `Concat` appends each node's array slice (`KEYS`, since no single node sees the whole keyspace), `Fold` reduces pairwise (a durability
+  * barrier down to its weakest shard). The broadcast always targets masters regardless of the `ReadFrom` policy (a single replica would only
+  * see one shard's slice). Inert on a standalone server.
   */
 final case class Command[+Out](
   name: String,
@@ -46,14 +57,14 @@ final case class Command[+Out](
   cacheable: Boolean = false,
   allMasters: Boolean = false,
   cursorBound: Boolean = false,
-  aggregate: Boolean = false
+  broadcast: BroadcastReduce = BroadcastReduce.First
 ) {
 
   /**
     * Transforms the decoded result, leaving the wire encoding and routing metadata untouched.
     */
   def map[B](f: Out => B): Command[B] =
-    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters, cursorBound, aggregate)
+    Command(name, keyIndices, args, frame => decode(frame).map(f), execution, isReadOnly, cacheable, allMasters, cursorBound, broadcast)
 
   /**
     * Whether this command blocks its connection and so needs a Dedicated Connection.
@@ -77,10 +88,10 @@ final case class Command[+Out](
 
   /**
     * This command's wire form with decoding replaced by the raw reply frame, preserving routing metadata. The cluster runtime uses it to
-    * collect an `aggregate` broadcast's per-node replies and merge them before decoding once.
+    * collect a broadcast's per-node replies and fold them before decoding once.
     */
   def rawFrame: Command[Frame] =
-    Command(name, keyIndices, args, frame => Right(frame), execution, isReadOnly, cacheable, allMasters, cursorBound, aggregate)
+    Command(name, keyIndices, args, frame => Right(frame), execution, isReadOnly, cacheable, allMasters, cursorBound, broadcast)
 }
 
 object Command {

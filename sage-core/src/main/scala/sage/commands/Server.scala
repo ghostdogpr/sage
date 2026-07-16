@@ -185,8 +185,30 @@ private[sage] object Server {
   def flushDb(mode: Option[FlushMode] = None): Command[Unit]  =
     Command("FLUSHDB", Command.NoKeys, FlushMode.args(mode), Decode.ok, allMasters = true)
 
+  private val waitMinReplicas: (Frame, Frame) => Frame = (a, b) =>
+    (a, b) match {
+      case (Frame.Integer(x), Frame.Integer(y)) => Frame.Integer(math.min(x, y))
+      case (Frame.Integer(_), bad)              => bad
+      case (bad, _)                             => bad
+    }
+
+  private val waitAofMin: (Frame, Frame) => Frame = (a, b) =>
+    (a, b) match {
+      case (Frame.Array(Vector(Frame.Integer(l1), Frame.Integer(r1))), Frame.Array(Vector(Frame.Integer(l2), Frame.Integer(r2)))) =>
+        Frame.Array(Vector(Frame.Integer(math.min(l1, l2)), Frame.Integer(math.min(r1, r2))))
+      case (Frame.Array(Vector(Frame.Integer(_), Frame.Integer(_))), bad)                                                         => bad
+      case (bad, _)                                                                                                               => bad
+    }
+
   def waitReplicas(numReplicas: Long, timeout: FiniteDuration): Command[Long] =
-    Command("WAIT", Command.NoKeys, Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(timeout.toMillis.toString)), Decode.long, Execution.Blocking)
+    Command(
+      "WAIT",
+      Command.NoKeys,
+      Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(timeout.toMillis.toString)),
+      Decode.long,
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold(waitMinReplicas)
+    )
 
   def waitAof(numLocal: Long, numReplicas: Long, timeout: FiniteDuration): Command[(Long, Long)] =
     Command(
@@ -197,7 +219,8 @@ private[sage] object Server {
         case Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas))) => Right((local, replicas))
         case other                                                              => Left(DecodeError("WAITAOF [numlocal, numreplicas]", Frame.describe(other)))
       },
-      Execution.Blocking
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold(waitAofMin)
     )
 
   def memoryUsage[K](key: K, samples: Option[Long] = None)(using keyCodec: sage.codec.KeyCodec[K]): Command[Option[Long]] =

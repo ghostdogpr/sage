@@ -11,7 +11,7 @@ import kyo.compat.*
 import sage.{Bytes, Outcome, SageEvent, SageListener}
 import sage.SageException.{ConnectionFailed, NotConnected, UnsupportedServer}
 import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
-import sage.commands.{Command, Execution}
+import sage.commands.{Command, Execution, Server}
 import sage.protocol.Frame
 
 class ConnectSpec extends munit.FunSuite {
@@ -120,6 +120,41 @@ class ConnectSpec extends munit.FunSuite {
     val (factory, _)                            = scripted(helloThenPong)
     val native: zio.ZIO[Any, Throwable, String] = Client.connectWith(factory).flatMap(client => client.ping()).lower
     CIO.lift(native).unsafeRun.map(result => assertEquals(result, "PONG"))
+  }
+
+  private def assertBarrierRidesMux(barrier: Command[?], barrierReply: Frame, token: String): scala.concurrent.Future[Unit] = {
+    val transports                                      = new ConcurrentLinkedQueue[FakeTransport]()
+    val reply: Bytes => Seq[Frame]                      = payload =>
+      if (payload.asUtf8String.contains("HELLO")) Seq(helloReply)
+      else if (payload.asUtf8String.contains(token)) Seq(barrierReply)
+      else Seq(Frame.SimpleString("OK"))
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed, reply)
+      transports.add(transport)
+      transport
+    }
+    val write                                           =
+      Command("SET", Command.NoKeys, Vector(Bytes.utf8("k"), Bytes.utf8("v")), (_: Frame) => Right(()), Execution.Ordinary)
+    Client
+      .connectWith(factory)
+      .flatMap(client => client.run(write).flatMap(_ => client.run(barrier)))
+      .unsafeRun
+      .map { _ =>
+        assertEquals(transports.size, 1)
+        val payloads   = transports.peek().written.map(_.asUtf8String).toVector
+        val setIdx     = payloads.indexWhere(_.contains("SET"))
+        val barrierIdx = payloads.indexWhere(_.contains(token))
+        assert(setIdx >= 0 && barrierIdx >= 0, s"SET and $token must both ride the multiplexed transport, got $payloads")
+        assert(setIdx < barrierIdx, s"$token must follow the SET on the same transport, got $payloads")
+      }
+  }
+
+  test("WAIT rides the multiplexed connection carrying the preceding writes, never a dedicated connection") {
+    assertBarrierRidesMux(Server.waitReplicas(0L, 100.millis), Frame.Integer(0L), "WAIT")
+  }
+
+  test("WAITAOF rides the multiplexed connection carrying the preceding writes, never a dedicated connection") {
+    assertBarrierRidesMux(Server.waitAof(0L, 0L, 100.millis), Frame.Array(Vector(Frame.Integer(0L), Frame.Integer(0L))), "WAITAOF")
   }
 
   test("a pipeline carrying a blocking command fails fast without reaching the socket") {

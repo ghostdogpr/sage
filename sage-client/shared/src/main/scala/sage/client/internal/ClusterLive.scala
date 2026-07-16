@@ -15,7 +15,7 @@ import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{Cluster, Command, Connection, Pipeline, Reply}
+import sage.commands.{BroadcastReduce, Cluster, Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
 
 /**
@@ -199,8 +199,11 @@ final private[client] class ClusterLive(
     else {
       val topology = topologyRef.get()
       if (command.allMasters)
-        if (command.aggregate) sendToAllMastersAggregated(topology, command, complete)
-        else sendToAllMasters(topology, command, complete)
+        command.broadcast match {
+          case BroadcastReduce.First      => sendToAllMasters(topology, command, complete)
+          case BroadcastReduce.Concat     => broadcastCombine(topology, command, concatFrames, complete)
+          case BroadcastReduce.Fold(fold) => broadcastCombine(topology, command, _.reduce(fold), complete)
+        }
       else
         topology.route(command) match {
           case Route.ToNode(node, slot) =>
@@ -313,9 +316,15 @@ final private[client] class ClusterLive(
     }
   }
 
-  // an aggregating broadcast (KEYS): every slot-owning master returns its node-local slice, which we merge as raw frames and decode once,
-  // since no single node sees the whole keyspace; any node failing fails the command
-  private def sendToAllMastersAggregated[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit): Unit = {
+  // an all-masters broadcast whose per-node replies fold into one: KEYS concatenates each node's node-local slice (no single node sees the
+  // whole keyspace), WAIT/WAITAOF reduce to the weakest shard. Frames are collected raw and combined before a single decode; any node
+  // failing fails the command
+  private def broadcastCombine[A](
+    topology: ClusterTopology,
+    command: Command[A],
+    combine: Vector[Frame] => Frame,
+    complete: Try[A] => Unit
+  ): Unit = {
     val masters = slotOwningMasters(topology)
     if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
     else {
@@ -331,7 +340,7 @@ final private[client] class ClusterLive(
         if (remaining.decrementAndGet() == 0)
           Option(firstError.get()) match {
             case Some(e) => complete(Failure(e))
-            case None    => complete(decodeMerged(command, mergeFrames(frames, masters.size)))
+            case None    => complete(Try(combine(collectFrames(frames, masters.size))).flatMap(decodeMerged(command, _)))
           }
       }
       masters.iterator.zipWithIndex.foreach { case (node, index) =>
@@ -344,19 +353,19 @@ final private[client] class ClusterLive(
     }
   }
 
-  private def mergeFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Frame = {
-    val merged = Vector.newBuilder[Frame]
-    var i      = 0
-    while (i < size) {
-      frames.get(i) match {
-        case Frame.Array(elements) => merged ++= elements
-        case Frame.Set(elements)   => merged ++= elements
-        case other                 => merged += other
-      }
-      i += 1
-    }
-    Frame.Array(merged.result())
+  private def collectFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Vector[Frame] = {
+    val out = Vector.newBuilder[Frame]
+    var i   = 0
+    while (i < size) { out += frames.get(i); i += 1 }
+    out.result()
   }
+
+  private def concatFrames(frames: Vector[Frame]): Frame =
+    Frame.Array(frames.flatMap {
+      case Frame.Array(elements) => elements
+      case Frame.Set(elements)   => elements
+      case other                 => Vector(other)
+    })
 
   private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] = Reply.decode(command, merged)
 
