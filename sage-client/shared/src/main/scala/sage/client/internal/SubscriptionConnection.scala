@@ -49,8 +49,7 @@ final private[client] class SubscriptionConnection(
   private val confirmed     = lock.newCondition()
   private var state: State  = State.Idle
   private var current: Conn = null
-  // connections whose socket is being opened, so a shutdown can abort every one still connecting; a set because an admitted reconnect can
-  // overlap a fresh attach once closeOwned flips Reconnecting -> Idle (see db9d6387)
+  // connections still being opened; a set, since a reconnect and a fresh attach can be establishing at once
   private val establishing  = mutable.Set.empty[Conn]
   private val channelSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
   private val patternSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
@@ -387,7 +386,7 @@ final private[client] class SubscriptionConnection(
     if (failure != null) throw failure
   }
 
-  // transition to Closed and hand back every connection to tear down: the live one plus all still establishing. Must hold `lock`.
+  // must hold `lock`: transition to Closed and return the connections to tear down (current + establishing)
   private def markClosed(): Vector[Conn] = {
     val conns = (Option(current) ++ establishing).toVector
     establishing.clear()

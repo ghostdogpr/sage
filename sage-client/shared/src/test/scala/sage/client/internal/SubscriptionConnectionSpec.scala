@@ -519,7 +519,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   }
 
   test("close aborts every overlapping establishment, not just the most recent") {
-    // a reconnect attempt and a fresh attach can both be establishing at once once closeOwned flips Reconnecting -> Idle; close must abort both
+    // a reconnect and a fresh attach can be establishing at once; close must abort both
     val scheduler                                       = new ManualScheduler
     val attempt                                         = new java.util.concurrent.atomic.AtomicInteger(0)
     val connecting                                      = new java.util.concurrent.CopyOnWriteArrayList[ConnectingTransport]()
@@ -542,17 +542,17 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val sub = connection.subscribeChannels(Vector("a"))
     fake.close() // the socket drops -> Reconnecting, reconnect scheduled
 
-    val reconnect = new Thread(() => scheduler.advance(1.milli)) // blocks inside the reconnect's ConnectingTransport.start()
+    val reconnect = new Thread(() => scheduler.advance(1.milli)) // blocks in the reconnect's connect
     reconnect.start()
     val conn1     = awaitReached(0)
 
-    sub.close() // closeOwned: Reconnecting -> Idle, leaving conn1 still establishing
+    sub.close() // Reconnecting -> Idle, leaving conn1 still establishing
 
     val attaching = new Thread(() =>
       try { val _ = connection.subscribeChannels(Vector("b")) }
       catch { case _: Throwable => () }
     )
-    attaching.start() // blocks inside the attach's ConnectingTransport.start()
+    attaching.start() // blocks in the attach's connect
     val conn2     = awaitReached(1)
 
     connection.close()
