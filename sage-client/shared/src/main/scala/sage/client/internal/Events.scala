@@ -71,8 +71,10 @@ private[client] object Events {
     def close(): Unit = if (worker != null) { running = false; worker.interrupt() }
 
     private def drain(): Unit = {
-      try while (running) dispatch(queue.take())
-      catch { case _: InterruptedException => () }
+      // keep serving while running: a listener may leave the interrupt flag set, and shutdown clears running first, so only it ends the loop
+      while (running)
+        try dispatch(queue.take())
+        catch { case _: InterruptedException => () }
       // best-effort: deliver what is already queued before exiting
       var event = queue.poll()
       while (event != null) { dispatch(event); event = queue.poll() }

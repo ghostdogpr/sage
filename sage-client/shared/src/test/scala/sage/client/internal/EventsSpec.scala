@@ -128,6 +128,30 @@ class EventsSpec extends munit.FunSuite {
     } finally bus.close()
   }
 
+  test("a listener that leaves the interrupt flag set does not permanently kill the worker") {
+    val gotFirst         = new CountDownLatch(1)
+    val gotSecond        = new CountDownLatch(1)
+    val first            = new java.util.concurrent.atomic.AtomicBoolean(true)
+    val selfInterrupting = new SageListener {
+      def onEvent(event: SageEvent): Unit = if (first.getAndSet(false)) Thread.currentThread().interrupt()
+    }
+    val healthy          = new SageListener {
+      def onEvent(event: SageEvent): Unit = event match {
+        case SageEvent.Cache.Hit("first")  => gotFirst.countDown()
+        case SageEvent.Cache.Hit("second") => gotSecond.countDown()
+        case _                             => ()
+      }
+    }
+    val bus              = Events(Vector(selfInterrupting, healthy))
+    try {
+      bus.emit(SageEvent.Cache.Hit("first"))
+      assert(gotFirst.await(2, TimeUnit.SECONDS), "the peer never received the first event")
+      Thread.sleep(100) // let a worker that mishandled the interrupt finish exiting before the later event is queued
+      bus.emit(SageEvent.Cache.Hit("second"))
+      assert(gotSecond.await(2, TimeUnit.SECONDS), "the worker died after a self-interrupt; the later event was lost")
+    } finally bus.close()
+  }
+
   // --- command completion ----------------------------------------------------------------------------------------------------------------
 
   test("trackCommand emits a completion with name and outcome, and is transparent when disabled") {
