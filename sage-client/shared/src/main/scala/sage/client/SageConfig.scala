@@ -271,7 +271,8 @@ object SageConfig {
   private def isHex(c: Char): Boolean = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 
   private def parseEndpoints(uri: String, hosts: String): Either[String, Vector[Endpoint]] =
-    hosts.split(",").toVector.foldRight(Right(Vector.empty): Either[String, Vector[Endpoint]]) { (token, acc) =>
+    // limit -1 keeps trailing empty tokens (a stray comma), so a missing seed reaches parseEndpoint and is rejected rather than dropped
+    hosts.split(",", -1).toVector.foldRight(Right(Vector.empty): Either[String, Vector[Endpoint]]) { (token, acc) =>
       acc.flatMap(rest => parseEndpoint(uri, token).map(_ +: rest))
     }
 
