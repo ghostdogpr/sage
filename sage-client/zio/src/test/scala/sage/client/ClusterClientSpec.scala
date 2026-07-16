@@ -10,7 +10,7 @@ import sage.Bytes
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
-import sage.commands.{BroadcastReduce, Command, Connection, Keys, Server, Strings}
+import sage.commands.{BroadcastReduce, Command, Connection, Keys, Scripting, Server, Strings}
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -292,6 +292,36 @@ class ClusterClientSpec extends munit.FunSuite {
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Server.dbSize).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+    }
+  }
+
+  test("SCRIPT EXISTS broadcasts to every master and reports a sha present only when every master has it") {
+    val mid                = Slot.Count / 2
+    def flags(bits: Long*) = Frame.Array(bits.map(Frame.Integer(_)).toVector)
+    val behaviour          = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("SCRIPT")) Seq(if (node == nodeA) flags(1L, 1L) else flags(1L, 0L))
+      else Seq(Frame.Null)
+    val fixture            = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Scripting.scriptExists("a", "b")).unsafeRun.map { result =>
+      assertEquals(result, Vector(true, false))
+      assert(fixture.written(nodeA).exists(_.contains("SCRIPT")), "nodeA did not receive SCRIPT EXISTS")
+      assert(fixture.written(nodeB).exists(_.contains("SCRIPT")), "nodeB did not receive SCRIPT EXISTS")
+    }
+  }
+
+  test("SCRIPT EXISTS fails when any master fails, rather than reporting a partial answer") {
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("SCRIPT"))
+        Seq(if (node == nodeA) Frame.Array(Vector(Frame.Integer(1L))) else Frame.SimpleError("ERR unavailable"))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Scripting.scriptExists("a")).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
     }
   }

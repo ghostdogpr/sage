@@ -39,11 +39,18 @@ class ScriptingSpec extends munit.FunSuite {
     assertEquals(Reply.run(Scripting.scriptLoad("return 1"), bulk("abc123")), Right("abc123"))
   }
 
-  test("the cluster mutations are All-Masters Commands; reads and KILL are not") {
+  test("SCRIPT LOAD, FLUSH and EXISTS are All-Masters Commands; KILL and EVALSHA are not") {
     assert(Scripting.scriptLoad("s").allMasters)
     assert(Scripting.scriptFlush().allMasters)
+    assert(Scripting.scriptExists("a").allMasters)
     assert(!Scripting.scriptKill.allMasters)
-    assert(!Scripting.scriptExists("a").allMasters)
     assert(!Scripting.evalSha("sha").allMasters)
+  }
+
+  test("SCRIPT EXISTS folds per-sha presence across masters with AND") {
+    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a", "b").broadcast: @unchecked
+    val a                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L)))
+    val b                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L)))
+    assertEquals(combine(a, b), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L))))
   }
 }
