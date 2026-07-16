@@ -1,13 +1,15 @@
 package sage.commands
 
 import sage.Bytes
+import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
   * Server-side Lua scripting. `EVAL`/`EVALSHA` and their `_RO` reads return the raw RESP3 [[Frame]], since a script's reply shape is
-  * defined by user code. `SCRIPT LOAD` and `SCRIPT FLUSH` run on every master, because a cluster keeps no shared script cache and a
-  * later key-routed `EVALSHA` must find the script wherever its keys live.
+  * defined by user code. `SCRIPT LOAD`, `SCRIPT FLUSH` and `SCRIPT EXISTS` run on every master, because a cluster keeps no shared script
+  * cache and a later key-routed `EVALSHA` must find the script wherever its keys live. `EXISTS` therefore reports a sha present only when
+  * every master has it (a per-sha AND), so a `true` reply guarantees the key-routed `EVALSHA` cannot hit a master that lacks the script.
   */
 private[sage] object Scripting {
 
@@ -58,8 +60,35 @@ private[sage] object Scripting {
   def scriptLoad(script: String): Command[String] =
     Command("SCRIPT", Command.NoKeys, Vector(Load, Bytes.utf8(script)), Decode.utf8String, allMasters = true)
 
+  private def isFlag(n: Long): Boolean = n == 0L || n == 1L
+
+  private def flagFrame(f: Frame): Boolean = f match {
+    case Frame.Integer(n) => isFlag(n)
+    case _                => false
+  }
+
+  private def andFlag(a: Frame, b: Frame): Frame =
+    (a, b) match {
+      case (Frame.Integer(x), Frame.Integer(y)) if isFlag(x) && isFlag(y) => Frame.Integer(if (x == 1L && y == 1L) 1L else 0L)
+      case (bad, _) if !flagFrame(bad)                                    => bad
+      case (_, bad)                                                       => bad
+    }
+
+  private val existsAnd: (Frame, Frame) => Frame = (a, b) =>
+    (a, b) match {
+      case (Frame.Array(xs), Frame.Array(ys)) if xs.length == ys.length => Frame.Array(xs.lazyZip(ys).map(andFlag))
+      case _                                                            => throw DecodeError("SCRIPT EXISTS per-master flag arrays of equal length", s"${Frame.describe(a)} vs ${Frame.describe(b)}")
+    }
+
   def scriptExists(first: String, rest: String*): Command[Vector[Boolean]] =
-    Command("SCRIPT", Command.NoKeys, Exists +: (first +: rest).iterator.map(Bytes.utf8).toVector, Decode.vector(Decode.flag))
+    Command(
+      "SCRIPT",
+      Command.NoKeys,
+      Exists +: (first +: rest).iterator.map(Bytes.utf8).toVector,
+      Decode.vector(Decode.flag),
+      allMasters = true,
+      broadcast = BroadcastReduce.Fold(existsAnd)
+    )
 
   def scriptFlush(mode: Option[FlushMode] = None): Command[Unit] =
     Command("SCRIPT", Command.NoKeys, Flush +: FlushMode.args(mode), Decode.ok, allMasters = true)

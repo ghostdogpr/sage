@@ -1,11 +1,19 @@
 package sage.commands
 
 import sage.Bytes
+import sage.SageException.DecodeError
 import sage.protocol.Frame
 
 class ScriptingSpec extends munit.FunSuite {
 
   private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
+
+  private def flags(bits: Long*): Frame = Frame.Array(bits.iterator.map(Frame.Integer(_)).toVector)
+
+  private val existsFold: (Frame, Frame) => Frame = {
+    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("x").broadcast: @unchecked
+    combine
+  }
 
   test("EVAL returns the raw RESP3 frame untouched") {
     assertEquals(Reply.run(Scripting.eval("return 1"), Frame.Integer(1L)), Right(Frame.Integer(1L)))
@@ -39,11 +47,23 @@ class ScriptingSpec extends munit.FunSuite {
     assertEquals(Reply.run(Scripting.scriptLoad("return 1"), bulk("abc123")), Right("abc123"))
   }
 
-  test("the cluster mutations are All-Masters Commands; reads and KILL are not") {
+  test("SCRIPT LOAD, FLUSH and EXISTS are All-Masters Commands; KILL and EVALSHA are not") {
     assert(Scripting.scriptLoad("s").allMasters)
     assert(Scripting.scriptFlush().allMasters)
+    assert(Scripting.scriptExists("a").allMasters)
     assert(!Scripting.scriptKill.allMasters)
-    assert(!Scripting.scriptExists("a").allMasters)
     assert(!Scripting.evalSha("sha").allMasters)
+  }
+
+  test("SCRIPT EXISTS folds per-sha presence across masters with AND") {
+    assertEquals(existsFold(flags(1L, 1L), flags(1L, 0L)), flags(1L, 0L))
+  }
+
+  test("SCRIPT EXISTS surfaces a non-binary flag so the strict decode rejects it rather than coercing to false") {
+    assert(Reply.run(Scripting.scriptExists("a"), existsFold(flags(2L), flags(1L))).isLeft)
+  }
+
+  test("SCRIPT EXISTS fails a length mismatch across masters rather than hiding the malformed reply") {
+    intercept[DecodeError](existsFold(flags(1L, 1L), flags(1L)))
   }
 }
