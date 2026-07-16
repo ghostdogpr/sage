@@ -506,9 +506,11 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       try { val _ = connection.subscribeChannels(Vector("news")) }
       catch { case _: Throwable => () }
     )
-    subscribing.start() // blocks inside ConnectingTransport.start()
+    subscribing.start() // blocks in the connect
 
-    assert(connecting.get() != null || { Thread.sleep(50); connecting.get() != null }, "the establish never started")
+    val deadline = System.currentTimeMillis() + 2000
+    while (connecting.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(1)
+    assert(connecting.get() != null, "the establish never started")
     assert(connecting.get().reached.await(2, TimeUnit.SECONDS), "the establish never reached the connect phase")
 
     connection.close()
@@ -516,6 +518,34 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
     assert(!subscribing.isAlive, "close must abort the establishing connection, not wait out the connect")
     assert(connecting.get().wasClosed, "close must abort the establishing transport")
+  }
+
+  test("close unblocks a subscriber parked waiting for the bootstrap reply") {
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val t = new FakeTransport(onFrame, onClosed, _ => Nil) // never answers the bootstrap
+      transports += t
+      t
+    }
+    // long timeout: a broken close() would leave the caller parked well past the join
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 60000L, 16, () => true)
+
+    val subscribing = new Thread(() =>
+      try { val _ = connection.subscribeChannels(Vector("news")) }
+      catch { case _: Throwable => () }
+    )
+    subscribing.start()
+
+    val deadline = System.currentTimeMillis() + 2000
+    def pinged   = transports.headOption.exists(_.written.exists(_.asUtf8String.contains("PING")))
+    while (!pinged && System.currentTimeMillis() < deadline) Thread.sleep(1)
+    assert(pinged, "the bootstrap PING was never sent")
+
+    connection.close()
+    subscribing.join(2000)
+
+    assert(!subscribing.isAlive, "close must fail the bootstrap wait, not leave the caller parked for the connect timeout")
   }
 
   test("close aborts every overlapping establishment, not just the most recent") {

@@ -8,8 +8,9 @@ import java.util.concurrent.CountDownLatch
 final class ConnectingTransport(onClosed: () => Unit) extends Transport {
   val reached                          = new CountDownLatch(1)
   private val gate                     = new CountDownLatch(1)
-  @volatile var wasClosed: Boolean     = false
+  private val closed                   = new java.util.concurrent.atomic.AtomicBoolean(false)
+  def wasClosed: Boolean               = closed.get()
   def start(): Unit                    = { reached.countDown(); gate.await(); throw new java.io.IOException("connect aborted") }
   def send(item: Transport.Item): Unit = item.dropped()
-  def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
+  def close(): Unit                    = if (closed.compareAndSet(false, true)) { gate.countDown(); onClosed() }
 }

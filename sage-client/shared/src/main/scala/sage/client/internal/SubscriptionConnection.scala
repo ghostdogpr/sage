@@ -6,10 +6,11 @@ import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import sage.{Bytes, SageEvent, SageException}
-import sage.SageException.{ConnectionFailed, NotConnected}
+import sage.SageException.{ConnectionFailed, ConnectionLost, NotConnected}
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.{Command, Connection, Pubsub, Reply}
@@ -280,12 +281,13 @@ final private[client] class SubscriptionConnection(
         bootstrap,
         connectTimeoutMillis,
         (command, cb) => {
-          conn.bootstrapWaiter = frame => cb(Reply.decode(command, frame))
-          conn.send(command.encode)
+          conn.armBootstrap(result => cb(result.flatMap(frame => Reply.decode(command, frame))))
+          if (conn.isTerminated) { val _ = conn.completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false))) }
+          else conn.send(command.encode)
         },
         () => conn.close()
       )
-    finally conn.bootstrapWaiter = null
+    finally conn.clearBootstrap()
 
   private def scheduleReconnect(attempt: Int): Unit =
     scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
@@ -343,9 +345,7 @@ final private[client] class SubscriptionConnection(
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
         lastReplyAtMillis = scheduler.nowMillis
-        val waiter = conn.bootstrapWaiter
-        if (waiter != null) waiter(reply)
-        else
+        if (!conn.completeBootstrap(Success(reply)))
           reply match {
             // an error (e.g. MOVED on SSUBSCRIBE) isn't a PONG: drop the connection so re-home/reconnect re-plans
             case _: Frame.SimpleError | _: Frame.BulkError => scheduler.after(Duration.Zero)(conn.close()) // off the reader thread: close() joins it
@@ -488,18 +488,33 @@ final private[client] class SubscriptionConnection(
 
   final private class Conn {
 
-    private val transportRef                     = new AtomicReference[Transport]()
-    @volatile private var terminated             = false
-    @volatile private var aborted                = false
-    @volatile var bootstrapWaiter: Frame => Unit = null
+    private val transportRef         = new AtomicReference[Transport]()
+    @volatile private var terminated = false
+    @volatile private var aborted    = false
+    private val bootstrapWaiter      = new AtomicReference[Try[Frame] => Unit]()
 
     def isTerminated: Boolean = terminated
 
     def start(): Unit = {
-      val transport = factory(frame => onFrame(this, frame), () => { terminated = true; onConnClosed(this) })
+      val transport = factory(frame => onFrame(this, frame), () => onTerminated())
       transportRef.set(transport)
       if (aborted) transport.close()
       else transport.start()
+    }
+
+    private def onTerminated(): Unit = {
+      terminated = true
+      val _ = completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false)))
+      onConnClosed(this)
+    }
+
+    def armBootstrap(waiter: Try[Frame] => Unit): Unit = bootstrapWaiter.set(waiter)
+    def clearBootstrap(): Unit                         = bootstrapWaiter.set(null)
+
+    def completeBootstrap(result: Try[Frame]): Boolean = {
+      val waiter = bootstrapWaiter.getAndSet(null)
+      if (waiter != null) { waiter(result); true }
+      else false
     }
 
     def send(payload: Bytes): Unit = {
