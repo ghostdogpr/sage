@@ -527,8 +527,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       transports += t
       t
     }
-    // long timeout: a broken close() would leave the caller parked well past the join
-    val connection                                      =
+    val connection =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 60000L, 16, () => true)
 
     val subscribing = new Thread(() =>
