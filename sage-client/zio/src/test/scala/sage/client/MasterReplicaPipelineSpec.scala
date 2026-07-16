@@ -50,9 +50,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       )
     )
 
-  // one reply frame per command occurrence in a batch payload, so a pipeline of N commands gets N replies dispatched in order; only the
-  // master answers ROLE, so discovery resolves the topology from the seed. Non-pipeline bootstrap commands (CLIENT TRACKING on the caching
-  // master pool, etc.) each get a single OK
+  // one reply per command occurrence in a batch; only the master answers ROLE; other bootstrap commands each get a single OK
   private def respondFor(node: Node): Bytes => Seq[Frame] = payload => {
     val s = payload.asUtf8String
     if (s.contains("HELLO")) Seq(helloReply)
@@ -70,7 +68,6 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     count
   }
 
-  // records the node each command's span was routed to, so tracer attribution can be asserted per command name
   final private class RoutingTracer extends CommandTracer {
     val routed                                      = new ConcurrentLinkedQueue[(String, Node)]()
     def onCommand(command: Command[?]): CommandSpan =
