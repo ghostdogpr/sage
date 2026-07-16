@@ -2154,18 +2154,21 @@ object Client {
     commands: Vector[Command[?]],
     spans: Vector[CommandSpan],
     submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
-    complete: Try[Vector[Either[SageException, Any]]] => Unit
+    complete: Try[Vector[Either[SageException, Any]]] => Unit,
+    node: Option[Node] = None
   ): Unit = {
     val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
     val callbacks = Vector.tabulate(commands.length) { i =>
       val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
       Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
     }
+    // attribute the serving node before submitAll: a synchronous (fake/fast) transport can complete a callback inline, ahead of any later attribution
+    node.foreach(n => callbacks.foreach(Events.attributeNode(_, n)))
     if (!submitAll(commands, callbacks)) {
       val error = NotConnected()
       callbacks.foreach(Events.abandonSpan(_, error))
       if (events.emitsEvents)
-        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
+        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, node, Duration.Zero, Outcome.Failed(error))))
       complete(Failure(error))
     }
   }

@@ -283,31 +283,39 @@ final private[client] class MasterReplicaLive(
         offload {
           // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
           val useReplica = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-          val nc         = if (useReplica) readConn() else masterConn()
+          val (node, nc) = if (useReplica) readConn() else masterConn()
           // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
           if (nc == null) triggerRefresh()
           val submit     = if (nc == null) (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false else nc.submitAll
-          Client.submitBatchOnOne(events, p.commands, spans, submit, complete)
+          // None when nothing reached the wire, so the batch is not attributed to a node it never landed on
+          val attributed = if (nc == null) None else Some(node)
+          Client.submitBatchOnOne(events, p.commands, spans, submit, complete, attributed)
         }
       }
 
-  private def masterConn(): NodeClient =
-    try masterPool.getOrEstablish(masterNodeRef.get())
-    catch { case NonFatal(_) => null }
+  private def masterConn(): (Node, NodeClient) = {
+    val node = masterNodeRef.get()
+    (
+      node,
+      try masterPool.getOrEstablish(node)
+      catch { case NonFatal(_) => null }
+    )
+  }
 
-  // the first live read candidate under the policy, master or replica; null when none
-  private def readConn(): NodeClient = {
+  // the first live read candidate under the policy with the node it landed on; (null, null) when none
+  private def readConn(): (Node, NodeClient) = {
     val master            = masterNodeRef.get()
     val it                = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement()).iterator
+    var foundNode: Node   = null
     var found: NodeClient = null
     while (found == null && it.hasNext) {
       val node = it.next()
       val nc   =
         try if (node == master) masterPool.getOrEstablish(node) else replicaPool.getOrEstablish(node)
         catch { case NonFatal(_) => null }
-      if (nc != null && nc.isLive) found = nc
+      if (nc != null && nc.isLive) { foundNode = node; found = nc }
     }
-    found
+    (foundNode, found)
   }
 
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
