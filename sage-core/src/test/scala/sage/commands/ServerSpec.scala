@@ -84,6 +84,19 @@ class ServerSpec extends munit.FunSuite {
     assert(Server.waitReplicas(1L, 1.second).allMasters)
   }
 
+  test("WAIT/WAITAOF round a sub-millisecond timeout up to 1ms, keep an explicit zero as block-forever, and clamp a negative to 1ms") {
+    def waitMs(d: FiniteDuration)    = Server.waitReplicas(1L, d).args(1).asUtf8String
+    def waitAofMs(d: FiniteDuration) = Server.waitAof(1L, 0L, d).args(2).asUtf8String
+    assertEquals(waitMs(500.microseconds), "1")
+    assertEquals(waitMs(Duration.Zero), "0")
+    assertEquals(waitMs(-5.milliseconds), "1")
+    assertEquals(waitMs(2.seconds), "2000")
+    assertEquals(waitAofMs(500.microseconds), "1")
+    assertEquals(waitAofMs(Duration.Zero), "0")
+    assertEquals(waitAofMs(-5.milliseconds), "1")
+    assertEquals(waitAofMs(2.seconds), "2000")
+  }
+
   test(
     "only DBSIZE requires a cluster-wide transaction result; other broadcasts stay transaction-legal like Redis, which never flags them no-multi"
   ) {
