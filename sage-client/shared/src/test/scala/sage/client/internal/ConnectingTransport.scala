@@ -2,7 +2,9 @@ package sage.client.internal
 
 import java.util.concurrent.CountDownLatch
 
-// A transport whose start() blocks like a socket connect until close() aborts it; `reached` fires when start() is entered
+/**
+  * A transport whose `start()` blocks like a socket connect until `close()` aborts it; `reached` fires when `start()` is entered.
+  */
 final class ConnectingTransport(onClosed: () => Unit) extends Transport {
   val reached                          = new CountDownLatch(1)
   private val gate                     = new CountDownLatch(1)
