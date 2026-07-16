@@ -147,7 +147,6 @@ class EventsSpec extends munit.FunSuite {
     try {
       bus.emit(SageEvent.Cache.Hit("first"))
       assert(gotFirst.await(2, TimeUnit.SECONDS), "the peer never received the first event")
-      // deterministic: a surviving worker parks WAITING on take(); a worker that mishandled the interrupt is TERMINATED. Decide before emitting.
       val t        = worker.get()
       val deadline = System.nanoTime() + 2.seconds.toNanos
       def settled  = t.getState == Thread.State.WAITING || t.getState == Thread.State.TERMINATED
