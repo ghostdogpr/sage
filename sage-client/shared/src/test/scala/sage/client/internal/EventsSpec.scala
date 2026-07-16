@@ -131,9 +131,10 @@ class EventsSpec extends munit.FunSuite {
   test("a listener that leaves the interrupt flag set does not permanently kill the worker") {
     val gotFirst         = new CountDownLatch(1)
     val gotSecond        = new CountDownLatch(1)
+    val worker           = new java.util.concurrent.atomic.AtomicReference[Thread]()
     val first            = new java.util.concurrent.atomic.AtomicBoolean(true)
     val selfInterrupting = new SageListener {
-      def onEvent(event: SageEvent): Unit = if (first.getAndSet(false)) Thread.currentThread().interrupt()
+      def onEvent(event: SageEvent): Unit = if (first.getAndSet(false)) { worker.set(Thread.currentThread()); Thread.currentThread().interrupt() }
     }
     val healthy          = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
@@ -146,7 +147,12 @@ class EventsSpec extends munit.FunSuite {
     try {
       bus.emit(SageEvent.Cache.Hit("first"))
       assert(gotFirst.await(2, TimeUnit.SECONDS), "the peer never received the first event")
-      Thread.sleep(100) // let a worker that mishandled the interrupt finish exiting before the later event is queued
+      // deterministic: a surviving worker parks WAITING on take(); a worker that mishandled the interrupt is TERMINATED. Decide before emitting.
+      val t        = worker.get()
+      val deadline = System.nanoTime() + 2.seconds.toNanos
+      def settled  = t.getState == Thread.State.WAITING || t.getState == Thread.State.TERMINATED
+      while (!settled && System.nanoTime() < deadline) Thread.sleep(5)
+      assert(settled, "the worker never settled after the self-interrupt")
       bus.emit(SageEvent.Cache.Hit("second"))
       assert(gotSecond.await(2, TimeUnit.SECONDS), "the worker died after a self-interrupt; the later event was lost")
     } finally bus.close()
