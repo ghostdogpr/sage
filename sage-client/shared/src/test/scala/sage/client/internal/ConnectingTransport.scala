@@ -13,12 +13,11 @@ final class ConnectingTransport(onClosed: () => Unit) extends Transport {
   private val queued                   = new ConcurrentLinkedQueue[Transport.Item]()
   def wasClosed: Boolean               = closed.get()
   def start(): Unit                    = { reached.countDown(); gate.await(); throw new java.io.IOException("connect aborted") }
-  def send(item: Transport.Item): Unit = { val _ = queued.add(item) }
-  def close(): Unit                    =
-    if (closed.compareAndSet(false, true)) {
-      gate.countDown()
-      var item = queued.poll()
-      while (item != null) { item.dropped(); item = queued.poll() }
-      onClosed()
-    }
+  def send(item: Transport.Item): Unit = { val _ = queued.add(item); if (closed.get()) drainQueue() }
+  def close(): Unit                    = if (closed.compareAndSet(false, true)) { gate.countDown(); drainQueue(); onClosed() }
+
+  private def drainQueue(): Unit = {
+    var item = queued.poll()
+    while (item != null) { item.dropped(); item = queued.poll() }
+  }
 }
