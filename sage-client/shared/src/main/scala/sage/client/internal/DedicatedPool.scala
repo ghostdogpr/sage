@@ -39,6 +39,9 @@ final private[client] class DedicatedPool(
 
   private val idle                              = mutable.ArrayDeque.empty[DedicatedPool.Idle]
   private val live                              = mutable.Set.empty[DedicatedConnection]
+  // connections whose socket is being opened outside the lock; retained so close() can abort one still stuck in connect rather than
+  // stranding it until the connect timeout. The establisher removes its own entry on return.
+  private val establishing                      = mutable.Set.empty[DedicatedConnection]
   private var reserved                          = 0
   private var closing                           = false
   private val sweepHandle: Scheduler.Cancelable =
@@ -115,7 +118,8 @@ final private[client] class DedicatedPool(
       closing = true
       if (sweepHandle != null) sweepHandle.cancel()
       available.signalAll()
-      val snapshot = live.toVector
+      // establishing connections abort their in-flight connect; they still remove their own entry when the establish unwinds
+      val snapshot = (live ++ establishing).toVector
       live.clear()
       idle.clear()
       snapshot
@@ -144,18 +148,21 @@ final private[client] class DedicatedPool(
     }
   }
 
-  // entered holding the lock with `reserved` already incremented; drops the lock for the blocking establish, then re-accounts under it.
+  // entered holding the lock with `reserved` already incremented; registers the connection, drops the lock for the blocking establish, then
+  // re-accounts under it. Registering before the unlock lets a concurrent close() abort the socket instead of stranding it in connect.
   private def establishOutsideLock(): DedicatedConnection = {
+    val connection = DedicatedConnection.create(factory, connectTimeoutMillis)
+    establishing += connection
     lock.unlock()
-    val connection =
-      try DedicatedConnection.establish(factory, bootstrap, connectTimeoutMillis)
-      catch {
-        case e: Throwable =>
-          locked { reserved -= 1; available.signal() }
-          lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
-          throw e
-      }
+    try connection.establish(bootstrap)
+    catch {
+      case e: Throwable =>
+        locked { establishing -= connection; reserved -= 1; available.signal() }
+        lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
+        throw e
+    }
     lock.lock()
+    establishing -= connection
     reserved -= 1
     // stamp with the epoch live the moment it joins the pool, so a connection built across a reconnect is born current, never stale
     if (closing) {

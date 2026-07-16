@@ -491,4 +491,40 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     connection.attach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)
     assert(connection.detach(sink, Vector("news"), SubscriptionConnection.Kind.Channel)) // must return, not throw the interrupt
   }
+
+  test("close aborts a subscription connection still blocked in the connect (start) phase") {
+    // a transport whose start() blocks like socket.connect until close() aborts it
+    final class ConnectingTransport(onClosed: () => Unit) extends Transport {
+      private val gate                     = new CountDownLatch(1)
+      @volatile var wasClosed: Boolean     = false
+      def start(): Unit                    = { gate.await(); throw new java.io.IOException("connect aborted") }
+      def send(item: Transport.Item): Unit = item.dropped()
+      def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
+    }
+
+    val connecting                                      = new AtomicReference[ConnectingTransport]()
+    val factory: MultiplexedConnection.TransportFactory = (_, onClosed) => {
+      val transport = new ConnectingTransport(onClosed)
+      connecting.set(transport)
+      transport
+    }
+    val connection                                      =
+      new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
+
+    val subscribing = new Thread(() =>
+      try { val _ = connection.subscribeChannels(Vector("news")) }
+      catch { case _: Throwable => () }
+    )
+    subscribing.start() // blocks inside ConnectingTransport.start()
+
+    val deadline = System.currentTimeMillis() + 2000
+    while (connecting.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(1)
+    assert(connecting.get() != null, "the establish never reached the connect phase")
+
+    connection.close()
+    subscribing.join(2000)
+
+    assert(!subscribing.isAlive, "close must abort the establishing connection, not wait out the connect")
+    assert(connecting.get().wasClosed, "close must abort the establishing transport")
+  }
 }

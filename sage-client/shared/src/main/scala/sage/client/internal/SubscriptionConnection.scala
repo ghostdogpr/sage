@@ -44,14 +44,17 @@ final private[client] class SubscriptionConnection(
 ) extends Placement.ShardConn {
   import SubscriptionConnection.*
 
-  private val lock          = new ReentrantLock()
-  private val established   = lock.newCondition()
-  private val confirmed     = lock.newCondition()
-  private var state: State  = State.Idle
-  private var current: Conn = null
-  private val channelSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
-  private val patternSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
-  private val shardSinks    = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
+  private val lock               = new ReentrantLock()
+  private val established        = lock.newCondition()
+  private val confirmed          = lock.newCondition()
+  private var state: State       = State.Idle
+  private var current: Conn      = null
+  // the connection whose socket is being opened (an attach or a reconnect), retained so a shutdown can abort one still stuck in connect
+  // rather than stranding it until the connect timeout; the establisher clears it when the connect unwinds
+  private var establishing: Conn = null
+  private val channelSinks       = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
+  private val patternSinks       = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
+  private val shardSinks         = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
 
   // SUBSCRIBE-ack accounting (guarded by `lock`): the server confirms each subscribed name with one push frame in send order, so a subscribe
   // waits until `subscribeConfirmed` catches `subscribeSent` before returning — otherwise `subscribe` then `publish` races across the sockets.
@@ -256,16 +259,20 @@ final private[client] class SubscriptionConnection(
 
   private def establish(): Conn = {
     val conn = new Conn
-    try conn.start()
-    catch {
-      case e: SageException => throw e
-      case NonFatal(e)      =>
-        val failed = ConnectionFailed(s"could not open the subscription connection: $e")
-        failed.initCause(e)
-        throw failed
-    }
-    runBootstrap(conn)
-    conn
+    // register before the blocking connect so a concurrent shutdown can abort it; if the shutdown already fired, abort right away
+    locked { establishing = conn; if (state == State.Closed) conn.close() }
+    try {
+      try conn.start()
+      catch {
+        case e: SageException => throw e
+        case NonFatal(e)      =>
+          val failed = ConnectionFailed(s"could not open the subscription connection: $e")
+          failed.initCause(e)
+          throw failed
+      }
+      runBootstrap(conn)
+      conn
+    } finally locked { if (establishing eq conn) establishing = null }
   }
 
   // per-conn waiter (two establishes can bootstrap concurrently and must not cross-complete); the finally clears it so a later PONG isn't misrouted
@@ -383,11 +390,14 @@ final private[client] class SubscriptionConnection(
 
   // atomic empty-check + Closed transition, so a racing attach can't bind a sink to a connection about to close
   def closeIfEmpty(): Boolean = {
-    var conn: Conn = null
-    val closing    = locked {
+    var conn: Conn             = null
+    var establishingConn: Conn = null
+    val closing                = locked {
       if (!isEmptyUnlocked) false
       else {
         conn = current
+        establishingConn = establishing
+        establishing = null
         state = State.Closed
         stopWatchdog()
         current = null
@@ -396,15 +406,19 @@ final private[client] class SubscriptionConnection(
         true
       }
     }
+    if (establishingConn != null) establishingConn.close()
     if (conn != null) conn.close()
     closing
   }
 
   // close socket/watchdog but keep the sinks (unlike close), so a re-home re-attaches them
   def shutdown(): Unit = {
-    var conn: Conn = null
+    var conn: Conn             = null
+    var establishingConn: Conn = null
     locked {
       conn = current
+      establishingConn = establishing
+      establishing = null
       state = State.Closed
       stopWatchdog()
       current = null
@@ -414,15 +428,19 @@ final private[client] class SubscriptionConnection(
       established.signalAll()
       confirmed.signalAll()
     }
+    if (establishingConn != null) establishingConn.close()
     if (conn != null) conn.close()
   }
 
   def close(): Unit = {
-    var conn: Conn       = null
-    var sinks: Set[Sink] = Set.empty
+    var conn: Conn             = null
+    var establishingConn: Conn = null
+    var sinks: Set[Sink]       = Set.empty
     locked {
       sinks = (channelSinks.values.flatten ++ patternSinks.values.flatten ++ shardSinks.values.flatten).toSet
       conn = current
+      establishingConn = establishing
+      establishing = null
       state = State.Closed
       stopWatchdog()
       current = null
@@ -435,6 +453,7 @@ final private[client] class SubscriptionConnection(
     // terminate before close: conn.close() joins the reader, which only exits Sink.offer once its sink is closed — closing first deadlocks.
     // In cluster mode the manager owns the sinks and terminates them before calling close(), so this set is already empty.
     sinks.foreach(_.terminate())
+    if (establishingConn != null) establishingConn.close()
     if (conn != null) conn.close()
   }
 
@@ -491,14 +510,18 @@ final private[client] class SubscriptionConnection(
 
     private val transportRef                     = new AtomicReference[Transport]()
     @volatile private var terminated             = false
+    @volatile private var aborted                = false
     @volatile var bootstrapWaiter: Frame => Unit = null
 
     def isTerminated: Boolean = terminated
 
     def start(): Unit = {
       val transport = factory(frame => onFrame(this, frame), () => { terminated = true; onConnClosed(this) })
+      // transportRef is published before the blocking connect so a concurrent close() can abort it; `aborted` (set by close before it reads
+      // transportRef) covers the narrow gap where close lands before the transport is published
       transportRef.set(transport)
-      transport.start()
+      if (aborted) transport.close()
+      else transport.start()
     }
 
     def send(payload: Bytes): Unit = {
@@ -507,6 +530,7 @@ final private[client] class SubscriptionConnection(
     }
 
     def close(): Unit = {
+      aborted = true
       val transport = transportRef.get()
       if (transport != null) transport.close()
     }

@@ -36,6 +36,9 @@ final private[client] class NodePool(
   private val lock             = new ReentrantLock()
   private val established      = mutable.HashMap.empty[Node, NodeClient]
   private val pendingEstablish = mutable.HashMap.empty[Node, NodePool.Establish]
+  // connections whose socket is still being opened, retained so close() can abort one stuck in connect rather than waiting out the connect
+  // timeout; each establisher removes its own entry once the connect settles
+  private val establishing     = mutable.Set.empty[MultiplexedConnection]
   @volatile private var closed = false
 
   private inline def locked[A](inline body: A): A = {
@@ -72,6 +75,7 @@ final private[client] class NodePool(
     if (existing != null) existing
     else if (waitOn != null) waitOn.get()
     else {
+      val connRef = new java.util.concurrent.atomic.AtomicReference[MultiplexedConnection]()
       val nc      =
         try
           NodeClient.connect(
@@ -86,16 +90,24 @@ final private[client] class NodePool(
             cacheMaxBytes,
             Some(node),
             events,
-            dedicatedBootstrap
+            dedicatedBootstrap,
+            // register the connection before its blocking connect; if close() already fired, abort it now so it doesn't strand the socket
+            onConstructed = conn => { connRef.set(conn); if (locked { establishing += conn; closed }) conn.close() }
           )
         catch {
           case error: Throwable =>
-            locked(if (pendingEstablish.get(node).exists(_ eq mine)) { val _ = pendingEstablish.remove(node) })
+            locked {
+              val conn = connRef.get()
+              if (conn != null) { val _ = establishing -= conn }
+              if (pendingEstablish.get(node).exists(_ eq mine)) { val _ = pendingEstablish.remove(node) }
+            }
             mine.fail(error)
             throw error
         }
       // publish only if our token is still current: a retain, close, or newer attempt supersedes us, and the new client is discarded not leaked
       val publish = locked {
+        val conn    = connRef.get()
+        if (conn != null) { val _ = establishing -= conn }
         val current = pendingEstablish.get(node).exists(_ eq mine)
         if (current) { val _ = pendingEstablish.remove(node) }
         if (current && !closed) { established.put(node, nc); true }
@@ -118,17 +130,20 @@ final private[client] class NodePool(
   }
 
   def close(): Unit = {
-    val (all, waiters) = locked {
+    val (all, waiters, opening) = locked {
       closed = true
-      val snap    = established.values.toVector
-      val pending = pendingEstablish.values.toVector
+      val snap     = established.values.toVector
+      val pending  = pendingEstablish.values.toVector
+      val inFlight = establishing.toVector
       established.clear()
       pendingEstablish.clear()
-      (snap, pending)
+      (snap, pending, inFlight)
     }
     // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still
     // observes `closed` on return and closes the node it opened
     waiters.foreach(_.fail(NotConnected()))
+    // abort connections still opening their socket, so a shutdown doesn't wait out the connect timeout; each establisher then removes its entry
+    opening.foreach(_.close())
     all.foreach(_.close())
   }
 }

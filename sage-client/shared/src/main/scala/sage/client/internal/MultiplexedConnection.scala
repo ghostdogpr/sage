@@ -153,24 +153,29 @@ final private[client] class MultiplexedConnection private (
   private[internal] def isCurrent(g: Generation): Boolean = liveEpoch.get() == g
 
   private def connectInitial(): Unit = {
-    val conn = establish() // the first connect propagates a handshake failure; only reconnects retry
+    val conn     = establish() // the first connect propagates a handshake failure; only reconnects retry
     // emit under the lock so the enqueue is ordered with the state transition: a socket dropping immediately after cannot deliver
     // Disconnected before this Connected (the same lock serializes both)
-    locked {
-      if (conn.isTerminated) scheduleReconnect(0)
+    val teardown = locked {
+      // a close() that arrived while establish() ran (e.g. the owning pool shutting down) wins: don't publish this connection Live
+      if (state == State.Closed) conn
+      else if (conn.isTerminated) { scheduleReconnect(0); null }
       else {
         current = conn
         generation = generation.next
         transition(State.Live)
         startWatchdog()
         events.emit(SageEvent.Connection.Connected(node))
+        null
       }
     }
+    if (teardown != null) teardown.close()
   }
 
   private def establish(): Conn = {
     val conn = new Conn
-    locked { establishing = conn }
+    // register before the blocking connect so a concurrent close() can abort it; if the close already fired, abort right away
+    locked { establishing = conn; if (state == State.Closed) conn.close() }
     try {
       conn.start()
       // reserve(1) per command: submit does not self-increment, so this balances the retire() the reply will trigger. A half-open peer can
@@ -454,10 +459,14 @@ private[client] object MultiplexedConnection {
     closeTimeout: FiniteDuration,
     cacheMaxBytes: Long = 0L,
     node: Option[Node] = None,
-    events: Events = Events.disabled
+    events: Events = Events.disabled,
+    onConstructed: MultiplexedConnection => Unit = _ => ()
   ): MultiplexedConnection = {
     val connection =
       new MultiplexedConnection(factory, scheduler, bootstrap, backoff, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, node, events)
+    // hand the instance to the caller before the blocking initial connect, so an owner (e.g. a NodePool) can abort it from close() rather
+    // than stranding the socket until the connect timeout
+    onConstructed(connection)
     connection.connectInitial()
     connection
   }

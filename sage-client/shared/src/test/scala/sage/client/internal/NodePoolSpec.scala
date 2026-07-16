@@ -161,4 +161,37 @@ class NodePoolSpec extends munit.FunSuite {
     assertEquals(gated.transport(1).closeCount, 0, "attempt 2's published client must not be closed")
     pool.close()
   }
+
+  test("close aborts an in-flight node establishment still blocked in the connect (start) phase") {
+    // a transport whose start() blocks like socket.connect until close() aborts it
+    final class ConnectingTransport(onClosed: () => Unit) extends Transport {
+      private val gate                     = new CountDownLatch(1)
+      @volatile var wasClosed: Boolean     = false
+      def start(): Unit                    = { gate.await(); throw new java.io.IOException("connect aborted") }
+      def send(item: Transport.Item): Unit = item.dropped()
+      def close(): Unit                    = { wasClosed = true; gate.countDown(); onClosed() }
+    }
+
+    val connecting                                              = new AtomicReference[ConnectingTransport]()
+    val factory: Node => MultiplexedConnection.TransportFactory = _ =>
+      (_, onClosed) => {
+        val transport = new ConnectingTransport(onClosed)
+        connecting.set(transport)
+        transport
+      }
+    val pool                                                    = newPool(factory)
+    val node                                                    = Node("slow", 6379)
+
+    val result       = new AtomicReference[Try[NodeClient]]()
+    val establishing = new Thread(() => result.set(Try(pool.getOrEstablish(node))), "establisher")
+    establishing.start()
+    awaitTrue(connecting.get() != null, "the establish never reached the connect phase")
+
+    pool.close()
+    establishing.join(2000)
+
+    assert(!establishing.isAlive, "close must abort the in-flight establishment, not wait out the connect")
+    assert(connecting.get().wasClosed, "close must abort the establishing transport")
+    assert(result.get() != null && result.get().isFailure, s"the aborted establisher should fail: ${result.get()}")
+  }
 }

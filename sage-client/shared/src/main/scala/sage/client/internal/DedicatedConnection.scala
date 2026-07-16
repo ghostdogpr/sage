@@ -60,10 +60,22 @@ final private[client] class DedicatedConnection private (
     if (transport != null) transport.close()
   }
 
+  /**
+    * Opens the socket and runs the bootstrap synchronously; throws (no retry) if the connect or handshake fails. Split from the constructor
+    * ([[DedicatedConnection.create]]) so the pool can retain the reference and abort a still-establishing connection from `close`.
+    */
+  def establish(bootstrap: Vector[Command[?]]): Unit = {
+    start()
+    runBootstrap(bootstrap)
+  }
+
   private def start(): Unit = {
     val transport = factory(onFrame, onClosed)
+    // transportRef is published before the blocking connect, so a concurrent close() can abort it; `dead` (set by close before it reads
+    // transportRef) covers the narrow gap where close lands before the transport is published
     transportRef.set(transport)
-    transport.start()
+    if (dead) transport.close()
+    else transport.start()
   }
 
   private def runBootstrap(bootstrap: Vector[Command[?]]): Unit =
@@ -153,16 +165,9 @@ private[client] object DedicatedConnection {
   }
 
   /**
-    * Connects and runs the bootstrap synchronously; throws (no retry) if the connect or handshake fails.
+    * Builds an unconnected connection. The pool registers it, then drives the blocking [[DedicatedConnection.establish]] outside its lock, so
+    * a `close` racing the establish can abort the socket rather than stranding it until the connect timeout.
     */
-  def establish(
-    factory: MultiplexedConnection.TransportFactory,
-    bootstrap: Vector[Command[?]],
-    connectTimeoutMillis: Long
-  ): DedicatedConnection = {
-    val connection = new DedicatedConnection(factory, connectTimeoutMillis)
-    connection.start()
-    connection.runBootstrap(bootstrap)
-    connection
-  }
+  def create(factory: MultiplexedConnection.TransportFactory, connectTimeoutMillis: Long): DedicatedConnection =
+    new DedicatedConnection(factory, connectTimeoutMillis)
 }
