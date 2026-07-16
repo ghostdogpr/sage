@@ -8,6 +8,13 @@ class ScriptingSpec extends munit.FunSuite {
 
   private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
 
+  private def flags(bits: Long*): Frame = Frame.Array(bits.iterator.map(Frame.Integer(_)).toVector)
+
+  private val existsFold: (Frame, Frame) => Frame = {
+    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("x").broadcast: @unchecked
+    combine
+  }
+
   test("EVAL returns the raw RESP3 frame untouched") {
     assertEquals(Reply.run(Scripting.eval("return 1"), Frame.Integer(1L)), Right(Frame.Integer(1L)))
     val nested = Frame.Array(Vector(bulk("a"), Frame.Integer(2L)))
@@ -49,22 +56,14 @@ class ScriptingSpec extends munit.FunSuite {
   }
 
   test("SCRIPT EXISTS folds per-sha presence across masters with AND") {
-    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a", "b").broadcast: @unchecked
-    val a                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L)))
-    val b                             = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L)))
-    assertEquals(combine(a, b), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L))))
+    assertEquals(existsFold(flags(1L, 1L), flags(1L, 0L)), flags(1L, 0L))
   }
 
   test("SCRIPT EXISTS surfaces a non-binary flag so the strict decode rejects it rather than coercing to false") {
-    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a").broadcast: @unchecked
-    val merged                        = combine(Frame.Array(Vector(Frame.Integer(2L))), Frame.Array(Vector(Frame.Integer(1L))))
-    assert(Reply.run(Scripting.scriptExists("a"), merged).isLeft)
+    assert(Reply.run(Scripting.scriptExists("a"), existsFold(flags(2L), flags(1L))).isLeft)
   }
 
   test("SCRIPT EXISTS fails a length mismatch across masters rather than hiding the malformed reply") {
-    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("a", "b").broadcast: @unchecked
-    val whole                         = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(1L)))
-    val short                         = Frame.Array(Vector(Frame.Integer(1L)))
-    intercept[DecodeError](combine(whole, short))
+    intercept[DecodeError](existsFold(flags(1L, 1L), flags(1L)))
   }
 }
