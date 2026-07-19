@@ -37,6 +37,8 @@ final private[sage] class RespParser {
   private var highWater: Int   = 0
   private var quietDrains: Int = 0
 
+  private[protocol] def unsafeBuffer: Array[Byte] = buf
+
   /**
     * Returns every frame completed by `bytes`, in order.
     */

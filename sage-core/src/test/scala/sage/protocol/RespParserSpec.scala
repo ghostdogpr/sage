@@ -172,11 +172,7 @@ class RespParserSpec extends munit.FunSuite {
       acc ++ parser.feed(Bytes.fromArray(chunk)).fold(error => fail(s"unexpected protocol error: $error"), identity)
     }
 
-  private def buffer(parser: RespParser): Array[Byte] = {
-    val field = classOf[RespParser].getDeclaredField("buf")
-    field.setAccessible(true)
-    field.get(parser).asInstanceOf[Array[Byte]]
-  }
+  private def buffer(parser: RespParser): Array[Byte] = parser.unsafeBuffer
 
   test("handles frames split at every two-way boundary") {
     val (wires, expected) = goldens.unzip
