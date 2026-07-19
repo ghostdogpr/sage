@@ -13,14 +13,14 @@ import sage.protocol.Frame
 
 class SocketTransportSpec extends munit.FunSuite {
 
-  final private class RecordingItem(text: String) extends Transport.Item {
-    val payload: Bytes                = Bytes.utf8(text)
+  final private class RecordingItem(val text: String) extends Transport.Item {
+    var payload: Bytes                = Bytes.utf8(text)
     @volatile var writeAttempts: Int  = 0
     @volatile var drops: Int          = 0
     @volatile var clears: Int         = 0
     def writeAttempted(): Unit        = writeAttempts += 1
     def dropped(): Unit               = drops += 1
-    override def clearPayload(): Unit = clears += 1
+    override def clearPayload(): Unit = { clears += 1; payload = Bytes.empty }
   }
 
   private def withTransport(
@@ -54,7 +54,7 @@ class SocketTransportSpec extends munit.FunSuite {
   }
 
   private def assertAllArrive(peer: Socket, items: Seq[RecordingItem]): Unit = {
-    val expected = items.map(item => item.payload.asUtf8String).mkString
+    val expected = items.map(_.text).mkString
     assertEquals(readExactly(peer.getInputStream, expected.length), expected)
   }
 
