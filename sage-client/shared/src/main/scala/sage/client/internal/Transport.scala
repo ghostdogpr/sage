@@ -32,6 +32,11 @@ private[client] object Transport {
     def payload: Bytes
 
     /**
+      * Invoked after the payload has been captured for the write attempt; it is never read again, so the item may drop it.
+      */
+    def clearPayload(): Unit = ()
+
+    /**
       * Invoked on the writer thread immediately before the first write attempt: from here on the command may execute server-side.
       */
     def writeAttempted(): Unit
