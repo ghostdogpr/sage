@@ -33,6 +33,10 @@ final private[sage] class RespParser {
   private var stack      = new Array[Agg](8)
   private var stackDepth = 0
 
+  // shrink hysteresis: the cycle's buffered high-water mark, and how many drains in a row stayed under MaxRetainedBuffer
+  private var highWater: Int   = 0
+  private var quietDrains: Int = 0
+
   /**
     * Returns every frame completed by `bytes`, in order.
     */
@@ -60,8 +64,15 @@ final private[sage] class RespParser {
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
-          // a buffer grown by one huge element must not stay pinned for the connection's lifetime
-          if (buf.length > MaxRetainedBuffer) buf = Array.emptyByteArray
+          // a buffer grown by a huge element must not stay pinned forever, but consecutive large replies must keep reusing it
+          if (buf.length > MaxRetainedBuffer) {
+            if (highWater > MaxRetainedBuffer) quietDrains = 0
+            else {
+              quietDrains += 1
+              if (quietDrains >= ShrinkAfterDrains) buf = Array.emptyByteArray
+            }
+          }
+          highWater = 0
         }
         None
       }
@@ -99,6 +110,7 @@ final private[sage] class RespParser {
       }
       System.arraycopy(incoming, offset, buf, writePos, length)
       writePos += length
+      if (writePos > highWater) highWater = writePos
       true
     }
   }
@@ -411,6 +423,9 @@ final private[sage] class RespParser {
 
   // largest buffer kept across feeds once fully drained (see the reset in feed)
   private inline def MaxRetainedBuffer: Int = 1 << 20
+
+  // consecutive drains under MaxRetainedBuffer before an oversized buffer is released
+  private inline def ShrinkAfterDrains: Int = 8
 
   // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
   private inline def MaxDepth: Int = 512
