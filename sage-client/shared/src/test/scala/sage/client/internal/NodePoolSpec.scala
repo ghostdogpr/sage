@@ -71,6 +71,28 @@ class NodePoolSpec extends munit.FunSuite {
   private def awaitAllWaiting(threads: Seq[Thread]): Unit =
     awaitTrue(threads.forall(_.getState == Thread.State.WAITING), "a waiter never blocked on the in-flight establishment")
 
+  test("existing answers immediately while an establishment is in flight, and tracks publish and retain") {
+    val node  = Node("gated", 6379)
+    val gated = new GatedFactory(1)
+    val pool  = newPool(gated.factory)
+    assertEquals(pool.existing(node), null)
+
+    val establishing = new Thread(() => { val _ = Try(pool.getOrEstablish(node)) }, "establisher")
+    establishing.start()
+    gated.awaitReached(0)
+    assertEquals(pool.existing(node), null)
+
+    gated.release(0)
+    establishing.join(2000)
+    val nc = pool.existing(node)
+    assert(nc != null, "the published client should be visible")
+    assert(pool.existingLive(node).exists(_ eq nc))
+
+    pool.retain(_ => false)
+    assertEquals(pool.existing(node), null)
+    pool.close()
+  }
+
   test("retain invalidates an in-flight establishment for a rejected node: the client is closed, absent, and every waiter fails") {
     val node  = Node("gated", 6379)
     val gated = new GatedFactory(1)

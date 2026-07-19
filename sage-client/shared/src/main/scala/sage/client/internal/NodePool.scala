@@ -5,6 +5,7 @@ import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
@@ -34,7 +35,8 @@ final private[client] class NodePool(
 ) {
 
   private val lock             = new ReentrantLock()
-  private val established      = mutable.HashMap.empty[Node, NodeClient]
+  // lock-free reads; every mutation stays under `lock`
+  private val established      = new java.util.concurrent.ConcurrentHashMap[Node, NodeClient]()
   private val pendingEstablish = mutable.HashMap.empty[Node, NodePool.Establish]
   // connections whose socket is still being opened, so close() can abort one still connecting
   private val establishing     = mutable.Set.empty[MultiplexedConnection]
@@ -46,30 +48,35 @@ final private[client] class NodePool(
     finally lock.unlock()
   }
 
-  def existingLive(node: Node): Option[NodeClient] = locked(established.get(node)).filter(_.isLive)
+  /**
+    * The node's established client, or `null` — never blocks.
+    */
+  def existing(node: Node): NodeClient = established.get(node)
 
-  def firstLiveNode: Option[Node] = locked(established.collectFirst { case (node, nc) if nc.isLive => node })
+  def existingLive(node: Node): Option[NodeClient] = Option(established.get(node)).filter(_.isLive)
+
+  def firstLiveNode: Option[Node] = established.asScala.collectFirst { case (node, nc) if nc.isLive => node }
 
   // live nodes first, so a refresh prefers a known-good node
   def candidatesByLiveness: Vector[Node] = {
-    val (live, others) = locked(established.toVector).partition(_._2.isLive)
+    val (live, others) = established.asScala.toVector.partition(_._2.isLive)
     live.map(_._1) ++ others.map(_._1)
   }
 
   def getOrEstablish(node: Node): NodeClient = {
+    val fast                       = established.get(node)
+    if (fast != null) return fast
     var existing: NodeClient       = null
     var waitOn: NodePool.Establish = null
     var mine: NodePool.Establish   = null
     locked {
       if (closed) throw NotConnected()
-      established.get(node) match {
-        case Some(nc) => existing = nc
-        case None     =>
-          pendingEstablish.get(node) match {
-            case Some(p) => waitOn = p
-            case None    => mine = new NodePool.Establish; pendingEstablish.put(node, mine)
-          }
-      }
+      existing = established.get(node)
+      if (existing == null)
+        pendingEstablish.get(node) match {
+          case Some(p) => waitOn = p
+          case None    => mine = new NodePool.Establish; val _ = pendingEstablish.put(node, mine)
+        }
     }
     if (existing != null) existing
     else if (waitOn != null) waitOn.get()
@@ -119,7 +126,7 @@ final private[client] class NodePool(
   // drops/closes bundles `keep` rejects and invalidates in-flight establishments for rejected nodes, so neither leaks; closes are offloaded
   def retain(keep: Node => Boolean): Unit = {
     val (gone, rejected) = locked {
-      val absent          = established.keysIterator.filterNot(keep).toVector.flatMap(node => established.remove(node))
+      val absent          = established.keySet.asScala.toVector.filterNot(keep).flatMap(node => Option(established.remove(node)))
       val rejectedPending = pendingEstablish.keysIterator.filterNot(keep).toVector.flatMap(node => pendingEstablish.remove(node))
       (absent, rejectedPending)
     }
@@ -130,7 +137,7 @@ final private[client] class NodePool(
   def close(): Unit = {
     val (all, waiters, opening) = locked {
       closed = true
-      val snap     = established.values.toVector
+      val snap     = established.values.asScala.toVector
       val pending  = pendingEstablish.values.toVector
       val inFlight = establishing.toVector
       established.clear()
