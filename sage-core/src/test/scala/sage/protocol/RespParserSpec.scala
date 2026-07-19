@@ -167,8 +167,13 @@ class RespParserSpec extends munit.FunSuite {
     assertEquals(feedInChunks(parser, wire), Vector(expected))
     // 4-byte elements never align with the 8192-byte chunks, so the cursor passes the threshold with no mid-aggregate drain
     val count            = 325000
-    val aggregate        = s"*$count\r\n".getBytes ++ Array.fill(count)(":4\r\n".getBytes).flatten
-    assertEquals(feedInChunks(parser, aggregate), Vector(Frame.Array(Vector.fill(count)(Frame.Integer(4)))))
+    val aggregate        = (s"*$count\r\n" + ":4\r\n" * count).getBytes
+    feedInChunks(parser, aggregate) match {
+      case Vector(Frame.Array(elements)) =>
+        assertEquals(elements.length, count)
+        assert(elements.forall(_ == Frame.Integer(4)))
+      case other                         => fail(s"expected one array, got $other")
+    }
     for (_ <- 1 to 7)
       assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
     assert(buffer(parser).length <= (1 << 20), "cursor position must not be mistaken for buffering demand")
