@@ -129,7 +129,6 @@ final private[client] class DedicatedConnection private (
     private val remaining = new AtomicInteger(n)
     private val done      = new AtomicBoolean(false)
 
-    // the pending Slots pin this batch until every reply lands
     var payload: Bytes = Bytes.concatBy(commands)(_.encode)
 
     override def clearPayload(): Unit = payload = Bytes.empty
