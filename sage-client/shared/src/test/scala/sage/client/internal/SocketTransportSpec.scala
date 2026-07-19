@@ -13,12 +13,14 @@ import sage.protocol.Frame
 
 class SocketTransportSpec extends munit.FunSuite {
 
-  final private class RecordingItem(text: String) extends Transport.Item {
-    val payload: Bytes               = Bytes.utf8(text)
-    @volatile var writeAttempts: Int = 0
-    @volatile var drops: Int         = 0
-    def writeAttempted(): Unit       = writeAttempts += 1
-    def dropped(): Unit              = drops += 1
+  final private class RecordingItem(val text: String) extends Transport.Item {
+    var payload: Bytes                = Bytes.utf8(text)
+    @volatile var writeAttempts: Int  = 0
+    @volatile var drops: Int          = 0
+    @volatile var clears: Int         = 0
+    def writeAttempted(): Unit        = writeAttempts += 1
+    def dropped(): Unit               = drops += 1
+    override def clearPayload(): Unit = { clears += 1; payload = Bytes.empty }
   }
 
   private def withTransport(
@@ -52,7 +54,7 @@ class SocketTransportSpec extends munit.FunSuite {
   }
 
   private def assertAllArrive(peer: Socket, items: Seq[RecordingItem]): Unit = {
-    val expected = items.map(item => item.payload.asUtf8String).mkString
+    val expected = items.map(_.text).mkString
     assertEquals(readExactly(peer.getInputStream, expected.length), expected)
   }
 
@@ -64,6 +66,7 @@ class SocketTransportSpec extends munit.FunSuite {
       transport.send(item)
       assertEquals(readExactly(peer.getInputStream, 6), "PING\r\n")
       assertEquals(item.writeAttempts, 1)
+      assertEquals(item.clears, 1)
       peer.getOutputStream.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8))
       peer.getOutputStream.flush()
       awaitUntil(frames == Vector(Frame.SimpleString("PONG")), "the PONG frame")
@@ -81,7 +84,10 @@ class SocketTransportSpec extends munit.FunSuite {
     withTransport(onClosed = () => (), beforeStart = transport => items.foreach(transport.send)) { (transport, peer) =>
       assertAllArrive(peer, items)
       awaitWriteCount(transport, 1L)
-      items.foreach(item => assertEquals(item.writeAttempts, 1))
+      items.foreach { item =>
+        assertEquals(item.writeAttempts, 1)
+        assertEquals(item.clears, 1)
+      }
       transport.close()
     }
   }
@@ -170,6 +176,7 @@ class SocketTransportSpec extends munit.FunSuite {
       transport.send(item)
       assertEquals(item.drops, 1)
       assertEquals(item.writeAttempts, 0)
+      assertEquals(item.clears, 0)
       transport.close()
     }
   }

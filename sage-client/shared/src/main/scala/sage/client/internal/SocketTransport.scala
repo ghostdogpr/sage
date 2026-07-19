@@ -128,9 +128,11 @@ final private[client] class SocketTransport private (
           }
         }
         if (batch.size == 1) {
+          val payload = first.payload
           first.writeAttempted()
+          first.clearPayload()
           attempted = 1
-          out.write(first.payload.unsafeArray)
+          out.write(payload.unsafeArray)
         } else {
           if (scratch == null || scratch.length < size) {
             var capacity = if (scratch == null) 1024L else scratch.length.toLong
@@ -145,6 +147,7 @@ final private[client] class SocketTransport private (
           }
           batch.forEach { item =>
             item.writeAttempted()
+            item.clearPayload()
             attempted += 1
           }
           out.write(scratch, 0, offset)

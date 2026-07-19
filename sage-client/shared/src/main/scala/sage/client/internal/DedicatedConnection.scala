@@ -102,7 +102,9 @@ final private[client] class DedicatedConnection private (
 
   final private class Entry[A](command: Command[A], callback: Try[A] => Unit) extends Transport.Item with DedicatedConnection.Waiter {
 
-    val payload: Bytes = command.encode
+    var payload: Bytes = command.encode
+
+    override def clearPayload(): Unit = payload = Bytes.empty
 
     def writeAttempted(): Unit = { val _ = pending.add(this) }
 
@@ -127,7 +129,9 @@ final private[client] class DedicatedConnection private (
     private val remaining = new AtomicInteger(n)
     private val done      = new AtomicBoolean(false)
 
-    val payload: Bytes = Bytes.concatBy(commands)(_.encode)
+    var payload: Bytes = Bytes.concatBy(commands)(_.encode)
+
+    override def clearPayload(): Unit = payload = Bytes.empty
 
     def writeAttempted(): Unit = {
       var i = 0

@@ -400,7 +400,9 @@ final private[client] class MultiplexedConnection private (
 
       @volatile var sentAtMillis: Long = 0L
 
-      val payload: Bytes = command.encode
+      var payload: Bytes = command.encode
+
+      override def clearPayload(): Unit = payload = Bytes.empty
 
       def writeAttempted(): Unit = {
         sentAtMillis = scheduler.nowMillis
@@ -420,6 +422,8 @@ final private[client] class MultiplexedConnection private (
     final private class Batch(entries: Vector[Entry[Any]]) extends Transport.Item {
 
       val payload: Bytes = Bytes.concatBy(entries)(_.payload)
+
+      override def clearPayload(): Unit = entries.foreach(_.clearPayload())
 
       def writeAttempted(): Unit = entries.foreach(_.writeAttempted())
 
