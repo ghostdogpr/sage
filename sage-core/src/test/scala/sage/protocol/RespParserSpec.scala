@@ -132,6 +132,33 @@ class RespParserSpec extends munit.FunSuite {
     assertEquals(parser.feed(Bytes.utf8("d\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("hello world")))))
   }
 
+  test("releases an oversized buffer once fully drained, then keeps parsing normally") {
+    val parser  = new RespParser
+    val length  = (1 << 20) + 1 // one byte past the retention threshold, so the drained buffer must be released
+    val payload = Array.fill[Byte](length)('x')
+    val wire    = s"$$$length\r\n".getBytes ++ payload ++ "\r\n".getBytes
+    val frames  = wire.grouped(8192).foldLeft(Vector.empty[Frame]) { (acc, chunk) =>
+      acc ++ parser.feed(Bytes.fromArray(chunk)).fold(error => fail(s"unexpected protocol error: $error"), identity)
+    }
+    assertEquals(frames, Vector(Frame.BulkString(Bytes.fromArray(payload))))
+    assert(bufferCapacity(parser) <= (1 << 20), "the grown buffer must not stay pinned after the reply is consumed")
+    assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+  }
+
+  test("keeps a small buffer across feeds without reallocating") {
+    val parser = new RespParser
+    assertEquals(parser.feed(Bytes.utf8("$5\r\nhello\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("hello")))))
+    val buffer = bufferCapacity(parser)
+    assertEquals(parser.feed(Bytes.utf8("$5\r\nworld\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("world")))))
+    assertEquals(bufferCapacity(parser), buffer)
+  }
+
+  private def bufferCapacity(parser: RespParser): Int = {
+    val field = classOf[RespParser].getDeclaredField("buf")
+    field.setAccessible(true)
+    field.get(parser).asInstanceOf[Array[Byte]].length
+  }
+
   test("handles frames split at every two-way boundary") {
     val (wires, expected) = goldens.unzip
     val stream            = wires.mkString.getBytes

@@ -60,6 +60,8 @@ final private[sage] class RespParser {
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
+          // a buffer grown by one huge element must not stay pinned for the connection's lifetime
+          if (buf.length > MaxRetainedBuffer) buf = Array.emptyByteArray
         }
         None
       }
@@ -406,6 +408,9 @@ final private[sage] class RespParser {
 
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8
+
+  // largest buffer kept across feeds once fully drained (see the reset in feed)
+  private inline def MaxRetainedBuffer: Int = 1 << 20
 
   // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
   private inline def MaxDepth: Int = 512
