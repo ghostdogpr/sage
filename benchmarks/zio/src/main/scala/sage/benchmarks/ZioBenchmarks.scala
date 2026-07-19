@@ -25,6 +25,29 @@ class ThroughputBench extends RedisBenchState {
   @Benchmark def set(): Long = subject.setAll(keys, Payloads.value(valueSize), concurrency)
 }
 
+// the throughput workload swept over the client topology (sage only): every topology serves identical commands, so the delta is dispatch overhead
+@State(Scope.Benchmark)
+@BenchmarkMode(Array(Mode.Throughput))
+@OutputTimeUnit(TimeUnit.SECONDS)
+@OperationsPerInvocation(1000) // = Payloads.KeyCount
+@Fork(1)
+@Warmup(iterations = 3, time = 3)
+@Measurement(iterations = 5, time = 3)
+class TopologyBench extends TopologyBenchState {
+
+  @Param(Array("sage-zio")) var client: String                                  = "sage-zio"
+  @Param(Array("standalone", "cluster", "master-replica")) var topology: String = "standalone"
+  @Param(Array("1", "8", "64", "256")) var concurrency: Int                     = 1
+  @Param(Array("16")) var valueSize: Int                                        = 16
+
+  protected def topologyName: String                                            = topology
+  override protected def seedValueBytes: Int                                    = valueSize
+  protected def buildClient(host: String, port: Int, name: String): BenchClient = Clients.buildTopology(host, port, name)
+
+  @Benchmark def get(): Long = subject.getAll(keys, concurrency)
+  @Benchmark def set(): Long = subject.setAll(keys, Payloads.value(valueSize), concurrency)
+}
+
 // a single big-reply command per invocation (no concurrency — that's the throughput workload); valueSize sizes the seeded values
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))

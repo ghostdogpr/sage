@@ -13,8 +13,9 @@ final class RedisFixture {
   var host: String = ""
   var port: Int    = 0
 
-  def start(): Unit = {
-    val c = GenericContainer(RedisFixture.Image, exposedPorts = Seq(6379))
+  def start(clusterEnabled: Boolean = false): Unit = {
+    val command = if (clusterEnabled) Seq("redis-server", "--cluster-enabled", "yes") else Seq.empty
+    val c       = GenericContainer(RedisFixture.Image, exposedPorts = Seq(6379), command = command)
     c.start()
     container = Some(c)
     host = c.host

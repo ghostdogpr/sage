@@ -17,9 +17,19 @@ import sage.client.{Endpoint, SageConfig, Topology}
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {
-    case "sage-zio"  => new SageZioBench(host, port)
+    case "sage-zio"  => new SageZioBench(Topology.Standalone(Endpoint(host, port)))
     case "zio-redis" => new ZioRedisBench(host, port)
     case other       => throw new IllegalArgumentException(s"unknown client: $other")
+  }
+
+  def buildTopology(host: String, port: Int, topology: String): BenchClient = {
+    val endpoint = Endpoint(host, port)
+    topology match {
+      case "standalone"     => new SageZioBench(Topology.Standalone(endpoint))
+      case "cluster"        => new SageZioBench(Topology.Cluster(Vector(endpoint)))
+      case "master-replica" => new SageZioBench(Topology.MasterReplica(Vector(endpoint)))
+      case other            => throw new IllegalArgumentException(s"unknown topology: $other")
+    }
   }
 }
 
@@ -29,10 +39,10 @@ private object Run {
     Unsafe.unsafe(implicit u => runtime.unsafe.run(z).getOrThrowFiberFailure())
 }
 
-final class SageZioBench(host: String, port: Int) extends BenchClient {
+final class SageZioBench(topology: Topology) extends BenchClient {
 
   private val client: SageClient =
-    Run(SageClient.connect(SageConfig(topology = Topology.Standalone(Endpoint(host, port)))))
+    Run(SageClient.connect(SageConfig(topology = topology)))
 
   def name: String = "sage-zio"
 

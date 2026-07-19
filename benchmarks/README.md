@@ -11,6 +11,7 @@ Workloads (the command path only — no blocking or pub/sub):
 | Workload | Class / method | Notes |
 | --- | --- | --- |
 | Throughput | `ThroughputBench.get` / `.set` | swept over a **concurrency** param (`1, 8, 64, 256`) and **valueSize** (`16, 1024`); reported as a curve. Auto-pipelining only pays off as concurrency rises, so a single point would mislead. |
+| Topology | `TopologyBench.get` / `.set` | sage-only, in the `benchmarksZio` cell: the throughput workload swept over a **topology** param (`standalone, cluster, master-replica`). The cluster is a single self-provisioned node owning every slot and master-replica discovers a replica-less master, so all three serve identical commands and the delta is per-topology dispatch overhead. |
 | Big collection | `CollectionBench.mget` / `.hgetall` | a single MGET / HGETALL of 1000 keys/fields — the large-reply parse path (concurrency does not apply). |
 
 Allocation profile: add `-prof gc` to any run (see below).
