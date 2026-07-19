@@ -2,7 +2,7 @@ package sage.client.internal
 
 import java.util.concurrent.{Executors, ScheduledExecutorService, ScheduledFuture, ThreadLocalRandom, TimeUnit}
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{Duration, FiniteDuration}
 import scala.util.control.NonFatal
 
 /**
@@ -46,13 +46,16 @@ private[client] object Scheduler {
     def jitterMillis(boundExclusive: Long): Long =
       if (boundExclusive <= 0) 0L else ThreadLocalRandom.current().nextLong(boundExclusive)
 
-    def after(delay: FiniteDuration)(task: => Unit): Unit = {
-      val _ = timer.schedule(
-        (() => { val _ = Thread.ofVirtual().name("sage-reconnect").start(() => task) }): Runnable,
-        delay.toMillis,
-        TimeUnit.MILLISECONDS
-      )
-    }
+    def after(delay: FiniteDuration)(task: => Unit): Unit =
+      // zero delay: spawn directly, off the timer thread shared with watchdog/reconnect timing
+      if (delay <= Duration.Zero) { val _ = Thread.ofVirtual().name("sage-offload").start(() => task) }
+      else {
+        val _ = timer.schedule(
+          (() => { val _ = Thread.ofVirtual().name("sage-reconnect").start(() => task) }): Runnable,
+          delay.toMillis,
+          TimeUnit.MILLISECONDS
+        )
+      }
 
     def every(interval: FiniteDuration)(task: => Unit): Cancelable = {
       // a throwing task cancels a scheduleAtFixedRate future forever, so swallow it to keep the periodic alive
