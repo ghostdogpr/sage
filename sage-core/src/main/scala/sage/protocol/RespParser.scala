@@ -33,7 +33,7 @@ final private[sage] class RespParser {
   private var stack      = new Array[Agg](8)
   private var stackDepth = 0
 
-  // shrink hysteresis: the cycle's buffered high-water mark, and how many drains in a row stayed under MaxRetainedBuffer
+  // shrink hysteresis: the cycle's peak buffering demand, and how many drains in a row stayed under MaxRetainedBuffer
   private var highWater: Int   = 0
   private var quietDrains: Int = 0
 
@@ -97,6 +97,7 @@ final private[sage] class RespParser {
     val needed   = unparsed.toLong + length
     if (needed > MaxBuffer) false
     else {
+      if (needed > highWater) highWater = needed.toInt
       if (buf.length - writePos < length) {
         if (buf.length >= needed) {
           System.arraycopy(buf, readPos, buf, 0, unparsed)
@@ -112,7 +113,6 @@ final private[sage] class RespParser {
       }
       System.arraycopy(incoming, offset, buf, writePos, length)
       writePos += length
-      if (writePos > highWater) highWater = writePos
       true
     }
   }

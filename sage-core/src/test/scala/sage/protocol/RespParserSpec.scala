@@ -136,11 +136,42 @@ class RespParserSpec extends munit.FunSuite {
     val parser           = new RespParser
     val (wire, expected) = largeBulk((1 << 20) + 1)
     assertEquals(feedInChunks(parser, wire), Vector(expected))
-    assert(buffer(parser).length > (1 << 20), "the buffer stays grown right after the large reply")
-    for (_ <- 1 to 8)
+    val grown            = buffer(parser)
+    assert(grown.length > (1 << 20), "the buffer stays grown right after the large reply")
+    for (_ <- 1 to 7) {
       assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+      assert(buffer(parser) eq grown, "the buffer must survive until the quiet-drain streak completes")
+    }
+    assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
     assert(buffer(parser).length <= (1 << 20), "the grown buffer must be released once no longer needed")
     assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+  }
+
+  test("a large reply mid-streak resets the shrink countdown") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    val grown            = buffer(parser)
+    for (_ <- 1 to 4)
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    for (_ <- 1 to 7) {
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+      assert(buffer(parser) eq grown, "a large reply must restart the quiet-drain streak")
+    }
+  }
+
+  test("a long stream of small elements through an enlarged buffer still counts as quiet") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    // 4-byte elements never align with the 8192-byte chunks, so the cursor passes the threshold with no mid-aggregate drain
+    val count            = 325000
+    val aggregate        = s"*$count\r\n".getBytes ++ Array.fill(count)(":4\r\n".getBytes).flatten
+    assertEquals(feedInChunks(parser, aggregate), Vector(Frame.Array(Vector.fill(count)(Frame.Integer(4)))))
+    for (_ <- 1 to 7)
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+    assert(buffer(parser).length <= (1 << 20), "cursor position must not be mistaken for buffering demand")
   }
 
   test("consecutive large replies reuse the grown buffer instead of shrinking and regrowing") {
