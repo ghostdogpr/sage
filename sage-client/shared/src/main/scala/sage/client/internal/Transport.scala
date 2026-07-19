@@ -15,7 +15,8 @@ private[client] trait Transport {
   def start(): Unit
 
   /**
-    * Enqueues an item for writing; never blocks. Exactly one of `writeAttempted`/`dropped` eventually fires; `clearPayload` follows a write.
+    * Enqueues an item for writing; never blocks. Exactly one of `writeAttempted`/`dropped` eventually fires; `clearPayload` follows
+    * `writeAttempted`, after the transport captures the payload.
     */
   def send(item: Transport.Item): Unit
 
