@@ -312,34 +312,51 @@ final private[client] class MasterReplicaLive(
           Client.submitBatchOnOne(events, p.commands, spans, submit, complete, attributed)
         }
         val master                                     = masterNodeRef.get()
-        val existing                                   = if (useReplica) null else masterPool.existing(master)
-        if (existing != null) submitOn(master, existing)
-        else offload { val (node, nc) = if (useReplica) readConn() else masterConn(); submitOn(node, nc) }
+        if (useReplica) {
+          val candidates = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement())
+          liveEstablished(candidates, master) match {
+            case Some((node, nc)) => submitOn(node, nc)
+            case None             => offload { val (node, nc) = establishRead(candidates, master); submitOn(node, nc) }
+          }
+        } else {
+          val existing = masterPool.existing(master)
+          if (existing != null) submitOn(master, existing)
+          else
+            offload {
+              val nc =
+                try masterPool.getOrEstablish(master)
+                catch { case NonFatal(_) => null }
+              submitOn(master, nc)
+            }
+        }
       }
 
-  private def masterConn(): (Node, NodeClient) = {
-    val node = masterNodeRef.get()
-    (
-      node,
-      try masterPool.getOrEstablish(node)
-      catch { case NonFatal(_) => null }
-    )
+  // lock-free walk: the first live established candidate, Some((null, null)) when all are established but none live, and None when an
+  // unestablished candidate is met first — only then must the caller offload to establish
+  private def liveEstablished(candidates: Vector[Node], master: Node): Option[(Node, NodeClient)] = {
+    val it = candidates.iterator
+    while (it.hasNext) {
+      val node = it.next()
+      val pool = if (node == master) masterPool else replicaPool
+      val nc   = pool.existing(node)
+      if (nc == null) return None
+      if (nc.isLive) return Some((node, nc))
+    }
+    Some((null, null))
   }
 
-  // the first live read candidate under the policy with the node it landed on; (null, null) when none
-  private def readConn(): (Node, NodeClient) = {
-    val master            = masterNodeRef.get()
-    val it                = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement()).iterator
-    var foundNode: Node   = null
-    var found: NodeClient = null
-    while (found == null && it.hasNext) {
+  // the first live read candidate, establishing as needed, with the node it landed on; (null, null) when none
+  private def establishRead(candidates: Vector[Node], master: Node): (Node, NodeClient) = {
+    val it = candidates.iterator
+    while (it.hasNext) {
       val node = it.next()
+      val pool = if (node == master) masterPool else replicaPool
       val nc   =
-        try if (node == master) masterPool.getOrEstablish(node) else replicaPool.getOrEstablish(node)
+        try pool.getOrEstablish(node)
         catch { case NonFatal(_) => null }
-      if (nc != null && nc.isLive) { foundNode = node; found = nc }
+      if (nc != null && nc.isLive) return (node, nc)
     }
-    (foundNode, found)
+    (null, null)
   }
 
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------

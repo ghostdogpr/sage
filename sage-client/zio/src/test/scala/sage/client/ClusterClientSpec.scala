@@ -169,6 +169,45 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a broadcast to established masters dispatches inline, with no zero-delay scheduler hop") {
+    val counting  = new CountingScheduler
+    val mid       = Slot.Count / 2
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("DBSIZE")) Seq(Frame.Integer(if (node == nodeA) 2L else 3L))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
+
+    fixture.live.run(Server.dbSize).unsafeRun.flatMap { _ =>
+      val before = counting.zeroDelays.get()
+      fixture.live.run(Server.dbSize).unsafeRun.map { total =>
+        assertEquals(total, 5L)
+        assertEquals(counting.zeroDelays.get(), before, "a broadcast to established masters must not offload")
+      }
+    }
+  }
+
+  test("a warmed read-only pipeline under ReadFrom.Replica dispatches inline, with no zero-delay scheduler hop") {
+    val counting  = new CountingScheduler
+    val nodeR     = Node("r", 6379)
+    def slots     =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slots)
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica, scheduler = counting)
+
+    val pipe = fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2")))
+    pipe.unsafeRun.flatMap { _ =>
+      val before = counting.zeroDelays.get()
+      pipe.unsafeRun.map { result =>
+        assertEquals(result, (Some("v1"), Some("v2")))
+        assertEquals(counting.zeroDelays.get(), before, "a warmed replica pipeline must not offload")
+      }
+    }
+  }
+
   test("KEYS broadcasts to every slot-owning master and concatenates the per-node slices") {
     // nodeA owns the lower half, nodeB the upper half; KEYS is node-local, so each returns only its own keys
     val mid             = Slot.Count / 2

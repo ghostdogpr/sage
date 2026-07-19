@@ -127,6 +127,18 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     }
   }
 
+  test("a warmed read-only pipeline under ReadFrom.Replica dispatches inline, with no zero-delay scheduler hop") {
+    val counting = new CountingScheduler
+    val f        = build(ReadFrom.Replica, counting)
+    f.live.pipeline(Seq(readCmd, readCmd)).unsafeRun.flatMap { _ =>
+      val before = counting.zeroDelays.get()
+      f.live.pipeline(Seq(readCmd, readCmd)).unsafeRun.map { _ =>
+        assertEquals(counting.zeroDelays.get(), before, "a warmed replica pipeline must not offload")
+        val _ = f.live.close.unsafeRun
+      }
+    }
+  }
+
   test("a fully read-only pipeline under ReadFrom.Replica attributes every command to the replica") {
     val f = build(ReadFrom.Replica)
     f.live
