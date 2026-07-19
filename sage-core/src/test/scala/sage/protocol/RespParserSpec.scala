@@ -171,7 +171,8 @@ class RespParserSpec extends munit.FunSuite {
     feedInChunks(parser, aggregate) match {
       case Vector(Frame.Array(elements)) =>
         assertEquals(elements.length, count)
-        assert(elements.forall(_ == Frame.Integer(4)))
+        val expected = Frame.Integer(4)
+        assert(elements.forall(_ == expected))
       case other                         => fail(s"expected one array, got $other")
     }
     for (_ <- 1 to 7)
