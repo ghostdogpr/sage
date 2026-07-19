@@ -116,7 +116,6 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
   test("a command to the established master dispatches inline, with no zero-delay scheduler hop") {
     val counting = new CountingScheduler
     val f        = build(ReadFrom.Master, counting)
-    // the first command establishes the master connection (offloaded)
     f.live.run(writeCmd).unsafeRun.flatMap { _ =>
       val before = counting.zeroDelays.get()
       f.live.run(writeCmd).unsafeRun.flatMap { _ =>

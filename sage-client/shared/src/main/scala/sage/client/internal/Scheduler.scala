@@ -47,7 +47,7 @@ private[client] object Scheduler {
       if (boundExclusive <= 0) 0L else ThreadLocalRandom.current().nextLong(boundExclusive)
 
     def after(delay: FiniteDuration)(task: => Unit): Unit =
-      // zero delay: spawn directly, off the timer thread shared with watchdog/reconnect timing
+      // zero-delay offloads must not queue behind watchdog/reconnect timing on the timer thread
       if (delay <= Duration.Zero) { val _ = Thread.ofVirtual().name("sage-offload").start(() => task) }
       else {
         val _ = timer.schedule(

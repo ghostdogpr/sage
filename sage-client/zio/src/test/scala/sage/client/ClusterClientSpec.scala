@@ -148,7 +148,6 @@ class ClusterClientSpec extends munit.FunSuite {
       (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
     val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
 
-    // bootstrap already established the seed
     val before = counting.zeroDelays.get()
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
       assertEquals(result, Some(nodeA.host))

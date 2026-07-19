@@ -26,9 +26,9 @@ import sage.protocol.Frame
   * submission order; positions a stale topology can't resolve fall back to per-command [[dispatch]]. A Transaction leases one Dedicated
   * Connection, pinned lazily to the slot of its first key, and rejects any key on another slot with [[CrossSlot]].
   *
-  * Dispatch to an already-established node runs inline on the caller: the registry lookup and the submit never block. Only the paths that
-  * may establish a connection or refresh the topology hop to an offloaded virtual thread, and a submit's reply callback re-offloads before
-  * any blocking continuation (never on the reply thread).
+  * Dispatch to an already-established node runs inline on the caller: the registry lookup and the submit never block, even mid-reconnect,
+  * where the submit fails fast. Only the paths that may establish a connection or refresh the topology hop to an offloaded virtual thread,
+  * and a submit's reply callback re-offloads before any blocking continuation (never on the reply thread).
   */
 final private[client] class ClusterLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -404,7 +404,6 @@ final private[client] class ClusterLive(
     complete: Try[A] => Unit,
     lease: DedicatedPool.Lease
   ): Unit = {
-    // an established node — even one mid-reconnect, whose submit fails fast — takes the inline path
     val existing = masterPool.existing(node)
     if (existing != null) submitTo(existing, node, command, asking, redirectsLeft, complete, lease)
     else
