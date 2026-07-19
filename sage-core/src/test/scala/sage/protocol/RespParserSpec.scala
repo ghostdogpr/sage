@@ -132,6 +132,85 @@ class RespParserSpec extends munit.FunSuite {
     assertEquals(parser.feed(Bytes.utf8("d\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("hello world")))))
   }
 
+  test("releases an oversized buffer after enough drains no longer need it, then keeps parsing normally") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    val grown            = buffer(parser)
+    assert(grown.length > (1 << 20), "the buffer stays grown right after the large reply")
+    for (_ <- 1 to 7) {
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+      assert(buffer(parser) eq grown, "the buffer must survive until the quiet-drain streak completes")
+    }
+    assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+    assert(buffer(parser).length <= (1 << 20), "the grown buffer must be released once no longer needed")
+    assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+  }
+
+  test("a large reply mid-streak resets the shrink countdown") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    val grown            = buffer(parser)
+    for (_ <- 1 to 4)
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    for (_ <- 1 to 7) {
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+      assert(buffer(parser) eq grown, "a large reply must restart the quiet-drain streak")
+    }
+  }
+
+  test("a long stream of small elements through an enlarged buffer still counts as quiet") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    // 4-byte elements never align with the 8192-byte chunks, so the cursor passes the threshold with no mid-aggregate drain
+    val count            = 325000
+    val aggregate        = (s"*$count\r\n" + ":4\r\n" * count).getBytes
+    feedInChunks(parser, aggregate) match {
+      case Vector(Frame.Array(elements)) =>
+        assertEquals(elements.length, count)
+        val expected = Frame.Integer(4)
+        assert(elements.forall(_ == expected))
+      case other                         => fail(s"expected one array, got $other")
+    }
+    for (_ <- 1 to 7)
+      assertEquals(parser.feed(Bytes.utf8("+OK\r\n")), Right(Vector(Frame.SimpleString("OK"))))
+    assert(buffer(parser).length <= (1 << 20), "cursor position must not be mistaken for buffering demand")
+  }
+
+  test("consecutive large replies reuse the grown buffer instead of shrinking and regrowing") {
+    val parser           = new RespParser
+    val (wire, expected) = largeBulk((1 << 20) + 1)
+    assertEquals(feedInChunks(parser, wire), Vector(expected))
+    val grown            = buffer(parser)
+    for (_ <- 1 to 3) {
+      assertEquals(feedInChunks(parser, wire), Vector(expected))
+      assert(buffer(parser) eq grown, "a large reply arriving between drains must reuse the buffer")
+    }
+  }
+
+  test("keeps a small buffer across feeds without reallocating") {
+    val parser = new RespParser
+    assertEquals(parser.feed(Bytes.utf8("$5\r\nhello\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("hello")))))
+    val first  = buffer(parser)
+    assertEquals(parser.feed(Bytes.utf8("$5\r\nworld\r\n")), Right(Vector(Frame.BulkString(Bytes.utf8("world")))))
+    assert(buffer(parser) eq first)
+  }
+
+  private def largeBulk(length: Int): (Array[Byte], Frame) = {
+    val payload = Array.fill[Byte](length)('x')
+    (s"$$$length\r\n".getBytes ++ payload ++ "\r\n".getBytes, Frame.BulkString(Bytes.fromArray(payload)))
+  }
+
+  private def feedInChunks(parser: RespParser, wire: Array[Byte]): Vector[Frame] =
+    wire.grouped(8192).foldLeft(Vector.empty[Frame]) { (acc, chunk) =>
+      acc ++ parser.feed(Bytes.fromArray(chunk)).fold(error => fail(s"unexpected protocol error: $error"), identity)
+    }
+
+  private def buffer(parser: RespParser): Array[Byte] = parser.unsafeBuffer
+
   test("handles frames split at every two-way boundary") {
     val (wires, expected) = goldens.unzip
     val stream            = wires.mkString.getBytes
