@@ -9,7 +9,7 @@ import scala.jdk.CollectionConverters.*
 import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, CommandTracer, Outcome, SageEvent, SageListener}
-import sage.client.internal.{Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
+import sage.client.internal.{CountingScheduler, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
 import sage.protocol.Frame
@@ -87,7 +87,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     latch: CountDownLatch
   )
 
-  private def build(readFrom: ReadFrom): Fixture = {
+  private def build(readFrom: ReadFrom, scheduler: Scheduler = Scheduler.real): Fixture = {
     val completions                                             = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
     val latch                                                   = new CountDownLatch(2)
     val listener                                                = new SageListener {
@@ -102,7 +102,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     val live                                                    =
       new MasterReplicaLive(
         factory,
-        Scheduler.real,
+        scheduler,
         Vector(Connection.hello(None)),
         SageConfig(readFrom = readFrom),
         Vector(master),
@@ -111,6 +111,21 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       )
     live.bootstrapRoles()
     Fixture(live, completions, tracer, latch)
+  }
+
+  test("a command to the established master dispatches inline, with no zero-delay scheduler hop") {
+    val counting = new CountingScheduler
+    val f        = build(ReadFrom.Master, counting)
+    // the first command establishes the master connection (offloaded)
+    f.live.run(writeCmd).unsafeRun.flatMap { _ =>
+      val before = counting.zeroDelays.get()
+      f.live.run(writeCmd).unsafeRun.flatMap { _ =>
+        f.live.pipeline(Seq(writeCmd, readCmd)).unsafeRun.map { _ =>
+          assertEquals(counting.zeroDelays.get(), before, "an established-master dispatch must not offload")
+          val _ = f.live.close.unsafeRun
+        }
+      }
+    }
   }
 
   test("a fully read-only pipeline under ReadFrom.Replica attributes every command to the replica") {
