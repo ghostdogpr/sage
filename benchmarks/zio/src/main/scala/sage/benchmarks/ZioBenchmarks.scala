@@ -25,7 +25,7 @@ class ThroughputBench extends RedisBenchState {
   @Benchmark def set(): Long = subject.setAll(keys, Payloads.value(valueSize), concurrency)
 }
 
-// the throughput workload swept over the client topology (sage only): every topology serves identical commands, so the delta is dispatch overhead
+// the throughput workload swept over the client topology (sage only): end-to-end overhead, server mode included — see TopologyBenchState
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
 @OutputTimeUnit(TimeUnit.SECONDS)

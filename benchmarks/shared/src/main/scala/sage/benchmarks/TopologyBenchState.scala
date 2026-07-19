@@ -4,7 +4,8 @@ import org.openjdk.jmh.annotations.{Level, Setup, TearDown}
 
 /**
   * Shared JMH state for the topology benchmarks: the same workload against the standalone, cluster, and master-replica runtimes, each on a
-  * single self-provisioned server, so the numbers isolate per-topology dispatch overhead.
+  * single self-provisioned server. The comparison is end-to-end per-topology overhead — the cluster trial runs a `--cluster-enabled` server
+  * in its own container, so server-mode and instance variance are included, not client dispatch alone.
   */
 abstract class TopologyBenchState {
 
