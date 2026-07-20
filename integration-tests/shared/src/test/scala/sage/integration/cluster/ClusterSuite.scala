@@ -244,9 +244,12 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
         val endpoint  = Endpoint(server.host, server.mappedPort(6379))
         val clustered = SageConfig(topology = Topology.Cluster(Vector(endpoint)), database = 2)
 
-        Client.connect(clustered).unsafeRun.failed.map { error =>
-          assert(error.isInstanceOf[ServerError], s"expected the server's SELECT error, got $error")
-        }
+        val attempted: CIO[Unit] = connectAndUse(clustered)(_ => CIO.value(()))
+        val program: CIO[Unit]   = attempted.fold(
+          _ => CIO.fail(new AssertionError("expected the cluster connection to reject database 2")),
+          error => CIO.value(assert(error.isInstanceOf[ServerError], s"expected the server's SELECT error, got $error"))
+        )
+        program.unsafeRun
       }
     }
 }
