@@ -60,31 +60,24 @@ final private[client] class ReadPolicy(
     exhaustion: Exhaustion,
     establish: Boolean
   ): Unit =
-    candidates.headOption match {
-      case None       => topology.exhausted(exhaustion, request.command, request.redirectsLeft, request.complete)
-      case Some(node) =>
-        val role       = if (node == request.master) Role.Master else Role.Replica
-        val connection =
-          try Option(if (establish) nodes.establish(node, role) else nodes.existing(node, role))
-          catch {
-            case NonFatal(error) =>
-              attempt(candidates.tail, request, exhaustion.withLast(node, error), establish)
-              return
-          }
-
-        connection match {
-          case Some(conn) if conn.isLive =>
-            try conn.submit(request.command, result => onResult(node, candidates.tail, request, result))
-            catch {
-              case NonFatal(error) =>
-                scheduler.after(Duration.Zero)(onFailure(node, candidates.tail, request, error))
-            }
-          case Some(_)                   =>
-            attempt(candidates.tail, request, exhaustion.withLast(node, NotConnected()), establish)
-          case None if establish         =>
-            attempt(candidates.tail, request, exhaustion.withLast(node, NotConnected()), establish = true)
-          case None                      =>
-            scheduler.after(Duration.Zero)(attempt(candidates, request, exhaustion, establish = true))
+    resolve(candidates, request.master, exhaustion, establish) match {
+      case Candidate.Exhausted(state)                   =>
+        topology.exhausted(
+          ExhaustedAttempt(
+            state,
+            request.command,
+            request.redirectsLeft,
+            request.complete,
+            error => failFromExhaustion(state, request.complete, error)
+          )
+        )
+      case Candidate.Establish(pending, state)          =>
+        scheduler.after(Duration.Zero)(attempt(pending, request, state, establish = true))
+      case Candidate.Live(node, conn, remaining, state) =>
+        try conn.submit(request.command, result => onResult(node, remaining, request, result))
+        catch {
+          case NonFatal(error) =>
+            scheduler.after(Duration.Zero)(onFailure(node, remaining, request, error))
         }
     }
 
@@ -106,50 +99,50 @@ final private[client] class ReadPolicy(
     exhaustion: Exhaustion,
     establish: Boolean
   ): BatchSubmission =
-    candidates.headOption match {
-      case None       => topology.batchExhausted(exhaustion); BatchSubmission.Rejected
-      case Some(node) =>
-        val role                           = if (node == request.master) Role.Master else Role.Replica
-        val connection: Option[Connection] =
-          try Option(if (establish) nodes.establish(node, role) else nodes.existing(node, role))
-          catch {
-            case NonFatal(error) =>
-              return attemptBatch(candidates.tail, request, exhaustion.withLast(node, error), establish)
-          }
+    resolve(candidates, request.master, exhaustion, establish) match {
+      case Candidate.Exhausted(state)                   => topology.batchExhausted(state); BatchSubmission.Rejected
+      case Candidate.Establish(pending, state)          =>
+        scheduler.after(Duration.Zero) {
+          if (attemptBatch(pending, request, state, establish = true) == BatchSubmission.Rejected)
+            request.onDeferredExhausted()
+        }
+        BatchSubmission.Deferred
+      case Candidate.Live(node, conn, remaining, state) =>
+        val routed = Vector.tabulate(request.commands.length) { index =>
+          val command = request.commands(index).asInstanceOf[Command[Any]]
+          val single  = Request(request.master, command, request.redirectsLeft, request.callbacks(index))
+          (result: Try[Any]) => onResult(node, remaining, single, result)
+        }
+        try
+          if (conn.submitAll(request.commands, routed)) BatchSubmission.Submitted
+          else attemptBatch(remaining, request, state.withLast(node, NotConnected()), establish)
+        catch {
+          case NonFatal(error) =>
+            Fault.categorize(error) match {
+              case Fault.Lost(false) =>
+                attemptBatch(remaining, request, Exhaustion(Some(node -> error), redispatch = true), establish)
+              case _                 => routed.foreach(_(Failure(error))); BatchSubmission.Submitted
+            }
+        }
+    }
 
-        connection match {
-          case Some(conn) if conn.isLive =>
-            val routed = Vector.tabulate(request.commands.length) { index =>
-              val command = request.commands(index).asInstanceOf[Command[Any]]
-              val single  = Request(request.master, command, request.redirectsLeft, request.callbacks(index))
-              (result: Try[Any]) => onResult(node, candidates.tail, single, result)
-            }
-            try
-              if (conn.submitAll(request.commands, routed)) BatchSubmission.Submitted
-              else attemptBatch(candidates.tail, request, exhaustion.withLast(node, NotConnected()), establish)
-            catch {
-              case NonFatal(error) =>
-                Fault.categorize(error) match {
-                  case Fault.Lost(false) =>
-                    attemptBatch(
-                      candidates.tail,
-                      request,
-                      Exhaustion(Some(node -> error), redispatch = true),
-                      establish
-                    )
-                  case _                 => routed.foreach(_(Failure(error))); BatchSubmission.Submitted
-                }
-            }
-          case Some(_)                   =>
-            attemptBatch(candidates.tail, request, exhaustion.withLast(node, NotConnected()), establish)
-          case None if establish         =>
-            attemptBatch(candidates.tail, request, exhaustion.withLast(node, NotConnected()), establish = true)
-          case None                      =>
-            scheduler.after(Duration.Zero) {
-              if (attemptBatch(candidates, request, exhaustion, establish = true) == BatchSubmission.Rejected)
-                request.onDeferredExhausted()
-            }
-            BatchSubmission.Deferred
+  private def resolve(
+    candidates: Vector[Node],
+    master: Node,
+    exhaustion: Exhaustion,
+    establish: Boolean
+  ): Candidate =
+    candidates.headOption match {
+      case None       => Candidate.Exhausted(exhaustion)
+      case Some(node) =>
+        val role = if (node == master) Role.Master else Role.Replica
+        Try(Option(if (establish) nodes.establish(node, role) else nodes.existing(node, role))) match {
+          case Failure(error)                     => resolve(candidates.tail, master, exhaustion.withLast(node, error), establish)
+          case Success(Some(conn)) if conn.isLive => Candidate.Live(node, conn, candidates.tail, exhaustion)
+          case Success(Some(_))                   => resolve(candidates.tail, master, exhaustion.withLast(node, NotConnected()), establish)
+          case Success(None) if establish         =>
+            resolve(candidates.tail, master, exhaustion.withLast(node, NotConnected()), establish = true)
+          case Success(None)                      => Candidate.Establish(candidates, exhaustion)
         }
     }
 
@@ -190,6 +183,14 @@ final private[client] class ReadPolicy(
     complete(result)
   }
 
+  private def failFromExhaustion[A](exhaustion: Exhaustion, complete: Try[A] => Unit, error: Throwable): Unit =
+    if (!exhaustion.redispatch) complete(Failure(error))
+    else
+      exhaustion.last match {
+        case Some((node, _)) => finishAt(node, complete, Failure(error))
+        case None            => complete(Failure(error))
+      }
+
   final private case class Request[A](master: Node, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit)
   final private case class BatchRequest(
     master: Node,
@@ -201,6 +202,12 @@ final private[client] class ReadPolicy(
 
   private enum BatchSubmission {
     case Submitted, Rejected, Deferred
+  }
+
+  private enum Candidate {
+    case Exhausted(exhaustion: Exhaustion)
+    case Establish(candidates: Vector[Node], exhaustion: Exhaustion)
+    case Live(node: Node, connection: Connection, remaining: Vector[Node], exhaustion: Exhaustion)
   }
 }
 
@@ -232,7 +239,15 @@ private[client] object ReadPolicy {
     error: Throwable,
     command: Command[A],
     redirectsLeft: Int,
-    complete: Try[A] => Unit,
+    resume: Try[A] => Unit,
+    failAtSource: Throwable => Unit
+  )
+
+  final case class ExhaustedAttempt[A](
+    exhaustion: Exhaustion,
+    command: Command[A],
+    redirectsLeft: Int,
+    resume: Try[A] => Unit,
     failAtSource: Throwable => Unit
   )
 
@@ -271,7 +286,7 @@ private[client] object ReadPolicy {
   trait TopologyPolicy {
     def redirected[A](attempt: RedirectAttempt[A]): Unit = attempt.failAtSource(attempt.error)
     def onSafeLoss(node: Node, error: Throwable): Unit   = ()
-    def exhausted[A](exhaustion: Exhaustion, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit
+    def exhausted[A](attempt: ExhaustedAttempt[A]): Unit
     def terminal(node: Node, error: Throwable): Unit
     def batchExhausted(exhaustion: Exhaustion): Unit
   }

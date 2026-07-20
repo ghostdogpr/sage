@@ -81,15 +81,10 @@ final private[client] class MasterReplicaLive(
       override def onSafeLoss(node: Node, error: Throwable): Unit =
         if (node == masterNodeRef.get()) triggerRefresh()
 
-      def exhausted[A](
-        exhaustion: ReadPolicy.Exhaustion,
-        command: Command[A],
-        redirectsLeft: Int,
-        complete: Try[A] => Unit
-      ): Unit = {
+      def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit = {
         triggerRefresh()
-        val error = if (exhaustion.redispatch) exhaustion.last.fold[Throwable](NotConnected())(_._2) else NotConnected()
-        complete(Failure(error))
+        val error = if (attempt.exhaustion.redispatch) attempt.exhaustion.last.fold[Throwable](NotConnected())(_._2) else NotConnected()
+        attempt.failAtSource(error)
       }
 
       def terminal(node: Node, error: Throwable): Unit =

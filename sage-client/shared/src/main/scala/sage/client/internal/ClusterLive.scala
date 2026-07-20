@@ -100,22 +100,25 @@ final private[client] class ClusterLive(
           // strict Replica must not follow ASK onto the importing master (the migrating key is on no replica)
           case RedirectKind.Ask if readFrom == ReadFrom.Replica => attempt.failAtSource(NotConnected())
           case RedirectKind.Ask                                 =>
-            onRedirect(attempt.from, attempt.redirect, attempt.command, attempt.redirectsLeft, attempt.complete)
+            onRedirect(
+              attempt.from,
+              attempt.redirect,
+              attempt.command,
+              attempt.redirectsLeft,
+              attempt.resume,
+              attempt.failAtSource
+            )
           case RedirectKind.Moved if attempt.redirectsLeft <= 0 =>
             attempt.failAtSource(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${attempt.command.name}"))
           case RedirectKind.Moved                               =>
             refresh(force = true)
-            dispatch(attempt.command, attempt.redirectsLeft - 1, attempt.complete)
+            dispatch(attempt.command, attempt.redirectsLeft - 1, attempt.resume)
         }
 
-      def exhausted[A](
-        exhaustion: ReadPolicy.Exhaustion,
-        command: Command[A],
-        redirectsLeft: Int,
-        complete: Try[A] => Unit
-      ): Unit =
-        if (exhaustion.redispatch) onUnreachable(command, redirectsLeft, complete)
-        else { triggerRefresh(); complete(Failure(NotConnected())) }
+      def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit =
+        if (attempt.exhaustion.redispatch)
+          onUnreachable(attempt.command, attempt.redirectsLeft, attempt.resume, attempt.failAtSource)
+        else { triggerRefresh(); attempt.failAtSource(NotConnected()) }
 
       def terminal(node: Node, error: Throwable): Unit = triggerRefresh()
 
@@ -378,7 +381,7 @@ final private[client] class ClusterLive(
         val nc =
           try getOrEstablish(node)
           catch { case NonFatal(_) => null }
-        if (nc == null) onUnreachable(command, redirectsLeft, complete, lease)
+        if (nc == null) onUnreachable(command, redirectsLeft, complete, error => complete(Failure(error)), lease)
         else submitTo(nc, node, command, asking, redirectsLeft, complete, lease)
       }
   }
@@ -411,8 +414,18 @@ final private[client] class ClusterLive(
     lease: DedicatedPool.Lease
   ): Unit =
     Fault.categorize(error) match {
-      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease)
-      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease)
+      case Fault.Redirected(redirect)       =>
+        onRedirect(
+          node,
+          redirect,
+          command,
+          redirectsLeft,
+          complete,
+          error => complete(Failure(error)),
+          lease
+        )
+      case Fault.Lost(false)                =>
+        onUnreachable(command, redirectsLeft, complete, error => complete(Failure(error)), lease)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -423,10 +436,11 @@ final private[client] class ClusterLive(
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
+    onExhausted: Throwable => Unit,
     lease: DedicatedPool.Lease = null
   ): Unit =
     if (redirectsLeft <= 0)
-      complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+      onExhausted(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}"))
     else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
@@ -437,8 +451,14 @@ final private[client] class ClusterLive(
 
   // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
   // failover is not hammered; redirectsLeft bounds it.
-  private def onUnreachable[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
-    if (redirectsLeft <= 0) complete(Failure(NotConnected()))
+  private def onUnreachable[A](
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    onExhausted: Throwable => Unit,
+    lease: DedicatedPool.Lease = null
+  ): Unit =
+    if (redirectsLeft <= 0) onExhausted(NotConnected())
     else {
       refresh(force = true)
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
@@ -455,7 +475,7 @@ final private[client] class ClusterLive(
         else sendTo(node, command, asking = false, redirectsLeft, complete, lease)
       // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
       case _ if readFrom == ReadFrom.Replica && ReadPolicy.replicaEligible(command) =>
-        onUnreachable(command, redirectsLeft, complete, lease)
+        onUnreachable(command, redirectsLeft, complete, error => complete(Failure(error)), lease)
       // still unowned after refresh: any master, trusting its reply (a MOVED to follow, or CLUSTERDOWN)
       case _                                                                        => sendToAny(topology, command, redirectsLeft, complete, lease)
     }
@@ -592,7 +612,14 @@ final private[client] class ClusterLive(
             case Fault.Redirected(redirect)       =>
               redirect.kind match {
                 case RedirectKind.Ask   =>
-                  onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
+                  onRedirect(
+                    target,
+                    redirect,
+                    p.commands(index),
+                    cluster.maxRedirects,
+                    emits(index),
+                    error => emits(index)(Failure(error))
+                  )
                 case RedirectKind.Moved => reroute(index)
               }
             case Fault.Lost(false)                => reroute(index)

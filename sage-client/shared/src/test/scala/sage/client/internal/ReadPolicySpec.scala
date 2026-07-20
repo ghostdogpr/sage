@@ -161,6 +161,31 @@ class ReadPolicySpec extends munit.FunSuite {
     assert(results.head.failed.get.isInstanceOf[NotConnected])
   }
 
+  test("candidate exhaustion after a safe loss is attributed to the last serving Node") {
+    val scheduler = new ManualScheduler
+    val lost      = ConnectionLost(mayHaveExecuted = false)
+    val access    = new FakeAccess(Map(r1 -> new FakeConnection(Vector(Failure(lost)))))
+    val topology  = new RecordingTopology
+    val policy    = new ReadPolicy(ReadFrom.Replica, access, topology, scheduler)
+    val routed    = mutable.ArrayBuffer.empty[Node]
+    val tracer    = new CommandTracer {
+      def onCommand(command: Command[?]): CommandSpan = new CommandSpan {
+        def routedTo(node: Node): Unit      = routed += node
+        def settled(outcome: Outcome): Unit = ()
+      }
+    }
+    val events    = Events(Vector.empty, Some(tracer))
+    val results   = mutable.ArrayBuffer.empty[Try[String]]
+    val tracked   = Events.trackCommand[String](events, read, result => results += result)
+
+    policy.submit(ReadPolicy.Source.forMaster(master, Vector(r1)), read, redirectsLeft = 0, tracked)
+    scheduler.advance(Duration.Zero)
+
+    assertEquals(routed.toVector, Vector(r1))
+    assertEquals(results.toVector, Vector(Failure(lost)))
+    events.close()
+  }
+
   test("establish failures and dead candidates exhaust once without Node attribution") {
     val scheduler = new ManualScheduler
     val access    = new FakeAccess(Map(r2 -> new FakeConnection(Vector.empty, live = false)))
@@ -390,9 +415,9 @@ class ReadPolicySpec extends munit.FunSuite {
       attempt.failAtSource(attempt.error)
     }
 
-    def exhausted[A](exhaustion: ReadPolicy.Exhaustion, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
-      exhausted += ((exhaustion, redirectsLeft))
-      complete(Failure(exhaustion.last.map(_._2).getOrElse(NotConnected())))
+    def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit = {
+      exhausted += ((attempt.exhaustion, attempt.redirectsLeft))
+      attempt.failAtSource(attempt.exhaustion.last.map(_._2).getOrElse(NotConnected()))
     }
 
     def terminal(node: Node, error: Throwable): Unit = terminals += ((node, error))
