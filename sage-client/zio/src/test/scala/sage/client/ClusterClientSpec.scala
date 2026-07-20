@@ -1,14 +1,17 @@
 package sage.client
 
+import java.util.concurrent.ConcurrentLinkedQueue
+
 import scala.collection.mutable
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 import kyo.compat.*
 
-import sage.Bytes
+import sage.{Bytes, CommandSpan, CommandTracer, Outcome}
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
-import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, MultiplexedConnection, Scheduler}
+import sage.client.internal.{ClusterLive, CountingScheduler, Events, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Keys, Scripting, Server, Strings}
 import sage.protocol.Frame
@@ -42,6 +45,15 @@ class ClusterClientSpec extends munit.FunSuite {
   private def subscribed(kind: String, channel: String): Frame =
     Frame.Push(Vector(Frame.BulkString(Bytes.utf8(kind)), Frame.BulkString(Bytes.utf8(channel)), Frame.Integer(1)))
 
+  final private class RoutingTracer extends CommandTracer {
+    val routed                                      = new ConcurrentLinkedQueue[(String, Node)]()
+    def onCommand(command: Command[?]): CommandSpan =
+      new CommandSpan {
+        def routedTo(node: Node): Unit      = { val _ = routed.add(command.name -> node) }
+        def settled(outcome: Outcome): Unit = ()
+      }
+  }
+
   /**
     * A cluster of fake per-node transports. `behaviour` scripts each node's reply to a written command (HELLO and CLUSTER SLOTS are
     * answered here); `written(node)` exposes what reached that node so routing can be asserted.
@@ -52,7 +64,8 @@ class ClusterClientSpec extends munit.FunSuite {
     unreachable: Set[Node] = Set.empty,
     readFrom: ReadFrom = ReadFrom.Master,
     connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport creation, to park an establish mid-flight
-    scheduler: Scheduler = Scheduler.real
+    scheduler: Scheduler = Scheduler.real,
+    events: Events = Events.disabled
   ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
@@ -94,7 +107,8 @@ class ClusterClientSpec extends munit.FunSuite {
         ClusterConfig(),
         1024,
         seeds,
-        readFrom
+        readFrom,
+        events
       )
 
     live.bootstrapTopology()
@@ -122,6 +136,15 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
+
+  private def wholeClusterOn(master: Node, replica: Node): Frame =
+    Frame.Array(
+      Vector(
+        Frame.Array(
+          Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(master), nodeFrame(replica))
+        )
+      )
+    )
 
   test("routes a single-key command to the slot's owner") {
     // nodeA owns the lower half, nodeB the upper half
@@ -392,15 +415,12 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("under a Replica policy an eligible read routes to the shard's replica, which gets READONLY at setup") {
-    val nodeR                   = Node("r", 6379)
-    // CLUSTER SLOTS lists nodeR as nodeA's replica for the whole keyspace
-    def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
-    val behaviour               = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+    val nodeR     = Node("r", 6379)
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA, nodeR))
       else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
       else Seq(Frame.BulkString(Bytes.utf8(if (node == nodeR) "from-replica" else "from-master")))
-    val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
       assertEquals(result, Some("from-replica"))
@@ -538,6 +558,67 @@ class ClusterClientSpec extends munit.FunSuite {
 
     fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
       assertEquals(result, (Some("v1"), Some("v2")))
+    }
+  }
+
+  test("a replica-eligible Cluster pipeline batches on the replica, preserves order, and attributes every position") {
+    val nodeR     = Node("r", 6379)
+    val tracer    = new RoutingTracer
+    val events    = Events(Vector.empty, Some(tracer))
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA, nodeR))
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else if (node == nodeR && text.contains("GET"))
+        Seq(Frame.BulkString(Bytes.utf8("first")), Frame.BulkString(Bytes.utf8("second")))
+      else Seq(Frame.BulkString(Bytes.utf8("master")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica, events = events)
+
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
+      assertEquals(result, (Some("first"), Some("second")))
+      assert(fixture.written(nodeR).exists(_.contains("GET")), "replica did not receive the pipeline")
+      assert(!fixture.written(nodeA).exists(_.contains("GET")), "master received a replica-eligible pipeline")
+      assertEquals(tracer.routed.asScala.toVector, Vector("GET" -> nodeR, "GET" -> nodeR))
+      events.close()
+    }
+  }
+
+  test("a ReplicaPreferred Cluster pipeline preserves successful positions while MOVED re-dispatches one position") {
+    val nodeR                    = Node("r", 6379)
+    val slot                     = Slot.of(Bytes.utf8("{x}1")).value
+    @volatile var ownershipMoved = false
+    val behaviour                = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(if (ownershipMoved) wholeClusterOn(nodeB) else wholeClusterOn(nodeA, nodeR))
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else if (node == nodeR && text.contains("GET")) {
+        ownershipMoved = true
+        Seq(Frame.SimpleError(s"MOVED $slot b:6379"), Frame.BulkString(Bytes.utf8("stayed")))
+      } else if (node == nodeB && text.contains("GET")) Seq(Frame.BulkString(Bytes.utf8("moved")))
+      else Seq(Frame.BulkString(Bytes.utf8("master")))
+    val fixture                  = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred)
+
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
+      assertEquals(result, (Some("moved"), Some("stayed")))
+      assert(fixture.written(nodeR).exists(_.contains("GET")), "replica did not receive the original batch")
+      assert(fixture.written(nodeB).exists(_.contains("GET")), "new owner did not receive the redirected position")
+    }
+  }
+
+  test("a strict Replica Cluster pipeline rejects ASK positions without sending them to the importing master") {
+    val nodeR     = Node("r", 6379)
+    val slot      = Slot.of(Bytes.utf8("{x}1")).value
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA, nodeR))
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else if (node == nodeR && text.contains("GET"))
+        Seq(Frame.SimpleError(s"ASK $slot b:6379"), Frame.SimpleError(s"ASK $slot b:6379"))
+      else if (node == nodeB && text.contains("GET")) Seq(Frame.BulkString(Bytes.utf8("must-not-run")))
+      else Seq(Frame.BulkString(Bytes.utf8("master")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+
+    fixture.live.pipelineAttempt((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { case (first, second) =>
+      assert(first.fold(_.isInstanceOf[NotConnected], _ => false), s"first position should be NotConnected: $first")
+      assert(second.fold(_.isInstanceOf[NotConnected], _ => false), s"second position should be NotConnected: $second")
+      assert(!fixture.written(nodeB).exists(_.contains("GET")), "strict Replica followed ASK to a master")
     }
   }
 

@@ -2170,13 +2170,20 @@ object Client {
       case Some(n) => tracked.map(attributeOnComplete(_, n))
       case None    => tracked
     }
-    if (!submitAll(commands, callbacks)) {
-      val error = NotConnected()
-      tracked.foreach(Events.abandonSpan(_, error))
-      if (events.emitsEvents)
-        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
-      complete(Failure(error))
-    }
+    if (!submitAll(commands, callbacks)) rejectBatch(events, commands, tracked, complete, NotConnected())
+  }
+
+  private[internal] def rejectBatch(
+    events: Events,
+    commands: Vector[Command[?]],
+    tracked: Vector[Try[Any] => Unit],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit,
+    error: SageException
+  ): Unit = {
+    tracked.foreach(Events.abandonSpan(_, error))
+    if (events.emitsEvents)
+      commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
+    complete(Failure(error))
   }
 
   /**

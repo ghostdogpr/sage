@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.concurrent.duration.*
@@ -65,7 +65,6 @@ final private[client] class MasterReplicaLive(
 
   private val masterNodeRef    = new AtomicReference[Node](null)
   private val replicasRef      = new AtomicReference[Vector[Node]](Vector.empty)
-  private val cursor           = new AtomicInteger()
   @volatile private var closed = false
 
   private val subLock                                         = new ReentrantLock()
@@ -74,6 +73,36 @@ final private[client] class MasterReplicaLive(
   private val refreshThrottle = new RefreshThrottle(scheduler, minRefreshInterval.toMillis)
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
+
+  private lazy val readPolicy = new ReadPolicy(
+    readFrom,
+    ReadPolicy.NodeAccess.pooled(masterPool, replicaPool),
+    new ReadPolicy.TopologyPolicy {
+      override def onSafeLoss(node: Node, error: Throwable): Unit =
+        if (node == masterNodeRef.get()) triggerRefresh()
+
+      def exhausted[A](
+        exhaustion: ReadPolicy.Exhaustion,
+        command: Command[A],
+        redirectsLeft: Int,
+        complete: Try[A] => Unit
+      ): Unit = {
+        triggerRefresh()
+        val error = if (exhaustion.redispatch) exhaustion.last.fold[Throwable](NotConnected())(_._2) else NotConnected()
+        complete(Failure(error))
+      }
+
+      def terminal(node: Node, error: Throwable): Unit =
+        Fault.categorize(error) match {
+          case Fault.Lost(_)                                => triggerRefresh()
+          case Fault.Demoted if node == masterNodeRef.get() => triggerRefresh()
+          case _                                            => ()
+        }
+
+      def batchExhausted(exhaustion: ReadPolicy.Exhaustion): Unit = triggerRefresh()
+    },
+    scheduler
+  )
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
@@ -147,6 +176,7 @@ final private[client] class MasterReplicaLive(
         replicasRef.set(replicas)
         replicaPool.retain(replicas.toSet.contains)
         masterPool.retain(_ == master)
+        readPolicy.retainSources(Set(master))
       }
   }
 
@@ -158,7 +188,7 @@ final private[client] class MasterReplicaLive(
         val span    = Events.startSpan(events, command)
         val tracked = Events.trackCommand(events, command, complete, span)
         Client.completing(tracked) {
-          if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked)
+          if (readFrom != ReadFrom.Master && ReadPolicy.replicaEligible(command)) sendRead(command, tracked)
           else sendMaster(command, tracked, lease)
         }
       }
@@ -219,74 +249,13 @@ final private[client] class MasterReplicaLive(
 
   private def sendRead[A](command: Command[A], complete: Try[A] => Unit): Unit = {
     if (closed) { complete(Failure(NotConnected())); return }
-    val master     = masterNodeRef.get()
-    val candidates = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement())
-    tryRead(command, candidates, master, complete)
-  }
-
-  private def tryRead[A](command: Command[A], candidates: Vector[Node], master: Node, complete: Try[A] => Unit): Unit =
-    candidates match {
-      case node +: rest =>
-        val isMaster = node == master
-        val pool     = if (isMaster) masterPool else replicaPool
-        val existing = pool.existing(node)
-        if (existing != null)
-          if (existing.isLive) submitRead(existing, node, isMaster, command, rest, master, complete)
-          else tryRead(command, rest, master, complete)
-        else
-          offload {
-            val nc =
-              try pool.getOrEstablish(node)
-              catch { case NonFatal(_) => null }
-            if (nc == null || !nc.isLive) tryRead(command, rest, master, complete)
-            else submitRead(nc, node, isMaster, command, rest, master, complete)
-          }
-      // nothing reached the wire, so no fault event fires: re-discover here or a strict-Replica read stays stuck on a stale replica set
-      case _            => triggerRefresh(); complete(Failure(NotConnected()))
-    }
-
-  private def submitRead[A](
-    nc: NodeClient,
-    node: Node,
-    isMaster: Boolean,
-    command: Command[A],
-    rest: Vector[Node],
-    master: Node,
-    complete: Try[A] => Unit
-  ): Unit =
-    nc.submit[A](
-      command,
-      asking = false,
-      {
-        case s @ Success(_) => Events.attributeNode(complete, node); complete(s)
-        case Failure(error) => offload(onReadFault(node, isMaster, error, command, rest, master, complete))
-      }
-    )
-
-  private def onReadFault[A](
-    node: Node,
-    isMaster: Boolean,
-    error: Throwable,
-    command: Command[A],
-    rest: Vector[Node],
-    master: Node,
-    complete: Try[A] => Unit
-  ): Unit = {
-    if (isMaster && isOwnershipFault(error)) triggerRefresh()
-    if (isConnLoss(error)) {
-      if (rest.nonEmpty) tryRead(command, rest, master, complete)
-      else { triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error)) }
-    } else { Events.attributeNode(complete, node); complete(Failure(error)) }
+    val master = masterNodeRef.get()
+    readPolicy.submit(ReadPolicy.Source.forMaster(master, replicasRef.get()), command, redirectsLeft = 0, complete)
   }
 
   private def isOwnershipFault(error: Throwable): Boolean = Fault.categorize(error) match {
     case Fault.Demoted | Fault.Lost(_) => true
     case _                             => false
-  }
-
-  private def isConnLoss(error: Throwable): Boolean = Fault.categorize(error) match {
-    case Fault.Lost(_) => true
-    case _             => false
   }
 
   // --- pipelines -----------------------------------------------------------------------------------------------------------------------
@@ -300,65 +269,42 @@ final private[client] class MasterReplicaLive(
       CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
     else
       CIO.async { complete =>
-        val spans                                      = Events.startSpans(events, p.commands)
+        val spans      = Events.startSpans(events, p.commands)
         // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
-        val useReplica                                 = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-        def submitOn(node: Node, nc: NodeClient): Unit = {
-          // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
-          if (nc == null) triggerRefresh()
-          val submit     = if (nc == null) (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false else nc.submitAll
-          // None when nothing reached the wire, so the batch is not attributed to a node it never landed on
-          val attributed = if (nc == null) None else Some(node)
-          Client.submitBatchOnOne(events, p.commands, spans, submit, complete, attributed)
-        }
-        val master                                     = masterNodeRef.get()
+        val useReplica = readFrom != ReadFrom.Master && ReadPolicy.replicaEligible(p.commands)
         if (useReplica) {
-          val candidates = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement())
-          liveEstablished(candidates, master) match {
-            case Some((node, nc)) => submitOn(node, nc)
-            case None             => offload { val (node, nc) = establishRead(candidates, master); submitOn(node, nc) }
-          }
+          val master = masterNodeRef.get()
+          Client.submitBatchOnOne(
+            events,
+            p.commands,
+            spans,
+            (_, callbacks) =>
+              readPolicy.submitBatch(
+                ReadPolicy.Source.forMaster(master, replicasRef.get()),
+                p.commands,
+                callbacks,
+                redirectsLeft = 0,
+                onDeferredExhausted = () => Client.rejectBatch(events, p.commands, callbacks, complete, NotConnected())
+              ),
+            complete
+          )
         } else {
+          val master   = masterNodeRef.get()
           val existing = masterPool.existing(master)
-          if (existing != null) submitOn(master, existing)
+          if (existing != null)
+            Client.submitBatchOnOne(events, p.commands, spans, existing.submitAll, complete, Some(master))
           else
             offload {
-              val nc =
+              val nc         =
                 try masterPool.getOrEstablish(master)
                 catch { case NonFatal(_) => null }
-              submitOn(master, nc)
+              if (nc == null) triggerRefresh()
+              val submit     = if (nc == null) (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false else nc.submitAll
+              val attributed = if (nc == null) None else Some(master)
+              Client.submitBatchOnOne(events, p.commands, spans, submit, complete, attributed)
             }
         }
       }
-
-  // lock-free walk: the first live established candidate, Some((null, null)) when all are established but none live, and None when an
-  // unestablished candidate is met first — only then must the caller offload to establish
-  private def liveEstablished(candidates: Vector[Node], master: Node): Option[(Node, NodeClient)] = {
-    val it = candidates.iterator
-    while (it.hasNext) {
-      val node = it.next()
-      val pool = if (node == master) masterPool else replicaPool
-      val nc   = pool.existing(node)
-      if (nc == null) return None
-      if (nc.isLive) return Some((node, nc))
-    }
-    Some((null, null))
-  }
-
-  // the first live read candidate, establishing as needed, with the node it landed on; (null, null) when none
-  private def establishRead(candidates: Vector[Node], master: Node): (Node, NodeClient) = {
-    val it = candidates.iterator
-    while (it.hasNext) {
-      val node = it.next()
-      val pool = if (node == master) masterPool else replicaPool
-      val nc   =
-        try pool.getOrEstablish(node)
-        catch { case NonFatal(_) => null }
-      if (nc != null && nc.isLive) return (node, nc)
-    }
-    (null, null)
-  }
-
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
 
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
