@@ -154,7 +154,8 @@ enum Topology {
   * @param readFrom       which node read-only commands may run on — see [[ReadFrom]]
   * @param database       the logical keyspace `SELECT`ed once at setup and fixed for the client's lifetime (re-issued on every reconnect and
   *                       every connection); never changed by a runtime command, since that would move the keyspace under every fiber sharing
-  *                       a connection. Must be 0 for a cluster topology, which has only database 0
+  *                       a connection. Valkey 9+ supports numbered databases in cluster mode; Redis and older Valkey versions reject a
+  *                       non-zero database during connection setup
   * @param clientName     sets `CLIENT SETNAME`, visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically
   * @param listeners      observers of runtime [[sage.SageEvent]]s — see [[sage.SageListener]]
   * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active
@@ -184,9 +185,9 @@ object SageConfig {
     * Parses a `redis://`/`rediss://` connection URI into a config. `rediss` selects TLS with system trust. Userinfo becomes auth
     * (`redis://user:pass@…`, or `redis://:pass@…` for the default user), percent-decoded so a managed-service password like `p%40ss`
     * authenticates as `p@ss`. A single host yields a standalone topology; comma-separated hosts
-    * (`redis://h1:6379,h2:6380`) yield cluster seeds. A `/<db>` path sets `database`, rejected for a cluster URI (cluster has only db 0).
-    * Other tuning stays programmatic: `fromUri(…).map(_.copy(watchdog = …))`. Returns the problem as a `Left` rather than throwing; there
-    * is intentionally no way to select insecure TLS from a URI.
+    * (`redis://h1:6379,h2:6380`) yield cluster seeds. A `/<db>` path sets `database`; when the endpoints form a cluster, the server must support
+    * numbered cluster databases (Valkey 9+). Other tuning stays programmatic: `fromUri(…).map(_.copy(watchdog = …))`. Returns the problem as a
+    * `Left` rather than throwing; there is intentionally no way to select insecure TLS from a URI.
     */
   def fromUri(uri: String): Either[String, SageConfig] = {
     val shown                                   = redactCredentials(uri)
@@ -213,10 +214,6 @@ object SageConfig {
           topology   = endpoints match {
                          case Vector(one) => Topology.Standalone(one)
                          case seeds       => Topology.Cluster(seeds)
-                       }
-          _         <- topology match {
-                         case _: Topology.Cluster if db != 0 => fail[Unit]("cluster URIs cannot select a database (cluster has only db 0)")
-                         case _                              => Right(())
                        }
         } yield SageConfig(topology = topology, auth = auth, tls = tls, database = db)
       case _                   => fail("expected redis:// or rediss://")

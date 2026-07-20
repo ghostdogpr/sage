@@ -75,9 +75,9 @@ class SageConfigSpec extends munit.FunSuite {
     assert(SageConfig.fromUri("redis://[]:6379").isLeft) // empty host
   }
 
-  test("a cluster URI cannot select a non-zero database") {
-    assert(SageConfig.fromUri("redis://a,b/2").isLeft)
-    assert(SageConfig.fromUri("redis://a,b/0").isRight)
+  test("a cluster URI can select a database when the server supports it") {
+    assertEquals(parsed("redis://a,b/2").database, 2)
+    assertEquals(parsed("redis://a,b/0").database, 0)
   }
 
   test("malformed URIs fail with a Left, never throw") {

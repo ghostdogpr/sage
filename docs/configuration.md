@@ -21,7 +21,7 @@ val config = SageConfig(
 )
 ```
 
-The `database` is selected once at connection setup and fixed for the client's lifetime, re-applied on every reconnect. It is never changed by a runtime command, because that would move the keyspace under every fiber sharing the connection. A cluster has only database 0.
+The `database` is selected once at connection setup and fixed for the client's lifetime, re-applied on every reconnect. It is never changed by a runtime command, because that would move the keyspace under every fiber sharing the connection. Valkey 9+ also supports numbered databases in cluster mode; Redis Cluster and older Valkey versions reject a non-zero database during connection setup.
 
 ## Cluster
 
@@ -31,11 +31,13 @@ Give the cluster seeds. Sage discovers the full topology from them, routes each 
 val config = SageConfig(
   topology = Topology.Cluster(
     Vector(Endpoint("localhost", 7000), Endpoint("localhost", 7001))
-  )
+  ),
+  database = 0
 )
 ```
 
 Seeds bootstrap discovery only. Once the topology is known, sage routes to the nodes the cluster reports; any one seed answering is enough.
+Set `database` to a non-zero value for a Valkey 9+ cluster configured with a sufficiently large `cluster-databases` setting. Sage issues `SELECT` while establishing every node connection, including after reconnects and redirects. Servers without numbered cluster database support reject the connection.
 
 ### Hash tags
 

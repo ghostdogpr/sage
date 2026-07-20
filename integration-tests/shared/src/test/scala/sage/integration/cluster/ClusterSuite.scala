@@ -8,7 +8,7 @@ import com.dimafeng.testcontainers.munit.TestContainerForAll
 import kyo.compat.*
 
 import sage.{Bytes, Message}
-import sage.SageException.DecodeError
+import sage.SageException.{DecodeError, ServerError}
 import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.{Client, ScanTarget}
 import sage.commands.{Command, Commands, FlushMode, ScanCursor}
@@ -20,10 +20,15 @@ import sage.protocol.Frame
   * testcontainers-mapped host port so the address the node reports in `CLUSTER SLOTS` is reachable from the test. This exercises topology
   * discovery, the `CLUSTER SLOTS` decoder against real wire output, and single-key routing; redirects and failover need multiple nodes.
   */
-abstract class ClusterSuite(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
+abstract class ClusterSuite(image: String, serverBinary: String, supportsNumberedDatabases: Boolean = false)
+  extends munit.FunSuite
+  with TestContainerForAll
+  with ContainerClient {
 
-  override val containerDef: GenericContainer.Def[GenericContainer] =
-    GenericContainer.Def(image, exposedPorts = Seq(6379), command = Seq(serverBinary, "--cluster-enabled", "yes"))
+  override val containerDef: GenericContainer.Def[GenericContainer] = {
+    val numberedDatabases = if (supportsNumberedDatabases) Seq("--cluster-databases", "16") else Seq.empty
+    GenericContainer.Def(image, exposedPorts = Seq(6379), command = Seq(serverBinary, "--cluster-enabled", "yes") ++ numberedDatabases)
+  }
 
   given ExecutionContext = munitExecutionContext
 
@@ -209,8 +214,43 @@ abstract class ClusterSuite(image: String, serverBinary: String) extends munit.F
       program.unsafeRun
     }
   }
+
+  if (supportsNumberedDatabases)
+    test("a numbered database is selected on a Valkey cluster connection") {
+      withContainers { server =>
+        val host       = server.host
+        val port       = server.mappedPort(6379)
+        val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+        val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))), database = 2)
+        val key        = "cluster-numbered-database"
+
+        val program =
+          connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+            connectAndUse(standalone)(_.set(key, "database-0")).flatMap { _ =>
+              connectAndUse(clustered) { client =>
+                client.set(key, "database-2").flatMap(_ => client.get[String](key)).map(value => assertEquals(value, Some("database-2")))
+              }.flatMap { _ =>
+                connectAndUse(standalone)(_.get[String](key)).map(value => assertEquals(value, Some("database-0")))
+              }
+            }
+          }
+        program.unsafeRun
+      }
+    }
+
+  if (!supportsNumberedDatabases)
+    test("an unsupported cluster server rejects a numbered database during bootstrap") {
+      withContainers { server =>
+        val endpoint  = Endpoint(server.host, server.mappedPort(6379))
+        val clustered = SageConfig(topology = Topology.Cluster(Vector(endpoint)), database = 2)
+
+        Client.connect(clustered).unsafeRun.failed.map { error =>
+          assert(error.isInstanceOf[ServerError], s"expected the server's SELECT error, got $error")
+        }
+      }
+    }
 }
 
 class RedisClusterSuite extends ClusterSuite(Images.redis, "redis-server")
 
-class ValkeyClusterSuite extends ClusterSuite(Images.valkey, "valkey-server")
+class ValkeyClusterSuite extends ClusterSuite(Images.valkey, "valkey-server", supportsNumberedDatabases = true)

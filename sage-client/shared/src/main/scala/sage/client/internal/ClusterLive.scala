@@ -1015,7 +1015,6 @@ private[client] object ClusterLive {
     translate: Throwable => Throwable
   ): CIO[Client[CIO, String]] =
     CIO.blocking[Client[CIO, String]] {
-      // cluster validation forces database 0, so this adds no SELECT
       val bootstrap                                               = Bootstrap.commands(config.auth, config.database, config.clientName)
       val factory: Node => MultiplexedConnection.TransportFactory = node => {
         val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)

@@ -2222,7 +2222,6 @@ object Client {
       case Topology.Cluster(seeds, cluster)             =>
         Vector(
           cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
-          cond(config.database == 0, "cluster topology has no SELECT; database must be 0"),
           cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
           atLeastOneMilli(cluster.minRefreshInterval, "cluster.minRefreshInterval")
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
