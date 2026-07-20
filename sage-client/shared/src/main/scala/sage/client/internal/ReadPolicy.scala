@@ -31,7 +31,7 @@ final private[client] class ReadPolicy(
   def submit[A](source: Source, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
     val cursor     = cursors.computeIfAbsent(source.lane, _ => new AtomicInteger)
     val candidates = ReadPolicy.candidates(readFrom, source, cursor.getAndIncrement())
-    attempt(candidates, Request(source.master, command, redirectsLeft, complete), Exhaustion(None, redispatch = false), establish = false)
+    attempt(candidates, Request(source.master, command, redirectsLeft, complete), Exhaustion.Unsubmitted(None), establish = false)
   }
 
   def submitBatch(
@@ -44,7 +44,7 @@ final private[client] class ReadPolicy(
     val cursor     = cursors.computeIfAbsent(source.lane, _ => new AtomicInteger)
     val candidates = ReadPolicy.candidates(readFrom, source, cursor.getAndIncrement())
     val request    = BatchRequest(source.master, commands, callbacks, redirectsLeft, onDeferredExhausted)
-    attemptBatch(candidates, request, Exhaustion(None, redispatch = false), establish = false) != BatchSubmission.Rejected
+    attemptBatch(candidates, request, Exhaustion.Unsubmitted(None), establish = false) != BatchSubmission.Rejected
   }
 
   def retainSources(masters: Set[Node]): Unit = {
@@ -120,7 +120,7 @@ final private[client] class ReadPolicy(
           case NonFatal(error) =>
             Fault.categorize(error) match {
               case Fault.Lost(false) =>
-                attemptBatch(remaining, request, Exhaustion(Some(node -> error), redispatch = true), establish)
+                attemptBatch(remaining, request, Exhaustion.AfterSafeLoss(node, error), establish)
               case _                 => routed.foreach(_(Failure(error))); BatchSubmission.Submitted
             }
         }
@@ -167,7 +167,7 @@ final private[client] class ReadPolicy(
         )
       case Fault.Lost(false)          =>
         topology.onSafeLoss(node, error)
-        attempt(remaining, request, Exhaustion(Some(node -> error), redispatch = true), establish = true)
+        attempt(remaining, request, Exhaustion.AfterSafeLoss(node, error), establish = true)
       case Fault.Demoted              => terminal(node, error, request.complete)
       case Fault.Lost(true)           => terminal(node, error, request.complete)
       case Fault.Fatal                => finishAt(node, request.complete, Failure(error))
@@ -184,12 +184,10 @@ final private[client] class ReadPolicy(
   }
 
   private def failFromExhaustion[A](exhaustion: Exhaustion, complete: Try[A] => Unit, error: Throwable): Unit =
-    if (!exhaustion.redispatch) complete(Failure(error))
-    else
-      exhaustion.last match {
-        case Some((node, _)) => finishAt(node, complete, Failure(error))
-        case None            => complete(Failure(error))
-      }
+    exhaustion match {
+      case Exhaustion.Unsubmitted(_)         => complete(Failure(error))
+      case Exhaustion.AfterSafeLoss(node, _) => finishAt(node, complete, Failure(error))
+    }
 
   final private case class Request[A](master: Node, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit)
   final private case class BatchRequest(
@@ -229,8 +227,14 @@ private[client] object ReadPolicy {
     case Keyless
   }
 
-  final case class Exhaustion(last: Option[(Node, Throwable)], redispatch: Boolean) {
-    private[ReadPolicy] def withLast(node: Node, error: Throwable): Exhaustion = copy(last = Some(node -> error))
+  enum Exhaustion {
+    case Unsubmitted(lastFailure: Option[(Node, Throwable)])
+    case AfterSafeLoss(node: Node, error: Throwable)
+
+    private[ReadPolicy] def withLast(node: Node, error: Throwable): Exhaustion = this match {
+      case Unsubmitted(_)             => Unsubmitted(Some(node -> error))
+      case safe @ AfterSafeLoss(_, _) => safe
+    }
   }
 
   final case class RedirectAttempt[A](

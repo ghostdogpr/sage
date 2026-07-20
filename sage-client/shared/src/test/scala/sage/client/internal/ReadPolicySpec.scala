@@ -161,7 +161,7 @@ class ReadPolicySpec extends munit.FunSuite {
     assert(results.head.failed.get.isInstanceOf[NotConnected])
   }
 
-  test("candidate exhaustion after a safe loss is attributed to the last serving Node") {
+  test("safe loss remains attributed to its serving Node when a later candidate fails to establish") {
     val scheduler = new ManualScheduler
     val lost      = ConnectionLost(mayHaveExecuted = false)
     val access    = new FakeAccess(Map(r1 -> new FakeConnection(Vector(Failure(lost)))))
@@ -178,9 +178,10 @@ class ReadPolicySpec extends munit.FunSuite {
     val results   = mutable.ArrayBuffer.empty[Try[String]]
     val tracked   = Events.trackCommand[String](events, read, result => results += result)
 
-    policy.submit(ReadPolicy.Source.forMaster(master, Vector(r1)), read, redirectsLeft = 0, tracked)
+    policy.submit(ReadPolicy.Source.forMaster(master, Vector(r1, r2)), read, redirectsLeft = 0, tracked)
     scheduler.advance(Duration.Zero)
 
+    assertEquals(access.attempted.toVector, Vector(r1, r2))
     assertEquals(routed.toVector, Vector(r1))
     assertEquals(results.toVector, Vector(Failure(lost)))
     events.close()
@@ -417,7 +418,11 @@ class ReadPolicySpec extends munit.FunSuite {
 
     def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit = {
       exhausted += ((attempt.exhaustion, attempt.redirectsLeft))
-      attempt.failAtSource(attempt.exhaustion.last.map(_._2).getOrElse(NotConnected()))
+      val error = attempt.exhaustion match {
+        case ReadPolicy.Exhaustion.Unsubmitted(_)          => NotConnected()
+        case ReadPolicy.Exhaustion.AfterSafeLoss(_, error) => error
+      }
+      attempt.failAtSource(error)
     }
 
     def terminal(node: Node, error: Throwable): Unit = terminals += ((node, error))

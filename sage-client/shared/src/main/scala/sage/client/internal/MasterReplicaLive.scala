@@ -83,7 +83,10 @@ final private[client] class MasterReplicaLive(
 
       def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit = {
         triggerRefresh()
-        val error = if (attempt.exhaustion.redispatch) attempt.exhaustion.last.fold[Throwable](NotConnected())(_._2) else NotConnected()
+        val error = attempt.exhaustion match {
+          case ReadPolicy.Exhaustion.Unsubmitted(_)          => NotConnected()
+          case ReadPolicy.Exhaustion.AfterSafeLoss(_, error) => error
+        }
         attempt.failAtSource(error)
       }
 

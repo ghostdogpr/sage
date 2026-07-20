@@ -116,9 +116,13 @@ final private[client] class ClusterLive(
         }
 
       def exhausted[A](attempt: ReadPolicy.ExhaustedAttempt[A]): Unit =
-        if (attempt.exhaustion.redispatch)
-          onUnreachable(attempt.command, attempt.redirectsLeft, attempt.resume, attempt.failAtSource)
-        else { triggerRefresh(); attempt.failAtSource(NotConnected()) }
+        attempt.exhaustion match {
+          case ReadPolicy.Exhaustion.AfterSafeLoss(_, _) =>
+            onUnreachable(attempt.command, attempt.redirectsLeft, attempt.resume, attempt.failAtSource)
+          case ReadPolicy.Exhaustion.Unsubmitted(_)      =>
+            triggerRefresh()
+            attempt.failAtSource(NotConnected())
+        }
 
       def terminal(node: Node, error: Throwable): Unit = triggerRefresh()
 
