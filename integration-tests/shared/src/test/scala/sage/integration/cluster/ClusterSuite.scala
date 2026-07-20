@@ -96,6 +96,48 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
     }
   }
 
+  test("supported cross-slot commands are transparently split and merged against a real cluster") {
+    withContainers { server =>
+      val host       = server.host
+      val port       = server.mappedPort(6379)
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
+      val keyA       = "{mget-a}value"
+      val keyB       = "{mget-b}value"
+      val missingA   = "{mget-a}missing"
+      val missingB   = "{mget-b}missing"
+      val msetA      = "{mset-a}value"
+      val msetB      = "{mset-b}value"
+
+      val program =
+        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+          connectAndUse(clustered) { client =>
+            for {
+              _         <- client.set(keyA, "a")
+              _         <- client.set(keyB, "b")
+              values    <- client.mGet[String](keyA, keyB, missingA, keyB)
+              piped     <- client.pipeline((Commands.mGet[String, String](keyA, keyB), Commands.get[String, String](keyA)))
+              exists    <- client.exists(keyA, keyB, missingA, keyB)
+              touched   <- client.touch(keyA, keyB, missingA)
+              _         <- client.mSet(msetA -> "set-a", msetB -> "set-b")
+              setValues <- client.mGet[String](msetA, msetB)
+              deleted   <- client.del(keyA, missingB)
+              unlinked  <- client.unlink(keyB, missingA)
+            } yield {
+              assertEquals(values, Vector(Some("a"), Some("b"), None, Some("b")))
+              assertEquals(piped, (Vector(Some("a"), Some("b")), Some("a")))
+              assertEquals(exists, 3L)
+              assertEquals(touched, 2L)
+              assertEquals(setValues, Vector(Some("set-a"), Some("set-b")))
+              assertEquals(deleted, 1L)
+              assertEquals(unlinked, 1L)
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
   // sharded and classic pub/sub against a real (single-node) cluster: SSUBSCRIBE/SPUBLISH route by slot and coexist with classic SUBSCRIBE.
   // Resubscription on slot migration needs multiple nodes and is covered deterministically by ClusterClientSpec.
   test("sharded and classic pub/sub coexist on a cluster client") {

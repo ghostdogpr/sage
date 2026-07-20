@@ -14,7 +14,7 @@ Every sage failure is a `SageException`, a single sealed hierarchy you can match
 | `NotConnected()` | The client was never started, or has been closed. |
 | `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |
 | `TlsError(message)` | TLS could not be established (rejected certificate or unusable trust material). |
-| `CrossSlot(message)` | A multi-key command or transaction touched keys in more than one cluster slot. |
+| `CrossSlot(message)` | An unsupported multi-key command or a transaction touched keys in more than one cluster slot. `MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, and `TOUCH` are transparently split outside transactions. |
 | `TimedOut(message)` | A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout; bound a command's own duration with your backend's timeout combinator. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
 | `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |

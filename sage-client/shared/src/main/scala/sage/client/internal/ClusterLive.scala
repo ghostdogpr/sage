@@ -1,17 +1,19 @@
 package sage.client.internal
 
+import java.util.Locale
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
+import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{CommandSpan, Message, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, CrossSlot, NotConnected, ServerError}
+import sage.{Bytes, CommandSpan, Message, PatternMessage, SageEvent, SageException}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
@@ -218,11 +220,115 @@ final private[client] class ClusterLive(
               sendKeylessRead(topology, command, redirectsLeft, complete)
             else sendToAny(topology, command, redirectsLeft, complete, lease)
           case Route.Unowned(_)         => offload(onUnowned(command, redirectsLeft, complete, lease))
-          case Route.CrossSlot(slots)   => complete(Failure(crossSlot(command.name, slots)))
+          case Route.CrossSlot(slots)   =>
+            multiSlotPolicy(command) match {
+              case Some(policy) => scatterMultiSlot(command, policy, redirectsLeft, complete, allowReplica)
+              case None         => complete(Failure(crossSlot(command.name, slots)))
+            }
           case Route.Malformed          =>
             complete(Failure(malformedKeys(command.name)))
         }
     }
+
+  private enum MultiSlotMerge {
+    case Positional, Sum, AllSucceeded
+  }
+
+  final private case class MultiSlotPolicy(merge: MultiSlotMerge, argsPerKey: Int)
+
+  final private case class MultiSlotEntry(resultIndex: Int, argIndex: Int)
+
+  // A supported logical cross-slot command becomes one ordinary command per exact slot, not per owner node. Every subgroup re-enters
+  // dispatch so replica policy, topology refresh, and MOVED/ASK handling stay identical to a normal one-slot call. The merge waits for every
+  // subgroup and decodes once through the original command: MGET scatters positional frames, integer commands sum per-slot counts, and MSET
+  // requires every per-slot reply to succeed with OK.
+  private def scatterMultiSlot[A](
+    command: Command[A],
+    policy: MultiSlotPolicy,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    allowReplica: Boolean
+  ): Unit = {
+    val bySlot = mutable.LinkedHashMap.empty[Slot, mutable.ArrayBuffer[MultiSlotEntry]]
+    command.keyIndices.iterator.zipWithIndex.foreach { case (argIndex, resultIndex) =>
+      val key   = command.args(argIndex)
+      val entry = MultiSlotEntry(resultIndex, argIndex)
+      val group = bySlot.getOrElseUpdate(Slot.of(key), mutable.ArrayBuffer.empty)
+      group += entry
+    }
+    val groups = bySlot.valuesIterator.map(_.toVector).toVector
+
+    lazy val values = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](command.keyIndices.size)
+    lazy val total  = new java.util.concurrent.atomic.AtomicLong(0L)
+    val remaining   = new java.util.concurrent.atomic.AtomicInteger(groups.size)
+    val firstError  = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
+
+    def settle(group: Vector[MultiSlotEntry], result: Try[Frame]): Unit = {
+      (policy.merge, result) match {
+        case (MultiSlotMerge.Positional, Success(Frame.Array(elements))) if elements.size == group.size =>
+          group.iterator.zip(elements).foreach { case (entry, frame) => values.set(entry.resultIndex, frame) }
+        case (MultiSlotMerge.Positional, Success(Frame.Array(elements)))                                =>
+          firstError.compareAndSet(
+            null,
+            DecodeError(s"an array of ${group.size} MGET values", s"an array of ${elements.size} values")
+          )
+        case (MultiSlotMerge.Positional, Success(other))                                                =>
+          firstError.compareAndSet(null, DecodeError(s"an array of ${group.size} MGET values", Frame.describe(other)))
+        case (MultiSlotMerge.Sum, Success(Frame.Integer(value)))                                        => total.addAndGet(value)
+        case (MultiSlotMerge.Sum, Success(other))                                                       =>
+          firstError.compareAndSet(null, DecodeError("an integer count", Frame.describe(other)))
+        case (MultiSlotMerge.AllSucceeded, Success(Frame.SimpleString("OK")))                           => ()
+        case (MultiSlotMerge.AllSucceeded, Success(other))                                              =>
+          firstError.compareAndSet(null, DecodeError("simple string 'OK'", Frame.describe(other)))
+        case (_, Failure(error))                                                                        =>
+          firstError.compareAndSet(null, error)
+      }
+
+      if (remaining.decrementAndGet() == 0)
+        Option(firstError.get()) match {
+          case Some(error) => complete(Failure(error))
+          case None        =>
+            val merged = policy.merge match {
+              case MultiSlotMerge.Positional   => Frame.Array(collectFrames(values, command.keyIndices.size))
+              case MultiSlotMerge.Sum          => Frame.Integer(total.get())
+              case MultiSlotMerge.AllSucceeded => Frame.SimpleString("OK")
+            }
+            complete(Reply.decode(command, merged))
+        }
+    }
+
+    val raw = command.rawFrame
+    groups.foreach { group =>
+      val args = Vector.newBuilder[Bytes]
+      args.sizeHint(group.size * policy.argsPerKey)
+      group.foreach { entry =>
+        var offset = 0
+        while (offset < policy.argsPerKey) {
+          args += command.args(entry.argIndex + offset)
+          offset += 1
+        }
+      }
+      val sub  = raw.copy(
+        keyIndices = Vector.tabulate(group.size)(_ * policy.argsPerKey),
+        args = args.result()
+      )
+      dispatch(sub, redirectsLeft, result => settle(group, result), allowReplica = allowReplica)
+    }
+  }
+
+  // Validate each recognized command's complete argument shape before splitting so a custom command that merely shares its name can never
+  // lose or misassociate non-key arguments during subgroup construction.
+  private def multiSlotPolicy(command: Command[?]): Option[MultiSlotPolicy] =
+    command.name.toUpperCase(Locale.ROOT) match {
+      case "MGET" if hasKeyStride(command, 1)                                => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1))
+      case "DEL" | "EXISTS" | "TOUCH" | "UNLINK" if hasKeyStride(command, 1) => Some(MultiSlotPolicy(MultiSlotMerge.Sum, 1))
+      case "MSET" if hasKeyStride(command, 2)                                => Some(MultiSlotPolicy(MultiSlotMerge.AllSucceeded, 2))
+      case _                                                                 => None
+    }
+
+  private def hasKeyStride(command: Command[?], argsPerKey: Int): Boolean =
+    command.args.nonEmpty && command.args.size % argsPerKey == 0 &&
+      command.keyIndices == Vector.tabulate(command.args.size / argsPerKey)(_ * argsPerKey)
 
   // walk the policy's ordered candidates, falling through on connection loss; strict Replica with no live replica exhausts to NotConnected
   private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
@@ -574,7 +680,9 @@ final private[client] class ClusterLive(
     def reroute(index: Int): Unit = dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica)
 
     plan.rejected.foreach {
-      case (index, Rejected.CrossSlot(slots)) => emits(index)(Failure(crossSlot(p.commands(index).name, slots)))
+      case (index, Rejected.CrossSlot(slots)) =>
+        if (multiSlotPolicy(p.commands(index)).nonEmpty) reroute(index)
+        else emits(index)(Failure(crossSlot(p.commands(index).name, slots)))
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
       case (_, Rejected.Malformed)            => ()             // unreachable: the guard above returned
     }

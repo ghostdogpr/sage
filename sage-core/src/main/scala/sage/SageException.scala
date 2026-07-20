@@ -77,7 +77,9 @@ object SageException {
   final case class TlsError(message: String) extends SageException(message)
 
   /**
-    * A multi-key command or transaction touched keys in more than one cluster slot, which the server cannot serve atomically.
+    * An unsupported multi-key command or a transaction touched keys in more than one cluster slot, which the server cannot serve atomically.
+    * Supported multi-slot commands are handled transparently outside transactions and therefore do not produce this error solely for spanning
+    * slots.
     */
   final case class CrossSlot(message: String) extends SageException(message)
 

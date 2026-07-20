@@ -100,12 +100,15 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def incrByFloat(key: K, increment: Double): F[Double] = run(Strings.incrByFloat(key, increment))
 
   /**
-    * Gets the values at several keys in request order, each `None` if that key is absent.
+    * Gets the values at several keys in request order, each `None` if that key is absent. In cluster mode, keys spanning slots are
+    * transparently split into one MGET per exact slot and merged; each subgroup is atomic, but the combined result is not a cluster-wide
+    * point-in-time snapshot. Cross-slot MGET remains invalid inside a transaction.
     */
   final def mGet[V: ValueCodec](first: K, rest: K*): F[Vector[Option[V]]] = run(Strings.mGet(first, rest*))
 
   /**
-    * Sets several key/value pairs atomically.
+    * Sets several key/value pairs atomically on one server. In cluster mode, pairs spanning slots are set independently per exact slot; a
+    * failed call may therefore have already set pairs in successful slot groups. Cross-slot MSET remains invalid inside a transaction.
     */
   final def mSet[V: ValueCodec](first: (K, V), rest: (K, V)*): F[Unit] = run(Strings.mSet(first, rest*))
 
@@ -210,7 +213,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     run(Keys.copy(source, destination, replace))
 
   /**
-    * Deletes the given keys, returning how many existed.
+    * Deletes the given keys, returning how many existed. In cluster mode, keys spanning slots are deleted independently per exact slot and
+    * the counts are summed; a failed call may therefore have already deleted keys in successful slot groups.
     */
   final def del(first: K, rest: K*): F[Long] = run(Keys.del(first, rest*))
 
@@ -220,7 +224,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def delIfEq[V: ValueCodec](key: K, value: V): F[Boolean] = run(Keys.delIfEq(key, value))
 
   /**
-    * Returns how many of the given keys exist (counting duplicates).
+    * Returns how many of the given keys exist (counting duplicates). In cluster mode, keys spanning slots are checked independently per exact
+    * slot and the counts are summed.
     */
   final def exists(first: K, rest: K*): F[Long] = run(Keys.exists(first, rest*))
 
@@ -287,7 +292,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   ): F[ScanPage[K]] = run(Keys.scan(cursor, pattern, count, ofType))
 
   /**
-    * Updates the last-access time of the given keys without reading them, returning how many existed.
+    * Updates the last-access time of the given keys without reading them, returning how many existed. In cluster mode, keys spanning slots
+    * are touched independently per exact slot and the counts are summed.
     */
   final def touch(first: K, rest: K*): F[Long] = run(Keys.touch(first, rest*))
 
@@ -302,7 +308,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def typeOf(key: K): F[Option[RedisType]] = run(Keys.typeOf(key))
 
   /**
-    * Deletes the given keys, reclaiming memory asynchronously, returning how many existed.
+    * Deletes the given keys, reclaiming memory asynchronously, returning how many existed. In cluster mode, keys spanning slots are unlinked
+    * independently per exact slot and the counts are summed; a failed call may therefore have already unlinked keys in successful slot groups.
     */
   final def unlink(first: K, rest: K*): F[Long] = run(Keys.unlink(first, rest*))
 

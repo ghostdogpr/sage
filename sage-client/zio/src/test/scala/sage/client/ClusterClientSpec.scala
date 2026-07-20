@@ -451,14 +451,264 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
-  test("a single command whose keys span slots fails CrossSlot") {
-    val behaviour                = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Integer(1))
-    val fixture                  = new Fixture(behaviour, Vector(nodeA))
-    val crossSlot: Command[Long] =
-      Command("MSET", Vector(0, 2), Vector("{a}", "v", "{b}", "v").map(Bytes.utf8), _ => Right(1L))
+  test("an unsupported multi-key command whose keys span slots fails CrossSlot") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Integer(1))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
 
-    fixture.live.run(crossSlot).unsafeRun.failed.map { error =>
+    fixture.live.run(Strings.mSetNx("{a}" -> "a", "{b}" -> "b")).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+    }
+  }
+
+  test("an MSET-named custom command without alternating key/value arguments is not rewritten") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val malformed = Command[Unit](
+      "MSET",
+      Vector(0, 3),
+      Vector("{a}", "a-value", "option", "{b}", "b-value").map(Bytes.utf8),
+      _ => Right(())
+    )
+
+    fixture.live.run(malformed).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("MSET")), "an unvalidated custom shape reached the wire")
+    }
+  }
+
+  test("an MGET-named custom command with non-key arguments is not rewritten") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Array(Vector.empty))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val malformed = Command[Vector[String]](
+      "MGET",
+      Vector(0, 2),
+      Vector("{a}", "not-a-key", "{b}").map(Bytes.utf8),
+      _ => Right(Vector.empty)
+    )
+
+    fixture.live.run(malformed).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("MGET")), "an unvalidated custom shape reached the wire")
+    }
+  }
+
+  test("a cross-slot MGET splits by exact slot on one node and restores positional results") {
+    val keyA      = "{mget-a}value"
+    val keyB      = "{mget-b}value"
+    val missingA  = "{mget-a}missing"
+    assert(Slot.of(Bytes.utf8(keyA)) != Slot.of(Bytes.utf8(keyB)), "test keys must hash to different slots")
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains(keyA))
+        Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a-value")), Frame.Null)))
+      else if (text.contains(keyB))
+        Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b-value")), Frame.BulkString(Bytes.utf8("b-value")))))
+      else Seq(Frame.SimpleError("ERR unexpected command"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](keyA, keyB, missingA, keyB)).unsafeRun.map { result =>
+      assertEquals(result, Vector(Some("a-value"), Some("b-value"), None, Some("b-value")))
+      val subMgets = fixture.written(nodeA).filter(_.contains("MGET"))
+      assertEquals(subMgets.size, 2, "different slots must remain separate even when one node owns both")
+      assert(subMgets.forall(text => !(text.contains(keyA) && text.contains(keyB))), s"a subgroup crossed slots: $subMgets")
+    }
+  }
+
+  test("a lowercase supported command name is transparently split") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else Seq(Frame.Integer(1L))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val lowercase = Keys.exists(keyA, keyB).copy(name = "exists")
+
+    fixture.live.run(lowercase).unsafeRun.map { result =>
+      assertEquals(result, 2L)
+      assertEquals(fixture.written(nodeA).count(_.contains("\r\nexists\r\n")), 2)
+    }
+  }
+
+  test("a single-slot MGET keeps the one-command fast path") {
+    val first     = "{same}one"
+    val second    = "{same}two"
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("one")), Frame.BulkString(Bytes.utf8("two")))))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](first, second)).unsafeRun.map { result =>
+      assertEquals(result, Vector(Some("one"), Some("two")))
+      val mgets = fixture.written(nodeA).filter(_.contains("MGET"))
+      assertEquals(mgets.size, 1)
+      assert(mgets.head.contains(first) && mgets.head.contains(second), s"same-slot keys were split: $mgets")
+    }
+  }
+
+  test("a cross-slot MSET keeps values paired while splitting by exact slot") {
+    val firstA    = "{mset-a}one"
+    val keyB      = "{mset-b}one"
+    val secondA   = "{mset-a}two"
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mSet(firstA -> "first", keyB -> "other", secondA -> "second")).unsafeRun.map { _ =>
+      val subMsets = fixture.written(nodeA).filter(_.contains("\r\nMSET\r\n"))
+      assertEquals(subMsets.size, 2, "different slots must remain separate even when one node owns both")
+      val groupA   = subMsets.find(_.contains(firstA)).getOrElse(fail(s"missing first slot subgroup: $subMsets"))
+      val groupB   = subMsets.find(_.contains(keyB)).getOrElse(fail(s"missing second slot subgroup: $subMsets"))
+      assert(groupA.contains("first") && groupA.contains(secondA) && groupA.contains("second"), s"values lost pairing: $groupA")
+      assert(groupB.contains("other"), s"value lost pairing: $groupB")
+      assert(!groupA.contains(keyB) && !groupB.contains(firstA), s"an MSET subgroup crossed slots: $subMsets")
+    }
+  }
+
+  test("a single-slot MSET keeps the one-command fast path") {
+    val first     = "{same}one"
+    val second    = "{same}two"
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mSet(first -> "one", second -> "two")).unsafeRun.map { _ =>
+      val msets = fixture.written(nodeA).filter(_.contains("\r\nMSET\r\n"))
+      assertEquals(msets.size, 1)
+      assert(msets.head.contains(first) && msets.head.contains(second), s"same-slot pairs were split: $msets")
+    }
+  }
+
+  test("a cross-slot MGET routes slot groups independently to their owners") {
+    val keyA      = "{a}"
+    val keyB      = "{b}"
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(Slot.of(Bytes.utf8(keyB)).value))
+      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8(node.host)))))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.map { result =>
+      assertEquals(result, Vector(Some(nodeA.host), Some(nodeB.host)))
+      assert(fixture.written(nodeA).exists(text => text.contains("MGET") && text.contains(keyA)), "nodeA missed its slot group")
+      assert(fixture.written(nodeB).exists(text => text.contains("MGET") && text.contains(keyB)), "nodeB missed its slot group")
+    }
+  }
+
+  test("a cross-slot MGET fails as a whole when one slot group fails") {
+    val keyA      = "{a}"
+    val keyB      = "{b}"
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(Slot.of(Bytes.utf8(keyB)).value))
+      else if (node == nodeB) Seq(Frame.SimpleError("ERR subgroup unavailable"))
+      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("ok")))))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+      assert(fixture.written(nodeA).exists(_.contains("MGET")), "the successful group was not issued")
+      assert(fixture.written(nodeB).exists(_.contains("MGET")), "the failing group was not issued")
+    }
+  }
+
+  test("a cross-slot MGET rejects a subgroup reply with the wrong positional length") {
+    val keyA      = "{a}"
+    val keyB      = "{b}"
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains(keyA)) Seq(Frame.Array(Vector.empty))
+      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[DecodeError], s"expected DecodeError, got $error")
+    }
+  }
+
+  test("a cross-slot MGET follows a redirect for only the affected slot group") {
+    val keyA      = "{a}"
+    val keyB      = "{b}"
+    val slotB     = Slot.of(Bytes.utf8(keyB)).value
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (node == nodeA && text.contains(keyB)) Seq(Frame.SimpleError(s"MOVED $slotB b:6379"))
+      else if (text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a")))))
+      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.map { result =>
+      assertEquals(result, Vector(Some("a"), Some("b")))
+      assert(fixture.written(nodeB).exists(text => text.contains("MGET") && text.contains(keyB)), "redirected subgroup missed nodeB")
+      assert(!fixture.written(nodeB).exists(_.contains(keyA)), "unaffected subgroup followed the other slot's redirect")
+    }
+  }
+
+  Vector("DEL", "EXISTS", "TOUCH", "UNLINK").foreach { name =>
+    test(s"a cross-slot $name splits by exact slot and sums subgroup counts") {
+      val firstA    = "{sum-a}one"
+      val keyB      = "{sum-b}one"
+      val secondA   = "{sum-a}two"
+      val behaviour = (_: Node, text: String) =>
+        if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+        else Seq(Frame.Integer(if (text.contains(secondA)) 2L else 1L))
+      val fixture   = new Fixture(behaviour, Vector(nodeA))
+      val command   = name match {
+        case "DEL"    => Keys.del(firstA, keyB, secondA)
+        case "EXISTS" => Keys.exists(firstA, keyB, secondA)
+        case "TOUCH"  => Keys.touch(firstA, keyB, secondA)
+        case "UNLINK" => Keys.unlink(firstA, keyB, secondA)
+        case other    => fail(s"unexpected command: $other")
+      }
+
+      fixture.live.run(command).unsafeRun.map { result =>
+        assertEquals(result, 3L)
+        val subcommands = fixture.written(nodeA).filter(_.contains(s"\r\n$name\r\n"))
+        assertEquals(subcommands.size, 2, "different slots must remain separate even when one node owns both")
+        assert(subcommands.forall(text => !(text.contains(firstA) && text.contains(keyB))), s"a subgroup crossed slots: $subcommands")
+      }
+    }
+  }
+
+  test("a summed cross-slot command fails as a whole when one subgroup fails") {
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (node == nodeB) Seq(Frame.SimpleError("ERR subgroup unavailable"))
+      else Seq(Frame.Integer(1L))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Keys.del(keyA, keyB)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+      assert(fixture.written(nodeA).exists(_.contains("DEL")), "the successful subgroup was not issued")
+      assert(fixture.written(nodeB).exists(_.contains("DEL")), "the failing subgroup was not issued")
+    }
+  }
+
+  test("a summed cross-slot command rejects a non-integer subgroup reply") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Array(Vector.empty))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Keys.exists(keyA, keyB)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[DecodeError], s"expected DecodeError, got $error")
+    }
+  }
+
+  test("a cross-slot MSET fails as a whole after issuing every subgroup") {
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitOn(slotB))
+      else if (node == nodeB) Seq(Frame.SimpleError("ERR subgroup unavailable"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mSet(keyA -> "a", keyB -> "b")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
+      assert(fixture.written(nodeA).exists(_.contains("MSET")), "the successful subgroup was not issued")
+      assert(fixture.written(nodeB).exists(_.contains("MSET")), "the failing subgroup was not issued")
+    }
+  }
+
+  test("a cross-slot MSET rejects a subgroup reply other than OK") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains(keyA)) Seq(Frame.SimpleString("OK"))
+      else Seq(Frame.Integer(1L))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.mSet(keyA -> "a", keyB -> "b")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[DecodeError], s"expected DecodeError, got $error")
     }
   }
 
@@ -514,6 +764,43 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, (Right(Some(nodeA.host)), Right(Some(nodeB.host))))
       assert(fixture.written(nodeA).exists(_.contains("GET")), "nodeA did not receive its GET")
       assert(fixture.written(nodeB).exists(_.contains("GET")), "nodeB did not receive its GET")
+    }
+  }
+
+  test("a pipeline transparently executes a cross-slot MGET at its logical position") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MGET") && text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a")))))
+      else if (text.contains("MGET") && text.contains(keyB)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
+      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Strings.mGet[String, String](keyA, keyB), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
+      assertEquals(result, (Vector(Some("a"), Some("b")), Some("tail")))
+    }
+  }
+
+  test("a pipeline transparently executes a summed cross-slot command at its logical position") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("EXISTS")) Seq(Frame.Integer(1L))
+      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Keys.exists(keyA, keyB), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
+      assertEquals(result, (2L, Some("tail")))
+    }
+  }
+
+  test("a pipeline transparently executes a cross-slot MSET at its logical position") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MSET")) Seq(Frame.SimpleString("OK"))
+      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Strings.mSet(keyA -> "a", keyB -> "b"), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
+      assertEquals(result, ((), Some("tail")))
     }
   }
 
@@ -614,6 +901,42 @@ class ClusterClientSpec extends munit.FunSuite {
       Thread.sleep(150)
       val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
       assert(clusterCalls >= 3, s"each tx fault must force a refresh despite the throttle; CLUSTER calls: $clusterCalls")
+    }
+  }
+
+  test("a cross-slot MGET remains forbidden inside a transaction") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.transaction(_.run(Strings.mGet[String, String](keyA, keyB))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("MULTI")), "no MULTI should be sent for a rejected MGET")
+      assert(!fixture.written(nodeA).exists(_.contains("MGET")), "no MGET subgroup should escape the transaction")
+      assert(!fixture.written(nodeB).exists(_.contains("MGET")), "no MGET subgroup should escape the transaction")
+    }
+  }
+
+  test("a summed cross-slot command remains forbidden inside a transaction") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.transaction(_.run(Keys.exists(keyA, keyB))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("MULTI")), "no MULTI should be sent for a rejected EXISTS")
+      assert(!fixture.written(nodeA).exists(_.contains("EXISTS")), "no EXISTS subgroup should escape the transaction")
+      assert(!fixture.written(nodeB).exists(_.contains("EXISTS")), "no EXISTS subgroup should escape the transaction")
+    }
+  }
+
+  test("a cross-slot MSET remains forbidden inside a transaction") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.transaction(_.run(Strings.mSet(keyA -> "a", keyB -> "b"))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("MULTI")), "no MULTI should be sent for a rejected MSET")
+      assert(!fixture.written(nodeA).exists(_.contains("MSET")), "no MSET subgroup should escape the transaction")
+      assert(!fixture.written(nodeB).exists(_.contains("MSET")), "no MSET subgroup should escape the transaction")
     }
   }
 

@@ -6,6 +6,10 @@ Both group several commands together, but they answer different needs. A **pipel
 
 A pipeline is an applicative composition of `Command` values, sent in one round-trip and decoded into a typed tuple. There is no atomicity: other clients' commands may interleave, and in a cluster the pipeline is split and routed per key, then reassembled in order.
 
+A supported cross-slot command (`MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, or `TOUCH`) inside a cluster pipeline is itself split once more by exact
+slot and merged back into its one logical pipeline position. Each slot-specific operation is atomic individually, not across the cluster;
+write subgroups may already have applied when another subgroup fails.
+
 ::: code-group
 
 ```scala [Ox]
@@ -119,7 +123,7 @@ A few rules follow from how Redis transactions work:
 - **Reads inside the scope must be ordinary commands.** A blocking command is rejected rather than parking the lease.
 - **A queueing-phase rejection discards the whole transaction**, so nothing runs.
 - **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
-- **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction.
+- **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
 
 ## Which to use
 

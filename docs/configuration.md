@@ -44,6 +44,19 @@ Set `database` to a non-zero value for a Valkey 9+ cluster configured with a suf
 Redis Cluster hashes the bytes inside the first non-empty `{...}` pair instead of the whole key. Use the same tag in every key that must live
 in one slot, for example `user:{42}:profile` and `user:{42}:settings`. Transactions require all keys to share one slot.
 
+### Supported cross-slot commands
+
+Ordinary `mGet`, `mSet`, `exists`, `del`, `unlink`, and `touch` calls may span cluster slots. Sage transparently groups their keys by exact slot and
+sends one subcommand per slot through the normal routing and redirect machinery. This also works when the command is an entry in a pipeline.
+For `mGet`, Sage restores values to request order, retaining missing and repeated positions. For `exists`, `del`, `unlink`, and `touch`, it
+sums the slot-specific counts; `mSet` succeeds only when every slot subgroup returns `OK`.
+
+Each slot-specific command is atomic, but the combined operation is not cluster-wide atomic. A cross-slot `mGet` is not a point-in-time
+snapshot, and a failing cross-slot `mSet`, `del`, or `unlink` may already have applied writes in successful slot groups. If any subgroup
+fails, the logical call fails as a whole. Use a common hash tag when the operation must be atomic. `mSetNx` is not split because doing so would
+break its all-or-nothing condition. All cross-slot commands remain rejected inside a transaction because `MULTI`/`EXEC` must stay pinned to
+one slot.
+
 ## Master-replica
 
 Select `Topology.MasterReplica` with seed endpoints. Sage asks each its role, discovers the master and its replicas, sends writes to the master, and routes reads per the read policy:
