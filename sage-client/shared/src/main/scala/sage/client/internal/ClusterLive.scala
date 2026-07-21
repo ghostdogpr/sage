@@ -412,6 +412,7 @@ final private[client] class ClusterLive(
         }
       case Fault.Lost(false)                =>
         if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
+      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -562,6 +563,7 @@ final private[client] class ClusterLive(
     Fault.categorize(error) match {
       case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease)
       case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease)
+      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete, lease)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -590,6 +592,20 @@ final private[client] class ClusterLive(
     if (redirectsLeft <= 0) complete(Failure(NotConnected()))
     else {
       refresh(force = true)
+      val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete, lease = lease))
+    }
+
+  // -TRYAGAIN is a transient mid-migration refusal: the slot mapping is still valid, so retry (bounded, jittered) without refreshing the topology.
+  private def onTryAgain[A](
+    command: Command[A],
+    error: Throwable,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease = null
+  ): Unit =
+    if (redirectsLeft <= 0) complete(Failure(error))
+    else {
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
       scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete, lease = lease))
     }
@@ -786,6 +802,7 @@ final private[client] class ClusterLive(
                 case RedirectKind.Moved                                             => reroute(index)
               }
             case Fault.Lost(false)                => reroute(index)
+            case Fault.TryAgain                   => onTryAgain(p.commands(index), error, cluster.maxRedirects, emits(index))
             case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
             case Fault.Fatal                      => settle(index, result)
           }
@@ -856,10 +873,7 @@ final private[client] class ClusterLive(
     // a transaction never follows a redirect (that would break MULTI/EXEC atomicity), but on any ownership/connection fault it refreshes in the
     // background so the caller's retry re-pins to the new owner instead of looping on the stale node; a data error refreshes nothing
     private def refreshOnFault(error: Throwable): Unit =
-      Fault.categorize(error) match {
-        case Fault.Fatal => ()
-        case _           => forceRefresh()
-      }
+      if (Fault.categorize(error).refreshesTopology) forceRefresh()
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
       case failure @ Failure(error) => refreshOnFault(error); complete(failure)
@@ -870,7 +884,7 @@ final private[client] class ClusterLive(
     // level and the EXEC array and refresh on any non-terminal one so the caller's retry re-pins
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
       val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
-      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => Fault.categorize(ServerError.of(m)) != Fault.Fatal)
+      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => Fault.categorize(ServerError.of(m)).refreshesTopology)
       if (fault) forceRefresh()
     }
 

@@ -10,7 +10,14 @@ private[client] enum Fault {
   case Redirected(redirect: Redirect)
   case Demoted
   case Lost(mayHaveExecuted: Boolean)
+  case TryAgain
   case Fatal
+
+  // an ownership or connection change the topology must adopt; a data error or a transient mid-migration TryAgain leaves the mapping valid
+  def refreshesTopology: Boolean = this match {
+    case Fatal | TryAgain => false
+    case _                => true
+  }
 }
 
 private[client] object Fault {
@@ -21,6 +28,7 @@ private[client] object Fault {
         Redirect.parse(e.getMessage) match {
           case Some(redirect)               => Fault.Redirected(redirect)
           case None if e.code == "READONLY" => Fault.Demoted
+          case None if e.code == "TRYAGAIN" => Fault.TryAgain
           case None                         => Fault.Fatal
         }
       case NotConnected()           => Fault.Lost(mayHaveExecuted = false)

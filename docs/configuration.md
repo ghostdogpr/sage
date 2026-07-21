@@ -57,6 +57,11 @@ fails, the logical call fails as a whole. Use a common hash tag when the operati
 break its all-or-nothing condition. All cross-slot commands remain rejected inside a transaction because `MULTI`/`EXEC` must stay pinned to
 one slot.
 
+While a slot is being migrated, the server answers a multi-key command whose keys briefly straddle the moving slot with `-TRYAGAIN`. The command
+did not run, so sage retries it. The retry shares the same `maxRedirects` budget as `MOVED`/`ASK` follows, but where those are resent
+immediately, a `-TRYAGAIN` retry is paced by a short jittered delay. If the migration outlasts that budget, the original `-TRYAGAIN` surfaces as
+a `ServerError`.
+
 ## Master-replica
 
 Select `Topology.MasterReplica` with seed endpoints. Sage asks each its role, discovers the master and its replicas, sends writes to the master, and routes reads per the read policy:
