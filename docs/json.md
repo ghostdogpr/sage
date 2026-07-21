@@ -13,7 +13,7 @@ JsonPath("$.items[0]") // an array element
 JsonPath("$..price")   // every price, at any depth
 ```
 
-A JSONPath can match more than one location, so the location commands (`jsonType`, `jsonArrLen`, `jsonStrLen`, `jsonArrAppend`, `jsonToggle`, and the rest) return a `Vector` with one entry per match, `None` where the match was absent or the wrong type. A single-match path returns a one-element `Vector`, so read `.head` when you expect exactly one.
+A JSONPath can match more than one location, so the location commands (`jsonType`, `jsonArrLen`, `jsonStrLen`, `jsonArrAppend`, `jsonToggle`, and the rest) return a `Vector` with one entry per matched location, `None` where a match exists but holds the wrong type for the command. A path that matches nothing returns an empty `Vector`, so prefer `.headOption` over `.head` when you expect a single match.
 
 The legacy dot dialect is not modeled. If you need it, send a raw command.
 
@@ -60,6 +60,8 @@ client.jsonGet[Vector[Int]]("user:1", JsonPath("$.age")) // Some(Vector(36)) —
 ```
 
 Sage takes no JSON dependency of its own; the codec is entirely yours.
+
+`jsonSet` models the `NX` and `XX` conditions; other server options (the `jsonGet` formatting hints `INDENT`, `NEWLINE`, `SPACE`, and newer `JSON.SET` storage hints) are not modeled. Reach them with a raw command.
 
 ## Working with the document
 

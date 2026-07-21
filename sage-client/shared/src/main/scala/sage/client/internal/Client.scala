@@ -1278,7 +1278,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def jsonClear(key: K, path: JsonPath = JsonPath.root): F[Long] = run(Json.jsonClear(key, path))
 
   /**
-    * Returns the [[sage.commands.JsonType]] at each matched location, `None` where the path did not match.
+    * Returns the [[sage.commands.JsonType]] at each matched location, one entry per match and an empty `Vector` when nothing matched.
     */
   final def jsonType(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[JsonType]]] = run(Json.jsonType(key, path))
 
