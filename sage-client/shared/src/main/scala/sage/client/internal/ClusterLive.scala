@@ -341,7 +341,7 @@ final private[client] class ClusterLive(
       case "MGET" if hasKeyStride(command, 1)                                => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1))
       case "DEL" | "EXISTS" | "TOUCH" | "UNLINK" if hasKeyStride(command, 1) => Some(MultiSlotPolicy(MultiSlotMerge.Sum, 1))
       case "MSET" if hasKeyStride(command, 2)                                => Some(MultiSlotPolicy(MultiSlotMerge.AllSucceeded, 2))
-      // JSON.MSET is intentionally not here: it is atomic, so cross-slot keys are rejected rather than split into a partial apply
+      // JSON.MSET is not split: unlike MSET, a triplet can fail path validation, so splitting could partially apply before a later group fails
       case "JSON.MGET" if hasLeadingKeys(command, 1)                         => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1, suffixArgs = 1))
       case _                                                                 => None
     }

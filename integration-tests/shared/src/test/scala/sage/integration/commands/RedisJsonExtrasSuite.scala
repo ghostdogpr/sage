@@ -6,7 +6,7 @@ import sage.commands.JsonPath
 import sage.integration.{Images, ServerSuite}
 
 /**
-  * JSON commands present only on Redis (ReJSON), not on Valkey Bundle 9.1.0: `JSON.MERGE` (RFC 7386). Mirrors the Redis-only extras suites
+  * JSON commands present only on Redis (RedisJSON), not on Valkey Bundle 9.1.0: `JSON.MERGE` (RFC 7386). Mirrors the Redis-only extras suites
   * of other families (ADR-0026); the shared [[JsonSuite]] stays backend-symmetric.
   */
 class RedisJsonExtrasSuite extends ServerSuite(Images.redis) {

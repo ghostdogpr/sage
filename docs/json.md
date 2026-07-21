@@ -55,8 +55,8 @@ given [A](using io.circe.Decoder[A], io.circe.Encoder[A]): ValueCodec[A] =
 case class User(name: String, age: Int)
 
 client.jsonSet("user:1", JsonPath.root, User("Ada", 36))
-client.jsonGet[User]("user:1")                           // Some(User("Ada", 36)) — whole document, unwrapped
-client.jsonGet[Vector[Int]]("user:1", JsonPath("$.age")) // Some(Vector(36)) — a JSONPath wraps matches in an array
+client.jsonGet[User]("user:1")                           // Some(User("Ada", 36)): whole document, unwrapped
+client.jsonGet[Vector[Int]]("user:1", JsonPath("$.age")) // Some(Vector(36)): a JSONPath wraps matches in an array
 ```
 
 Sage takes no JSON dependency of its own; the codec is entirely yours.

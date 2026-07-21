@@ -67,6 +67,20 @@ abstract class JsonSuite(image: String) extends ServerSuite(image) {
     }
   }
 
+  test("a multi-match path returns one entry per match for JSON.TYPE and JSON.NUMINCRBY") {
+    withClient { client =>
+      for {
+        _    <- client.jsonSet("multi", JsonPath.root, """{"a":{"x":1},"b":{"x":"s"}}""")
+        tpe  <- client.jsonType("multi", JsonPath("$..x"))
+        _    <- client.jsonSet("nums", JsonPath.root, """{"a":{"x":1},"b":{"x":2}}""")
+        incr <- client.jsonNumIncrBy("nums", JsonPath("$..x"), 5.0)
+      } yield {
+        assertEquals(tpe.toSet, Set(Option(JsonType.Integer), Option(JsonType.String)))
+        assertEquals(incr.flatten.toSet, Set(6.0, 7.0))
+      }
+    }
+  }
+
   test("array commands append, index, insert, pop, trim, and length") {
     withClient { client =>
       for {
