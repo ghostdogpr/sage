@@ -18,13 +18,14 @@ final private[client] class ClientCache(maxBytes: Long) {
   import ClientCache.*
   import ClientCache.Acquire.*
 
-  private val lock                        = new ReentrantLock()
+  private val lock                                   = new ReentrantLock()
   // accessOrder = true: a lookup promotes the entry to most-recently-used, so eviction sheds the genuinely cold entries
-  private val entries                     = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
-  private val reverse                     = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
-  private val pending                     = mutable.HashMap.empty[Key, InFlight]
-  private var bytesUsed: Long             = 0L
-  @volatile private var epoch: CacheEpoch = CacheEpoch.initial
+  private val entries                                = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
+  private val reverse                                = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
+  private val pending                                = mutable.HashMap.empty[Key, InFlight]
+  private var bytesUsed: Long                        = 0L
+  @volatile private var epoch: CacheEpoch            = CacheEpoch.initial
+  @volatile private var rerouteWatermark: CacheEpoch = CacheEpoch.initial
 
   /**
     * Tries to serve `commandBytes` from cache. [[Hit]] returns the stored frame (decode it and complete the caller). [[Fetch]] means the
@@ -95,16 +96,27 @@ final private[client] class ClientCache(maxBytes: Long) {
 
   def flush(): Unit = {
     lock.lock()
-    try {
-      entries.clear()
-      reverse.clear()
-      bytesUsed = 0L
-      pending.valuesIterator.foreach(_.dirty = true)
-      epoch = epoch.next
-    } finally lock.unlock()
+    try clearAndBump()
+    finally lock.unlock()
+  }
+
+  def flushForReroute(): Unit = {
+    lock.lock()
+    try { clearAndBump(); rerouteWatermark = epoch }
+    finally lock.unlock()
+  }
+
+  private def clearAndBump(): Unit = {
+    entries.clear()
+    reverse.clear()
+    bytesUsed = 0L
+    pending.valuesIterator.foreach(_.dirty = true)
+    epoch = epoch.next
   }
 
   def isCurrent(stamped: CacheEpoch): Boolean = epoch == stamped
+
+  def rerouteRetired(stamped: CacheEpoch): Boolean = rerouteWatermark.isAfter(stamped)
 
   private def insert(key: Key, entry: Entry): Unit = {
     val previous = entries.put(key, entry)
@@ -155,7 +167,10 @@ private[client] object ClientCache {
   object CacheEpoch {
     val initial: CacheEpoch = 0L
   }
-  extension (e: CacheEpoch) def next: CacheEpoch = e + 1L
+  extension (e: CacheEpoch) {
+    def next: CacheEpoch                    = e + 1L
+    def isAfter(other: CacheEpoch): Boolean = e > other
+  }
 
   enum Acquire {
     case Hit(frame: Frame, epoch: CacheEpoch)

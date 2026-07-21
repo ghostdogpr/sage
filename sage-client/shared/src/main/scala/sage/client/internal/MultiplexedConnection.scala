@@ -326,8 +326,8 @@ final private[client] class MultiplexedConnection private (
           // and release the two slots reserved for the (now unsent) fetch
           case ClientCache.Acquire.Hit(frame, epoch) =>
             if (cache.isCurrent(epoch)) { release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
-            // a flush retired this hit mid-lookup: fail on a dead connection so the caller reroutes, else re-run as a local miss
-            else if (terminated) { release(2); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
+            // reroute a hit retired by a topology change or a dead connection; refetch here one retired by a server flush (ownership unchanged)
+            else if (terminated || cache.rerouteRetired(epoch)) { release(2); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
             else attempt()
           case ClientCache.Acquire.Wait              => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
           case ClientCache.Acquire.Fetch             =>
@@ -370,7 +370,7 @@ final private[client] class MultiplexedConnection private (
       }
     }
 
-    def flushCache(): Unit = cache.flush()
+    def flushCache(): Unit = cache.flushForReroute()
 
     def close(): Unit = {
       aborted = true

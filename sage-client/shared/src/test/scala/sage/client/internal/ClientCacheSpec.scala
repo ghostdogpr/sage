@@ -68,6 +68,22 @@ class ClientCacheSpec extends munit.FunSuite {
     assert(!cache.isCurrent(epoch))
   }
 
+  test("a server flush retires a hit for refetch, a topology flush retires it for reroute") {
+    val cache                              = new ClientCache(1024)
+    val cmd                                = key("GET foo")
+    cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
+    val ClientCache.Acquire.Hit(_, served) = cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()): @unchecked
+    cache.flush()
+    assert(!cache.isCurrent(served))
+    assert(!cache.rerouteRetired(served), "a server flush leaves ownership unchanged: refetch, not reroute")
+
+    cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
+    val ClientCache.Acquire.Hit(_, moved) = cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()): @unchecked
+    cache.flushForReroute()
+    assert(!cache.isCurrent(moved))
+    assert(cache.rerouteRetired(moved), "a topology flush requires rerouting to the new owner")
+  }
+
   test("an invalidation mid-flight delivers the reply but does not cache it") {
     val cache      = new ClientCache(1024)
     val cmd        = key("GET foo")
