@@ -322,13 +322,13 @@ final private[client] class MultiplexedConnection private (
       cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
         // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
         // and release the two slots reserved for the (now unsent) fetch
-        case ClientCache.Acquire.Hit(frame) =>
+        case ClientCache.Acquire.Hit(frame, cacheEpoch) =>
           release(2)
-          // don't serve a hit from a generation that was retired between the lookup and here
-          if (terminated) callback(Failure(ConnectionLost(mayHaveExecuted = false)))
+          // a flush between the lookup and here (topology change or connection drop) retires this hit
+          if (!cache.isCurrent(cacheEpoch)) callback(Failure(ConnectionLost(mayHaveExecuted = false)))
           else { if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
-        case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
-        case ClientCache.Acquire.Fetch      =>
+        case ClientCache.Acquire.Wait                   => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
+        case ClientCache.Acquire.Fetch                  =>
           if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
           val span                        = Events.startOrDefer(events, command, deferred)
           node.foreach(Events.routeSpan(span, _))
