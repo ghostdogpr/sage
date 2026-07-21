@@ -52,7 +52,8 @@ class ClusterClientSpec extends munit.FunSuite {
     unreachable: Set[Node] = Set.empty,
     readFrom: ReadFrom = ReadFrom.Master,
     connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport creation, to park an establish mid-flight
-    scheduler: Scheduler = Scheduler.real
+    scheduler: Scheduler = Scheduler.real,
+    caching: Boolean = false
   ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
@@ -74,6 +75,7 @@ class ClusterClientSpec extends munit.FunSuite {
           val text = payload.asUtf8String
           if (text.contains("HELLO"))
             if (unreachable(node) || flakyHello.remove(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(helloReply)
+          else if (text.contains("TRACKING")) Seq(Frame.SimpleString("OK"))
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
@@ -94,7 +96,9 @@ class ClusterClientSpec extends munit.FunSuite {
         ClusterConfig(),
         1024,
         seeds,
-        readFrom
+        readFrom,
+        cachingEnabled = caching,
+        cacheMaxBytes = if (caching) 1L << 20 else 0L
       )
 
     live.bootstrapTopology()
@@ -139,6 +143,24 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some(owner.host))
       assert(fixture.written(owner).exists(_.contains("GET")), "owner did not receive GET")
       assert(!fixture.written(other).exists(_.contains("GET")), "non-owner received GET")
+    }
+  }
+
+  test("a cached read routes to the slot's master as [CLIENT CACHING YES, read] and serves a repeat locally") {
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8(node.host))) // [CACHING, GET] batch → two replies
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    fixture.live.cached(Strings.get[String, String]("foo"), 1.minute).unsafeRun.flatMap { first =>
+      assertEquals(first, Some(nodeA.host))
+      assert(fixture.written(nodeA).exists(_.contains("CACHING")), "a cached read must send CLIENT CACHING YES")
+      val gets = fixture.written(nodeA).count(_.contains("\r\nGET\r\n"))
+      fixture.live.cached(Strings.get[String, String]("foo"), 1.minute).unsafeRun.map { second =>
+        assertEquals(second, Some(nodeA.host))
+        assertEquals(fixture.written(nodeA).count(_.contains("\r\nGET\r\n")), gets, "a repeat is served from the local cache, no new round-trip")
+      }
     }
   }
 

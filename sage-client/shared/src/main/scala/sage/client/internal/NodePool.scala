@@ -57,6 +57,8 @@ final private[client] class NodePool(
 
   def firstLiveNode: Option[Node] = established.asScala.collectFirst { case (node, nc) if nc.isLive => node }
 
+  def foreachEstablished(f: NodeClient => Unit): Unit = established.values.forEach(nc => f(nc))
+
   // live nodes first, so a refresh prefers a known-good node
   def candidatesByLiveness: Vector[Node] = {
     val (live, others) = established.asScala.toVector.partition(_._2.isLive)

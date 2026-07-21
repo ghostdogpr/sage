@@ -30,6 +30,8 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
   def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean =
     connection.submitAll(commands, callbacks)
 
+  def flushCache(): Unit = connection.flushCache()
+
   def acquireForTransaction(): DedicatedConnection = pool.acquireForTransaction()
 
   def releaseTransaction(connection: DedicatedConnection, reusable: Boolean): Unit = pool.releaseTransaction(connection, reusable)

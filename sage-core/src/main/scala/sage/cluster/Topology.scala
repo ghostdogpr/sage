@@ -33,6 +33,18 @@ final private[sage] class ClusterTopology private (val shards: Vector[Shard], pr
   // the core only locates the owning shard; selecting a live replica and applying the read policy is the runtime's job
   def shardForSlot(slot: Slot): Option[Shard] = Option(shardOwners(slot.value))
 
+  // masters in `previous` that no longer own a slot they hold in this (new) topology
+  def mastersLosingSlots(previous: ClusterTopology): Set[Node] = {
+    val losing = mutable.Set.empty[Node]
+    var slot   = 0
+    while (slot < Slot.Count) {
+      val before = previous.owners(slot)
+      if (before != null && !before.equals(owners(slot))) losing += before
+      slot += 1
+    }
+    losing.toSet
+  }
+
   def route(command: Command[?]): Route =
     if (command.hasMalformedKeys) Route.Malformed
     else

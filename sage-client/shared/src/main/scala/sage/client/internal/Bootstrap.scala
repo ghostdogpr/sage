@@ -29,14 +29,16 @@ private[client] object Bootstrap {
     * Runs the connection-setup handshake on a freshly opened connection: submits each command in turn and blocks for its reply up to
     * `connectTimeoutMillis`, then closes the half-built connection and throws on a timeout or a failed reply so the caller discards it.
     * `submit` enqueues one command and delivers its decoded reply; replies are FIFO, so each command is awaited before the next is sent.
-    * A [[bestEffort]] command whose reply is a `ServerError` is tolerated rather than fatal; a `ConnectionLost`/`DecodeError` stays fatal
-    * even for it. Used by the Multiplexed, Dedicated, and Subscription connections, which differ only in how a reply is obtained.
+    * A [[bestEffort]] command whose reply is a `ServerError` is tolerated rather than fatal (and reported to `onTolerated`); a
+    * `ConnectionLost`/`DecodeError` stays fatal even for it. Used by the Multiplexed, Dedicated, and Subscription connections, which differ
+    * only in how a reply is obtained.
     */
   def run(
     commands: Vector[Command[?]],
     connectTimeoutMillis: Long,
     submit: (Command[?], Try[Any] => Unit) => Unit,
-    close: () => Unit
+    close: () => Unit,
+    onTolerated: Command[?] => Unit = _ => ()
   ): Unit =
     commands.foreach { command =>
       val latch   = new CountDownLatch(1)
@@ -47,17 +49,18 @@ private[client] object Bootstrap {
         throw ConnectionLost(mayHaveExecuted = false)
       }
       outcome.get() match {
-        case Failure(_: ServerError) if bestEffort(command) => ()
+        case Failure(_: ServerError) if bestEffort(command) => onTolerated(command)
         case Failure(error)                                 => close(); throw error
         case Success(_)                                     => ()
       }
     }
 
   /**
-    * Whether a server-error reply to this command may be tolerated during bootstrap. Only `CLIENT SETINFO` qualifies: it is library
-    * identification added in Redis 7.2, so an older server rejects it with an error every client ignores. Every other bootstrap command is
-    * load-bearing, so its failure stays fatal.
+    * Whether a server-error reply to this command may be tolerated during bootstrap. `CLIENT SETINFO` qualifies because it is library
+    * identification added in Redis 7.2, so an older server rejects it with an error every client ignores. `CLIENT TRACKING` qualifies because
+    * a server that permits `HELLO` but denies tracking (an ACL restriction, a proxy) should still connect and serve cached reads uncached
+    * rather than fail the connection (ADR-0045). Every other bootstrap command is load-bearing, so its failure stays fatal.
     */
   private def bestEffort(command: Command[?]): Boolean =
-    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "SETINFO")
+    command.name == "CLIENT" && command.args.headOption.map(_.asUtf8String).exists(sub => sub == "SETINFO" || sub == "TRACKING")
 }

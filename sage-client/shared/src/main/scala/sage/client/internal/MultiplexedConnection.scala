@@ -53,6 +53,8 @@ final private[client] class MultiplexedConnection private (
   // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
   private var reconnectAttempt: Int                = 0
   private var liveSinceMillis: Long                = -1L
+  // whether the live generation accepts CLIENT TRACKING; false makes cached reads run uncached
+  @volatile private var trackingActive             = true
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
 
@@ -177,12 +179,25 @@ final private[client] class MultiplexedConnection private (
     locked { establishing = conn; if (state == State.Closed) conn.close() }
     try {
       conn.start()
+      var tracking = true
       // reserve(1) per command: submit does not self-increment, so this balances the retire() the reply will trigger. A half-open peer can
       // accept the socket yet never answer HELLO, so the runner bounds each wait and the reconnect loop can't stall on it forever.
-      Bootstrap.run(bootstrap, connectTimeout.toMillis, (c, cb) => { conn.reserve(1); conn.submit(c, cb) }, () => conn.close())
+      Bootstrap.run(
+        bootstrap,
+        connectTimeout.toMillis,
+        (c, cb) => { conn.reserve(1); conn.submit(c, cb) },
+        () => conn.close(),
+        onTolerated = c => if (isTracking(c)) tracking = false
+      )
+      trackingActive = tracking
       conn
     } finally locked { if (establishing eq conn) establishing = null }
   }
+
+  private def isTracking(command: Command[?]): Boolean =
+    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "TRACKING")
+
+  private[internal] def flushCache(): Unit = { val c = locked(current); if (c != null) c.flushCache() }
 
   private def scheduleReconnect(attempt: Int): Unit = {
     reconnectAttempt = attempt
@@ -298,6 +313,8 @@ final private[client] class MultiplexedConnection private (
     // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
     // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
     def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
+      // tracking off: run uncached, releasing one of the two slots reserved for the (now unsent) caching prefix
+      if (!trackingActive) { release(1); uncached(command, callback, deferred); return }
       val commandBytes                = command.encode
       val keys                        = command.keys
       def deliver(frame: Frame): Unit = callback(decodeFrame(command, frame))
@@ -336,6 +353,26 @@ final private[client] class MultiplexedConnection private (
           }
       }
     }
+
+    private def uncached[A](command: Command[A], callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
+      val span    = Events.startOrDefer(events, command, deferred)
+      node.foreach(Events.routeSpan(span, _))
+      val started = System.nanoTime()
+      submit(
+        command,
+        { (result: Try[A]) =>
+          if (events.enabled) {
+            val outcome = Outcome.of(result)
+            Events.settleSpan(span, outcome)
+            if (events.emitsEvents)
+              events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
+          }
+          callback(result)
+        }
+      )
+    }
+
+    def flushCache(): Unit = cache.flush()
 
     def close(): Unit = {
       aborted = true
