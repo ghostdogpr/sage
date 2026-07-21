@@ -1112,8 +1112,8 @@ final private[client] class ClusterLive(
     refreshThrottle(force) {
       querySlots(refreshCandidates()) match {
         case Some((from, shards)) => adopt(from, shards)
-        // only a forced refresh treats unanswered CLUSTER SLOTS as lost topology worth flushing every cache for
-        case None                 => if (cachingEnabled && force) masterPool.foreachEstablished(_.flushCache())
+        // no candidate answered CLUSTER SLOTS: ownership is unknowable, so retire every cache
+        case None                 => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
       }
     }
 

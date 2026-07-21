@@ -96,22 +96,26 @@ final private[client] class ClientCache(maxBytes: Long) {
 
   def flush(): Unit = {
     lock.lock()
-    try clearAndBump()
+    try { clearEntries(); epoch = epoch.next }
     finally lock.unlock()
   }
 
   def flushForReroute(): Unit = {
     lock.lock()
-    try { clearAndBump(); rerouteWatermark = epoch }
-    finally lock.unlock()
+    try {
+      clearEntries()
+      val retired = epoch.next
+      // publish the watermark before the epoch a reader tests first, so it can never see the new epoch with the stale watermark
+      rerouteWatermark = retired
+      epoch = retired
+    } finally lock.unlock()
   }
 
-  private def clearAndBump(): Unit = {
+  private def clearEntries(): Unit = {
     entries.clear()
     reverse.clear()
     bytesUsed = 0L
     pending.valuesIterator.foreach(_.dirty = true)
-    epoch = epoch.next
   }
 
   def isCurrent(stamped: CacheEpoch): Boolean = epoch == stamped
