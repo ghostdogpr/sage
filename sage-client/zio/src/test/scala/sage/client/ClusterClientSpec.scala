@@ -164,6 +164,28 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a cached read that meets an ASK is an uncached one-shot: [ASKING, read] on the target, nothing stored") {
+    val slot      = Slot.of(Bytes.utf8("foo")).value
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      // the ASK target receives [ASKING, GET foo] (one payload, two replies); it must not receive CLIENT CACHING YES
+      else if (node == nodeB && text.contains("ASKING")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("v")))
+      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"ASK $slot b:6379"))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    val read = fixture.live.cached(Strings.get[String, String]("foo"), 1.minute)
+    read.unsafeRun.flatMap { first =>
+      read.unsafeRun.map { second =>
+        assertEquals(first, Some("v"))
+        assertEquals(second, Some("v"))
+        val bWrites = fixture.written(nodeB)
+        assertEquals(bWrites.count(_.contains("\r\nGET\r\n")), 2, "each read must reach the ASK target; nothing is cached")
+        assert(bWrites.forall(!_.contains("CACHING")), "the ASK one-shot must never send CLIENT CACHING YES")
+      }
+    }
+  }
+
   test("a command to an established node dispatches inline, with no zero-delay scheduler hop") {
     val counting  = new CountingScheduler
     val behaviour =

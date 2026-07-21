@@ -187,15 +187,12 @@ final private[client] class MultiplexedConnection private (
         connectTimeout.toMillis,
         (c, cb) => { conn.reserve(1); conn.submit(c, cb) },
         () => conn.close(),
-        onTolerated = c => if (isTracking(c)) tracking = false
+        onTolerated = c => if (Connection.isClientTracking(c)) tracking = false
       )
       trackingActive = tracking
       conn
     } finally locked { if (establishing eq conn) establishing = null }
   }
-
-  private def isTracking(command: Command[?]): Boolean =
-    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "TRACKING")
 
   private[internal] def flushCache(): Unit = { val c = locked(current); if (c != null) c.flushCache() }
 
@@ -325,7 +322,11 @@ final private[client] class MultiplexedConnection private (
       cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
         // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
         // and release the two slots reserved for the (now unsent) fetch
-        case ClientCache.Acquire.Hit(frame) => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
+        case ClientCache.Acquire.Hit(frame) =>
+          release(2)
+          // don't serve a hit from a generation that was retired between the lookup and here
+          if (terminated) callback(Failure(ConnectionLost(mayHaveExecuted = false)))
+          else { if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
         case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
         case ClientCache.Acquire.Fetch      =>
           if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
@@ -424,6 +425,8 @@ final private[client] class MultiplexedConnection private (
 
     private def onClosed(): Unit = {
       terminated = true
+      // a dropped connection loses all further invalidations, so its cache can no longer be trusted for a hit
+      cache.flush()
       var entry = pending.poll()
       while (entry != null) {
         entry.fail(ConnectionLost(mayHaveExecuted = true))

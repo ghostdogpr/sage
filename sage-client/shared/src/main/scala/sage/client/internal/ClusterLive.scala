@@ -591,7 +591,9 @@ final private[client] class ClusterLive(
     complete: Try[A] => Unit,
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
-  ): Unit =
+  ): Unit = {
+    // a MOVED proves `from` lost the slot; retire its cache even if the retry budget is now exhausted
+    if (redirect.kind == RedirectKind.Moved) flushNode(from)
     if (redirectsLeft <= 0)
       complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
     else {
@@ -601,6 +603,7 @@ final private[client] class ClusterLive(
         case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease, cacheCtx)
       }
     }
+  }
 
   // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
   // failover is not hammered; redirectsLeft bounds it.
@@ -1095,6 +1098,9 @@ final private[client] class ClusterLive(
 
   private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
 
+  private def flushNode(node: Node): Unit =
+    if (cachingEnabled) { val nc = masterPool.existing(node); if (nc != null) nc.flushCache() }
+
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
   private def triggerRefresh(): Unit = offload(refresh(force = false))
@@ -1135,6 +1141,8 @@ final private[client] class ClusterLive(
     val oldTopology  = topologyRef.get()
     val previous     = if (events.emitsEvents) slotOwningMasters(oldTopology).toSet else Set.empty[Node]
     val newTopology  = ClusterTopology.from(resolved)
+    // retire losing masters' caches before the new topology is published
+    if (cachingEnabled) newTopology.mastersLosingSlots(oldTopology).foreach(flushNode)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change
     if (events.emitsEvents && previous.nonEmpty) {
@@ -1147,11 +1155,6 @@ final private[client] class ClusterLive(
     val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
     replicaCursors.keySet.removeIf(node => !masters.contains(node))
-    if (cachingEnabled)
-      newTopology.mastersLosingSlots(oldTopology).foreach { node =>
-        val nc = masterPool.existing(node)
-        if (nc != null) nc.flushCache()
-      }
     // re-home shard subscriptions only when slot ownership changed; else a forced refresh mid-failover loops (refresh -> adopt -> reconcile ->
     // refresh) at RTT. A classic subscription follows the cluster bus, so it re-homes only when its pinned master's socket drops, never here.
     if (!newTopology.sameOwnership(oldTopology)) subscriptions.onTopologyChanged()

@@ -62,5 +62,6 @@ private[client] object Bootstrap {
     * rather than fail the connection (ADR-0045). Every other bootstrap command is load-bearing, so its failure stays fatal.
     */
   private def bestEffort(command: Command[?]): Boolean =
-    command.name == "CLIENT" && command.args.headOption.map(_.asUtf8String).exists(sub => sub == "SETINFO" || sub == "TRACKING")
+    Connection.isClientTracking(command) ||
+      (command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "SETINFO"))
 }
