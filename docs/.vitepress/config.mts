@@ -28,6 +28,7 @@ export default defineConfig({
           { text: 'Pipelines & transactions', link: '/pipelines-transactions' },
           { text: 'Pub/Sub', link: '/pubsub' },
           { text: 'Streams', link: '/streams' },
+          { text: 'JSON', link: '/json' },
           { text: 'Client-side caching', link: '/client-side-caching' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Error handling', link: '/error-handling' },

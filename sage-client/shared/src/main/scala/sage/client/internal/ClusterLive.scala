@@ -249,7 +249,8 @@ final private[client] class ClusterLive(
     case Positional, Sum, AllSucceeded
   }
 
-  final private case class MultiSlotPolicy(merge: MultiSlotMerge, argsPerKey: Int)
+  // suffixArgs are shared trailing args (e.g. JSON.MGET's path) re-appended to every per-slot subgroup after its keys
+  final private case class MultiSlotPolicy(merge: MultiSlotMerge, argsPerKey: Int, suffixArgs: Int = 0)
 
   final private case class MultiSlotEntry(resultIndex: Int, argIndex: Int)
 
@@ -324,6 +325,7 @@ final private[client] class ClusterLive(
           offset += 1
         }
       }
+      if (policy.suffixArgs > 0) command.args.takeRight(policy.suffixArgs).foreach(args += _)
       val sub  = raw.copy(
         keyIndices = Vector.tabulate(group.size)(_ * policy.argsPerKey),
         args = args.result()
@@ -339,12 +341,18 @@ final private[client] class ClusterLive(
       case "MGET" if hasKeyStride(command, 1)                                => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1))
       case "DEL" | "EXISTS" | "TOUCH" | "UNLINK" if hasKeyStride(command, 1) => Some(MultiSlotPolicy(MultiSlotMerge.Sum, 1))
       case "MSET" if hasKeyStride(command, 2)                                => Some(MultiSlotPolicy(MultiSlotMerge.AllSucceeded, 2))
+      // JSON.MSET is intentionally not here: it is atomic, so cross-slot keys are rejected rather than split into a partial apply
+      case "JSON.MGET" if hasLeadingKeys(command, 1)                         => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1, suffixArgs = 1))
       case _                                                                 => None
     }
 
   private def hasKeyStride(command: Command[?], argsPerKey: Int): Boolean =
     command.args.nonEmpty && command.args.size % argsPerKey == 0 &&
       command.keyIndices == Vector.tabulate(command.args.size / argsPerKey)(_ * argsPerKey)
+
+  private def hasLeadingKeys(command: Command[?], suffixArgs: Int): Boolean =
+    command.args.size > suffixArgs &&
+      command.keyIndices == Vector.tabulate(command.args.size - suffixArgs)(identity)
 
   // walk the policy's ordered candidates, falling through on connection loss; strict Replica with no live replica exhausts to NotConnected
   private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {

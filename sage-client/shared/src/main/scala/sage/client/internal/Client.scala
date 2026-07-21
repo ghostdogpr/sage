@@ -1235,6 +1235,135 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def pfMerge(destination: K, sources: K*): F[Unit] = run(HyperLogLog.pfMerge(destination, sources*))
 
   /**
+    * Sets the JSON value at `path` in the document at `key`, creating the document if absent. The value must be raw JSON text: the built-in
+    * `String` codec passes it through verbatim, so you supply valid JSON (a scalar string is `"quoted"`); structured documents come from your
+    * own `ValueCodec`. Returns `false` only when `condition` (`NX`/`XX`) made the server skip the write. See [[sage.commands.JsonPath]].
+    */
+  final def jsonSet[V: ValueCodec](key: K, path: JsonPath, value: V, condition: JsonSetCondition = JsonSetCondition.Always): F[Boolean] =
+    run(Json.jsonSet(key, path, value, condition))
+
+  /**
+    * Returns the JSON at the given paths in the document at `key` as raw JSON text, or `None` if the key is absent. With no path it returns
+    * the whole document unwrapped, so a typed `ValueCodec` decodes it directly; a JSONPath wraps its matches in a JSON array, and several
+    * paths merge into one path-keyed JSON object.
+    */
+  final def jsonGet[V: ValueCodec](key: K, paths: JsonPath*): F[Option[V]] = run(Json.jsonGet(key, paths*))
+
+  /**
+    * Returns the JSON at `path` from each document, `None` per absent key or non-matching path. Reads the same path from every key.
+    */
+  final def jsonMGet[V: ValueCodec](path: JsonPath = JsonPath.root)(first: K, rest: K*): F[Vector[Option[V]]] =
+    run(Json.jsonMGet(path)(first, rest*))
+
+  /**
+    * Atomically sets each `(key, path, value)`. In a cluster all keys must hash to one slot (use a hash tag); a cross-slot call is rejected
+    * rather than partially applied, unlike the string `mSet`.
+    */
+  final def jsonMSet[V: ValueCodec](first: (K, JsonPath, V), rest: (K, JsonPath, V)*): F[Unit] = run(Json.jsonMSet(first, rest*))
+
+  /**
+    * Merges `value` into `path` per RFC 7386: matching locations are updated, deleted (JSON `null`), or created. Redis only; Valkey Bundle
+    * 9.1.0 does not ship `JSON.MERGE`.
+    */
+  final def jsonMerge[V: ValueCodec](key: K, path: JsonPath, value: V): F[Unit] = run(Json.jsonMerge(key, path, value))
+
+  /**
+    * Deletes the value at `path` (the whole document when `path` is root), returning the number of paths deleted.
+    */
+  final def jsonDel(key: K, path: JsonPath = JsonPath.root): F[Long] = run(Json.jsonDel(key, path))
+
+  /**
+    * Clears the container(s) at `path` (empties arrays/objects, zeroes numbers), returning the number of values cleared.
+    */
+  final def jsonClear(key: K, path: JsonPath = JsonPath.root): F[Long] = run(Json.jsonClear(key, path))
+
+  /**
+    * Returns the [[sage.commands.JsonType]] at each matched location, `None` where the path did not match.
+    */
+  final def jsonType(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[JsonType]]] = run(Json.jsonType(key, path))
+
+  /**
+    * Toggles each boolean at `path`, returning the new value per matched location and `None` where the path was not a boolean.
+    */
+  final def jsonToggle(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Boolean]]] = run(Json.jsonToggle(key, path))
+
+  /**
+    * Appends `value` (raw JSON string text) to each string at `path`, returning the new length per matched location.
+    */
+  final def jsonStrAppend[V: ValueCodec](key: K, path: JsonPath, value: V): F[Vector[Option[Long]]] =
+    run(Json.jsonStrAppend(key, path, value))
+
+  /**
+    * Returns the length of each string at `path`, `None` where the path was not a string.
+    */
+  final def jsonStrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonStrLen(key, path))
+
+  /**
+    * Increments each number at `path` by `increment`, returning the new value per matched location and `None` where the path was not a number.
+    */
+  final def jsonNumIncrBy(key: K, path: JsonPath, increment: Double): F[Vector[Option[Double]]] = run(Json.jsonNumIncrBy(key, path, increment))
+
+  /**
+    * Multiplies each number at `path` by `multiplier`, returning the new value per matched location and `None` where the path was not a number.
+    */
+  final def jsonNumMultBy(key: K, path: JsonPath, multiplier: Double): F[Vector[Option[Double]]] = run(Json.jsonNumMultBy(key, path, multiplier))
+
+  /**
+    * Appends the values (raw JSON) to each array at `path`, returning the new length per matched location.
+    */
+  final def jsonArrAppend[V: ValueCodec](key: K, path: JsonPath, first: V, rest: V*): F[Vector[Option[Long]]] =
+    run(Json.jsonArrAppend(key, path, first, rest*))
+
+  /**
+    * Returns the first index of `value` in each array at `path` within `[start, stop)` (`stop` `0` means to the end), `-1` when not found.
+    */
+  final def jsonArrIndex[V: ValueCodec](key: K, path: JsonPath, value: V, start: Long = 0, stop: Long = 0): F[Vector[Option[Long]]] =
+    run(Json.jsonArrIndex(key, path, value, start, stop))
+
+  /**
+    * Inserts the values (raw JSON) into each array at `path` before `index`, returning the new length per matched location.
+    */
+  final def jsonArrInsert[V: ValueCodec](key: K, path: JsonPath, index: Long, first: V, rest: V*): F[Vector[Option[Long]]] =
+    run(Json.jsonArrInsert(key, path, index, first, rest*))
+
+  /**
+    * Returns the length of each array at `path`, `None` where the path was not an array.
+    */
+  final def jsonArrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonArrLen(key, path))
+
+  /**
+    * Pops the element at `index` (default `-1`, the last) from each array at `path`, returning it as raw JSON text, `None` per empty/absent.
+    */
+  final def jsonArrPop[V: ValueCodec](key: K, path: JsonPath = JsonPath.root, index: Long = -1): F[Vector[Option[V]]] =
+    run(Json.jsonArrPop(key, path, index))
+
+  /**
+    * Trims each array at `path` to the inclusive `[start, stop]` range, returning the new length per matched location.
+    */
+  final def jsonArrTrim(key: K, path: JsonPath, start: Long, stop: Long): F[Vector[Option[Long]]] =
+    run(Json.jsonArrTrim(key, path, start, stop))
+
+  /**
+    * Returns the key names of each object at `path`, `None` where the path was not an object.
+    */
+  final def jsonObjKeys(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Vector[String]]]] = run(Json.jsonObjKeys(key, path))
+
+  /**
+    * Returns the number of keys in each object at `path`, `None` where the path was not an object.
+    */
+  final def jsonObjLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonObjLen(key, path))
+
+  /**
+    * Returns the memory footprint in bytes of the value at each matched location. A diagnostic; not client-side cached.
+    */
+  final def jsonDebugMemory(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonDebugMemory(key, path))
+
+  /**
+    * Returns the value at `path` re-encoded as its RESP representation, as a raw [[sage.protocol.Frame]]. A niche diagnostic.
+    */
+  final def jsonResp(key: K, path: JsonPath = JsonPath.root): F[Frame] = run(Json.jsonResp(key, path))
+
+  /**
     * Appends an entry of field/value pairs to the Stream at `key`, optionally trimming; returns the assigned ID. See [[sage.commands.XAddId]].
     */
   final def xAdd[F0: KeyCodec, V: ValueCodec](

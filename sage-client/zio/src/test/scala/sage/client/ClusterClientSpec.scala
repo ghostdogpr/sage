@@ -10,7 +10,7 @@ import sage.Bytes
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
-import sage.commands.{BroadcastReduce, Command, Connection, Keys, Scripting, Server, Strings}
+import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
 import sage.protocol.Frame
 
 class ClusterClientSpec extends munit.FunSuite {
@@ -607,6 +607,36 @@ class ClusterClientSpec extends munit.FunSuite {
       val subMgets = fixture.written(nodeA).filter(_.contains("MGET"))
       assertEquals(subMgets.size, 2, "different slots must remain separate even when one node owns both")
       assert(subMgets.forall(text => !(text.contains(keyA) && text.contains(keyB))), s"a subgroup crossed slots: $subMgets")
+    }
+  }
+
+  test("a cross-slot JSON.MGET splits by slot and re-appends the shared path") {
+    val keyA      = "{jmget-a}v"
+    val keyB      = "{jmget-b}v"
+    assert(Slot.of(Bytes.utf8(keyA)) != Slot.of(Bytes.utf8(keyB)), "test keys must hash to different slots")
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("[1]")))))
+      else if (text.contains(keyB)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("[2]")))))
+      else Seq(Frame.SimpleError("ERR unexpected command"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Json.jsonMGet[String, String](JsonPath("$.x"))(keyA, keyB)).unsafeRun.map { result =>
+      assertEquals(result, Vector(Some("[1]"), Some("[2]")))
+      val subs = fixture.written(nodeA).filter(_.contains("JSON.MGET"))
+      assertEquals(subs.size, 2, "different slots must remain separate even when one node owns both")
+      assert(subs.forall(_.contains("$.x")), s"the shared path was not re-appended to each subgroup: $subs")
+      assert(subs.forall(text => !(text.contains(keyA) && text.contains(keyB))), s"a subgroup crossed slots: $subs")
+    }
+  }
+
+  test("a cross-slot JSON.MSET is rejected rather than split, preserving atomicity") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Json.jsonMSet(("{a}", JsonPath.root, "1"), ("{b}", JsonPath.root, "2"))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[CrossSlot], s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("JSON.MSET")), "atomic JSON.MSET must not be split across slots")
     }
   }
 

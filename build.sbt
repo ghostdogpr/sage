@@ -8,6 +8,7 @@ val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed t
 val munitVersion          = "1.3.4"
 val testcontainersVersion = "0.44.1"
 val otelVersion           = "1.64.0"
+val circeVersion          = "0.14.10" // test-only: proves the ValueCodec emap seam works with a real JSON library
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC5"
@@ -164,6 +165,10 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .settings(
     publish / skip                        := true,
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-munit" % testcontainersVersion % Test,
+    libraryDependencies ++= Seq(
+      "io.circe" %% "circe-parser"  % circeVersion % Test,
+      "io.circe" %% "circe-generic" % circeVersion % Test
+    ),
     // the Future anchor rows compile but don't boot containers
     Test / testOptions += {
       val isAnchor     = moduleName.value.endsWith("-future")
