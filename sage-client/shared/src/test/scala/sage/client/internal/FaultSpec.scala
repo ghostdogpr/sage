@@ -23,6 +23,10 @@ class FaultSpec extends munit.FunSuite {
     assertEquals(Fault.categorize(ServerError("READONLY", "You can't write against a read only replica.")), Fault.Demoted)
   }
 
+  test("a TRYAGAIN reply categorizes as TryAgain") {
+    assertEquals(Fault.categorize(ServerError("TRYAGAIN", "Multiple keys request during rehashing of slot")), Fault.TryAgain)
+  }
+
   test("any other ServerError categorizes as Fatal") {
     assertEquals(Fault.categorize(ServerError("WRONGTYPE", "Operation against a key holding the wrong kind of value")), Fault.Fatal)
     assertEquals(Fault.categorize(ServerError("ERR", "foo bar")), Fault.Fatal)

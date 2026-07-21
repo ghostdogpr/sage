@@ -451,6 +451,33 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a TRYAGAIN reply is retried and eventually succeeds") {
+    val attempts  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("GET"))
+        if (attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("TRYAGAIN Multiple keys request during rehashing of slot"))
+        else Seq(Frame.BulkString(Bytes.utf8("value")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("value"))
+      assert(attempts.get() >= 2, s"TRYAGAIN was not retried: ${attempts.get()} attempts")
+    }
+  }
+
+  test("a persistent TRYAGAIN surfaces the original error after exhausting retries") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else Seq(Frame.SimpleError("TRYAGAIN Multiple keys request during rehashing of slot"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError] && error.asInstanceOf[ServerError].code == "TRYAGAIN", s"unexpected error: $error")
+    }
+  }
+
   test("an unsupported multi-key command whose keys span slots fails CrossSlot") {
     val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Integer(1))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
