@@ -18,13 +18,13 @@ final private[client] class ClientCache(maxBytes: Long) {
   import ClientCache.*
   import ClientCache.Acquire.*
 
-  private val lock                             = new ReentrantLock()
+  private val lock                        = new ReentrantLock()
   // accessOrder = true: a lookup promotes the entry to most-recently-used, so eviction sheds the genuinely cold entries
-  private val entries                          = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
-  private val reverse                          = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
-  private val pending                          = mutable.HashMap.empty[Key, InFlight]
-  private var bytesUsed: Long                  = 0L
-  @volatile private var generation: CacheEpoch = CacheEpoch.initial
+  private val entries                     = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
+  private val reverse                     = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
+  private val pending                     = mutable.HashMap.empty[Key, InFlight]
+  private var bytesUsed: Long             = 0L
+  @volatile private var epoch: CacheEpoch = CacheEpoch.initial
 
   /**
     * Tries to serve `commandBytes` from cache. [[Hit]] returns the stored frame (decode it and complete the caller). [[Fetch]] means the
@@ -37,7 +37,7 @@ final private[client] class ClientCache(maxBytes: Long) {
       val key   = new Key(commandBytes)
       val entry = entries.get(key)
       if (entry != null) {
-        if (entry.expiresAt > now) return Hit(entry.frame, generation)
+        if (entry.expiresAt > now) return Hit(entry.frame, epoch)
         removeEntry(key, entry)
       }
       pending.get(key) match {
@@ -100,11 +100,11 @@ final private[client] class ClientCache(maxBytes: Long) {
       reverse.clear()
       bytesUsed = 0L
       pending.valuesIterator.foreach(_.dirty = true)
-      generation = generation.next
+      epoch = epoch.next
     } finally lock.unlock()
   }
 
-  def isCurrent(epoch: CacheEpoch): Boolean = generation == epoch
+  def isCurrent(stamped: CacheEpoch): Boolean = epoch == stamped
 
   private def insert(key: Key, entry: Entry): Unit = {
     val previous = entries.put(key, entry)

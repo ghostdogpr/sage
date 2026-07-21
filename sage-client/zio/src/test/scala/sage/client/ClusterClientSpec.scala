@@ -186,6 +186,31 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a MOVED retires the source master's whole cache, so a previously cached key can no longer serve a stale local hit") {
+    val moved     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) // topology never changes, so only a flush keeps reads fresh
+      else if (node == nodeB && text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("fresh")))
+      else if (node == nodeA && text.contains("GET"))
+        if (moved.get) Seq(Frame.SimpleString("OK"), Frame.SimpleError("MOVED 0 b:6379"))
+        else Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("stale")))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    fixture.live.cached(Strings.get[String, String]("k1"), 1.minute).unsafeRun.flatMap { k1 =>
+      assertEquals(k1, Some("stale"))
+      moved.set(true)
+      // k2 (uncached) meets MOVED on nodeA, flushing nodeA's whole cache (k1 included) before retrying on nodeB
+      fixture.live.cached(Strings.get[String, String]("k2"), 1.minute).unsafeRun.flatMap { k2 =>
+        assertEquals(k2, Some("fresh"))
+        fixture.live.cached(Strings.get[String, String]("k1"), 1.minute).unsafeRun.map { k1Again =>
+          assertEquals(k1Again, Some("fresh"), "the MOVED must have retired k1's stale entry, forcing a refetch")
+          assert(fixture.written(nodeB).count(_.contains("\r\nGET\r\n")) >= 2, "both k2 and the re-fetched k1 must reach the new owner")
+        }
+      }
+    }
+  }
+
   test("a command to an established node dispatches inline, with no zero-delay scheduler hop") {
     val counting  = new CountingScheduler
     val behaviour =

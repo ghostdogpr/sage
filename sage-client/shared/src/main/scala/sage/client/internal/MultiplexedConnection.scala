@@ -4,6 +4,7 @@ import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
+import scala.annotation.tailrec
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
@@ -319,58 +320,54 @@ final private[client] class MultiplexedConnection private (
         case Success(frame) => deliver(frame)
         case Failure(error) => callback(Failure(error))
       }
-      cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
-        // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
-        // and release the two slots reserved for the (now unsent) fetch
-        case ClientCache.Acquire.Hit(frame, cacheEpoch) =>
-          release(2)
-          // a flush between the lookup and here (topology change or connection drop) retires this hit
-          if (!cache.isCurrent(cacheEpoch)) callback(Failure(ConnectionLost(mayHaveExecuted = false)))
-          else { if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
-        case ClientCache.Acquire.Wait                   => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
-        case ClientCache.Acquire.Fetch                  =>
-          if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
-          val span                        = Events.startOrDefer(events, command, deferred)
-          node.foreach(Events.routeSpan(span, _))
-          val started                     = System.nanoTime()
-          val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
-          val onReply: Try[Frame] => Unit = { result =>
-            result match {
-              case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
-              case Failure(error) => cache.fail(commandBytes, error)
+      @tailrec def attempt(): Unit    =
+        cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
+          // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
+          // and release the two slots reserved for the (now unsent) fetch
+          case ClientCache.Acquire.Hit(frame, epoch) =>
+            if (cache.isCurrent(epoch)) { release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
+            // a flush retired this hit mid-lookup: fail on a dead connection so the caller reroutes, else re-run as a local miss
+            else if (terminated) { release(2); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
+            else attempt()
+          case ClientCache.Acquire.Wait              => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
+          case ClientCache.Acquire.Fetch             =>
+            if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
+            traced(command, deferred) { settle =>
+              val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
+              val onReply: Try[Frame] => Unit = { result =>
+                result match {
+                  case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
+                  case Failure(error) => cache.fail(commandBytes, error)
+                }
+                // the outcome reflects the decoded reply, not the raw identity-decoded frame
+                settle(Outcome.of(result.flatMap(decodeFrame(command, _))))
+              }
+              try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
+              catch {
+                // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
+                case NonFatal(error) => release(2); onReply(Failure(error))
+              }
             }
-            if (events.enabled) {
-              // the outcome reflects the decoded reply, not the raw identity-decoded frame
-              val outcome = Outcome.of(result.flatMap(decodeFrame(command, _)))
-              Events.settleSpan(span, outcome)
-              if (events.emitsEvents)
-                events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
-            }
-          }
-          try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
-          catch {
-            // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
-            case NonFatal(error) => release(2); onReply(Failure(error))
-          }
-      }
+        }
+      attempt()
     }
 
-    private def uncached[A](command: Command[A], callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
+    private def uncached[A](command: Command[A], callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =
+      traced(command, deferred)(settle => submit(command, (result: Try[A]) => { settle(Outcome.of(result)); callback(result) }))
+
+    // span and CommandCompleted bookkeeping around a server-bound submit; `send` is handed a settle hook to call with the outcome
+    private def traced(command: Command[?], deferred: () => CommandSpan)(send: ((=> Outcome) => Unit) => Unit): Unit = {
       val span    = Events.startOrDefer(events, command, deferred)
       node.foreach(Events.routeSpan(span, _))
       val started = System.nanoTime()
-      submit(
-        command,
-        { (result: Try[A]) =>
-          if (events.enabled) {
-            val outcome = Outcome.of(result)
-            Events.settleSpan(span, outcome)
-            if (events.emitsEvents)
-              events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
-          }
-          callback(result)
+      send { outcome =>
+        if (events.enabled) {
+          val settled = outcome
+          Events.settleSpan(span, settled)
+          if (events.emitsEvents)
+            events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), settled))
         }
-      )
+      }
     }
 
     def flushCache(): Unit = cache.flush()

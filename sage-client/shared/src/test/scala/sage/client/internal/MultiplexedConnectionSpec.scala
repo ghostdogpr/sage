@@ -624,6 +624,25 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(third, Some(Success(Some("baz"))))
   }
 
+  test("a null-payload invalidation push flushes the whole cache, and reads refetch on the same connection") {
+    val (connection, _, transports) = cachedConnection()
+    val get                         = Strings.get[String, String]("foo")
+
+    connection.cachedSubmit(get, 60000L, _ => ())
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    assertEquals(transports.head.written.length, 1)
+
+    transports.head.emit(Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Null))) // FLUSHALL/tracking-drop form
+
+    var afterFlush: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => afterFlush = Some(r))
+    assertEquals(transports.head.written.length, 2) // flushed -> refetch
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("baz")))
+    assertEquals(afterFlush, Some(Success(Some("baz"))))
+  }
+
   test("TTL expiry evicts a cached read independently of invalidations") {
     val (connection, scheduler, transports) = cachedConnection()
     val get                                 = Strings.get[String, String]("foo")

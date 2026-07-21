@@ -196,6 +196,9 @@ final private[client] class ClusterLive(
 
   final private case class Cached(ttlMillis: Long, deferred: () => CommandSpan)
 
+  // a cached read is master-pinned, so it may use a replica only when there is no cache context
+  private def replicaAllowed(cacheCtx: Cached): Boolean = cacheCtx == null
+
   private def dispatch[A](
     command: Command[A],
     redirectsLeft: Int,
@@ -619,7 +622,7 @@ final private[client] class ClusterLive(
       refresh(force = true)
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
       scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(
-        dispatch(command, redirectsLeft - 1, complete, allowReplica = cacheCtx == null, lease = lease, cacheCtx = cacheCtx)
+        dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
       )
     }
 
@@ -636,14 +639,14 @@ final private[client] class ClusterLive(
     else {
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
       scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(
-        dispatch(command, redirectsLeft - 1, complete, allowReplica = cacheCtx == null, lease = lease, cacheCtx = cacheCtx)
+        dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
       )
     }
 
   private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease, cacheCtx: Cached): Unit = {
     refresh(force = false)
     val topology     = topologyRef.get()
-    val allowReplica = cacheCtx == null // cached reads are master-pinned
+    val allowReplica = replicaAllowed(cacheCtx)
     topology.route(command) match {
       // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
       case Route.ToNode(node, slot)                                                                  =>
