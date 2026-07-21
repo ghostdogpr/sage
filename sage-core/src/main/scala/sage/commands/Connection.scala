@@ -30,6 +30,9 @@ private[sage] object Connection {
   val clientCachingYes: Command[Unit] =
     Command("CLIENT", keyIndices = Command.NoKeys, args = Vector("CACHING", "YES").map(Bytes.utf8), decode = Decode.ok)
 
+  def isClientTracking(command: Command[?]): Boolean =
+    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "TRACKING")
+
   def watch[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Unit] = {
     val keys = (first +: rest.toVector).map(keyCodec.encode)
     Command("WATCH", keyIndices = Vector.range(0, keys.length), args = keys, decode = Decode.ok)

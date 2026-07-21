@@ -45,7 +45,9 @@ final private[client] class ClusterLive(
   pubsubBufferSize: Int,
   seeds: Vector[Node],
   readFrom: ReadFrom = ReadFrom.Master,
-  events: Events = Events.disabled
+  events: Events = Events.disabled,
+  cachingEnabled: Boolean = false,
+  cacheMaxBytes: Long = 0L
 ) extends Client[CIO, String] {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
@@ -84,13 +86,15 @@ final private[client] class ClusterLive(
   private val masterPool       = new NodePool(
     nodeFactory,
     scheduler,
-    bootstrap,
+    if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap,
     reconnect,
     watchdog,
     connectTimeout,
     closeTimeout,
     dedicatedPool,
-    events = events
+    cacheMaxBytes = if (cachingEnabled) cacheMaxBytes else 0L,
+    events = events,
+    dedicatedBootstrap = Some(bootstrap)
   )
   // set once by close; routing refuses afterwards, so close is terminal like the standalone client's
   @volatile private var closed = false
@@ -126,15 +130,20 @@ final private[client] class ClusterLive(
     else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
   }
 
-  // caching is not applied in cluster mode (per-node tracking through redirects/failover is unsupported): the read runs uncached but on the
-  // master (allowReplica = false), so it never honors ReadFrom and the call stays portable; the cacheability guard still applies
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
-    else
+    else if (!cachingEnabled)
       CIO.async[A] { complete =>
         val span    = Events.startSpan(events, command)
         val tracked = Events.trackCommand(events, command, complete, span)
         Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, allowReplica = false))
+      }
+    else
+      CIO.async[A] { complete =>
+        val deferred = Events.deferSpan(events, command)
+        Client.completing(complete)(
+          dispatch(command, cluster.maxRedirects, complete, allowReplica = false, cacheCtx = Cached(ttl.toMillis, deferred))
+        )
       }
 
   // SCAN cursors are node-local, so a full SCAN must sweep every slot-owning master; a reshard mid-scan can still miss or duplicate keys
@@ -185,12 +194,18 @@ final private[client] class ClusterLive(
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
+  final private case class Cached(ttlMillis: Long, deferred: () => CommandSpan)
+
+  // a cached read is master-pinned, so it may use a replica only when there is no cache context
+  private def replicaAllowed(cacheCtx: Cached): Boolean = cacheCtx == null
+
   private def dispatch[A](
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
     allowReplica: Boolean = true,
-    lease: DedicatedPool.Lease = null
+    lease: DedicatedPool.Lease = null,
+    cacheCtx: Cached = null
   ): Unit =
     if (closed) complete(Failure(NotConnected()))
     else {
@@ -214,15 +229,15 @@ final private[client] class ClusterLive(
           case Route.ToNode(node, slot) =>
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendRead(command, node, slot, redirectsLeft, complete)
-            else sendTo(node, command, asking = false, redirectsLeft, complete, lease)
+            else sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
           case Route.Keyless            =>
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendKeylessRead(topology, command, redirectsLeft, complete)
-            else sendToAny(topology, command, redirectsLeft, complete, lease)
-          case Route.Unowned(_)         => offload(onUnowned(command, redirectsLeft, complete, lease))
+            else sendToAny(topology, command, redirectsLeft, complete, lease, cacheCtx)
+          case Route.Unowned(_)         => offload(onUnowned(command, redirectsLeft, complete, lease, cacheCtx))
           case Route.CrossSlot(slots)   =>
             multiSlotPolicy(command) match {
-              case Some(policy) => scatterMultiSlot(command, policy, redirectsLeft, complete, allowReplica)
+              case Some(policy) => scatterMultiSlot(command, policy, redirectsLeft, complete, allowReplica, cacheCtx)
               case None         => complete(Failure(crossSlot(command.name, slots)))
             }
           case Route.Malformed          =>
@@ -247,7 +262,8 @@ final private[client] class ClusterLive(
     policy: MultiSlotPolicy,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    allowReplica: Boolean
+    allowReplica: Boolean,
+    cacheCtx: Cached
   ): Unit = {
     val bySlot = mutable.LinkedHashMap.empty[Slot, mutable.ArrayBuffer[MultiSlotEntry]]
     command.keyIndices.iterator.zipWithIndex.foreach { case (argIndex, resultIndex) =>
@@ -312,7 +328,7 @@ final private[client] class ClusterLive(
         keyIndices = Vector.tabulate(group.size)(_ * policy.argsPerKey),
         args = args.result()
       )
-      dispatch(sub, redirectsLeft, result => settle(group, result), allowReplica = allowReplica)
+      dispatch(sub, redirectsLeft, result => settle(group, result), allowReplica = allowReplica, cacheCtx = cacheCtx)
     }
   }
 
@@ -506,10 +522,11 @@ final private[client] class ClusterLive(
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease = null
+    lease: DedicatedPool.Lease = null,
+    cacheCtx: Cached = null
   ): Unit =
     pickNode(topology) match {
-      case Some(node) => sendTo(node, command, asking = false, redirectsLeft, complete, lease)
+      case Some(node) => sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
       case None       => complete(Failure(NotConnected()))
     }
 
@@ -519,17 +536,18 @@ final private[client] class ClusterLive(
     asking: Boolean,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease
+    lease: DedicatedPool.Lease,
+    cacheCtx: Cached = null
   ): Unit = {
     val existing = masterPool.existing(node)
-    if (existing != null) submitTo(existing, node, command, asking, redirectsLeft, complete, lease)
+    if (existing != null) submitTo(existing, node, command, asking, redirectsLeft, complete, lease, cacheCtx)
     else
       offload {
         val nc =
           try getOrEstablish(node)
           catch { case NonFatal(_) => null }
-        if (nc == null) onUnreachable(command, redirectsLeft, complete, lease)
-        else submitTo(nc, node, command, asking, redirectsLeft, complete, lease)
+        if (nc == null) onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
+        else submitTo(nc, node, command, asking, redirectsLeft, complete, lease, cacheCtx)
       }
   }
 
@@ -540,17 +558,16 @@ final private[client] class ClusterLive(
     asking: Boolean,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease
-  ): Unit =
-    nc.submit[A](
-      command,
-      asking,
-      {
-        case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
-        case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete, lease))
-      },
-      lease
-    )
+    lease: DedicatedPool.Lease,
+    cacheCtx: Cached
+  ): Unit = {
+    val onReply: Try[A] => Unit = {
+      case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
+      case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete, lease, cacheCtx))
+    }
+    if (cacheCtx != null && !asking) nc.cachedSubmit[A](command, cacheCtx.ttlMillis, onReply, cacheCtx.deferred)
+    else nc.submit[A](command, asking, onReply, lease)
+  }
 
   private def onFailure[A](
     node: Node,
@@ -558,12 +575,13 @@ final private[client] class ClusterLive(
     error: Throwable,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease
+    lease: DedicatedPool.Lease,
+    cacheCtx: Cached
   ): Unit =
     Fault.categorize(error) match {
-      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease)
-      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease)
-      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete, lease)
+      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease, cacheCtx)
+      case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
+      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -574,26 +592,38 @@ final private[client] class ClusterLive(
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease = null
-  ): Unit =
+    lease: DedicatedPool.Lease = null,
+    cacheCtx: Cached = null
+  ): Unit = {
+    // a MOVED proves `from` lost the slot; retire its cache even if the retry budget is now exhausted
+    if (redirect.kind == RedirectKind.Moved) flushNode(from)
     if (redirectsLeft <= 0)
       complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
     else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
-        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease)
-        case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease)
+        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease, cacheCtx)
+        case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease, cacheCtx)
       }
     }
+  }
 
   // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
   // failover is not hammered; redirectsLeft bounds it.
-  private def onUnreachable[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
+  private def onUnreachable[A](
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    lease: DedicatedPool.Lease = null,
+    cacheCtx: Cached = null
+  ): Unit =
     if (redirectsLeft <= 0) complete(Failure(NotConnected()))
     else {
       refresh(force = true)
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
-      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete, lease = lease))
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(
+        dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
+      )
     }
 
   // -TRYAGAIN is a transient mid-migration refusal: the slot mapping is still valid, so retry (bounded, jittered) without refreshing the topology.
@@ -602,27 +632,32 @@ final private[client] class ClusterLive(
     error: Throwable,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    lease: DedicatedPool.Lease = null
+    lease: DedicatedPool.Lease = null,
+    cacheCtx: Cached = null
   ): Unit =
     if (redirectsLeft <= 0) complete(Failure(error))
     else {
       val attempt = (cluster.maxRedirects - redirectsLeft).max(0)
-      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(dispatch(command, redirectsLeft - 1, complete, lease = lease))
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis)(
+        dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
+      )
     }
 
-  private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease): Unit = {
+  private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease, cacheCtx: Cached): Unit = {
     refresh(force = false)
-    val topology = topologyRef.get()
+    val topology     = topologyRef.get()
+    val allowReplica = replicaAllowed(cacheCtx)
     topology.route(command) match {
       // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
-      case Route.ToNode(node, slot)                                                  =>
-        if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, node, slot, redirectsLeft, complete)
-        else sendTo(node, command, asking = false, redirectsLeft, complete, lease)
+      case Route.ToNode(node, slot)                                                                  =>
+        if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
+          sendRead(command, node, slot, redirectsLeft, complete)
+        else sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
       // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
-      case _ if readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
-        onUnreachable(command, redirectsLeft, complete, lease)
+      case _ if allowReplica && readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
+        onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
       // still unowned after refresh: any master, trusting its reply (a MOVED to follow, or CLUSTERDOWN)
-      case _                                                                         => sendToAny(topology, command, redirectsLeft, complete, lease)
+      case _                                                                                         => sendToAny(topology, command, redirectsLeft, complete, lease, cacheCtx)
     }
   }
 
@@ -1066,12 +1101,21 @@ final private[client] class ClusterLive(
 
   private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
 
+  private def flushNode(node: Node): Unit =
+    if (cachingEnabled) { val nc = masterPool.existing(node); if (nc != null) nc.flushCache() }
+
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
   private def triggerRefresh(): Unit = offload(refresh(force = false))
 
   private def refresh(force: Boolean): Unit =
-    refreshThrottle(force)(querySlots(refreshCandidates()).foreach { case (from, shards) => adopt(from, shards) })
+    refreshThrottle(force) {
+      querySlots(refreshCandidates()) match {
+        case Some((from, shards)) => adopt(from, shards)
+        // no candidate answered CLUSTER SLOTS: ownership is unknowable, so retire every cache
+        case None                 => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
+      }
+    }
 
   private def refreshCandidates(): Vector[Node] = (masterPool.candidatesByLiveness ++ seeds).distinct
 
@@ -1101,6 +1145,8 @@ final private[client] class ClusterLive(
     val oldTopology  = topologyRef.get()
     val previous     = if (events.emitsEvents) slotOwningMasters(oldTopology).toSet else Set.empty[Node]
     val newTopology  = ClusterTopology.from(resolved)
+    // retire losing masters' caches before the new topology is published
+    if (cachingEnabled) newTopology.mastersLosingSlots(oldTopology).foreach(flushNode)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change
     if (events.emitsEvents && previous.nonEmpty) {
@@ -1156,7 +1202,9 @@ private[client] object ClusterLive {
         config.pubsub.bufferSize,
         seeds,
         config.readFrom,
-        events
+        events,
+        config.clientCache.enabled,
+        config.clientCache.maxBytes
       )
       // translate discovery's handshake/TLS failures here rather than via mapError, which the per-backend CIO alias does not reconcile through
       // `Client`'s invariant type parameter

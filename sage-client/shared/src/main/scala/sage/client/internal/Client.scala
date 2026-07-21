@@ -2048,8 +2048,9 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     * Runs a read with client-side caching: served from the local cache until a server invalidation push or `ttl` evicts it. Only a
     * cacheable command with at least one key qualifies — a read whose result is a pure function of its keys' state, so an invalidation
     * covers every change. A write, a keyless read, or a time-varying/non-deterministic read (`TTL`, `SRANDMEMBER`) fails with
-    * [[sage.SageException.NotCacheable]]. On a cluster client this currently runs the read without caching, so the same call stays
-    * topology-portable.
+    * [[sage.SageException.NotCacheable]]. The read is always served from the master (never a replica, whatever the `ReadFrom` policy); in a
+    * cluster each slot-owning master owns an independent cache. Caching is transparent to the call, so it stays topology-portable: with caching
+    * disabled, or against a server that rejects tracking, the same call simply runs uncached.
     */
   def cached[A](command: Command[A], ttl: FiniteDuration): F[A]
 

@@ -5,11 +5,12 @@ import scala.concurrent.duration.*
 import scala.util.Try
 
 import com.dimafeng.testcontainers.FixedHostPortGenericContainer
-import com.dimafeng.testcontainers.munit.TestContainerForAll
+import com.dimafeng.testcontainers.munit.TestContainerForEach
 import kyo.compat.*
 
 import sage.client.{ClusterConfig, Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
+import sage.commands.Commands
 import sage.integration.{ContainerClient, Images}
 
 /**
@@ -24,7 +25,7 @@ import sage.integration.{ContainerClient, Images}
   * The cost is fixed host ports (7100-7105), which must be free on the host — the only single-host scheme a multi-node cluster admits short of
   * Linux-only host networking.
   */
-abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
+abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForEach with ContainerClient {
 
   private val ports  = 7100 to 7105
   private val victim = 7100 // redis-cli --cluster-create makes the first nodes masters, so 7100 is a master with a replica to promote
@@ -124,21 +125,79 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
   private def writeAll(client: Client[CIO, String], keys: Vector[String]): CIO[Unit] =
     keys.foldLeft(CIO.value(()))((acc, key) => acc.flatMap(_ => writeKey(client, key, 150)))
 
-  // retry a read across the failover window until the client refreshes onto the promoted master; each key stores its own name
+  // retries a transport error, but fails at once on a `reject` value: retrying a stale success would let it slip through behind a later refresh
+  private def awaitReadEquals(read: () => CIO[Option[String]], expected: String, reject: Option[String], attempts: Int): CIO[Boolean] =
+    read().fold(
+      {
+        case Some(v) if v == expected      => CIO.value(true)
+        case Some(v) if reject.contains(v) => CIO.value(false)
+        case _ if attempts <= 0            => CIO.value(false)
+        case _                             => CIO.sleep(200.millis).flatMap(_ => awaitReadEquals(read, expected, reject, attempts - 1))
+      },
+      _ => if (attempts <= 0) CIO.value(false) else CIO.sleep(200.millis).flatMap(_ => awaitReadEquals(read, expected, reject, attempts - 1))
+    )
+
   private def recoverKey(client: Client[CIO, String], key: String, attempts: Int): CIO[Boolean] =
-    client
-      .get[String](key)
-      .fold(
-        {
-          case Some(v) if v == key => CIO.value(true)
-          case _ if attempts <= 0  => CIO.value(false)
-          case _                   => CIO.sleep(200.millis).flatMap(_ => recoverKey(client, key, attempts - 1))
-        },
-        _ => if (attempts <= 0) CIO.value(false) else CIO.sleep(200.millis).flatMap(_ => recoverKey(client, key, attempts - 1))
-      )
+    awaitReadEquals(() => client.get[String](key), key, None, attempts)
+
+  private def recoverCached(client: Client[CIO, String], key: String, expected: String, stale: String, attempts: Int): CIO[Boolean] =
+    awaitReadEquals(() => client.cached(Commands.get[String, String](key), 1.minute), expected, Some(stale), attempts)
 
   private def recoverAll(client: Client[CIO, String], keys: Vector[String]): CIO[Boolean] =
     keys.foldLeft(CIO.value(true))((acc, key) => acc.flatMap(ok => if (!ok) CIO.value(false) else recoverKey(client, key, 150)))
+
+  // retries until the node accepts the write (e.g. a replica once it is promoted to master)
+  private def writeDirect(container: FixedHostPortGenericContainer, port: Int, key: String, value: String, attempts: Int): CIO[Unit] =
+    CIO.blocking(cli(container, port, "set", key, value)).flatMap { out =>
+      if (out.contains("OK")) CIO.value(())
+      else if (attempts <= 0) CIO.fail(new RuntimeException(s"could not write $key on $port: $out"))
+      else CIO.sleep(200.millis).flatMap(_ => writeDirect(container, port, key, value, attempts - 1))
+    }
+
+  private def masterId(container: FixedHostPortGenericContainer, port: Int): String = cli(container, port, "cluster", "myid").trim
+
+  // queried via the victim, so its own line carries the `myself` flag
+  private def clusterNodeLines(container: FixedHostPortGenericContainer): Vector[Array[String]] =
+    parseKeys(cli(container, victim, "cluster", "nodes")).map(_.split("\\s+"))
+
+  private def masterPortsExcludingVictim(container: FixedHostPortGenericContainer): Vector[Int] =
+    clusterNodeLines(container)
+      .filter(f => f.length > 2 && f(2).contains("master"))
+      .map(f => f(1).split("@")(0).split(":")(1).toInt)
+      .filter(_ != victim)
+
+  // slot tokens are `start-end` or a single slot; `[...]` migration markers are not owned slots
+  private def slotCount(fields: Array[String]): Int =
+    fields
+      .drop(8)
+      .filterNot(_.startsWith("["))
+      .map { token =>
+        val parts = token.split("-")
+        if (parts.length == 2) parts(1).toInt - parts(0).toInt + 1 else 1
+      }
+      .sum
+
+  private def ownSlotCount(container: FixedHostPortGenericContainer, port: Int): Int =
+    parseKeys(cli(container, port, "cluster", "nodes"))
+      .map(_.split("\\s+"))
+      .collectFirst { case f if f.length > 2 && f(2).contains("myself") => slotCount(f) }
+      .getOrElse(0)
+
+  private def reshard(container: FixedHostPortGenericContainer, fromId: String, toId: String, slots: Int): String =
+    exec(
+      container,
+      "redis-cli",
+      "--cluster",
+      "reshard",
+      s"127.0.0.1:$victim",
+      "--cluster-from",
+      fromId,
+      "--cluster-to",
+      toId,
+      "--cluster-slots",
+      slots.toString,
+      "--cluster-yes"
+    )
 
   test("the client recovers reads after a master crashes and its replica is promoted") {
     withContainers { container =>
@@ -161,6 +220,68 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
             } yield {
               assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove failover recovery")
               assert(recovered, "client did not recover the victim master's keys after its replica was promoted")
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
+  test("a cached read follows MOVED to the new owner after its slot is resharded off its master") {
+    withContainers { container =>
+      val seeds  = ports.map(p => Endpoint("127.0.0.1", p)).toVector
+      val config = SageConfig(topology = Topology.Cluster(seeds, ClusterConfig(minRefreshInterval = 500.millis)))
+      val keys   = (1 to 30).map(i => s"reshard:$i").toVector
+
+      val program =
+        formCluster(container).flatMap { _ =>
+          connectAndUse(config) { client =>
+            for {
+              _         <- writeAll(client, keys)
+              onVictim  <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
+              probe      = onVictim.head
+              first     <- client.cached(Commands.get[String, String](probe), 1.minute)
+              dest      <- CIO.blocking(masterPortsExcludingVictim(container).head)
+              fromId    <- CIO.blocking(masterId(container, victim))
+              toId      <- CIO.blocking(masterId(container, dest))
+              moved     <- CIO.blocking(ownSlotCount(container, victim))
+              _         <- CIO.blocking(reshard(container, fromId, toId, moved))
+              _         <- awaitClusterOk(container, 60)
+              _         <- writeDirect(container, dest, probe, "reshard-fresh", 50)
+              recovered <- recoverCached(client, probe, "reshard-fresh", probe, 150)
+            } yield {
+              assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove reshard recovery")
+              assertEquals(first, Some(probe))
+              assert(recovered, "cached read did not observe the resharded slot's new owner's current value")
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
+  test("a cached read recovers from the promoted master after a failover, never serving the dead master's entry") {
+    withContainers { container =>
+      val seeds  = ports.map(p => Endpoint("127.0.0.1", p)).toVector
+      val config = SageConfig(topology = Topology.Cluster(seeds, ClusterConfig(minRefreshInterval = 500.millis)))
+      val keys   = (1 to 30).map(i => s"cachedfailover:$i").toVector
+
+      val program =
+        formCluster(container).flatMap { _ =>
+          connectAndUse(config) { client =>
+            for {
+              _           <- writeAll(client, keys)
+              onVictim    <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
+              probe        = onVictim.head
+              _           <- client.cached(Commands.get[String, String](probe), 1.minute)
+              replicaPort <- CIO.blocking(victimReplicaPort(container))
+              _           <- awaitReplicated(container, replicaPort, onVictim.toSet, 100)
+              _           <- CIO.blocking(Try(cli(container, victim, "shutdown", "nosave")))
+              _           <- writeDirect(container, replicaPort, probe, "failover-fresh", 150)
+              recovered   <- recoverCached(client, probe, "failover-fresh", probe, 150)
+            } yield {
+              assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove cached failover recovery")
+              assert(recovered, "cached read did not observe the promoted master's current value after the victim crashed")
             }
           }
         }

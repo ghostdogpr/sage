@@ -76,4 +76,14 @@ class TopologySpec extends munit.FunSuite {
     assert(!ab.sameOwnership(migrated), "a slot moving from b to a is a change")
     assert(!whole.sameOwnership(ab), "differing covered ranges are a change")
   }
+
+  test("mastersLosingSlots names only masters that gave up a slot, so a cache flush targets exactly them") {
+    val before = ClusterTopology.from(Vector(covering(a, 0, 100), covering(b, 101, 200)))
+    val after  = ClusterTopology.from(Vector(covering(a, 0, 150), covering(b, 151, 200)))
+    assertEquals(after.mastersLosingSlots(before), Set(b))
+    assert(!after.mastersLosingSlots(before).contains(a))
+    assertEquals(before.mastersLosingSlots(before), Set.empty[Node])
+    val shrunk = ClusterTopology.from(Vector(covering(a, 0, 100)))
+    assertEquals(shrunk.mastersLosingSlots(before), Set(b))
+  }
 }

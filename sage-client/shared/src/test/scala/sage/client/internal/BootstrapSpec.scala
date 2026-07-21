@@ -47,6 +47,21 @@ class BootstrapSpec extends munit.FunSuite {
     assert(!closed, "connection must stay open when only library identification fails")
   }
 
+  test("a CLIENT TRACKING error is tolerated and reported, so a server that denies tracking still connects (ADR-0045)") {
+    val denied    = Failure(ServerError("ERR", "This instance has cluster support disabled"))
+    var closed    = false
+    var tolerated = Vector.empty[String]
+    Bootstrap.run(
+      Bootstrap.commands(None, 0, None) :+ Connection.clientTrackingOnOptin,
+      connectTimeoutMillis = 1000,
+      submit = (c, cb) => cb(if (c.name == "CLIENT" && c.args.head.asUtf8String == "TRACKING") denied else Success(())),
+      close = () => closed = true,
+      onTolerated = c => tolerated = tolerated :+ s"${c.name} ${c.args.head.asUtf8String}"
+    )
+    assert(!closed, "connection must stay open when only tracking is denied")
+    assertEquals(tolerated, Vector("CLIENT TRACKING"))
+  }
+
   test("a CLIENT SETINFO connection loss is NOT tolerated: it closes and throws") {
     var closed = false
     val thrown = intercept[ConnectionLost] {

@@ -4,6 +4,7 @@ import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
+import scala.annotation.tailrec
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
@@ -53,6 +54,8 @@ final private[client] class MultiplexedConnection private (
   // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
   private var reconnectAttempt: Int                = 0
   private var liveSinceMillis: Long                = -1L
+  // whether the live generation accepts CLIENT TRACKING; false makes cached reads run uncached
+  @volatile private var trackingActive             = true
 
   private[internal] def setOnLivenessLost(hook: () => Unit): Unit = onLivenessLost = hook
 
@@ -177,12 +180,22 @@ final private[client] class MultiplexedConnection private (
     locked { establishing = conn; if (state == State.Closed) conn.close() }
     try {
       conn.start()
+      var tracking = true
       // reserve(1) per command: submit does not self-increment, so this balances the retire() the reply will trigger. A half-open peer can
       // accept the socket yet never answer HELLO, so the runner bounds each wait and the reconnect loop can't stall on it forever.
-      Bootstrap.run(bootstrap, connectTimeout.toMillis, (c, cb) => { conn.reserve(1); conn.submit(c, cb) }, () => conn.close())
+      Bootstrap.run(
+        bootstrap,
+        connectTimeout.toMillis,
+        (c, cb) => { conn.reserve(1); conn.submit(c, cb) },
+        () => conn.close(),
+        onTolerated = c => if (Connection.isClientTracking(c)) tracking = false
+      )
+      trackingActive = tracking
       conn
     } finally locked { if (establishing eq conn) establishing = null }
   }
+
+  private[internal] def flushCache(): Unit = { val c = locked(current); if (c != null) c.flushCache() }
 
   private def scheduleReconnect(attempt: Int): Unit = {
     reconnectAttempt = attempt
@@ -298,6 +311,8 @@ final private[client] class MultiplexedConnection private (
     // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
     // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
     def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
+      // tracking off: run uncached, releasing one of the two slots reserved for the (now unsent) caching prefix
+      if (!trackingActive) { release(1); uncached(command, callback, deferred); return }
       val commandBytes                = command.encode
       val keys                        = command.keys
       def deliver(frame: Frame): Unit = callback(decodeFrame(command, frame))
@@ -305,37 +320,57 @@ final private[client] class MultiplexedConnection private (
         case Success(frame) => deliver(frame)
         case Failure(error) => callback(Failure(error))
       }
-      cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
-        // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
-        // and release the two slots reserved for the (now unsent) fetch
-        case ClientCache.Acquire.Hit(frame) => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame)
-        case ClientCache.Acquire.Wait       => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
-        case ClientCache.Acquire.Fetch      =>
-          if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
-          val span                        = Events.startOrDefer(events, command, deferred)
-          node.foreach(Events.routeSpan(span, _))
-          val started                     = System.nanoTime()
-          val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
-          val onReply: Try[Frame] => Unit = { result =>
-            result match {
-              case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
-              case Failure(error) => cache.fail(commandBytes, error)
+      @tailrec def attempt(): Unit    =
+        cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
+          // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
+          // and release the two slots reserved for the (now unsent) fetch
+          case ClientCache.Acquire.Hit(frame, epoch) =>
+            if (cache.isCurrent(epoch)) { release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
+            // reroute a hit retired by a topology change or a dead connection; refetch here one retired by a server flush (ownership unchanged)
+            else if (terminated || cache.rerouteRetired(epoch)) { release(2); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
+            else attempt()
+          case ClientCache.Acquire.Wait              => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
+          case ClientCache.Acquire.Fetch             =>
+            if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
+            traced(command, deferred) { settle =>
+              val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
+              val onReply: Try[Frame] => Unit = { result =>
+                result match {
+                  case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)
+                  case Failure(error) => cache.fail(commandBytes, error)
+                }
+                // the outcome reflects the decoded reply, not the raw identity-decoded frame
+                settle(Outcome.of(result.flatMap(decodeFrame(command, _))))
+              }
+              try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
+              catch {
+                // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
+                case NonFatal(error) => release(2); onReply(Failure(error))
+              }
             }
-            if (events.enabled) {
-              // the outcome reflects the decoded reply, not the raw identity-decoded frame
-              val outcome = Outcome.of(result.flatMap(decodeFrame(command, _)))
-              Events.settleSpan(span, outcome)
-              if (events.emitsEvents)
-                events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), outcome))
-            }
-          }
-          try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
-          catch {
-            // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
-            case NonFatal(error) => release(2); onReply(Failure(error))
-          }
+        }
+      attempt()
+    }
+
+    private def uncached[A](command: Command[A], callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =
+      traced(command, deferred)(settle => submit(command, (result: Try[A]) => { settle(Outcome.of(result)); callback(result) }))
+
+    // span and CommandCompleted bookkeeping around a server-bound submit; `send` is handed a settle hook to call with the outcome
+    private def traced(command: Command[?], deferred: () => CommandSpan)(send: ((=> Outcome) => Unit) => Unit): Unit = {
+      val span    = Events.startOrDefer(events, command, deferred)
+      node.foreach(Events.routeSpan(span, _))
+      val started = System.nanoTime()
+      send { outcome =>
+        if (events.enabled) {
+          val settled = outcome
+          Events.settleSpan(span, settled)
+          if (events.emitsEvents)
+            events.emit(SageEvent.CommandCompleted(command.name, node, FiniteDuration(System.nanoTime() - started, NANOSECONDS), settled))
+        }
       }
     }
+
+    def flushCache(): Unit = cache.flushForReroute()
 
     def close(): Unit = {
       aborted = true
@@ -387,6 +422,8 @@ final private[client] class MultiplexedConnection private (
 
     private def onClosed(): Unit = {
       terminated = true
+      // a dropped connection loses all further invalidations, so its cache can no longer be trusted for a hit
+      cache.flush()
       var entry = pending.poll()
       while (entry != null) {
         entry.fail(ConnectionLost(mayHaveExecuted = true))

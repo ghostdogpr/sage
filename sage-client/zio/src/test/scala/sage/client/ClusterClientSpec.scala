@@ -52,7 +52,8 @@ class ClusterClientSpec extends munit.FunSuite {
     unreachable: Set[Node] = Set.empty,
     readFrom: ReadFrom = ReadFrom.Master,
     connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport creation, to park an establish mid-flight
-    scheduler: Scheduler = Scheduler.real
+    scheduler: Scheduler = Scheduler.real,
+    caching: Boolean = false
   ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
@@ -74,6 +75,7 @@ class ClusterClientSpec extends munit.FunSuite {
           val text = payload.asUtf8String
           if (text.contains("HELLO"))
             if (unreachable(node) || flakyHello.remove(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(helloReply)
+          else if (text.contains("TRACKING")) Seq(Frame.SimpleString("OK"))
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
@@ -94,7 +96,9 @@ class ClusterClientSpec extends munit.FunSuite {
         ClusterConfig(),
         1024,
         seeds,
-        readFrom
+        readFrom,
+        cachingEnabled = caching,
+        cacheMaxBytes = if (caching) 1L << 20 else 0L
       )
 
     live.bootstrapTopology()
@@ -139,6 +143,71 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some(owner.host))
       assert(fixture.written(owner).exists(_.contains("GET")), "owner did not receive GET")
       assert(!fixture.written(other).exists(_.contains("GET")), "non-owner received GET")
+    }
+  }
+
+  test("a cached read routes to the slot's master as [CLIENT CACHING YES, read] and serves a repeat locally") {
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8(node.host))) // [CACHING, GET] batch → two replies
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    fixture.live.cached(Strings.get[String, String]("foo"), 1.minute).unsafeRun.flatMap { first =>
+      assertEquals(first, Some(nodeA.host))
+      assert(fixture.written(nodeA).exists(_.contains("CACHING")), "a cached read must send CLIENT CACHING YES")
+      val gets = fixture.written(nodeA).count(_.contains("\r\nGET\r\n"))
+      fixture.live.cached(Strings.get[String, String]("foo"), 1.minute).unsafeRun.map { second =>
+        assertEquals(second, Some(nodeA.host))
+        assertEquals(fixture.written(nodeA).count(_.contains("\r\nGET\r\n")), gets, "a repeat is served from the local cache, no new round-trip")
+      }
+    }
+  }
+
+  test("a cached read that meets an ASK is an uncached one-shot: [ASKING, read] on the target, nothing stored") {
+    val slot      = Slot.of(Bytes.utf8("foo")).value
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      // the ASK target receives [ASKING, GET foo] (one payload, two replies); it must not receive CLIENT CACHING YES
+      else if (node == nodeB && text.contains("ASKING")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("v")))
+      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"ASK $slot b:6379"))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    val read = fixture.live.cached(Strings.get[String, String]("foo"), 1.minute)
+    read.unsafeRun.flatMap { first =>
+      read.unsafeRun.map { second =>
+        assertEquals(first, Some("v"))
+        assertEquals(second, Some("v"))
+        val bWrites = fixture.written(nodeB)
+        assertEquals(bWrites.count(_.contains("\r\nGET\r\n")), 2, "each read must reach the ASK target; nothing is cached")
+        assert(bWrites.forall(!_.contains("CACHING")), "the ASK one-shot must never send CLIENT CACHING YES")
+      }
+    }
+  }
+
+  test("a MOVED retires the source master's whole cache, so a previously cached key can no longer serve a stale local hit") {
+    val moved     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) // topology never changes, so only a flush keeps reads fresh
+      else if (node == nodeB && text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("fresh")))
+      else if (node == nodeA && text.contains("GET"))
+        if (moved.get) Seq(Frame.SimpleString("OK"), Frame.SimpleError("MOVED 0 b:6379"))
+        else Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("stale")))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
+
+    fixture.live.cached(Strings.get[String, String]("k1"), 1.minute).unsafeRun.flatMap { k1 =>
+      assertEquals(k1, Some("stale"))
+      moved.set(true)
+      // k2 (uncached) meets MOVED on nodeA, flushing nodeA's whole cache (k1 included) before retrying on nodeB
+      fixture.live.cached(Strings.get[String, String]("k2"), 1.minute).unsafeRun.flatMap { k2 =>
+        assertEquals(k2, Some("fresh"))
+        fixture.live.cached(Strings.get[String, String]("k1"), 1.minute).unsafeRun.map { k1Again =>
+          assertEquals(k1Again, Some("fresh"), "the MOVED must have retired k1's stale entry, forcing a refetch")
+          assert(fixture.written(nodeB).count(_.contains("\r\nGET\r\n")) >= 2, "both k2 and the re-fetched k1 must reach the new owner")
+        }
+      }
     }
   }
 

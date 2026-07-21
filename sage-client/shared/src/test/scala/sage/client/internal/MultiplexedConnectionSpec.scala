@@ -624,6 +624,25 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(third, Some(Success(Some("baz"))))
   }
 
+  test("a null-payload invalidation push flushes the whole cache, and reads refetch on the same connection") {
+    val (connection, _, transports) = cachedConnection()
+    val get                         = Strings.get[String, String]("foo")
+
+    connection.cachedSubmit(get, 60000L, _ => ())
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    assertEquals(transports.head.written.length, 1)
+
+    transports.head.emit(Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Null))) // FLUSHALL/tracking-drop form
+
+    var afterFlush: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => afterFlush = Some(r))
+    assertEquals(transports.head.written.length, 2) // flushed -> refetch
+    transports.head.emit(Frame.SimpleString("OK"))
+    transports.head.emit(Frame.BulkString(Bytes.utf8("baz")))
+    assertEquals(afterFlush, Some(Success(Some("baz"))))
+  }
+
   test("TTL expiry evicts a cached read independently of invalidations") {
     val (connection, scheduler, transports) = cachedConnection()
     val get                                 = Strings.get[String, String]("foo")
@@ -683,5 +702,43 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assert(result.exists(_.isFailure))
     assertEquals(tracer.log.head, "start:GET")
     assert(tracer.log.last.startsWith("settled:Failed"))
+  }
+
+  test("a server that rejects CLIENT TRACKING degrades cached reads to uncached rather than failing (ADR-0045)") {
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val respond: Bytes => Seq[Frame]                    = payload => {
+      val text = payload.asUtf8String
+      if (text.contains("TRACKING")) Seq(Frame.SimpleError("ERR unknown subcommand TRACKING"))
+      else if (text.contains("GET")) Seq(Frame.BulkString(Bytes.utf8("bar")))
+      else Nil
+    }
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed, respond)
+      transports += transport
+      transport
+    }
+    val connection                                      = MultiplexedConnection.connect(
+      factory,
+      scheduler,
+      Vector(Connection.clientTrackingOnOptin),
+      fixedBackoff,
+      noWatchdog,
+      1.second,
+      Duration.Zero,
+      cacheMaxBytes = 1L << 20
+    )
+    val get                                             = Strings.get[String, String]("foo")
+
+    var first: Option[Try[Option[String]]]  = None
+    connection.cachedSubmit(get, 60000L, r => first = Some(r))
+    var second: Option[Try[Option[String]]] = None
+    connection.cachedSubmit(get, 60000L, r => second = Some(r))
+
+    assertEquals(first, Some(Success(Some("bar"))))
+    assertEquals(second, Some(Success(Some("bar"))))
+    val writes = transports.head.written.map(_.asUtf8String)
+    assert(!writes.exists(_.contains("CACHING")), "no CLIENT CACHING YES when tracking is unavailable")
+    assertEquals(writes.count(_.contains("GET")), 2, "each cached read re-contacts the server: nothing is cached without tracking")
   }
 }

@@ -13,6 +13,10 @@ class ClientCacheSpec extends munit.FunSuite {
     var slot: Option[Try[Frame]] = None
     ((r: Try[Frame]) => slot = Some(r), () => slot)
   }
+  private def hitFrame(acquired: ClientCache.Acquire): Frame              = acquired match {
+    case ClientCache.Acquire.Hit(frame, _) => frame
+    case other                             => fail(s"expected a hit, got $other")
+  }
 
   test("first miss fetches, a concurrent miss waits, and the stored reply reaches both") {
     val cache      = new ClientCache(1024)
@@ -24,14 +28,14 @@ class ClientCacheSpec extends munit.FunSuite {
     cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 1000L)
     assertEquals(get1(), Some(Success(frame("bar"))))
     assertEquals(get2(), Some(Success(frame("bar"))))
-    assertEquals(cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()), ClientCache.Acquire.Hit(frame("bar")))
+    assertEquals(hitFrame(cache.acquire(cmd, Vector(key("foo")), 0L, _ => ())), frame("bar"))
   }
 
   test("absolute TTL: a hit before expiry, a refetch at expiry") {
     val cache = new ClientCache(1024)
     val cmd   = key("GET foo")
     cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 1000L)
-    assertEquals(cache.acquire(cmd, Vector(key("foo")), 999L, _ => ()), ClientCache.Acquire.Hit(frame("bar")))
+    assertEquals(hitFrame(cache.acquire(cmd, Vector(key("foo")), 999L, _ => ())), frame("bar"))
     assertEquals(cache.acquire(cmd, Vector(key("foo")), 1000L, _ => ()), ClientCache.Acquire.Fetch)
   }
 
@@ -52,6 +56,32 @@ class ClientCacheSpec extends munit.FunSuite {
     cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
     cache.flush()
     assertEquals(cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()), ClientCache.Acquire.Fetch)
+  }
+
+  test("a hit carries the epoch it was acquired under, and a flush retires it") {
+    val cache                             = new ClientCache(1024)
+    val cmd                               = key("GET foo")
+    cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
+    val ClientCache.Acquire.Hit(_, epoch) = cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()): @unchecked
+    assert(cache.isCurrent(epoch))
+    cache.flush()
+    assert(!cache.isCurrent(epoch))
+  }
+
+  test("a server flush retires a hit for refetch, a topology flush retires it for reroute") {
+    val cache                              = new ClientCache(1024)
+    val cmd                                = key("GET foo")
+    cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
+    val ClientCache.Acquire.Hit(_, served) = cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()): @unchecked
+    cache.flush()
+    assert(!cache.isCurrent(served))
+    assert(!cache.rerouteRetired(served), "a server flush leaves ownership unchanged: refetch, not reroute")
+
+    cache.store(cmd, Vector(key("foo")), frame("bar"), 0L, 10000L)
+    val ClientCache.Acquire.Hit(_, moved) = cache.acquire(cmd, Vector(key("foo")), 0L, _ => ()): @unchecked
+    cache.flushForReroute()
+    assert(!cache.isCurrent(moved))
+    assert(cache.rerouteRetired(moved), "a topology flush requires rerouting to the new owner")
   }
 
   test("an invalidation mid-flight delivers the reply but does not cache it") {
@@ -82,6 +112,6 @@ class ClientCacheSpec extends munit.FunSuite {
     cache.store(key("GET a"), Vector(key("a")), big, 0L, 10000L)
     cache.store(key("GET b"), Vector(key("b")), big, 0L, 10000L)
     assertEquals(cache.acquire(key("GET a"), Vector(key("a")), 0L, _ => ()), ClientCache.Acquire.Fetch) // evicted
-    assertEquals(cache.acquire(key("GET b"), Vector(key("b")), 0L, _ => ()), ClientCache.Acquire.Hit(big))
+    assertEquals(hitFrame(cache.acquire(key("GET b"), Vector(key("b")), 0L, _ => ())), big)
   }
 }

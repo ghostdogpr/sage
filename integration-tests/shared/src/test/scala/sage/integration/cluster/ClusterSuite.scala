@@ -65,6 +65,12 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
       else CIO.sleep(100.millis).flatMap(_ => awaitClusterOk(admin0, attempts - 1))
     }
 
+  private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
+    client.cached(Commands.get[String, String](key), 1.minute).flatMap { value =>
+      if (value.contains(expected) || attempts <= 1) CIO.value(value)
+      else CIO.sleep(100.millis).flatMap(_ => awaitCached(client, key, expected, attempts - 1))
+    }
+
   // one shared container per suite, so the cluster is formed once and all routing exercised in a single test
   test("single-key commands, pipelines, and transactions route against a real cluster") {
     withContainers { server =>
@@ -249,6 +255,35 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
               fcall match {
                 case Frame.BulkString(b) => assertEquals(b.asUtf8String, "v")
                 case other               => fail(s"expected bulk string, got $other")
+              }
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
+  test("a cluster cached read is served locally and a server-side write evicts it via invalidation") {
+    withContainers { server =>
+      val host       = server.host
+      val port       = server.mappedPort(6379)
+      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
+      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
+
+      val program =
+        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
+          connectAndUse(clustered) { reader =>
+            connectAndUse(clustered) { writer =>
+              for {
+                _       <- writer.set("csc:cluster", "v1")
+                first   <- reader.cached(Commands.get[String, String]("csc:cluster"), 1.minute)
+                hit     <- reader.cached(Commands.get[String, String]("csc:cluster"), 1.minute)
+                _       <- writer.set("csc:cluster", "v2")
+                evicted <- awaitCached(reader, "csc:cluster", "v2", attempts = 50)
+              } yield {
+                assertEquals(first, Some("v1"))
+                assertEquals(hit, Some("v1"))
+                assertEquals(evicted, Some("v2"))
               }
             }
           }

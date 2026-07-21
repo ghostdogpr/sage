@@ -39,4 +39,11 @@ Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configur
 
 ## Topology
 
-Caching works on a standalone client and on a master-replica client (cached reads run on the master, which holds the tracking-backed cache; a failover starts the new master's cache cold). On a cluster client, `cached` currently runs the read without caching so the call stays portable; per-node tracking through redirects and failover is a planned follow-up. In every case the result is correct, you only forgo the local hit where caching is not active.
+Caching works on every topology. On a standalone or master-replica client, cached reads run on the master, which holds the tracking-backed cache. On a cluster client, each slot-owning master owns its own cache, and a cached read is routed to the master owning the key's slot (never a replica, whatever the read policy). The same call is therefore portable across all three topologies; the result is always correct, you only forgo the local hit where caching is not active.
+
+## Limitations
+
+- The cache budget is per master, not global: `clientCache.maxBytes` sizes each master's cache, so a cluster's effective ceiling is `maxBytes` times the number of masters.
+- A cache goes cold whenever its connection is replaced or its master stops owning the slot: a reconnect, a cluster failover, or a resharding that moves the slot off its master all start it fresh. Steady-state hit rates are unaffected; only these (rare) events reset it.
+- During a live slot migration a cached read of a migrating key runs uncached (following the `ASK` redirect once) until the migration completes.
+- A server that speaks RESP3 but rejects `CLIENT TRACKING` (an ACL or proxy restriction) still connects; cached reads there run uncached, exactly as when caching is disabled.
