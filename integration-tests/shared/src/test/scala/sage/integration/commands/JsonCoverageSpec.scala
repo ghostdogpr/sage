@@ -12,7 +12,7 @@ import sage.commands.CommandSamples
 import sage.integration.Images
 
 /**
-  * The extension-aware coverage spec for the JSON module. It runs the module-bearing images (Redis, which bundles ReJSON, and Valkey Bundle,
+  * The extension-aware coverage spec for the JSON module. It runs the module-bearing images (Redis, which bundles RedisJSON, and Valkey Bundle,
   * which ships valkey-json), takes the union of every `JSON.*` command each server reports, and requires an exact partition against the
   * implemented samples plus [[JsonCoverage.skipped]]. Unlike the core spec it does not drop subcommand names, so each `JSON.DEBUG` subcommand
   * must be implemented or explicitly skipped and a new one fails until acknowledged. Redis-only commands are covered through Redis and
@@ -34,12 +34,16 @@ class JsonCoverageSpec extends munit.FunSuite with TestContainersForAll with Cov
     assertEquals(implemented.intersect(JsonCoverage.skipped.keySet), Set.empty[String])
   }
 
-  test("the JSON partition is exact against both module-bearing servers") {
+  test("the JSON partition is exact per backend and the backend differences are acknowledged") {
     withContainers { case redis and valkey =>
       (for {
         redisJson  <- jsonCommands(configOf(redis))
         valkeyJson <- jsonCommands(configOf(valkey))
-      } yield assertExactPartition("JSON", redisJson ++ valkeyJson, implemented, JsonCoverage.skipped.keySet)).unsafeRun
+      } yield {
+        assertExactPartition("JSON", redisJson ++ valkeyJson, implemented, JsonCoverage.skipped.keySet)
+        assertEquals(redisJson -- valkeyJson, JsonCoverage.redisOnly, "Redis-only JSON commands drifted from the acknowledged set")
+        assertEquals(valkeyJson -- redisJson, JsonCoverage.valkeyOnly, "Valkey-only JSON commands drifted from the acknowledged set")
+      }).unsafeRun
     }
   }
 

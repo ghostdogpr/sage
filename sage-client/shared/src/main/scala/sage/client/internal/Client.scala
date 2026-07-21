@@ -1237,7 +1237,9 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   /**
     * Sets the JSON value at `path` in the document at `key`, creating the document if absent. The value must be raw JSON text: the built-in
     * `String` codec passes it through verbatim, so you supply valid JSON (a scalar string is `"quoted"`); structured documents come from your
-    * own `ValueCodec`. Returns `false` only when `condition` (`NX`/`XX`) made the server skip the write. See [[sage.commands.JsonPath]].
+    * own `ValueCodec`. Returns `false` when no write occurred: Redis reports this both when `condition` (`NX`/`XX`) is not met and when
+    * a target intermediate path is missing and cannot be created, whereas Valkey signals that missing-path case as an error instead. See
+    * [[sage.commands.JsonPath]].
     */
   final def jsonSet[V: ValueCodec](key: K, path: JsonPath, value: V, condition: JsonSetCondition = JsonSetCondition.Always): F[Boolean] =
     run(Json.jsonSet(key, path, value, condition))
