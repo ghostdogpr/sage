@@ -120,5 +120,6 @@ The common surface behaves the same on both servers. A few points differ:
 
 - `jsonMerge` (RFC 7386 merge) is available on Redis only; the Valkey Bundle 9.1.0 does not ship `JSON.MERGE` yet. It is present in the Sage API and works against Redis.
 - The two servers frame the replies to `jsonType`, `jsonNumIncrBy`, and `jsonNumMultBy` differently on the wire. Sage decodes both into the same result type, so your code does not see the difference.
+- `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but raises a server error on Valkey.
 
 Redis 8 ships JSON built in, but the stock `valkey` image carries no modules, so the tests run against JSON-capable images: `redis:8.8.0` and `valkey/valkey-bundle` (which adds valkey-json).
