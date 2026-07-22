@@ -7,6 +7,7 @@ import kyo.compat.*
 import sage.{Message, PatternMessage}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Pipeline}
+import sage.ratelimit.Decision
 
 /**
   * Lowers the runtime's [[Client]] from the kyo-compat carrier `CIO` to a Backend's native effect `F`, written once for every Backend. A
@@ -43,6 +44,9 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
   final private[sage] def scanTargets: F[Vector[ScanTarget]] = lower(underlying.scanTargets)
 
   final private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = lower(underlying.runOn(target, command))
+
+  final override private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
+    lower(executor.evalSha(underlying, subject, cost))
 
   final def close: F[Unit] = lower(underlying.close)
 

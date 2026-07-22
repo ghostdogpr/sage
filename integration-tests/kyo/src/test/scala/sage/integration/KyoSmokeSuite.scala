@@ -157,4 +157,29 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       KyoApp.Unsafe.runAndBlock(15L.seconds)(program).getOrThrow
     }
   }
+
+  test("client.rateLimiter admits up to capacity then denies") {
+    withContainers { server =>
+      val program: Unit < (Scope & Abort[Throwable] & Async) =
+        for {
+          client <- SageClient.scoped(configOf(server))
+          rl      = client.rateLimiter[String](
+                      RateLimit(
+                        capacity = 2,
+                        refillTokens = 1,
+                        refillPeriod = scala.concurrent.duration.FiniteDuration(1L, java.util.concurrent.TimeUnit.HOURS)
+                      )
+                    )
+          first  <- rl.tryAcquire("smoke")
+          second <- rl.tryAcquire("smoke")
+          denied <- rl.tryAcquire("smoke")
+        } yield {
+          assert(first.isAllowed && second.isAllowed, "the first two are admitted")
+          assert(!denied.isAllowed, "the third is denied once the bucket empties")
+        }
+
+      import AllowUnsafe.embrace.danger
+      KyoApp.Unsafe.runAndBlock(15L.seconds)(program).getOrThrow
+    }
+  }
 }

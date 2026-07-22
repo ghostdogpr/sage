@@ -27,6 +27,7 @@ export sage.client.{
   TrustSource,
   WatchdogConfig
 }
+export sage.client.RateLimiterClient
 // the cluster node a Listener observes (SageEvent), the only cluster type users name
 export sage.cluster.Node
 // codec typeclasses (built-in givens live in their companions, already in implicit scope)
@@ -135,3 +136,5 @@ export sage.commands.{as, asArray, asArrayOf, asLong, asString}
 export sage.commands.{Attempt, BroadcastReduce, Command, Commands, Execution}
 // raw-Frame escape hatch for eval/fcall replies
 export sage.protocol.Frame
+// built-in token-bucket rate limiter
+export sage.ratelimit.{Decision, RateLimit, RateLimiter}

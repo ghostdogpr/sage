@@ -31,6 +31,7 @@ export default defineConfig({
           { text: 'Streams', link: '/streams' },
           { text: 'JSON', link: '/json' },
           { text: 'Client-side caching', link: '/client-side-caching' },
+          { text: 'Rate limiting', link: '/rate-limiting' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Error handling', link: '/error-handling' },
           { text: 'Observability', link: '/observability' },

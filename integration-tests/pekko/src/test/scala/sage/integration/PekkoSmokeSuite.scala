@@ -157,4 +157,20 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
       }
     }
   }
+
+  test("client.rateLimiter admits up to capacity then denies") {
+    withContainers { server =>
+      val (first, second, denied) = withClientMat(server) { (client, _, system) =>
+        given scala.concurrent.ExecutionContext = system.executionContext
+        val rl                                  = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = 1.hour))
+        for {
+          a <- rl.tryAcquire("smoke")
+          b <- rl.tryAcquire("smoke")
+          c <- rl.tryAcquire("smoke")
+        } yield (a, b, c)
+      }
+      assert(first.isAllowed && second.isAllowed, "the first two are admitted")
+      assert(!denied.isAllowed, "the third is denied once the bucket empties")
+    }
+  }
 }

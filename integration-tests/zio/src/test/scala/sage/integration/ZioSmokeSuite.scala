@@ -239,4 +239,24 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
     }
   }
+
+  test("client.rateLimiter admits up to capacity then denies") {
+    withContainers { server =>
+      val program: Task[Unit] =
+        ZIO.scoped {
+          for {
+            client <- SageClient.scoped(configOf(server))
+            rl      = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = FiniteDuration(1L, TimeUnit.HOURS)))
+            first  <- rl.tryAcquire("smoke")
+            second <- rl.tryAcquire("smoke")
+            denied <- rl.tryAcquire("smoke")
+          } yield {
+            assert(first.isAllowed && second.isAllowed, "the first two are admitted")
+            assert(!denied.isAllowed, "the third is denied once the bucket empties")
+          }
+        }
+
+      Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
+    }
+  }
 }

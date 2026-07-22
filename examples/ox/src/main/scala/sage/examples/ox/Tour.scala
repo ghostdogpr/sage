@@ -18,6 +18,7 @@ import sage.backend.*
     TransactionsExample.run(client)
     PubSubExample.run(client)
     CachedReadsExample.run(client)
+    RateLimiterExample.run(client)
     StreamsExample.run(client)
   }
 }

@@ -1,5 +1,7 @@
 package sage.integration
 
+import scala.concurrent.duration.*
+
 import ox.{fork, supervised}
 
 import sage.*
@@ -161,6 +163,20 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         }
         val pairs  = client.zScanAll[String]("zscan", count = Some(10L)).runToList()
         assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
+      }
+    }
+  }
+
+  test("client.rateLimiter admits up to capacity then denies") {
+    withContainers { server =>
+      supervised {
+        val client = SageClient.scoped(configOf(server))
+        val rl     = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = 1.hour))
+        val first  = rl.tryAcquire("smoke")
+        val second = rl.tryAcquire("smoke")
+        val denied = rl.tryAcquire("smoke")
+        assert(first.isAllowed && second.isAllowed, "the first two are admitted")
+        assert(!denied.isAllowed, "the third is denied once the bucket empties")
       }
     }
   }

@@ -173,7 +173,14 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
     Test / testOptions += {
       val isAnchor     = moduleName.value.endsWith("-future")
       val isDesignated = moduleName.value.endsWith("-zio")
-      val onceOnly     = Set("sage.integration.commands.", "sage.integration.security.", "sage.integration.cluster.", "sage.integration.masterreplica.")
+      val onceOnly     =
+        Set(
+          "sage.integration.commands.",
+          "sage.integration.security.",
+          "sage.integration.cluster.",
+          "sage.integration.masterreplica.",
+          "sage.integration.ratelimit."
+        )
       Tests.Filter(name => !isAnchor && (isDesignated || !onceOnly.exists(name.startsWith)))
     }
   )

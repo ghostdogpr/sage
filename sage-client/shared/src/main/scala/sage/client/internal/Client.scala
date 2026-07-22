@@ -13,11 +13,12 @@ import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.*
-import sage.client.{AuthConfig, BackoffConfig, DedicatedPoolConfig, Endpoint, PubSubConfig, ReadFrom, SageConfig, Topology, WatchdogConfig}
+import sage.client.*
 import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 import sage.protocol.Frame
+import sage.ratelimit.{Decision, RateLimit, RateLimiter}
 
 /**
   * The command surface shared by [[Client]] and [[TransactionScope]]: every command as a concrete method delegating to [[run]], so anything
@@ -2221,6 +2222,18 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   def transaction[A](body: TransactionScope[F, K] => F[A]): F[A]
 
   /**
+    * A distributed token-bucket rate limiter over this connection, with subject key type `RK`. See [[RateLimiterClient]].
+    */
+  def rateLimiter[RK](limit: RateLimit, namespace: String = RateLimiter.defaultNamespace)(
+    using KeyCodec[RK]
+  ): RateLimiterClient[F, RK] =
+    new RateLimiterClient[F, RK](this, RateLimitExecutor(RateLimiter[RK](limit, namespace)))
+
+  // default is a plain EVAL; native backends override for EVALSHA in LoweredClient
+  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
+    executor.eval(this, subject, cost)
+
+  /**
     * Subscribes to classic channels, returning a [[Subscription]] handle the backend wraps into its native stream of [[Message]]s.
     */
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
@@ -2255,17 +2268,19 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   override def as[K2](using KeyCodec[K2]): Client[F, K2] = {
     val self = this
     new Client[F, K2] {
-      def run[A](command: Command[A]): F[A]                                     = self.run(command)
-      def cached[A](command: Command[A], ttl: FiniteDuration): F[A]             = self.cached(command, ttl)
-      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]           = self.pipeline(p)
-      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]      = self.pipelineAttempt(p)
-      def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]           = self.transaction(scope => body(scope.as[K2]))
-      def subscribeChannels[V: ValueCodec](channel: String, rest: String*)      = self.subscribeChannels(channel, rest*)
-      def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)      = self.subscribePatterns(pattern, rest*)
-      def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*) = self.subscribeShardChannels(channel, rest*)
-      private[sage] def scanTargets: F[Vector[ScanTarget]]                      = self.scanTargets
-      private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = self.runOn(target, command)
-      def close: F[Unit]                                                        = self.close
+      def run[A](command: Command[A]): F[A]                                                                                  = self.run(command)
+      def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                          = self.cached(command, ttl)
+      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                        = self.pipeline(p)
+      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                   = self.pipelineAttempt(p)
+      def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]                                                        = self.transaction(scope => body(scope.as[K2]))
+      def subscribeChannels[V: ValueCodec](channel: String, rest: String*)                                                   = self.subscribeChannels(channel, rest*)
+      def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)                                                   = self.subscribePatterns(pattern, rest*)
+      def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*)                                              = self.subscribeShardChannels(channel, rest*)
+      private[sage] def scanTargets: F[Vector[ScanTarget]]                                                                   = self.scanTargets
+      private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]                                              = self.runOn(target, command)
+      override private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
+        self.rateLimitAcquire(executor, subject, cost)
+      def close: F[Unit]                                                                                                     = self.close
     }
   }
 }

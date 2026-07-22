@@ -1,5 +1,7 @@
 package sage.integration
 
+import scala.concurrent.duration.*
+
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
@@ -96,6 +98,25 @@ class CeSmokeSuite extends ServerSuite(Images.redis) {
               assertEquals(messages.map(_.channel).toSet, Set("smoke"))
               assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
             }
+          }
+        }
+
+      program.unsafeRunSync()
+    }
+  }
+
+  test("client.rateLimiter admits up to capacity then denies") {
+    withContainers { server =>
+      val program: IO[Unit] =
+        SageClient.resource(configOf(server)).use { client =>
+          val rl = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = 1.hour))
+          for {
+            first  <- rl.tryAcquire("smoke")
+            second <- rl.tryAcquire("smoke")
+            denied <- rl.tryAcquire("smoke")
+          } yield {
+            assert(first.isAllowed && second.isAllowed, "the first two are admitted")
+            assert(!denied.isAllowed, "the third is denied once the bucket empties")
           }
         }
 
