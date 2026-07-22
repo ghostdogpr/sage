@@ -18,7 +18,7 @@ Every sage failure is a `SageException`, a single sealed hierarchy you can match
 | `TimedOut(message)` | A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout; bound a command's own duration with your backend's timeout combinator. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
 | `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |
-| `InvalidArgument(message)` | An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking or all-masters command in a pipeline or transaction, or a hand-built command a cluster client cannot route by key. A programming error, rejected before any server call. |
+| `InvalidArgument(message)` | An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction, or a command a cluster client cannot serve as routed (an all-masters command in a cluster pipeline, a cluster-wide result in a single-node transaction, a hand-built command it cannot route by key). A programming error, rejected before any server call. |
 
 ## Branching on the failure
 
