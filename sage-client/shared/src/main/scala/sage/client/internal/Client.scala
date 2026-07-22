@@ -2229,9 +2229,8 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   ): RateLimiterClient[F, RK] =
     new RateLimiterClient[F, RK](this, RateLimitExecutor(RateLimiter[RK](limit, namespace)))
 
-  // default is a plain EVAL; native backends override for EVALSHA in LoweredClient
-  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
-    executor.eval(this, subject, cost)
+  // implementations validate client-side, then run the cached-script EVALSHA path
+  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision]
 
   /**
     * Subscribes to classic channels, returning a [[Subscription]] handle the backend wraps into its native stream of [[Message]]s.
@@ -2268,19 +2267,19 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   override def as[K2](using KeyCodec[K2]): Client[F, K2] = {
     val self = this
     new Client[F, K2] {
-      def run[A](command: Command[A]): F[A]                                                                                  = self.run(command)
-      def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                          = self.cached(command, ttl)
-      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                        = self.pipeline(p)
-      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                   = self.pipelineAttempt(p)
-      def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]                                                        = self.transaction(scope => body(scope.as[K2]))
-      def subscribeChannels[V: ValueCodec](channel: String, rest: String*)                                                   = self.subscribeChannels(channel, rest*)
-      def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)                                                   = self.subscribePatterns(pattern, rest*)
-      def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*)                                              = self.subscribeShardChannels(channel, rest*)
-      private[sage] def scanTargets: F[Vector[ScanTarget]]                                                                   = self.scanTargets
-      private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]                                              = self.runOn(target, command)
-      override private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
-        self.rateLimitAcquire(executor, subject, cost)
-      def close: F[Unit]                                                                                                     = self.close
+      def run[A](command: Command[A]): F[A]                                                                                        = self.run(command)
+      def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                                = self.cached(command, ttl)
+      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                              = self.pipeline(p)
+      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                         = self.pipelineAttempt(p)
+      def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]                                                              = self.transaction(scope => body(scope.as[K2]))
+      def subscribeChannels[V: ValueCodec](channel: String, rest: String*)                                                         = self.subscribeChannels(channel, rest*)
+      def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)                                                         = self.subscribePatterns(pattern, rest*)
+      def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*)                                                    = self.subscribeShardChannels(channel, rest*)
+      private[sage] def scanTargets: F[Vector[ScanTarget]]                                                                         = self.scanTargets
+      private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]                                                    = self.runOn(target, command)
+      private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
+        self.rateLimitAcquire(executor, subject, cost, peek)
+      def close: F[Unit]                                                                                                           = self.close
     }
   }
 }
@@ -2338,7 +2337,7 @@ object Client {
     */
   def connect(config: SageConfig): CIO[Client[CIO, String]] =
     validate(config) match {
-      case Some(problem) => CIO.fail(new IllegalArgumentException(problem))
+      case Some(problem) => CIO.fail(InvalidArgument(problem))
       case None          =>
         config.topology match {
           case Topology.Standalone(endpoint)                => connectStandalone(config, endpoint)
@@ -2349,8 +2348,7 @@ object Client {
         }
     }
 
-  // a misconfigured client is a programmer error, surfaced through the connect effect (never thrown from a constructor) and deliberately
-  // outside the sealed hierarchy, like the other usage guards
+  // a misconfigured client is a programmer error, surfaced through the connect effect rather than thrown from a constructor
   private def validate(config: SageConfig): Option[String] = {
     // pingInterval/pingTimeout are inert when the watchdog is disabled, so don't reject them then
     val watchdog =
@@ -2519,6 +2517,9 @@ object Client {
 
     def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] = run(command)
 
+    private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
+      executor.evalSha(this, subject, cost, peek)
+
     private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
 
@@ -2547,7 +2548,7 @@ object Client {
       if (p.commands.isEmpty)
         CIO.value(Vector.empty)
       else if (p.commands.exists(_.isBlocking))
-        CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
+        CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
         CIO.async { complete =>
           Client.submitBatchOnOne(events, p.commands, Events.startSpans(events, p.commands), connection.submitAll, complete)
@@ -2674,7 +2675,7 @@ object Client {
       if (isReleased)
         CIO.fail(TxSupport.scopeReleasedError)
       else if (command.isBlocking)
-        CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
+        CIO.fail(InvalidArgument("a Transaction cannot run blocking commands; run them individually on the client"))
       else
         CIO.async[A] { complete =>
           val tracked = Events.trackSpan(events, command, complete)
@@ -2706,7 +2707,7 @@ object Client {
       else if (p.commands.isEmpty && !armed.get)
         CIO.value(Some(Vector.empty))
       else if (p.commands.exists(_.isBlocking))
-        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
+        CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
       else
         CIO
           .async[Vector[Frame]] { complete =>

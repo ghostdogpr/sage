@@ -13,9 +13,9 @@ enum Decision {
   case Allowed(remaining: Long, resetAfter: FiniteDuration)
 
   /**
-    * Rejected, with `retryAfter` until enough tokens are available.
+    * Rejected, with the untouched `remaining` balance (a denial consumes nothing) and `retryAfter` until enough tokens are available.
     */
-  case Denied(retryAfter: FiniteDuration)
+  case Denied(remaining: Long, retryAfter: FiniteDuration)
 
   def isAllowed: Boolean = this match {
     case _: Allowed => true
@@ -23,10 +23,10 @@ enum Decision {
   }
 
   /**
-    * Tokens left in the bucket, or `0` when denied.
+    * Tokens left in the bucket; a denial consumes nothing, so this is the untouched balance.
     */
-  def remainingOrZero: Long = this match {
+  def remainingTokens: Long = this match {
     case Allowed(remaining, _) => remaining
-    case _: Denied             => 0L
+    case Denied(remaining, _)  => remaining
   }
 }

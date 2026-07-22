@@ -13,12 +13,13 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, Message, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{BroadcastReduce, Cluster, Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
+import sage.ratelimit.Decision
 
 /**
   * The cluster runtime: one [[NodeClient]] bundle per master, a refreshable [[ClusterTopology]], and the routing/redirect/failover state
@@ -145,6 +146,9 @@ final private[client] class ClusterLive(
           dispatch(command, cluster.maxRedirects, complete, allowReplica = false, cacheCtx = Cached(ttl.toMillis, deferred))
         )
       }
+
+  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
+    executor.evalSha(this, subject, cost, peek)
 
   // SCAN cursors are node-local, so a full SCAN must sweep every slot-owning master; a reshard mid-scan can still miss or duplicate keys
   def scanTargets: CIO[Vector[ScanTarget]] =
@@ -680,8 +684,8 @@ final private[client] class ClusterLive(
   private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
     CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
 
-  private def malformedKeys(name: String): IllegalArgumentException =
-    new IllegalArgumentException(s"$name: declared key positions fall outside its arguments")
+  private def malformedKeys(name: String): InvalidArgument =
+    InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
   // a transaction never follows a redirect, so the caller's retry depends on the topology actually refreshing — bypass the throttle window
   // (single-flight still collapses concurrent refreshes); ordinary commands re-route, so they use the throttled triggerRefresh
@@ -694,14 +698,12 @@ final private[client] class ClusterLive(
       CIO.value(Vector.empty)
     // a blocking command is a programmer error: fail the whole effect up front, never a single position
     else if (p.commands.exists(_.isBlocking))
-      CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
+      CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
     // a Pipeline batches per node, so an all-masters command (SCRIPT LOAD, FUNCTION LOAD, KEYS, …) would touch one node only and either
     // break a later key-routed EVALSHA/FCALL or return a partial keyspace; fail up front rather than partially apply it
     else if (p.commands.exists(_.allMasters))
       CIO.fail(
-        new IllegalArgumentException(
-          "a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD, KEYS); run it individually on the client"
-        )
+        InvalidArgument("a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD, KEYS); run it individually on the client")
       )
     else
       CIO.async { complete =>
@@ -888,10 +890,10 @@ final private[client] class ClusterLive(
 
     def run[A](command: Command[A]): CIO[A] =
       if (command.isBlocking)
-        CIO.fail(new IllegalArgumentException("a Transaction cannot run blocking commands; run them individually on the client"))
+        CIO.fail(InvalidArgument("a Transaction cannot run blocking commands; run them individually on the client"))
       else if (command.requiresClusterWideTxResult)
         CIO.fail(
-          new IllegalArgumentException(
+          InvalidArgument(
             s"${command.name} returns a cluster-wide result that a single-node Transaction cannot produce; run it individually on the client"
           )
         )
@@ -946,10 +948,10 @@ final private[client] class ClusterLive(
       else if (p.commands.isEmpty && !armed.get)
         CIO.value(Some(Vector.empty))
       else if (p.commands.exists(_.isBlocking))
-        CIO.fail(new IllegalArgumentException("a Transaction cannot carry blocking commands; run them individually on the client"))
+        CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
       else if (p.commands.exists(_.requiresClusterWideTxResult))
         CIO.fail(
-          new IllegalArgumentException(
+          InvalidArgument(
             "a Transaction cannot carry a command that returns a cluster-wide result; run it individually on the client"
           )
         )

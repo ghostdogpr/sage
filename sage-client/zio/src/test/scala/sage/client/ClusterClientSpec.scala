@@ -7,7 +7,7 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, NotConnected, ServerError}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
 import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
@@ -1115,7 +1115,7 @@ class ClusterClientSpec extends munit.FunSuite {
       .unsafeRun
       .failed
       .map { error =>
-        assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+        assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
         assert(!fixture.written(nodeA).exists(_.contains("DBSIZE")), "a rejected DBSIZE must not reach the wire")
       }
   }
@@ -1129,7 +1129,7 @@ class ClusterClientSpec extends munit.FunSuite {
       .unsafeRun
       .failed
       .map { error =>
-        assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+        assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
         assert(!fixture.written(nodeA).exists(_.contains("MULTI")), "a rejected exec must not open MULTI")
       }
   }

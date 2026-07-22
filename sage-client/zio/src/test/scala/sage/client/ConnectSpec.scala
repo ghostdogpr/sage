@@ -9,7 +9,7 @@ import scala.jdk.CollectionConverters.*
 import kyo.compat.*
 
 import sage.{Bytes, Outcome, SageEvent, SageListener}
-import sage.SageException.{ConnectionFailed, NotConnected, UnsupportedServer}
+import sage.SageException.{ConnectionFailed, InvalidArgument, NotConnected, UnsupportedServer}
 import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
 import sage.commands.{Command, Execution, Server}
 import sage.protocol.Frame
@@ -75,31 +75,31 @@ class ConnectSpec extends munit.FunSuite {
 
   test("readFrom = Replica on a Standalone topology is rejected before connecting") {
     Client.connect(SageConfig(readFrom = ReadFrom.Replica)).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
   test("a MasterReplica topology with no seeds is rejected") {
     Client.connect(SageConfig(topology = Topology.MasterReplica(Vector.empty))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
   test("a non-positive finite dedicatedPool.idleTimeout is rejected by validation, not thrown after connecting") {
     Client.connect(SageConfig(dedicatedPool = DedicatedPoolConfig(idleTimeout = Duration.Zero))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
   test("a non-finite, non-Inf dedicatedPool.idleTimeout (MinusInf) is rejected; only Duration.Inf disables the sweep") {
     Client.connect(SageConfig(dedicatedPool = DedicatedPoolConfig(idleTimeout = Duration.MinusInf))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
   test("clientCache.maxBytes <= 0 with caching enabled is rejected by validation") {
     Client.connect(SageConfig(clientCache = CacheConfig(enabled = true, maxBytes = 0L))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
@@ -111,8 +111,8 @@ class ConnectSpec extends munit.FunSuite {
       .unsafeRun
       .map(_ => assert(true))
       .recover {
-        case _: IllegalArgumentException => fail("ReplicaPreferred on Standalone should pass validation")
-        case _                           => assert(true) // a connect failure (no server) is fine; only validation matters here
+        case _: InvalidArgument => fail("ReplicaPreferred on Standalone should pass validation")
+        case _                  => assert(true) // a connect failure (no server) is fine; only validation matters here
       }
   }
 
@@ -161,7 +161,7 @@ class ConnectSpec extends munit.FunSuite {
     val (factory, transport) = scripted(helloThenPong)
     val blocking             = Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking))
     Client.connectWith(factory).flatMap(_.pipeline(blocking)).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
       assertEquals(transport().written.count(_.asUtf8String.contains("BLPOP")), 0)
     }
   }
@@ -198,7 +198,7 @@ class ConnectSpec extends munit.FunSuite {
 
   test("a sub-millisecond duration is rejected before connecting rather than truncating to 0ms") {
     Client.connect(SageConfig(connectTimeout = 500.micros)).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
       assert(error.getMessage.contains("at least 1ms"), s"unexpected message: ${error.getMessage}")
     }
   }

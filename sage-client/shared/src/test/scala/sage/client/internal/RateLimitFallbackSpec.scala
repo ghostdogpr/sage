@@ -5,7 +5,7 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
-import sage.SageException.ServerError
+import sage.SageException.{InvalidArgument, ServerError}
 import sage.commands.Command
 import sage.ratelimit.{Decision, RateLimit, RateLimiter}
 
@@ -30,7 +30,7 @@ class RateLimitFallbackSpec extends munit.FunSuite {
       }
     }
     for {
-      result <- executor().evalSha(runner, "k", 1).unsafeRun
+      result <- executor().evalSha(runner, "k", 1, peek = false).unsafeRun
     } yield {
       assertEquals(result, Decision.Allowed(3, 1.second))
       assertEquals(loads, 1)
@@ -46,7 +46,7 @@ class RateLimitFallbackSpec extends munit.FunSuite {
         else CIO.fail(ServerError("WRONGTYPE", "nope"))
     }
     for {
-      failed <- executor().evalSha(runner, "k", 1).unsafeRun.failed
+      failed <- executor().evalSha(runner, "k", 1, peek = false).unsafeRun.failed
     } yield {
       failed match {
         case e: ServerError => assertEquals(e.code, "WRONGTYPE")
@@ -63,11 +63,11 @@ class RateLimitFallbackSpec extends munit.FunSuite {
     }
     val bad    = new RateLimitExecutor[String](RateLimiter[String](RateLimit(0, 1, 1.second)))
     for {
-      failed <- bad.evalSha(runner, "k", 1).unsafeRun.failed
+      failed <- bad.evalSha(runner, "k", 1, peek = false).unsafeRun.failed
     } yield {
       failed match {
-        case e: IllegalArgumentException => assert(e.getMessage.contains("capacity must be > 0"), e.getMessage)
-        case other                       => fail(s"expected IllegalArgumentException, got $other")
+        case e: InvalidArgument => assert(e.getMessage.contains("capacity must be > 0"), e.getMessage)
+        case other              => fail(s"expected InvalidArgument, got $other")
       }
       assertEquals(calls, 0)
     }

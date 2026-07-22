@@ -2,7 +2,7 @@ package sage.client
 
 import sage.client.internal.{Client, RateLimitExecutor}
 import sage.commands.Command
-import sage.ratelimit.{Decision, RateLimiter}
+import sage.ratelimit.Decision
 
 /**
   * A rate limiter bound to a client, returned by `client.rateLimiter(...)`. Checks come back in the backend's own effect `F`.
@@ -12,12 +12,13 @@ final class RateLimiterClient[F[_], K] private[sage] (client: Client[F, ?], exec
   /**
     * Consume `cost` tokens for `subject` if available, returning a [[Decision]]: `Allowed` with the tokens left, otherwise `Denied`.
     */
-  def tryAcquire(subject: K, cost: Long = 1): F[Decision] = client.rateLimitAcquire(executor, subject, cost)
+  def tryAcquire(subject: K, cost: Long = 1): F[Decision] = client.rateLimitAcquire(executor, subject, cost, peek = false)
 
   /**
-    * Report the current standing for `subject` without consuming.
+    * Report the current standing for `subject` without consuming: `Allowed` while at least one token is available, otherwise `Denied`
+    * with the wait until one is.
     */
-  def peek(subject: K): F[Decision] = client.rateLimitAcquire(executor, subject, RateLimiter.peekCost)
+  def peek(subject: K): F[Decision] = client.rateLimitAcquire(executor, subject, cost = 1, peek = true)
 
   /**
     * Clear `subject`'s bucket, so its next request starts from full capacity.

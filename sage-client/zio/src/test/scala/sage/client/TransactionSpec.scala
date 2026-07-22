@@ -5,7 +5,7 @@ import scala.concurrent.ExecutionContext
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{ServerError, TransactionDiscarded}
+import sage.SageException.{InvalidArgument, ServerError, TransactionDiscarded}
 import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
 import sage.commands.{Command, Commands, Execution}
 import sage.protocol.Frame
@@ -161,7 +161,7 @@ class TransactionSpec extends munit.FunSuite {
     val factory  = scripted(Seq(ok))
     val blocking = Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking))
     Client.connectWith(factory).flatMap(_.transaction(_.exec(blocking))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
     }
   }
 
@@ -169,7 +169,7 @@ class TransactionSpec extends munit.FunSuite {
     val (factory, transport) = capturing(scripted(Seq(ok)))
     val blocking             = Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking)
     Client.connectWith(factory).flatMap(_.transaction(_.run(blocking))).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[IllegalArgumentException], s"unexpected error: $error")
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
       assert(!transport().written.exists(_.asUtf8String.contains("BLPOP")), "the blocking command must not reach the socket")
     }
   }

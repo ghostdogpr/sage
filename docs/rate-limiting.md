@@ -42,9 +42,9 @@ RateLimit(permits = 100, per = 1.second, burst = 200) // 100/s sustained, bursti
 `Decision` is an ordinary returned value, never a thrown error: an admitted or rejected request is a normal outcome, not a failure.
 
 - `isAllowed`: whether the request was admitted.
-- `remainingOrZero`: tokens left in the bucket, or `0` when denied. Convenient for an `X-RateLimit-Remaining` header.
+- `remainingTokens`: tokens left in the bucket. A denial consumes nothing, so it reports the untouched balance. Convenient for an `X-RateLimit-Remaining` header.
 - `Allowed(remaining, resetAfter)`: `resetAfter` is the time until the bucket refills to full.
-- `Denied(retryAfter)`: `retryAfter` is the time until enough tokens are available. Convenient for a `Retry-After` header.
+- `Denied(remaining, retryAfter)`: `retryAfter` is the time until enough tokens are available. Convenient for a `Retry-After` header.
 
 There is no blocking `acquire`: `tryAcquire` never waits. To retry, sleep for `retryAfter` at the call site and try again.
 
@@ -52,7 +52,7 @@ Waits are reported at microsecond resolution. After an exceptionally large serve
 
 ## Peek and reset
 
-- `peek(subject)` reports the current standing without consuming. The bucket is still refilled by elapsed time, but no tokens are taken.
+- `peek(subject)` reports the current standing without consuming: `Allowed` while at least one token is available, otherwise `Denied` with the wait until one is. The bucket is still refilled by elapsed time, but no tokens are taken.
 - `reset(subject)` clears a subject's bucket, so its next request starts from full capacity.
 
 ## Cost and subjects
@@ -78,9 +78,9 @@ A policy and a `cost` must satisfy:
 - `capacity` greater than 0, `refillTokens` greater than 0, `refillPeriod` at least one microsecond.
 - `capacity`, `refillTokens`, and `refillPeriod` in microseconds each within `2^53` (the range a server-side Lua number represents exactly).
 - `capacity` multiplied by `refillPeriod` in microseconds within `2^53`, so the refill arithmetic stays exact on the server.
-- `cost` in the range `0` to `capacity`.
+- `cost` in the range `1` to `capacity`.
 
-Violations are a programming error, not a runtime outcome. On the `rateLimiter` factory path (`tryAcquire`, `peek`) a bad policy or cost fails with an `IllegalArgumentException` through the effect before any server call. On the composable `command` path the server rejects the call with an error and never modifies the bucket.
+Violations are a programming error, not a runtime outcome. On the `rateLimiter` factory path (`tryAcquire`, `peek`) a bad policy or cost fails with a typed `SageException.InvalidArgument` through the effect before any server call. On the composable `command` path the server rejects the call with an error and never modifies the bucket.
 
 ## When the store is unreachable
 

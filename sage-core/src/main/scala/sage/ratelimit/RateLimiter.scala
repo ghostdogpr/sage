@@ -20,12 +20,13 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
     * Consume `cost` tokens for `subject` if the bucket holds them, returning [[Decision.Allowed]] with the tokens left, otherwise
     * [[Decision.Denied]] with the time until `cost` tokens are available. Non-blocking: it never waits.
     */
-  def tryAcquire(subject: K, cost: Long = 1): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost)
+  def tryAcquire(subject: K, cost: Long = 1): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost, peek = false)
 
   /**
-    * Report the current standing for `subject` without consuming: the bucket is still refilled by elapsed time, but no tokens are taken.
+    * Report the current standing for `subject` without consuming: [[Decision.Allowed]] while at least one token is available, otherwise
+    * [[Decision.Denied]] with the wait until one is. The bucket is still refilled by elapsed time, but no tokens are taken.
     */
-  def peek(subject: K): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, RateLimiter.peekCost)
+  def peek(subject: K): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost = 1, peek = true)
 
   /**
     * Clear `subject`'s bucket, so its next request starts from full capacity.
@@ -60,27 +61,25 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   private[sage] def validate(cost: Long): Option[String] = policyProblem match {
     case problem @ Some(_) => problem
     case None              =>
-      if (cost < 0) Some("cost must be >= 0")
+      if (cost < 1) Some("cost must be >= 1")
       else if (cost > limit.capacity) Some(s"cost $cost cannot exceed capacity ${limit.capacity}")
       else None
   }
 
-  private[sage] def evalSha(subject: K, cost: Long): Command[Decision] = eval(RateLimiter.Invocation.EvalSha, subject, cost)
+  private[sage] def evalSha(subject: K, cost: Long, peek: Boolean = false): Command[Decision] =
+    eval(RateLimiter.Invocation.EvalSha, subject, cost, peek)
 
   // test-only: drive the script's clock with an explicit timestamp
   private[sage] def tryAcquireAt(subject: K, cost: Long, nowMicros: Long): Command[Decision] =
-    eval(RateLimiter.Invocation.Eval, subject, cost, Some(nowMicros))
+    eval(RateLimiter.Invocation.Eval, subject, cost, peek = false, Some(nowMicros))
 
   private[sage] def loadCommand: Command[String] = Scripting.scriptLoad(RateLimiter.script)
 
   // length-framing keeps namespace `a` + subject `b:c` distinct from namespace `a:b` + subject `c`
   private def keyBytes(subject: K): Bytes = Bytes.concat(Vector(keyPrefix, keyCodec.encode(subject)))
 
-  private def eval(invocation: RateLimiter.Invocation, subject: K, cost: Long, now: Option[Long] = None): Command[Decision] = {
-    val costArgument =
-      if (cost == 1L) RateLimiter.defaultCostArgument
-      else if (cost == RateLimiter.peekCost) RateLimiter.peekCostArgument
-      else Bytes.utf8(cost.toString)
+  private def eval(invocation: RateLimiter.Invocation, subject: K, cost: Long, peek: Boolean, now: Option[Long] = None): Command[Decision] = {
+    val costArgument = if (cost == 1L) RateLimiter.defaultCostArgument else Bytes.utf8(cost.toString)
     val nowArgument  = now match {
       case None        => Bytes.empty // empty injected time => server TIME
       case Some(value) => Bytes.utf8(value.toString)
@@ -94,7 +93,8 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
       periodArgument,
       policySignatureArgument,
       costArgument,
-      nowArgument
+      nowArgument,
+      if (peek) RateLimiter.peekArgument else Bytes.empty
     )
     Command(invocation.verb, RateLimiter.scriptKeyIndices, allArgs, RateLimiter.decode, Execution.Ordinary)
   }
@@ -103,13 +103,15 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
 object RateLimiter {
 
   // Reply: [allowed, remaining, catchupMicros, retryMicros, resetMicros] (catch-up kept separate so Scala sums the parts past Lua's 2^53).
-  // State hash: `t` tokens, `ts` last-refill micros, `f` sub-token remainder, `v` policy signature. ARGV[6] overrides server TIME for tests.
+  // State hash: `t` tokens, `ts` last-refill micros, `f` sub-token remainder, `v` policy signature. ARGV[6] overrides server TIME for
+  // tests; ARGV[7] = '1' is a peek: decide on `cost`, consume nothing.
   val script: String =
     """local capacity = tonumber(ARGV[1])
       |local refill_tokens = tonumber(ARGV[2])
       |local refill_period = tonumber(ARGV[3])
       |local cost = tonumber(ARGV[5])
       |local injected = ARGV[6]
+      |local is_peek = ARGV[7] == '1'
       |
       |-- last guard for the EVAL path; each field is bounded on its raw decimal string so a value just past 2^53 is rejected, not rounded in
       |local max_exact = 9007199254740992 -- 2^53
@@ -128,7 +130,7 @@ object RateLimiter {
       |if capacity <= 0 or refill_tokens < 1 or refill_period < 1
       |   or not within_exact(ARGV[1]) or not within_exact(ARGV[2]) or not within_exact(ARGV[3]) or not within_exact(ARGV[5])
       |   or product_over
-      |   or cost < 0 or cost > capacity then
+      |   or cost < 1 or cost > capacity then
       |  return redis.error_reply('SAGE invalid rate-limit policy or cost')
       |end
       |
@@ -188,7 +190,7 @@ object RateLimiter {
       |local allowed = 0
       |local retry_wait = 0
       |if tokens >= cost then
-      |  tokens = tokens - cost
+      |  if not is_peek then tokens = tokens - cost end
       |  allowed = 1
       |else
       |  retry_wait = math.ceil(((cost - tokens) * refill_period - frac) / refill_tokens)
@@ -241,14 +243,12 @@ object RateLimiter {
           reset      <- resetFrame.asLong
           retryAfter <- waitDuration(catchup, retry)
           resetAfter <- waitDuration(catchup, reset)
-        } yield if (allowed == 1L) Decision.Allowed(remaining, resetAfter) else Decision.Denied(retryAfter)
+        } yield if (allowed == 1L) Decision.Allowed(remaining, resetAfter) else Decision.Denied(remaining, retryAfter)
       case other                                                                      =>
         Left(DecodeError("rate-limit reply [allowed, remaining, catchup, retry, reset]", s"array of ${other.length} elements"))
     }
 
   private[sage] val defaultNamespace: String = "ratelimit"
-
-  private[sage] val peekCost: Long = 0L
 
   // Lua numbers are IEEE doubles, so integers (and capacity * refillPeriod) are held to 2^53 to stay exact
   private[sage] val maxExactInt: Long = 1L << 53
@@ -256,7 +256,7 @@ object RateLimiter {
   private val scriptKeyIndices: Vector[Int] = Vector(2) // 0 = script/sha, 1 = numkeys, 2 = the single key
   private val oneKeyArgument: Bytes         = Bytes.utf8("1")
   private val defaultCostArgument: Bytes    = Bytes.utf8("1")
-  private val peekCostArgument: Bytes       = Bytes.utf8("0")
+  private val peekArgument: Bytes           = Bytes.utf8("1")
 
   private enum Invocation(val verb: String, val scriptReference: Bytes) {
     case Eval    extends Invocation("EVAL", Bytes.utf8(script))

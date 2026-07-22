@@ -45,8 +45,8 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   final private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = lower(underlying.runOn(target, command))
 
-  final override private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long): F[Decision] =
-    lower(executor.evalSha(underlying, subject, cost))
+  final private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
+    lower(underlying.rateLimitAcquire(executor, subject, cost, peek))
 
   final def close: F[Unit] = lower(underlying.close)
 

@@ -1,5 +1,9 @@
 package sage.integration
 
+import java.util.concurrent.TimeUnit
+
+import scala.concurrent.duration.FiniteDuration
+
 import kyo.*
 
 import sage.*
@@ -163,13 +167,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       val program: Unit < (Scope & Abort[Throwable] & Async) =
         for {
           client <- SageClient.scoped(configOf(server))
-          rl      = client.rateLimiter[String](
-                      RateLimit(
-                        capacity = 2,
-                        refillTokens = 1,
-                        refillPeriod = scala.concurrent.duration.FiniteDuration(1L, java.util.concurrent.TimeUnit.HOURS)
-                      )
-                    )
+          rl      = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = FiniteDuration(1L, TimeUnit.HOURS)))
           first  <- rl.tryAcquire("smoke")
           second <- rl.tryAcquire("smoke")
           denied <- rl.tryAcquire("smoke")

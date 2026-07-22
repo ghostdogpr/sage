@@ -11,11 +11,12 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{CommandSpan, Message, Outcome, PatternMessage, SageException}
-import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
+import sage.SageException.{ConnectionLost, InvalidArgument, NotConnected, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
 import sage.commands.{Command, Connection, Pipeline, Role, Server}
+import sage.ratelimit.Decision
 
 /**
   * The master-replica runtime: a non-cluster deployment of one master and its replicas, discovered from seeds by asking each its `ROLE`.
@@ -297,7 +298,7 @@ final private[client] class MasterReplicaLive(
   private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
     if (p.commands.isEmpty) CIO.value(Vector.empty)
     else if (p.commands.exists(_.isBlocking))
-      CIO.fail(new IllegalArgumentException("a Pipeline cannot carry blocking commands; run them individually on the client"))
+      CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
     else
       CIO.async { complete =>
         val spans                                      = Events.startSpans(events, p.commands)
@@ -430,6 +431,9 @@ final private[client] class MasterReplicaLive(
 
   def scanTargets: CIO[Vector[ScanTarget]]                      = CIO.value(Vector(ScanTarget.any))
   def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] = run(command)
+
+  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
+    executor.evalSha(this, subject, cost, peek)
 
   def close: CIO[Unit] = CIO.blocking(closeAll())
 

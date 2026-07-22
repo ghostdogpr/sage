@@ -13,6 +13,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
 
   private def limit(capacity: Long) = RateLimit(capacity, refillTokens = 1, refillPeriod = 1.hour)
 
+  private def bucketKey(subject: String) = s"9:ratelimit:$subject"
+
   test("admits up to capacity, then denies (via client.rateLimiter)") {
     withClient { client =>
       val rl = client.rateLimiter[String](limit(3))
@@ -23,11 +25,13 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         d4 <- rl.tryAcquire("admit")
       } yield {
         assert(d1.isAllowed, "1st allowed")
-        assert(d3.isAllowed && d3.remainingOrZero == 0L, "3rd allowed, empties bucket")
+        assert(d3.isAllowed && d3.remainingTokens == 0L, "3rd allowed, empties bucket")
         assert(!d4.isAllowed, "4th denied")
         d4 match {
-          case Decision.Denied(retryAfter) => assert(retryAfter > Duration.Zero)
-          case other                       => fail(s"expected Denied, got $other")
+          case Decision.Denied(remaining, retryAfter) =>
+            assertEquals(remaining, 0L)
+            assert(retryAfter > Duration.Zero)
+          case other                                  => fail(s"expected Denied, got $other")
         }
       }
     }
@@ -40,8 +44,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         first  <- rl.tryAcquire("cost", cost = 3)
         second <- rl.tryAcquire("cost", cost = 3)
       } yield {
-        assert(first.isAllowed && first.remainingOrZero == 2L, "cost 3 of 5 leaves 2")
-        assert(!second.isAllowed, "second cost-3 exceeds the 2 left")
+        assert(first.isAllowed && first.remainingTokens == 2L, "cost 3 of 5 leaves 2")
+        assert(!second.isAllowed && second.remainingTokens == 2L, "second cost-3 exceeds the 2 left, which stay untouched")
       }
     }
   }
@@ -54,8 +58,23 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         peeked <- rl.peek("peek")
         after  <- rl.tryAcquire("peek")
       } yield {
-        assertEquals(peeked.remainingOrZero, 2L)
-        assert(after.isAllowed && after.remainingOrZero == 1L, "peek left the 2 tokens intact")
+        assert(peeked.isAllowed && peeked.remainingTokens == 2L)
+        assert(after.isAllowed && after.remainingTokens == 1L, "peek left the 2 tokens intact")
+      }
+    }
+  }
+
+  test("peek on an empty bucket is denied, still consuming nothing") {
+    withClient { client =>
+      val rl = client.rateLimiter[String](limit(1))
+      for {
+        _      <- rl.tryAcquire("peek-empty")
+        peeked <- rl.peek("peek-empty")
+      } yield peeked match {
+        case Decision.Denied(remaining, retryAfter) =>
+          assertEquals(remaining, 0L)
+          assert(retryAfter > Duration.Zero, "reports the wait until one token is available")
+        case other                                  => fail(s"expected Denied, got $other")
       }
     }
   }
@@ -85,8 +104,22 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         second <- client.run(rl.evalSha("es", 1))
       } yield {
         assertEquals(loaded, RateLimiter.sha)
-        assert(first.isAllowed && first.remainingOrZero == 1L)
-        assert(second.isAllowed && second.remainingOrZero == 0L)
+        assert(first.isAllowed && first.remainingTokens == 1L)
+        assert(second.isAllowed && second.remainingTokens == 0L)
+      }
+    }
+  }
+
+  test("the native EVALSHA path recovers from NOSCRIPT by loading the script and retrying") {
+    withClient { client =>
+      val rl = client.rateLimiter[String](limit(2), namespace = "noscript")
+      for {
+        _      <- client.scriptFlush()
+        first  <- rl.tryAcquire("cold")
+        second <- rl.tryAcquire("cold")
+      } yield {
+        assert(first.isAllowed && first.remainingTokens == 1L, "a cold server is recovered by one load-and-retry")
+        assert(second.isAllowed && second.remainingTokens == 0L, "the loaded script then serves EVALSHA directly")
       }
     }
   }
@@ -164,8 +197,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         rest <- client.run(rl.tryAcquireAt("big", 500, t0 + 1_000_000L))
         over <- client.run(rl.tryAcquireAt("big", 1, t0 + 1_000_000L))
       } yield {
-        assert(half.isAllowed && half.remainingOrZero == 0L, "0.5s accrues exactly 500 tokens")
-        assert(rest.isAllowed && rest.remainingOrZero == 0L, "the next 0.5s accrues the other 500")
+        assert(half.isAllowed && half.remainingTokens == 0L, "0.5s accrues exactly 500 tokens")
+        assert(rest.isAllowed && rest.remainingTokens == 0L, "the next 0.5s accrues the other 500")
         assert(!over.isAllowed, "and no more than the rate allows")
       }
     }
@@ -181,9 +214,9 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         partial <- client.run(rl.tryAcquireAt("refill", 3, t0 + 300_000L))
         empty   <- client.run(rl.tryAcquireAt("refill", 1, t0 + 300_000L))
       } yield {
-        assert(drain.isAllowed && drain.remainingOrZero == 0L, "cost 10 empties a 10-token bucket")
+        assert(drain.isAllowed && drain.remainingTokens == 0L, "cost 10 empties a 10-token bucket")
         assert(!denied.isAllowed, "no tokens have refilled at t0")
-        assert(partial.isAllowed && partial.remainingOrZero == 0L, "0.3s refills exactly 3 tokens")
+        assert(partial.isAllowed && partial.remainingTokens == 0L, "0.3s refills exactly 3 tokens")
         assert(!empty.isAllowed, "and no more")
       }
     }
@@ -200,7 +233,7 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         extra    <- client.run(rl.tryAcquireAt("clock", 1, t0 + 100_000L))
       } yield {
         assert(!backward.isAllowed, "a regressed clock credits nothing")
-        assert(recover.isAllowed && recover.remainingOrZero == 0L, "credit resumes from the high-water mark, not doubled")
+        assert(recover.isAllowed && recover.remainingTokens == 0L, "credit resumes from the high-water mark, not doubled")
         assert(!extra.isAllowed)
       }
     }
@@ -218,7 +251,7 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
       } yield {
         assert(!early.isAllowed, "just under 1/3 s accrues no whole token")
         assert(!repeat.isAllowed, "the same timestamp does not mint from re-counted elapsed")
-        assert(one.isAllowed && one.remainingOrZero == 0L, "one whole token at 333_334 micros, no more")
+        assert(one.isAllowed && one.remainingTokens == 0L, "one whole token at 333_334 micros, no more")
       }
     }
   }
@@ -230,11 +263,11 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
       for {
         _      <- client.run(rl.tryAcquireAt("roll", 1, t0))
         rolled <- client.run(rl.tryAcquireAt("roll", 1, t0 - 4_000_000L))
-        pttl   <- client.pTtl("9:ratelimit:roll")
+        pttl   <- client.pTtl(bucketKey("roll"))
       } yield {
         rolled match {
-          case Decision.Denied(retryAfter) => assertEquals(retryAfter, 5.seconds)
-          case other                       => fail(s"expected Denied, got $other")
+          case Decision.Denied(_, retryAfter) => assertEquals(retryAfter, 5.seconds)
+          case other                          => fail(s"expected Denied, got $other")
         }
         pttl match {
           case Ttl.Expires(remaining) => assert(remaining > 2.seconds && remaining <= 5.seconds, s"pttl was $remaining")
@@ -253,8 +286,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         _      <- client.run(rl.tryAcquireAt("big-period", 1, t0))
         rolled <- client.run(rl.tryAcquireAt("big-period", 1, t0 - 9L))
       } yield rolled match {
-        case Decision.Denied(retryAfter) => assertEquals(retryAfter, (period + 9L).micros)
-        case other                       => fail(s"expected Denied, got $other")
+        case Decision.Denied(_, retryAfter) => assertEquals(retryAfter, (period + 9L).micros)
+        case other                          => fail(s"expected Denied, got $other")
       }
     }
   }
@@ -272,8 +305,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         rolled    <- client.run(original.tryAcquireAt("same-subject", 1, t0 - 500_000L))
         recovered <- client.run(original.tryAcquireAt("same-subject", 1, t0))
       } yield {
-        assertEquals(old.remainingOrZero, 9L)
-        assert(firstNew.isAllowed && firstNew.remainingOrZero == 0L, "old credit is capped at the tightened capacity")
+        assertEquals(old.remainingTokens, 9L)
+        assert(firstNew.isAllowed && firstNew.remainingTokens == 0L, "old credit is capped at the tightened capacity")
         assert(!oldAgain.isAllowed, "the old policy cannot recreate a full bucket during an overlapping deployment")
         assert(!secondNew.isAllowed, "alternating policy signatures cannot mint tokens")
         assert(!rolled.isAllowed, "a policy switch during clock rollback credits nothing")
@@ -292,13 +325,13 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         }
       for {
         _            <- client.run(rl.tryAcquireAt("missing", 1, 4_000_000_000_000L))
-        _            <- client.hDel("9:ratelimit:missing", "ts")
+        _            <- client.hDel(bucketKey("missing"), "ts")
         missingField <- rejected("missing")
         _            <- client.run(rl.tryAcquireAt("out-of-range", 1, 4_000_000_000_000L))
-        _            <- client.hSet("9:ratelimit:out-of-range", ("t", "2"))
+        _            <- client.hSet(bucketKey("out-of-range"), ("t", "2"))
         outOfRange   <- rejected("out-of-range")
         _            <- client.run(rl.tryAcquireAt("full-with-fraction", 1, 4_000_000_000_000L))
-        _            <- client.hSet("9:ratelimit:full-with-fraction", ("t", "1"), ("f", "1"))
+        _            <- client.hSet(bucketKey("full-with-fraction"), ("t", "1"), ("f", "1"))
         fullFraction <- rejected("full-with-fraction")
       } yield {
         assert(missingField, "a missing field must not restore capacity")

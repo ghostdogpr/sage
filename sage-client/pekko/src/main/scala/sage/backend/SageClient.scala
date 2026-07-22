@@ -11,7 +11,7 @@ import org.apache.pekko.actor.typed.ActorSystem
 import org.apache.pekko.stream.{KillSwitches, Materializer, SystemMaterializer, UniqueKillSwitch}
 import org.apache.pekko.stream.scaladsl.{Keep, Sink, Source}
 
-import sage.{Message, PatternMessage}
+import sage.{Message, PatternMessage, SageException}
 import sage.client.SageConfig
 import sage.client.internal.{Client, LoweredClient, Paged, ScanStep, ScanTarget, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
@@ -249,11 +249,11 @@ object SageClient {
     ran.transformWith(result => client.close.transformWith(_ => Future.fromTry(result)))
   }
 
-  private[backend] def boundedPoll(block: BlockTimeout, method: String): Either[IllegalArgumentException, BlockTimeout] =
+  private[backend] def boundedPoll(block: BlockTimeout, method: String): Either[SageException.InvalidArgument, BlockTimeout] =
     block match {
       case BlockTimeout.Forever =>
         Left(
-          new IllegalArgumentException(
+          SageException.InvalidArgument(
             s"$method cannot use BlockTimeout.Forever on the Pekko backend; Future cannot interrupt an in-flight blocking read"
           )
         )

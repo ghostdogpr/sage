@@ -68,7 +68,7 @@ private[internal] object TxSupport {
       case _                          => None
     }
 
-  // a programmer error, deliberately outside the sealed hierarchy (like the blocking-command guard): a scope captured past its block
+  // a state error, not an argument, so deliberately outside the sealed hierarchy: a scope captured past its block
   def scopeReleasedError: IllegalStateException =
     new IllegalStateException("transaction scope used after its block returned")
 

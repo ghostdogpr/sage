@@ -151,8 +151,8 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
           e1 <- tailed
           e2 <- consumed
         } yield {
-          assert(e1.isInstanceOf[IllegalArgumentException], e1)
-          assert(e2.isInstanceOf[IllegalArgumentException], e2)
+          assert(e1.isInstanceOf[SageException.InvalidArgument], e1)
+          assert(e2.isInstanceOf[SageException.InvalidArgument], e2)
         }
       }
     }

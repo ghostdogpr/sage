@@ -20,8 +20,9 @@ class RateLimiterSpec extends munit.FunSuite {
     assertEquals(command.keyIndices, Vector(2))
     assert(command.args(2).sameBytes(Bytes.utf8("9:ratelimit:user")))     // length-framed namespace
     assertEquals(command.args(1).asUtf8String, "1")                       // numkeys
-    assertEquals(command.args.last.asUtf8String, "")                      // injected time empty => server TIME
-    assertEquals(command.args(command.args.length - 2).asUtf8String, "2") // cost
+    assertEquals(command.args.last.asUtf8String, "")                      // empty peek flag => consume
+    assertEquals(command.args(command.args.length - 2).asUtf8String, "")  // injected time empty => server TIME
+    assertEquals(command.args(command.args.length - 3).asUtf8String, "2") // cost
   }
 
   test("a custom namespace prefixes the key") {
@@ -32,18 +33,18 @@ class RateLimiterSpec extends munit.FunSuite {
     assertEquals(limiter.tryAcquire("u").decode(reply(1, 8, 0, 0, 500000)), Right(Decision.Allowed(8, 500000.micros)))
   }
 
-  test("decode maps a denied reply to Denied with retry-after") {
-    assertEquals(limiter.tryAcquire("u").decode(reply(0, 0, 0, 250000, 1000000)), Right(Decision.Denied(250000.micros)))
+  test("decode maps a denied reply to Denied with the untouched balance and retry-after") {
+    assertEquals(limiter.tryAcquire("u").decode(reply(0, 5, 0, 250000, 1000000)), Right(Decision.Denied(5, 250000.micros)))
   }
 
   test("decode combines exact timing components and saturates only at the documented maximum") {
     val maxExact    = 1L << 53
     val pastMaximum = RateLimiter.maximumReportedWait.toMicros - maxExact + 1L
     assertEquals(RateLimiter.maximumReportedWait.toMicros, Long.MaxValue / 1000L)
-    assertEquals(limiter.tryAcquire("u").decode(reply(0, 0, 9, maxExact, 0)), Right(Decision.Denied((maxExact + 9).micros)))
+    assertEquals(limiter.tryAcquire("u").decode(reply(0, 0, 9, maxExact, 0)), Right(Decision.Denied(0, (maxExact + 9).micros)))
     assertEquals(
       limiter.tryAcquire("u").decode(reply(0, 0, maxExact, pastMaximum, 0)),
-      Right(Decision.Denied(RateLimiter.maximumReportedWait))
+      Right(Decision.Denied(0, RateLimiter.maximumReportedWait))
     )
   }
 
@@ -52,8 +53,10 @@ class RateLimiterSpec extends munit.FunSuite {
     assert(limiter.tryAcquire("u").decode(Frame.Array(Vector(Frame.Integer(1)))).isLeft)
   }
 
-  test("peek builds a zero-cost check") {
-    assertEquals(limiter.peek("u").args(limiter.peek("u").args.length - 2).asUtf8String, "0")
+  test("peek builds a cost-1 probe that consumes nothing") {
+    val command = limiter.peek("u")
+    assertEquals(command.args(command.args.length - 3).asUtf8String, "1") // cost
+    assertEquals(command.args.last.asUtf8String, "1")                     // peek flag
   }
 
   test("reset builds a DEL on the namespaced key") {
@@ -77,9 +80,9 @@ class RateLimiterSpec extends munit.FunSuite {
 
   test("Decision helpers") {
     assert(Decision.Allowed(5, 1.second).isAllowed)
-    assertEquals(Decision.Allowed(5, 1.second).remainingOrZero, 5L)
-    assert(!Decision.Denied(1.second).isAllowed)
-    assertEquals(Decision.Denied(1.second).remainingOrZero, 0L)
+    assertEquals(Decision.Allowed(5, 1.second).remainingTokens, 5L)
+    assert(!Decision.Denied(2, 1.second).isAllowed)
+    assertEquals(Decision.Denied(2, 1.second).remainingTokens, 2L)
   }
 
   test("RateLimit smart constructors") {
@@ -89,7 +92,6 @@ class RateLimiterSpec extends munit.FunSuite {
 
   test("validate accepts a usable policy and cost") {
     assertEquals(limiter.validate(1), None)
-    assertEquals(limiter.validate(0), None) // peek
     assertEquals(RateLimiter[String](RateLimit.perSecond(10)).validate(10), None)
   }
 
@@ -117,7 +119,8 @@ class RateLimiterSpec extends munit.FunSuite {
       RateLimiter[String](RateLimit(3, 1, 3002399751580331L.micros)).validate(1),
       Some("capacity times refillPeriod must be <= 9007199254740992 microseconds (so refill math stays exact)")
     )
-    assertEquals(limiter.validate(-1), Some("cost must be >= 0"))
+    assertEquals(limiter.validate(0), Some("cost must be >= 1"))
+    assertEquals(limiter.validate(-1), Some("cost must be >= 1"))
     assertEquals(limiter.validate(11), Some("cost 11 cannot exceed capacity 10"))
   }
 

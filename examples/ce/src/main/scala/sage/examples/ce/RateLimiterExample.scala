@@ -16,8 +16,8 @@ object RateLimiterExample {
       first  <- limiter.tryAcquire("user:42")
       second <- limiter.tryAcquire("user:42")
       third  <- limiter.tryAcquire("user:42")
-      _      <- IO.println(s"1st allowed=${first.isAllowed} remaining=${first.remainingOrZero}")
-      _      <- IO.println(s"2nd allowed=${second.isAllowed} remaining=${second.remainingOrZero}")
+      _      <- IO.println(s"1st allowed=${first.isAllowed} remaining=${first.remainingTokens}")
+      _      <- IO.println(s"2nd allowed=${second.isAllowed} remaining=${second.remainingTokens}")
       _      <- IO.println(s"3rd allowed=${third.isAllowed}")
     } yield ()
   }
