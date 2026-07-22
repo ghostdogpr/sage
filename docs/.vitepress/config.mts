@@ -15,6 +15,7 @@ export default defineConfig({
       { text: 'Documentation', link: '/getting-started' },
       { text: 'FAQ', link: '/faq' },
       { text: 'About', link: '/about' },
+      { text: 'Scaladoc', link: 'https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/' },
     ],
 
     logo: { light: '/sage.svg', dark: '/sage-dark.svg' },
