@@ -10,7 +10,7 @@ import sage.ratelimit.{Decision, RateLimiter}
 final class RateLimiterClient[F[_], K] private[sage] (client: Client[F, ?], executor: RateLimitExecutor[K]) {
 
   /**
-    * Consume `cost` tokens for `subject` if available, returning [[Decision.Allowed]] with the tokens left, otherwise [[Decision.Denied]].
+    * Consume `cost` tokens for `subject` if available, returning a [[Decision]]: `Allowed` with the tokens left, otherwise `Denied`.
     */
   def tryAcquire(subject: K, cost: Long = 1): F[Decision] = client.rateLimitAcquire(executor, subject, cost)
 
