@@ -33,17 +33,19 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   def reset(subject: K): Command[Unit] =
     Command("DEL", Command.FirstKey, Vector(keyBytes(subject)), _ => Right(()))
 
-  private val capacityText       = limit.capacity.toString
-  private val refillTokensText   = limit.refillTokens.toString
-  private val refillPeriodMicros = limit.refillPeriodMicros
-  private val refillPeriodText   = refillPeriodMicros.toString
-  private val policyArgs         =
-    Vector(capacityText, refillTokensText, refillPeriodText, s"$capacityText:$refillTokensText:$refillPeriodText").map(Bytes.utf8)
-  private val keyPrefix          = {
+  private val capacityText            = limit.capacity.toString
+  private val refillTokensText        = limit.refillTokens.toString
+  private val refillPeriodMicros      = limit.refillPeriodMicros
+  private val refillPeriodText        = refillPeriodMicros.toString
+  private val capacityArgument        = Bytes.utf8(capacityText)
+  private val refillArgument          = Bytes.utf8(refillTokensText)
+  private val periodArgument          = Bytes.utf8(refillPeriodText)
+  private val policySignatureArgument = Bytes.utf8(s"$capacityText:$refillTokensText:$refillPeriodText")
+  private val keyPrefix               = {
     val ns = Bytes.utf8(namespace)
     Bytes.concat(Vector(Bytes.utf8(s"${ns.length}:"), ns, Bytes.utf8(":")))
   }
-  private val policyProblem      =
+  private val policyProblem           =
     if (limit.capacity <= 0) Some("capacity must be > 0")
     else if (limit.refillTokens <= 0) Some("refillTokens must be > 0")
     else if (refillPeriodMicros < 1) Some("refillPeriod must be at least 1 microsecond")
@@ -55,12 +57,13 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
       Some(s"capacity times refillPeriod must be <= ${RateLimiter.maxExactInt} microseconds (so refill math stays exact)")
     else None
 
-  private[sage] def validate(cost: Long): Option[String] =
-    policyProblem.orElse {
+  private[sage] def validate(cost: Long): Option[String] = policyProblem match {
+    case problem @ Some(_) => problem
+    case None              =>
       if (cost < 0) Some("cost must be >= 0")
       else if (cost > limit.capacity) Some(s"cost $cost cannot exceed capacity ${limit.capacity}")
       else None
-    }
+  }
 
   private[sage] def evalSha(subject: K, cost: Long): Command[Decision] = eval(RateLimiter.Invocation.EvalSha, subject, cost)
 
@@ -74,11 +77,26 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   private def keyBytes(subject: K): Bytes = Bytes.concat(Vector(keyPrefix, keyCodec.encode(subject)))
 
   private def eval(invocation: RateLimiter.Invocation, subject: K, cost: Long, now: Option[Long] = None): Command[Decision] = {
-    val requestArgs = Vector(cost.toString, now.fold("")(_.toString)).map(Bytes.utf8) // empty injected time => server TIME
-    val argv        = policyArgs ++ requestArgs
-    val allArgs     = Vector(invocation.scriptReference, RateLimiter.oneKeyArgument, keyBytes(subject)) ++ argv
-    val keyIndices  = Vector(2)                                                       // 0 = script/sha, 1 = numkeys, 2 = the single key
-    Command(invocation.verb, keyIndices, allArgs, RateLimiter.decode, Execution.Ordinary)
+    val costArgument =
+      if (cost == 1L) RateLimiter.defaultCostArgument
+      else if (cost == RateLimiter.peekCost) RateLimiter.peekCostArgument
+      else Bytes.utf8(cost.toString)
+    val nowArgument  = now match {
+      case None        => Bytes.empty // empty injected time => server TIME
+      case Some(value) => Bytes.utf8(value.toString)
+    }
+    val allArgs      = Vector(
+      invocation.scriptReference,
+      RateLimiter.oneKeyArgument,
+      keyBytes(subject),
+      capacityArgument,
+      refillArgument,
+      periodArgument,
+      policySignatureArgument,
+      costArgument,
+      nowArgument
+    )
+    Command(invocation.verb, RateLimiter.scriptKeyIndices, allArgs, RateLimiter.decode, Execution.Ordinary)
   }
 }
 
@@ -235,7 +253,10 @@ object RateLimiter {
   // Lua numbers are IEEE doubles, so integers (and capacity * refillPeriod) are held to 2^53 to stay exact
   private[sage] val maxExactInt: Long = 1L << 53
 
-  private val oneKeyArgument: Bytes = Bytes.utf8("1")
+  private val scriptKeyIndices: Vector[Int] = Vector(2) // 0 = script/sha, 1 = numkeys, 2 = the single key
+  private val oneKeyArgument: Bytes         = Bytes.utf8("1")
+  private val defaultCostArgument: Bytes    = Bytes.utf8("1")
+  private val peekCostArgument: Bytes       = Bytes.utf8("0")
 
   private enum Invocation(val verb: String, val scriptReference: Bytes) {
     case Eval    extends Invocation("EVAL", Bytes.utf8(script))

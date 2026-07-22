@@ -86,6 +86,14 @@ Violations are a programming error, not a runtime outcome. On the `rateLimiter` 
 
 A check reaches the server, so it can fail when the server is unreachable. The failure surfaces through the effect `F` for the caller to handle, exactly like any other command. The library hides nothing: decide there whether an outage should admit the request (availability first) or reject it (protection first).
 
+## Capacity planning
+
+Every check is one cached-script request and one constant-time atomic operation on the server. It reads and rewrites one small hash and refreshes its expiry, so it consumes write throughput even when the decision is denied. Concurrent checks are automatically multiplexed by the client, but Redis or Valkey still executes each script serially and atomically.
+
+One key exists for each subject whose bucket is not full. Its expiry is the remaining time until that bucket can refill completely; a full bucket expires almost immediately. Active-key cardinality therefore depends mainly on the number of distinct subjects seen within a full-refill window. Long refill windows and high-cardinality subjects retain more state than short windows over a stable subject set.
+
+For a limiter on every application call, include its operations, memory, replication, and persistence traffic in the store's capacity test. Avoid retrying a denied decision in a tight loop, and use a dedicated deployment or enough cluster shards when limiter traffic would consume a material share of an application's existing store.
+
 ## The composable command
 
 `tryAcquire` runs on the client directly. To pipeline the check or run it yourself instead, `command` returns the underlying `Command` to pass to `client.run`:
