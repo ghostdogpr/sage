@@ -15,7 +15,7 @@ val kyoVersion        = "1.0.0-RC5"
 val zioVersion        = "2.1.26"
 val catsEffectVersion = "3.7.0"
 val fs2Version        = "3.13.0"
-val oxVersion         = "1.0.5"
+val oxVersion         = "1.0.6"
 val pekkoVersion      = "1.6.0"
 
 // competitor baselines for the runtime benchmark harness (dev-only, never published) — see benchmarks/README.md
