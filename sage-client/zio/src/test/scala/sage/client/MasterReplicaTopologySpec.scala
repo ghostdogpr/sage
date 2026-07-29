@@ -4,6 +4,7 @@ import java.io.IOException
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 
 import scala.collection.concurrent.TrieMap
+import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
@@ -52,13 +53,13 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       )
     )
 
-  private def replicaRole(master: Node): Frame =
+  private def replicaRole(master: Node, state: String = "connected"): Frame =
     Frame.Array(
       Vector(
         Frame.BulkString(Bytes.utf8("slave")),
         Frame.BulkString(Bytes.utf8(master.host)),
         Frame.Integer(master.port.toLong),
-        Frame.BulkString(Bytes.utf8("connected")),
+        Frame.BulkString(Bytes.utf8(state)),
         Frame.Integer(0L)
       )
     )
@@ -72,7 +73,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   final private class Fixture(
     seeds: Vector[Node],
     initialRoles: Map[Node, Frame],
-    unreachable: Set[Node] = Set.empty,
+    unreachable: collection.Set[Node] = Set.empty,
     events: Events = Events.disabled,
     minRefreshInterval: FiniteDuration = 50.millis
   ) {
@@ -195,6 +196,68 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     assertEquals(failure.node, Some(reader))
     assert(failure.error.isInstanceOf[IOException], s"unexpected cause: ${failure.error}")
+  }
+
+  test("a singleton refresh reports the address whose connection failed, including a replica's advertised master") {
+    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
+    val delivered = new CountDownLatch(2)
+    val events    = Events(
+      Vector(
+        new SageListener {
+          def onEvent(event: SageEvent): Unit = event match {
+            case failure: SageEvent.Connection.ConnectFailed =>
+              val _ = failures.add(failure)
+              delivered.countDown()
+            case _                                           => ()
+          }
+        }
+      )
+    )
+    val down      = mutable.Set.empty[Node]
+    val fixture   = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary)),
+      unreachable = down,
+      events = events
+    )
+    fixture.live.bootstrapRoles()
+    assert(fixture.write().isSuccess, "the master pool should be established before discovery connections fail")
+
+    down += primary
+    fixture.writesFailReadonly = true
+    assert(fixture.write().isFailure, "READONLY should trigger a singleton role refresh")
+
+    assert(delivered.await(2, TimeUnit.SECONDS), s"expected direct and replica-follow failures, got ${failures.asScala.toVector}")
+    val reported = failures.asScala.toVector
+    fixture.close()
+
+    assertEquals(reported.map(_.node), Vector(Some(primary), Some(primary)))
+    assert(reported.forall(_.error.isInstanceOf[IOException]), s"unexpected causes: ${reported.map(_.error)}")
+  }
+
+  test("a pinned replica is not used until its own ROLE state is connected") {
+    val fixture = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary, state = "sync"))
+    )
+    fixture.live.bootstrapRoles()
+
+    assertEquals(fixture.read(), 1L)
+    assertEquals(fixture.readsServedBy(primary), 1)
+    assertEquals(fixture.readsServedBy(reader), 0)
+
+    fixture.roles.update(reader, replicaRole(primary, state = "connected"))
+    fixture.writesFailReadonly = true
+    assert(fixture.write().isFailure, "READONLY should trigger a later role refresh")
+
+    fixture.awaitTrue(
+      {
+        val _ = fixture.read()
+        fixture.readsServedBy(reader) > 0
+      },
+      "the connected replica was not admitted after the refresh"
+    )
+    fixture.close()
   }
 
   test("several reachable seeds with no master fail as a connection problem") {

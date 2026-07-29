@@ -95,16 +95,16 @@ final private[client] class MasterReplicaLive(
   private def resolvePinned(): Either[Throwable, (Node, Vector[Node])] = {
     var lastError: Throwable = NotConnected()
     val roles                = seeds.flatMap { seed =>
-      try probeRole(seed).map(seed -> _)
+      try probeRole(seed, reportConnectFailure = true).map(seed -> _)
       catch {
         case NonFatal(error) =>
           lastError = error
-          events.emit(SageEvent.Connection.ConnectFailed(Some(seed), error))
           None
       }
     }
     roles.collectFirst { case (node, _: Role.Master) => node } match {
-      case Some(master)          => Right(master -> roles.collect { case (node, _: Role.Replica) => node })
+      case Some(master)          =>
+        Right(master -> roles.collect { case (node, replica: Role.Replica) if replica.state == "connected" => node })
       case None if roles.isEmpty => Left(lastError)
       case None                  => Left(ConnectionFailed("no supplied endpoint reports the master role"))
     }
@@ -128,30 +128,39 @@ final private[client] class MasterReplicaLive(
   }
 
   // probes a node's ROLE; a master answers with its replica list, a replica points at its master (followed once), a sentinel is skipped
-  private def resolveFrom(node: Node): Option[(Node, Vector[Node])] =
-    probeRole(node).flatMap {
+  private def resolveFrom(node: Node, reportConnectFailure: Boolean = false): Option[(Node, Vector[Node])] =
+    probeRole(node, reportConnectFailure).flatMap {
       case Role.Master(_, replicas)       => Some(node -> replicas.map(r => Node(r.host, r.port)))
       case Role.Replica(host, port, _, _) =>
         val master = Node(host, port)
-        probeRole(master).collect { case Role.Master(_, replicas) => master -> replicas.map(r => Node(r.host, r.port)) }
+        probeRole(master, reportConnectFailure).collect { case Role.Master(_, replicas) =>
+          master -> replicas.map(r => Node(r.host, r.port))
+        }
       case _: Role.Sentinel               => None
     }
 
   // a throwaway connection (must not leave a pooled one behind): a connect/handshake failure propagates so bootstrapRoles surfaces it like a
   // standalone connect; a node that handshakes but doesn't answer ROLE yields None
-  private def probeRole(node: Node): Option[Role] = {
-    val nc = NodeClient.connect(
-      nodeFactory(node),
-      scheduler,
-      bootstrap,
-      config.reconnect,
-      config.watchdog,
-      config.connectTimeout,
-      config.closeTimeout,
-      config.dedicatedPool,
-      node = Some(node),
-      events = events
-    )
+  private def probeRole(node: Node, reportConnectFailure: Boolean): Option[Role] = {
+    val nc =
+      try
+        NodeClient.connect(
+          nodeFactory(node),
+          scheduler,
+          bootstrap,
+          config.reconnect,
+          config.watchdog,
+          config.connectTimeout,
+          config.closeTimeout,
+          config.dedicatedPool,
+          node = Some(node),
+          events = events
+        )
+      catch {
+        case NonFatal(error) =>
+          if (reportConnectFailure) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
+          throw error
+      }
     try {
       val latch   = new CountDownLatch(1)
       val outcome = new AtomicReference[Try[Role]]()
@@ -173,7 +182,7 @@ final private[client] class MasterReplicaLive(
         val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
         candidates.iterator
           .flatMap(n =>
-            try resolveFrom(n)
+            try resolveFrom(n, reportConnectFailure = true)
             catch { case NonFatal(_) => None }
           )
           .nextOption()
