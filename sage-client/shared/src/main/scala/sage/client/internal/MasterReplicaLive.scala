@@ -79,8 +79,8 @@ final private[client] class MasterReplicaLive(
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
-  // Several supplied endpoints are the topology itself: keep their addresses and discover only their roles. A lone seed retains the original
-  // discovery behavior, following the addresses in ROLE.
+  // several supplied endpoints are the topology itself: keep their addresses and discover only their roles; a lone seed retains the original
+  // discovery behavior, following the addresses in ROLE
   private val pinnedToSeeds = seeds.sizeIs > 1
 
   private[client] def bootstrapRoles(): Unit =
@@ -91,8 +91,8 @@ final private[client] class MasterReplicaLive(
       }
     else bootstrapDiscovered()
 
-  // Classifies every supplied endpoint by its own ROLE. An endpoint that cannot be opened is omitted, but reported because the successful
-  // topology resolution otherwise hides its failure from the caller.
+  // classifies every supplied endpoint by its own ROLE; an endpoint that cannot be opened is omitted, but reported because the successful
+  // topology resolution otherwise hides its failure from the caller
   private def resolvePinned(): Either[Throwable, (Node, Vector[Node])] = {
     var lastError: Throwable = NotConnected()
     val roles                = seeds.flatMap { seed =>
@@ -111,7 +111,7 @@ final private[client] class MasterReplicaLive(
     }
   }
 
-  // Contacts seeds until one answers ROLE, resolving the master and its advertised replicas. This is the original single-seed discovery path.
+  // contacts seeds until one answers ROLE, resolving the master and its advertised replicas; this is the original single-seed discovery path
   private def bootstrapDiscovered(): Unit = {
     var lastError: Throwable = NotConnected()
     val candidates           = seeds.iterator
