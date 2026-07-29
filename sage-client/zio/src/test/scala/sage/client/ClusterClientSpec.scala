@@ -437,18 +437,30 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
-  test("maxRedirects = 0 refuses to retry a broadcast but still refreshes, so the next one is not stale") {
-    val mid       = Slot.Count / 2
-    val behaviour = (_: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+  test("maxRedirects = 0 refuses to retry a broadcast but still adopts a topology, so the next one succeeds") {
+    val mid        = Slot.Count / 2
+    val departed   = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val behaviour  = (_: Node, text: String) =>
+      if (text.contains("CLUSTER"))
+        Seq(if (departed.get()) wholeClusterOn(nodeA) else slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
       else if (text.contains("SCRIPT")) Seq(Frame.BulkString(Bytes.utf8("digest")))
       else Seq(Frame.Null)
-    val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB), cluster = ClusterConfig(maxRedirects = 0))
+    val fixture    = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB), cluster = ClusterConfig(maxRedirects = 0))
+    val scriptLoad = Scripting.scriptLoad("return 1")
+    def helloes    = fixture.written(nodeB).count(_.contains("HELLO"))
 
-    fixture.live.run(Scripting.scriptLoad("return 1")).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[NotConnected], s"expected NotConnected, got $error")
-      assertEquals(fixture.written(nodeB).count(_.contains("HELLO")), 1, "a zero budget still retried the unreachable node")
-      awaitRefreshed(fixture, nodeA, nodeB)
+    // the first failure's refresh arms the minRefreshInterval throttle, so a throttled second refresh would be dropped
+    fixture.live.run(scriptLoad).unsafeRun.failed.flatMap { _ =>
+      assertEquals(helloes, 1, "a zero budget retried the unreachable node")
+      departed.set(true)
+      fixture.live.run(scriptLoad).unsafeRun.failed.flatMap { error =>
+        assert(error.isInstanceOf[NotConnected], s"expected NotConnected, got $error")
+        val contacted = helloes
+        fixture.live.run(scriptLoad).unsafeRun.map { digest =>
+          assertEquals(digest, "digest")
+          assertEquals(helloes, contacted, "the next broadcast still targeted the departed node")
+        }
+      }
     }
   }
 
@@ -578,6 +590,28 @@ class ClusterClientSpec extends munit.FunSuite {
       assert(fixture.written(nodeR).exists(_.contains("READONLY")), "replica connection did not issue READONLY at setup")
       assert(fixture.written(nodeR).exists(_.contains("GET")), "replica did not receive the read")
       assert(!fixture.written(nodeA).exists(_.contains("GET")), "master received a read it should not have")
+    }
+  }
+
+  test("a replica read's MOVED adopts a topology even with no budget to follow it") {
+    val nodeR     = Node("r", 6379)
+    val moved     = new java.util.concurrent.atomic.AtomicBoolean(true)
+    def slots     =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slots)
+      else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
+      else if (node == nodeR && moved.get()) Seq(Frame.SimpleError(s"MOVED 12182 ${nodeB.host}:${nodeB.port}"))
+      else Seq(Frame.BulkString(Bytes.utf8("value")))
+    val fixture   =
+      new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica, cluster = ClusterConfig(maxRedirects = 0))
+    val get       = Strings.get[String, String]("foo")
+
+    fixture.live.run(get).unsafeRun.failed.flatMap { error =>
+      assert(error.getMessage.contains("exceeded 0 cluster redirects"), error.getMessage)
+      assert(fixture.written(nodeA).count(_.contains("CLUSTER")) >= 2, "the exhausted MOVED did not refresh the topology")
+      moved.set(false)
+      fixture.live.run(get).unsafeRun.map(assertEquals(_, Some("value")))
     }
   }
 

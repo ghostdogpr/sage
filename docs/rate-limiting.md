@@ -2,7 +2,7 @@
 
 A **rate limiter** caps how often something may happen: so many requests per second for an API key, a budget of login attempts per account, a fair-use quota per tenant. Sage ships one built in, so every client has it with no extra dependency.
 
-The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server (they share the keyspace, not a connection). Each check runs its whole decide-and-consume cycle atomically on the server; in steady state that is a single round trip. The script is cached on the server, so a check pays one extra round trip, resending the script body, only when the server has not cached it yet (a cold server, or after `SCRIPT FLUSH`), not per connection. In a cluster that stays on the node owning the subject's key.
+The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server (they share the keyspace, not a connection). Each check runs its whole decide-and-consume cycle atomically on the server; in steady state that is a single round trip. The script is cached on the server, so only a cold server (or one after `SCRIPT FLUSH`) costs a second round trip to resend the script body. In a cluster that resend goes to the node owning the subject's key, like the check itself.
 
 `rateLimiter` binds a policy to the client. Each `tryAcquire` consumes tokens for a subject and returns a `Decision`.
 

@@ -425,6 +425,7 @@ final private[client] class ClusterLive(
             if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
             else onRedirect(node, redirect, command, redirectsLeft, complete)
           case RedirectKind.Moved if redirectsLeft <= 0 =>
+            refreshBeforeFailing()
             complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
           case RedirectKind.Moved                       => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
         }
@@ -512,7 +513,8 @@ final private[client] class ClusterLive(
 
   private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
     val nc = resolve(node)
-    if (nc == null) retryBroadcast(node, command, NotConnected(), attemptsLeft, settle)
+    // the dispatch fast path resolves inline on the caller, which the retry's refresh would block
+    if (nc == null) offload(retryBroadcast(node, command, NotConnected(), attemptsLeft, settle))
     else
       nc.submit[B](
         command,
@@ -535,7 +537,7 @@ final private[client] class ClusterLive(
 
   // a node the refreshed topology no longer lists as a slot-owning master makes this broadcast's target set stale, so it fails unchased
   private def retryBroadcast[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
-    if (attemptsLeft <= 0) { triggerRefresh(); settle(Failure(error)) }
+    if (attemptsLeft <= 0) { refreshBeforeFailing(); settle(Failure(error)) }
     else
       afterBackoff(attemptsLeft) {
         refresh(force = true)
@@ -637,14 +639,15 @@ final private[client] class ClusterLive(
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
   ): Unit = {
-    // a MOVED proves `from` lost the slot; retire its cache and adopt the new ownership even if the retry budget is now exhausted
-    if (redirect.kind == RedirectKind.Moved) { flushNode(from); triggerRefresh() }
-    if (redirectsLeft <= 0)
+    // a MOVED proves `from` lost the slot; retire its cache even if the retry budget is now exhausted
+    if (redirect.kind == RedirectKind.Moved) flushNode(from)
+    if (redirectsLeft <= 0) {
+      if (redirect.kind == RedirectKind.Moved) refreshBeforeFailing()
       complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
-    else {
+    } else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
-        case RedirectKind.Moved => sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease, cacheCtx)
+        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease, cacheCtx)
         case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease, cacheCtx)
       }
     }
@@ -659,8 +662,7 @@ final private[client] class ClusterLive(
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
   ): Unit =
-    // a zero or exhausted budget must still adopt the new topology, or the next command repeats this loss
-    if (redirectsLeft <= 0) { triggerRefresh(); complete(Failure(NotConnected())) }
+    if (redirectsLeft <= 0) { refreshBeforeFailing(); complete(Failure(NotConnected())) }
     else {
       refresh(force = true)
       afterBackoff(redirectsLeft)(
@@ -684,8 +686,11 @@ final private[client] class ClusterLive(
       )
 
   // paces a retry, growing with the attempts already spent, so an in-progress failover or migration is not hammered
-  private def afterBackoff(redirectsLeft: Int)(retry: => Unit): Unit =
-    scheduler.after(Backoff.jitteredMillis(reconnect, (cluster.maxRedirects - redirectsLeft).max(0), scheduler).millis)(retry)
+  private def afterBackoff(attemptsLeft: Int)(retry: => Unit): Unit =
+    scheduler.after(Backoff.jitteredMillis(reconnect, (cluster.maxRedirects - attemptsLeft).max(0), scheduler).millis)(retry)
+
+  // a path that will not retry must adopt a topology, not schedule one a throttle could drop
+  private def refreshBeforeFailing(): Unit = refresh(force = true)
 
   private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease, cacheCtx: Cached): Unit = {
     refresh(force = false)
