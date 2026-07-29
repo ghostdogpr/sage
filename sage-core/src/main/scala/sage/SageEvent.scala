@@ -26,7 +26,7 @@ object SageEvent {
   /**
     * The Multiplexed Connection's lifecycle. `Connected` fires on the initial connect and on every successful reconnect; `Disconnected`
     * fires when a live connection is lost unexpectedly and the runtime begins reconnecting. Graceful close and individual reconnect attempts
-    * are not reported. `node` is `Some` in cluster (the master this connection serves) and `None` on standalone.
+    * are not reported. `node` is `Some` for cluster and master-replica clients (the node this connection serves) and `None` for standalone.
     */
   sealed trait Connection extends SageEvent {
     def node: Option[Node]
@@ -43,6 +43,13 @@ object SageEvent {
       * the caller already sees.
       */
     final case class ReconnectFailed(node: Option[Node], error: Throwable) extends Connection
+
+    /**
+      * An attempt to establish a connection to a specific node, or to qualify it during topology discovery, failed. Names the address and cause,
+      * and may accompany a failure returned to the caller or one handled internally. Distinct from [[ReconnectFailed]], which concerns restoring
+      * an already-established connection. Repeated failures for the same node are collapsed until it establishes a pooled connection.
+      */
+    final case class ConnectFailed(node: Option[Node], error: Throwable) extends Connection
   }
 
   /**

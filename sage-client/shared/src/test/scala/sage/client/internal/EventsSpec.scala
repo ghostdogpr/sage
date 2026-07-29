@@ -1,5 +1,6 @@
 package sage.client.internal
 
+import java.io.IOException
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 
 import scala.collection.mutable
@@ -101,6 +102,27 @@ class EventsSpec extends munit.FunSuite {
       bus.close()
     }
     assert(seen.get() <= 1100, s"expected drops, retained ${seen.get()}")
+  }
+
+  test("ConnectFailed is emitted once per node outage and resets on Connected") {
+    val node      = Node("reader", 6379)
+    val other     = Node("other", 6379)
+    val delivered = new CountDownLatch(4)
+    val listener  = new Capturing(delivered)
+    val bus       = Events(Vector(listener))
+    try {
+      bus.emit(SageEvent.Connection.ConnectFailed(Some(node), new IOException("first")))
+      bus.emit(SageEvent.Connection.ConnectFailed(Some(node), new IOException("duplicate")))
+      bus.emit(SageEvent.Connection.ConnectFailed(Some(other), new IOException("other")))
+      bus.emit(SageEvent.Connection.Connected(Some(node)))
+      bus.emit(SageEvent.Connection.ConnectFailed(Some(node), new IOException("new outage")))
+
+      assert(delivered.await(2, TimeUnit.SECONDS), s"expected four connection events, got ${listener.received.asScala.toVector}")
+      Thread.sleep(50)
+      val received = listener.received.asScala.toVector
+      assertEquals(received.map(_.asInstanceOf[SageEvent.Connection].node), Vector(Some(node), Some(other), Some(node), Some(node)))
+      assertEquals(received.count(_.isInstanceOf[SageEvent.Connection.ConnectFailed]), 3)
+    } finally bus.close()
   }
 
   test("a listener interrupted during shutdown drain still delivers to peers and completes the drain") {

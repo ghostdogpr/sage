@@ -106,9 +106,8 @@ final case class ClusterConfig(
 )
 
 /**
-  * Master-replica tuning. `minRefreshInterval` throttles role re-discovery (`ROLE`/`INFO replication`) so a burst of `READONLY`s or
-  * reconnects triggers at most one discovery per window. There is no periodic poll: roles refresh only on reconnect and on a `READONLY`
-  * from the presumed master.
+  * Master-replica tuning. `minRefreshInterval` throttles role re-discovery (`ROLE`/`INFO replication`) so a burst of `READONLY`s, reconnects,
+  * or replica-preferred reads with no known replica triggers at most one discovery per window. There is no periodic poll.
   */
 final case class MasterReplicaConfig(
   minRefreshInterval: FiniteDuration = 5.seconds

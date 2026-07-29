@@ -7,6 +7,7 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+import sage.SageEvent
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
 import sage.cluster.Node
@@ -109,6 +110,7 @@ final private[client] class NodePool(
               if (pendingEstablish.get(node).exists(_ eq mine)) { val _ = pendingEstablish.remove(node) }
             }
             mine.fail(error)
+            if (!closed) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
             throw error
         }
       // publish only if our token is still current: a retain, close, or newer attempt supersedes us, and the new client is discarded not leaked
