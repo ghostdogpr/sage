@@ -168,6 +168,7 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
 | `clientName` | `CLIENT SETNAME`, shown in `CLIENT LIST` / `CLIENT INFO` | none |
 | `listeners` | observers of runtime events (`SageListener`) | none |
+| `tracer` | [distributed-tracing](/observability#distributed-tracing) spans on the command path (`CommandTracer`) | none |
 
 `dedicatedPool.maxConnections` is a ceiling per node, not per client: a blocking command runs on the node holding its keys, so every node gets its own pool. Connections open on demand and idle ones are evicted, so the ceiling is what a burst can reach, but size it against `maxclients` with your node count in mind.
 
