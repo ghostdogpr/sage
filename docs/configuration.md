@@ -41,7 +41,7 @@ Set `database` to a non-zero value for a Valkey 9+ cluster configured with a suf
 
 ### Node-local commands
 
-Some keyless commands are node-local in Redis: server/connection introspection and administration (`INFO`, `CONFIG`, `CLIENT`, `ACL`, `COMMAND`, `SLOWLOG`, `LATENCY`, `COMMANDLOG`, `MEMORY PURGE`), process-local scripting/function operations, `PUBSUB` introspection, and `SCAN` cursors describe, modify, or resume only on the contacted process. Use `knownNodes` and `runOn` to make that target explicit:
+In cluster mode, process-local commands such as `INFO`, `CONFIG`, and raw `SCAN` pages require an explicit target:
 
 ```scala
 for {
@@ -50,7 +50,7 @@ for {
 } yield info
 ```
 
-`knownNodes` is a topology snapshot containing the currently discovered masters and replicas. `runOn` accepts a known node and a keyless, non-blocking command; keyed commands still require normal slot routing. An all-masters command passed to `runOn` deliberately runs only on the selected node. Calling a node-local command through the cluster client's ordinary routed API fails with `InvalidArgument`; for example, use `client.runOn(node, Commands.configSet(...))` rather than plain `client.run(Commands.configSet(...))`.
+Use `knownNodes` to discover valid targets and `runOn` for keyless, non-blocking commands. Keyed commands continue to use normal slot routing.
 
 ### Hash tags
 
