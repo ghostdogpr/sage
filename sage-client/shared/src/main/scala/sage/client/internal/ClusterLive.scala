@@ -531,7 +531,7 @@ final private[client] class ClusterLive(
     Fault.categorize(error) match {
       case Fault.Lost(false) => retryBroadcast(node, command, error, attemptsLeft, settle)
       case fault             =>
-        if (fault.refreshesTopology) triggerRefresh()
+        if (fault.refreshPolicy != RefreshPolicy.Skip) triggerRefresh()
         settle(Failure(error))
     }
 
