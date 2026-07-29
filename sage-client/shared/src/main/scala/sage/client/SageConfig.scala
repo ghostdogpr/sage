@@ -98,7 +98,8 @@ final case class Endpoint(host: String = "localhost", port: Int = 6379)
 
 /**
   * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops a single command follows before failing (the same default as
-  * lettuce); `minRefreshInterval` throttles topology refreshes so a redirect storm triggers at most one `CLUSTER SLOTS` per window.
+  * lettuce); `minRefreshInterval` limits how often a `MOVED` or an unowned slot triggers `CLUSTER SLOTS`: once per window. A retry that
+  * must see the new topology first, as after a failover, refreshes regardless of the window and is bounded by `maxRedirects` instead.
   */
 final case class ClusterConfig(
   maxRedirects: Int = 5,
