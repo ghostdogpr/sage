@@ -64,7 +64,7 @@ a `ServerError`.
 
 ## Master-replica
 
-Select `Topology.MasterReplica` with seed endpoints. Sage asks each its role, discovers the master and its replicas, sends writes to the master, and routes reads per the read policy:
+Select `Topology.MasterReplica` with seed endpoints. Sage asks each its role, sends writes to the master, and routes reads per the read policy:
 
 ```scala
 val config = SageConfig(
@@ -74,6 +74,19 @@ val config = SageConfig(
   readFrom = ReadFrom.ReplicaPreferred
 )
 ```
+
+### What sage connects to
+
+The number of endpoints you supply decides which nodes sage dials:
+
+| Seeds | Nodes sage dials |
+| --- | --- |
+| Several | exactly the endpoints you supplied, each classified by its own `ROLE`. No other address is ever contacted. |
+| One | that endpoint, plus the replica addresses its `ROLE` reply advertises that answer a connection. |
+
+List every endpoint for a managed deployment (ElastiCache, MemoryDB, Azure Cache, a Kubernetes service). Those expose stable names that survive node replacement, while the addresses `ROLE` advertises are per-node and often unreachable from the client, so passing both the primary and reader endpoints is what keeps reads on the reader endpoint.
+
+Either way an endpoint that cannot be reached is dropped rather than routed at, and a `Connection.ConnectFailed` event names it (see [Observability](observability.md)).
 
 ## Read routing
 
