@@ -87,8 +87,8 @@ val config = SageConfig(
 )
 ```
 
-There is no timer unless you set one. Each tick costs one `CLUSTER SLOTS`, and no refresh ever runs more often than `minRefreshInterval`.
-`MasterReplicaConfig` has the same setting.
+There is no timer unless you set one. Each tick costs one `CLUSTER SLOTS`, and a tick landing inside the `minRefreshInterval` window is skipped,
+so a short interval cannot outpace it. `MasterReplicaConfig` has the same setting.
 
 ## Master-replica
 

@@ -105,8 +105,6 @@ final private[client] class ClusterLive(
 
   private val refreshThrottle = new RefreshThrottle(scheduler, cluster.minRefreshInterval.toMillis)
 
-  @volatile private var refreshTicker: Scheduler.Cancelable = null
-
   // if no seed answers, throws the last failure so the first connect surfaces a handshake/TLS error like a standalone connect, not None
   private[client] def bootstrapTopology(): Unit = {
     var lastError: Throwable = NotConnected()
@@ -115,7 +113,7 @@ final private[client] class ClusterLive(
       val node = candidates.next()
       try
         querySlotsVia(node, getOrEstablish(node)) match {
-          case Right(shards) => adopt(node, shards); startRefreshTicker(); return
+          case Right(shards) => adopt(node, shards); startRefreshPoll(); return
           case Left(error)   => lastError = error
         }
       catch { case NonFatal(error) => lastError = error }
@@ -1175,13 +1173,11 @@ final private[client] class ClusterLive(
 
   private def triggerRefresh(): Unit = offload(refresh(force = false))
 
-  private def startRefreshTicker(): Unit =
-    cluster.topologyRefreshInterval.foreach { interval =>
-      refreshTicker = scheduler.every(interval)(if (!closed) triggerRefresh())
-    }
+  private def startRefreshPoll(): Unit = refreshThrottle.startPolling(cluster.topologyRefreshInterval)(triggerRefresh())
 
+  // a refresh queued before close must not re-establish what the close tore down
   private def refresh(force: Boolean): Unit =
-    refreshThrottle(force) {
+    if (!closed) refreshThrottle(force) {
       querySlots(refreshCandidates()) match {
         case Some((from, shards)) => adopt(from, shards)
         // no candidate answered CLUSTER SLOTS: ownership is unknowable, so retire every cache
@@ -1246,8 +1242,7 @@ final private[client] class ClusterLive(
 
   private def closeAll(): Unit = {
     closed = true
-    val ticker = refreshTicker
-    if (ticker != null) { ticker.cancel(); refreshTicker = null }
+    refreshThrottle.stopPolling()
     masterPool.close()
     subscriptions.close()
     replicaPool.close()

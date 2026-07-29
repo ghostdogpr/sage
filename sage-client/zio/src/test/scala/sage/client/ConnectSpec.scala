@@ -103,6 +103,20 @@ class ConnectSpec extends munit.FunSuite {
     }
   }
 
+  test("a topologyRefreshInterval under 1ms is rejected by validation, not thrown at the timer") {
+    val cluster       =
+      SageConfig(topology = Topology.Cluster(Vector(Endpoint("localhost", 7000)), ClusterConfig(topologyRefreshInterval = Some(Duration.Zero))))
+    val masterReplica = SageConfig(topology =
+      Topology.MasterReplica(Vector(Endpoint("localhost", 6379)), MasterReplicaConfig(topologyRefreshInterval = Some(500.micros)))
+    )
+    Client.connect(cluster).unsafeRun.failed.flatMap { clusterError =>
+      Client.connect(masterReplica).unsafeRun.failed.map { masterReplicaError =>
+        assert(clusterError.isInstanceOf[InvalidArgument], s"unexpected error: $clusterError")
+        assert(masterReplicaError.isInstanceOf[InvalidArgument], s"unexpected error: $masterReplicaError")
+      }
+    }
+  }
+
   test("readFrom = ReplicaPreferred on a Standalone topology passes validation (degrades to the one node)") {
     // it may connect (a local server) or fail to connect (none) — either way it must not be rejected by validation
     Client

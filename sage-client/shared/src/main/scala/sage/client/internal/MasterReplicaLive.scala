@@ -75,8 +75,6 @@ final private[client] class MasterReplicaLive(
 
   private val refreshThrottle = new RefreshThrottle(scheduler, masterReplica.minRefreshInterval.toMillis)
 
-  @volatile private var refreshTicker: Scheduler.Cancelable = null
-
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
@@ -87,7 +85,7 @@ final private[client] class MasterReplicaLive(
 
   private[client] def bootstrapRoles(): Unit =
     resolveTopology(seeds) match {
-      case Right(topology) => installTopology(topology); startRefreshTicker()
+      case Right(topology) => installTopology(topology); startRefreshPoll()
       case Left(error)     => closeAll(); throw error
     }
 
@@ -188,16 +186,14 @@ final private[client] class MasterReplicaLive(
 
   private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscover())
 
-  private def startRefreshTicker(): Unit =
-    masterReplica.topologyRefreshInterval.foreach { interval =>
-      refreshTicker = scheduler.every(interval)(if (!closed) triggerRefresh())
-    }
+  private def startRefreshPoll(): Unit = refreshThrottle.startPolling(masterReplica.topologyRefreshInterval)(triggerRefresh())
 
   // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
+  // a re-discovery queued before close must not probe ROLE on a connection the close cannot reach
   private def rediscover(): Unit =
-    resolveTopology((Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct).foreach(installTopology)
+    if (!closed) resolveTopology((Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct).foreach(installTopology)
 
   private def installTopology(topology: MasterReplicaLive.ResolvedTopology): Unit = {
     masterNodeRef.set(topology.master)
@@ -500,9 +496,8 @@ final private[client] class MasterReplicaLive(
 
   private def closeAll(): Unit = {
     closed = true
-    val ticker = refreshTicker
-    if (ticker != null) { ticker.cancel(); refreshTicker = null }
-    val s      = subscriptions
+    refreshThrottle.stopPolling()
+    val s = subscriptions
     if (s != null) s.close()
     masterPool.close()
     replicaPool.close()
