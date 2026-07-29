@@ -124,6 +124,7 @@ A few rules follow from how Redis transactions work:
 - **A queueing-phase rejection discards the whole transaction**, so nothing runs.
 - **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
 - **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
+- **In a cluster, bound your retries.** A transaction never follows a redirect, because that would break atomicity, so the whole block is retried by the caller, exactly as a `WATCH` abort already requires. While a slot is migrating, a key that has already moved keeps answering `ASK` until the migration finalizes, and no retry can commit until then. Retry with backoff and a ceiling rather than in a tight loop.
 
 ## Which to use
 
