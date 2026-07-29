@@ -64,7 +64,7 @@ a `ServerError`.
 
 ## Master-replica
 
-Select `Topology.MasterReplica` with seed endpoints. Sage asks each its role, discovers the master and its replicas, sends writes to the master, and routes reads per the read policy:
+Select `Topology.MasterReplica` with seed endpoints. Sage discovers the nodes' roles, sends writes to the master, and routes reads per the read policy:
 
 ```scala
 val config = SageConfig(
@@ -74,6 +74,17 @@ val config = SageConfig(
   readFrom = ReadFrom.ReplicaPreferred
 )
 ```
+
+The number of endpoints decides where sage may connect:
+
+| Seeds | Nodes sage dials |
+| --- | --- |
+| Several | exactly the supplied endpoints, each classified by its own `ROLE`; addresses advertised by `ROLE` are ignored |
+| One | the supplied endpoint and the master or replicas discovered from its `ROLE` reply |
+
+Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises. An
+unreachable supplied endpoint is omitted when the roles are resolved, allowing a partially available deployment to connect. It can be considered
+again when an existing reconnect or routing failure triggers a later role refresh.
 
 ## Read routing
 

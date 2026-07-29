@@ -10,8 +10,8 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{CommandSpan, Message, Outcome, PatternMessage, SageException}
-import sage.SageException.{ConnectionLost, InvalidArgument, NotConnected, TimedOut}
+import sage.{CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
+import sage.SageException.{ConnectionFailed, ConnectionLost, InvalidArgument, NotConnected, TimedOut}
 import sage.client.{ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
@@ -78,9 +78,40 @@ final private[client] class MasterReplicaLive(
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
-  // contacts seeds (and currently-known nodes) until one answers ROLE, resolving the master and its replicas; throws the last failure if
-  // none answers, so the first connect surfaces a handshake/TLS error like a standalone connect would
-  private[client] def bootstrapRoles(): Unit = {
+  // Several supplied endpoints are the topology itself: keep their addresses and discover only their roles. A lone seed retains the original
+  // discovery behavior, following the addresses in ROLE.
+  private val pinnedToSeeds = seeds.sizeIs > 1
+
+  private[client] def bootstrapRoles(): Unit =
+    if (pinnedToSeeds)
+      resolvePinned() match {
+        case Right((master, replicas)) => masterNodeRef.set(master); replicasRef.set(replicas)
+        case Left(error)               => closeAll(); throw error
+      }
+    else bootstrapDiscovered()
+
+  // Classifies every supplied endpoint by its own ROLE. An endpoint that cannot be opened is omitted, but reported because the successful
+  // topology resolution otherwise hides its failure from the caller.
+  private def resolvePinned(): Either[Throwable, (Node, Vector[Node])] = {
+    var lastError: Throwable = NotConnected()
+    val roles                = seeds.flatMap { seed =>
+      try probeRole(seed).map(seed -> _)
+      catch {
+        case NonFatal(error) =>
+          lastError = error
+          events.emit(SageEvent.Connection.ConnectFailed(Some(seed), error))
+          None
+      }
+    }
+    roles.collectFirst { case (node, _: Role.Master) => node } match {
+      case Some(master)          => Right(master -> roles.collect { case (node, _: Role.Replica) => node })
+      case None if roles.isEmpty => Left(lastError)
+      case None                  => Left(ConnectionFailed("no supplied endpoint reports the master role"))
+    }
+  }
+
+  // Contacts seeds until one answers ROLE, resolving the master and its advertised replicas. This is the original single-seed discovery path.
+  private def bootstrapDiscovered(): Unit = {
     var lastError: Throwable = NotConnected()
     val candidates           = seeds.iterator
     var done                 = false
@@ -136,19 +167,23 @@ final private[client] class MasterReplicaLive(
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
   private def rediscover(): Unit = {
-    val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
-    candidates.iterator
-      .flatMap(n =>
-        try resolveFrom(n)
-        catch { case NonFatal(_) => None }
-      )
-      .nextOption()
-      .foreach { case (master, replicas) =>
-        masterNodeRef.set(master)
-        replicasRef.set(replicas)
-        replicaPool.retain(replicas.toSet.contains)
-        masterPool.retain(_ == master)
+    val resolved =
+      if (pinnedToSeeds) resolvePinned().toOption
+      else {
+        val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
+        candidates.iterator
+          .flatMap(n =>
+            try resolveFrom(n)
+            catch { case NonFatal(_) => None }
+          )
+          .nextOption()
       }
+    resolved.foreach { case (master, replicas) =>
+      masterNodeRef.set(master)
+      replicasRef.set(replicas)
+      replicaPool.retain(replicas.toSet.contains)
+      masterPool.retain(_ == master)
+    }
   }
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------

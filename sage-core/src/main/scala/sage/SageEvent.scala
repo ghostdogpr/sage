@@ -43,6 +43,12 @@ object SageEvent {
       * the caller already sees.
       */
     final case class ReconnectFailed(node: Option[Node], error: Throwable) extends Connection
+
+    /**
+      * A connection to a specific node could not be opened, naming the address and cause when routing or topology discovery handles the failure
+      * internally. Distinct from [[ReconnectFailed]], which concerns restoring an already-established connection.
+      */
+    final case class ConnectFailed(node: Option[Node], error: Throwable) extends Connection
   }
 
   /**

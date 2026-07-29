@@ -1,12 +1,13 @@
 package sage.client.internal
 
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.io.IOException
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference, AtomicReferenceArray}
 
 import scala.concurrent.duration.*
 import scala.util.Try
 
-import sage.Bytes
+import sage.{Bytes, SageEvent, SageListener}
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
 import sage.cluster.Node
@@ -28,7 +29,7 @@ class NodePoolSpec extends munit.FunSuite {
   private def respond(payload: Bytes): Seq[Frame] =
     if (payload.asUtf8String.contains("HELLO")) Seq(helloReply) else Nil
 
-  private def newPool(factory: Node => MultiplexedConnection.TransportFactory): NodePool =
+  private def newPool(factory: Node => MultiplexedConnection.TransportFactory, events: Events = Events.disabled): NodePool =
     new NodePool(
       factory,
       Scheduler.real,
@@ -37,7 +38,8 @@ class NodePoolSpec extends munit.FunSuite {
       WatchdogConfig(enabled = false),
       1.second,
       Duration.Zero,
-      DedicatedPoolConfig()
+      DedicatedPoolConfig(),
+      events = events
     )
 
   // gates the nth connect attempt: it signals `reached(n)`, blocks until `release(n)`, then opens a transport captured at `transport(n)`
@@ -207,5 +209,33 @@ class NodePoolSpec extends munit.FunSuite {
     assert(!establishing.isAlive, "close must abort the in-flight establishment, not wait out the connect")
     assert(connecting.get().wasClosed, "close must abort the establishing transport")
     assert(result.get() != null && result.get().isFailure, s"the aborted establisher should fail: ${result.get()}")
+  }
+
+  test("a failed establishment reports the node and cause through ConnectFailed") {
+    val node      = Node("unreachable", 6379)
+    val seen      = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
+    val delivered = new CountDownLatch(1)
+    val events    = Events(
+      Vector(
+        new SageListener {
+          def onEvent(event: SageEvent): Unit = event match {
+            case failure: SageEvent.Connection.ConnectFailed => seen.add(failure); delivered.countDown()
+            case _                                           => ()
+          }
+        }
+      )
+    )
+    val pool      = newPool(_ => (_, _) => throw new IOException("refused"), events)
+
+    try {
+      intercept[IOException](pool.getOrEstablish(node))
+      assert(delivered.await(2, TimeUnit.SECONDS), "ConnectFailed was not delivered")
+      val failure = seen.peek()
+      assertEquals(failure.node, Some(node))
+      assert(failure.error.isInstanceOf[IOException], s"unexpected cause: ${failure.error}")
+    } finally {
+      pool.close()
+      events.close()
+    }
   }
 }
