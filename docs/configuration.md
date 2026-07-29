@@ -87,9 +87,9 @@ val config = SageConfig(
 )
 ```
 
-There is no timer unless you set one. Each tick costs one `CLUSTER SLOTS`, and a tick landing inside the `minRefreshInterval` window is skipped,
-so a short interval cannot outpace it. The first tick is the exception: discovery at connect opens no window, so it always runs.
-`MasterReplicaConfig` has the same setting.
+There is no timer unless you set one. Each admitted tick costs one `CLUSTER SLOTS`, and a tick landing inside the `minRefreshInterval` window is
+skipped, so a short interval cannot outpace it. The first tick is initially eligible, since discovery at connect opens no window, though an
+event-driven refresh before it can still throttle it. `MasterReplicaConfig` has the same setting.
 
 ## Master-replica
 
