@@ -13,7 +13,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, Message, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, TimedOut, UnsupportedServer}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
@@ -109,9 +109,9 @@ final private[client] class ClusterLive(
     while (candidates.hasNext) {
       val node = candidates.next()
       try
-        querySlotsVia(getOrEstablish(node)) match {
-          case Some(shards) => adopt(node, shards); return
-          case None         => ()
+        querySlotsVia(node, getOrEstablish(node)) match {
+          case Right(shards) => adopt(node, shards); return
+          case Left(error)   => lastError = error
         }
       catch { case NonFatal(error) => lastError = error }
     }
@@ -1133,18 +1133,26 @@ final private[client] class ClusterLive(
     candidates.iterator.flatMap(trySlots).nextOption()
 
   private def trySlots(node: Node): Option[(Node, Vector[Shard])] =
-    try querySlotsVia(getOrEstablish(node)).map(node -> _)
+    try querySlotsVia(node, getOrEstablish(node)).toOption.map(node -> _)
     catch { case NonFatal(_) => None }
 
-  private def querySlotsVia(nc: NodeClient): Option[Vector[Shard]] = {
+  // a node outside a formed cluster answers CLUSTER SLOTS with an empty array: a non-answer, not a topology owning no slots
+  private def querySlotsVia(node: Node, nc: NodeClient): Either[Throwable, Vector[Shard]] = {
     val latch   = new CountDownLatch(1)
     val outcome = new AtomicReference[Try[Vector[Shard]]]()
     nc.submit[Vector[Shard]](Cluster.slots, asking = false, result => { outcome.set(result); latch.countDown() })
-    if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS)) None
+    if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS))
+      Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
     else
       outcome.get() match {
-        case Success(shards) => Some(shards)
-        case Failure(_)      => None
+        case Success(shards) if shards.nonEmpty =>
+          Right(shards)
+        case Success(_)                         =>
+          Left(UnsupportedServer(s"${node.host}:${node.port} owns no slots: it is not part of a formed cluster"))
+        case Failure(error: ServerError)        =>
+          Left(UnsupportedServer(s"${node.host}:${node.port} rejected CLUSTER SLOTS: ${error.getMessage}"))
+        case Failure(error)                     =>
+          Left(error)
       }
   }
 

@@ -66,7 +66,8 @@ object SageException {
   final case class NotConnected() extends SageException("not connected")
 
   /**
-    * The server rejected `HELLO 3`: it predates RESP3 (Redis < 6.0) or is a RESP2-only proxy.
+    * The server cannot serve what this client requires: it rejected `HELLO 3` (predates RESP3, or is a RESP2-only proxy), or a cluster
+    * client was pointed at a server that is not part of a formed cluster.
     */
   final case class UnsupportedServer(message: String) extends SageException(message)
 
@@ -84,7 +85,8 @@ object SageException {
   final case class CrossSlot(message: String) extends SageException(message)
 
   /**
-    * A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout.
+    * A wait ran past its budget: a blocking command or transaction past `dedicatedPool.acquireTimeout` for a free pooled connection, or a
+    * topology probe (`ROLE`, `CLUSTER SLOTS`) past `connectTimeout`. Not a per-command timeout.
     */
   final case class TimedOut(message: String) extends SageException(message)
 
