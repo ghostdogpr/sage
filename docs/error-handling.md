@@ -12,13 +12,14 @@ Every sage failure is a `SageException`, a single sealed hierarchy you can match
 | `ConnectionFailed(message)` | The initial connection could not be established (host unreachable, connection refused, or connect timeout). Distinct from `ConnectionLost`, which is a live connection dropping. |
 | `ConnectionLost(mayHaveExecuted)` | The connection dropped around this command. |
 | `NotConnected()` | The client was never started, or has been closed. |
+| `ClusterUnavailable(message)` | A cluster endpoint was reachable, but no usable slot owners were available, so keyed commands cannot currently be routed. |
 | `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |
 | `TlsError(message)` | TLS could not be established (rejected certificate or unusable trust material). |
 | `CrossSlot(message)` | An unsupported multi-key command or a transaction touched keys in more than one cluster slot. `MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, and `TOUCH` are transparently split outside transactions. |
 | `TimedOut(message)` | A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout; bound a command's own duration with your backend's timeout combinator. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
 | `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |
-| `InvalidArgument(message)` | An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction, or a command a cluster client cannot serve as routed (an all-masters command in a cluster pipeline, a cluster-wide result in a single-node transaction, a hand-built command it cannot route by key). A programming error, rejected before any server call. |
+| `InvalidArgument(message)` | An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction, a node-local command without an explicit `runOn` target, or a command a cluster client cannot otherwise serve as routed (an all-masters command in a cluster pipeline, a cluster-wide result in a single-node transaction, a hand-built command it cannot route by key). A programming error, rejected before any server call. |
 
 ## Branching on the failure
 
@@ -45,7 +46,7 @@ def classify(e: SageException): String = e match {
 - `false` means the command was never sent, so retrying is always safe.
 - `true` means it was already in flight when the connection dropped, so the server may or may not have applied it. A non-idempotent command (an `INCR`, an `LPUSH`) is then not safe to blindly retry; an idempotent one (a `SET` to a fixed value) is.
 
-Sage does not retry for you, and it does not queue commands while disconnected (see [What happens when the connection drops?](/faq#what-happens-when-the-connection-drops)). This flag gives you what you need to decide.
+Sage never retries an ambiguous in-flight loss for you, and it does not queue commands while disconnected (see [What happens when the connection drops?](/faq#what-happens-when-the-connection-drops)). Cluster redirects, commands known not to have been sent, and explicit temporary refusals such as `TRYAGAIN`, `CLUSTERDOWN`, and `LOADING` have bounded internal recovery because the server did not execute them. This flag gives you what you need to decide about every other retry.
 
 ::: warning
 When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command: it may already have run. Retry only when the command is idempotent, or make it so first.

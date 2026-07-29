@@ -27,6 +27,12 @@ class FaultSpec extends munit.FunSuite {
     assertEquals(Fault.categorize(ServerError("TRYAGAIN", "Multiple keys request during rehashing of slot")), Fault.TryAgain)
   }
 
+  List("CLUSTERDOWN", "LOADING", "MASTERDOWN").foreach { code =>
+    test(s"a $code reply categorizes as TemporarilyUnavailable") {
+      assertEquals(Fault.categorize(ServerError(code, "temporarily unavailable")), Fault.TemporarilyUnavailable)
+    }
+  }
+
   test("any other ServerError categorizes as Fatal") {
     assertEquals(Fault.categorize(ServerError("WRONGTYPE", "Operation against a key holding the wrong kind of value")), Fault.Fatal)
     assertEquals(Fault.categorize(ServerError("ERR", "foo bar")), Fault.Fatal)

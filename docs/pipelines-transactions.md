@@ -124,6 +124,7 @@ A few rules follow from how Redis transactions work:
 - **A queueing-phase rejection discards the whole transaction**, so nothing runs.
 - **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
 - **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
+- **A cluster transaction never follows a redirect.** It surfaces the ownership error and refreshes topology in the background so a caller retry can re-pin the whole block atomically. During live resharding an `ASK` does not change the recorded owner, so bound and pace application-level transaction retries; an unbounded loop can keep retrying until the migration ends.
 
 ## Which to use
 

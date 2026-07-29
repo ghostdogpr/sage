@@ -11,12 +11,13 @@ private[client] enum Fault {
   case Demoted
   case Lost(mayHaveExecuted: Boolean)
   case TryAgain
+  case TemporarilyUnavailable
   case Fatal
 
-  // an ownership or connection change the topology must adopt; a data error or a transient mid-migration TryAgain leaves the mapping valid
+  // an ownership or connection change the topology must adopt; transient server refusals leave the mapping valid
   def refreshesTopology: Boolean = this match {
-    case Fatal | TryAgain => false
-    case _                => true
+    case Fatal | TryAgain | TemporarilyUnavailable => false
+    case _                                         => true
   }
 }
 
@@ -26,10 +27,12 @@ private[client] object Fault {
     error match {
       case e: ServerError           =>
         Redirect.parse(e.getMessage) match {
-          case Some(redirect)               => Fault.Redirected(redirect)
-          case None if e.code == "READONLY" => Fault.Demoted
-          case None if e.code == "TRYAGAIN" => Fault.TryAgain
-          case None                         => Fault.Fatal
+          case Some(redirect)                                                                   => Fault.Redirected(redirect)
+          case None if e.code == "READONLY"                                                     => Fault.Demoted
+          case None if e.code == "TRYAGAIN"                                                     => Fault.TryAgain
+          case None if e.code == "CLUSTERDOWN" || e.code == "LOADING" || e.code == "MASTERDOWN" =>
+            Fault.TemporarilyUnavailable
+          case None                                                                             => Fault.Fatal
         }
       case NotConnected()           => Fault.Lost(mayHaveExecuted = false)
       case ConnectionLost(executed) => Fault.Lost(executed)

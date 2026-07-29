@@ -29,7 +29,8 @@ final case class WatchdogConfig(
 
 /**
   * The on-demand pool of Dedicated Connections for blocking commands. `acquireTimeout` bounds only the wait for a free slot, never a
-  * command's own block timeout; idle connections are evicted after `idleTimeout` (`Duration.Inf` keeps them forever).
+  * command's own block timeout; idle connections are evicted after `idleTimeout` (`Duration.Inf` keeps them forever). In cluster mode each
+  * master owns one such pool, so `maxConnections` is a per-master limit rather than a client-wide total.
   */
 final case class DedicatedPoolConfig(
   maxConnections: Int = 8,
@@ -97,8 +98,10 @@ final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 102
 final case class Endpoint(host: String = "localhost", port: Int = 6379)
 
 /**
-  * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops a single command follows before failing (the same default as
-  * lettuce); `minRefreshInterval` throttles topology refreshes so a redirect storm triggers at most one `CLUSTER SLOTS` per window.
+  * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops or transient server refusals a single command follows before failing
+  * (the same default as lettuce for redirects); `minRefreshInterval` throttles ordinary event-driven topology refreshes so a redirect storm
+  * triggers at most one `CLUSTER SLOTS` per window. Recovery paths that know a command was not sent, and transaction faults whose caller must
+  * re-pin, force refresh outside that interval while still collapsing concurrent refreshes.
   */
 final case class ClusterConfig(
   maxRedirects: Int = 5,

@@ -13,7 +13,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, Message, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
+import sage.SageException.{ClusterUnavailable, ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
@@ -104,19 +104,22 @@ final private[client] class ClusterLive(
 
   // if no seed answers, throws the last failure so the first connect surfaces a handshake/TLS error like a standalone connect, not None
   private[client] def bootstrapTopology(): Unit = {
-    var lastError: Throwable = NotConnected()
-    val candidates           = seeds.iterator
+    var lastError: Throwable          = NotConnected()
+    var lastDiscoveryError: Throwable = null
+    val candidates                    = seeds.iterator
     while (candidates.hasNext) {
       val node = candidates.next()
       try
         querySlotsVia(getOrEstablish(node)) match {
-          case Some(shards) => adopt(node, shards); return
-          case None         => ()
+          case Right(shards) if shards.nonEmpty => adopt(node, shards); return
+          case Right(_)                         =>
+            lastDiscoveryError = ClusterUnavailable(s"cluster seed ${node.host}:${node.port} reported no slot owners")
+          case Left(error)                      => lastDiscoveryError = error
         }
       catch { case NonFatal(error) => lastError = error }
     }
     closeAll()
-    throw lastError
+    throw Option(lastDiscoveryError).getOrElse(lastError)
   }
 
   def run[A](command: Command[A]): CIO[A] = {
@@ -361,6 +364,7 @@ final private[client] class ClusterLive(
   // walk the policy's ordered candidates, falling through on connection loss; strict Replica with no live replica exhausts to NotConnected
   private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
     val replicas = topologyRef.get().shardForSlot(slot).map(_.replicas).getOrElse(Vector.empty)
+    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
     val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
     tryReadCandidates(command, ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()), master, redirectsLeft, complete)
   }
@@ -370,6 +374,7 @@ final private[client] class ClusterLive(
     pickNode(topology) match {
       case Some(master) =>
         val replicas = topology.shards.iterator.flatMap(_.replicas).toVector.distinct
+        if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
         tryReadCandidates(
           command,
           ReadRouting.candidates(readFrom, master, replicas, keylessCursor.getAndIncrement()),
@@ -432,18 +437,34 @@ final private[client] class ClusterLive(
         redirect.kind match {
           // strict Replica must not follow ASK onto the importing master (the migrating key is on no replica); MOVED refreshes and re-dispatches
           case RedirectKind.Ask                         =>
-            if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
+            if (readFrom == ReadFrom.Replica) { Events.attributeNode(complete, node); complete(Failure(error)) }
             else onRedirect(node, redirect, command, redirectsLeft, complete)
           case RedirectKind.Moved if redirectsLeft <= 0 =>
-            complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+            complete(Failure(redirectFailure(redirect)))
           case RedirectKind.Moved                       => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
         }
       case Fault.Lost(false)                =>
-        if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
+        if (rest.nonEmpty) continueRead(command, node, rest, master, redirectsLeft, complete)
+        else onUnreachable(command, redirectsLeft, complete)
       case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete)
+      case Fault.TemporarilyUnavailable     =>
+        if (rest.nonEmpty) continueRead(command, node, rest, master, redirectsLeft, complete)
+        else onTryAgain(command, error, redirectsLeft, complete)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
+
+  private def continueRead[A](
+    command: Command[A],
+    failedNode: Node,
+    rest: Vector[Node],
+    master: Node,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit
+  ): Unit = {
+    if (readFrom == ReadFrom.ReplicaPreferred && failedNode != master && rest.contains(master)) triggerRefresh()
+    tryReadCandidates(command, rest, master, redirectsLeft, complete)
+  }
 
   private def broadcast[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit, resolve: Node => NodeClient): Unit =
     command.broadcast match {
@@ -464,7 +485,7 @@ final private[client] class ClusterLive(
       def settle(result: Try[A]): Unit = {
         result match {
           case Success(_) => firstValue.compareAndSet(null, result)
-          case Failure(e) => firstError.compareAndSet(null, e)
+          case Failure(e) => refreshBroadcastTopology(e); firstError.compareAndSet(null, e)
         }
         if (remaining.decrementAndGet() == 0)
           complete(Option(firstError.get()).map(Failure(_)).getOrElse(firstValue.get()))
@@ -497,7 +518,7 @@ final private[client] class ClusterLive(
       def settle(index: Int, result: Try[Frame]): Unit = {
         result match {
           case Success(frame) => frames.set(index, frame)
-          case Failure(e)     => firstError.compareAndSet(null, e)
+          case Failure(e)     => refreshBroadcastTopology(e); firstError.compareAndSet(null, e)
         }
         if (remaining.decrementAndGet() == 0)
           Option(firstError.get()) match {
@@ -528,6 +549,12 @@ final private[client] class ClusterLive(
     })
 
   private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] = Reply.decode(command, merged)
+
+  private def refreshBroadcastTopology(error: Throwable): Unit =
+    Fault.categorize(error) match {
+      case Fault.Lost(false) => triggerRefresh()
+      case _                 => ()
+    }
 
   private def sendToAny[A](
     topology: ClusterTopology,
@@ -594,6 +621,7 @@ final private[client] class ClusterLive(
       case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
       case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete, lease, cacheCtx)
+      case Fault.TemporarilyUnavailable     => onTryAgain(command, error, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -610,7 +638,7 @@ final private[client] class ClusterLive(
     // a MOVED proves `from` lost the slot; retire its cache even if the retry budget is now exhausted
     if (redirect.kind == RedirectKind.Moved) flushNode(from)
     if (redirectsLeft <= 0)
-      complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+      complete(Failure(redirectFailure(redirect)))
     else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
@@ -618,6 +646,14 @@ final private[client] class ClusterLive(
         case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease, cacheCtx)
       }
     }
+  }
+
+  private def redirectFailure(redirect: Redirect): ServerError = {
+    val code = redirect.kind match {
+      case RedirectKind.Moved => "MOVED"
+      case RedirectKind.Ask   => "ASK"
+    }
+    ServerError(code, s"${redirect.slot.value} ${redirect.target.host}:${redirect.target.port}")
   }
 
   // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
@@ -758,6 +794,7 @@ final private[client] class ClusterLive(
   // the read candidates for `master`'s shard under the policy, advancing its round-robin cursor once
   private def readCandidates(master: Node): Vector[Node] = {
     val replicas = topologyRef.get().shards.collectFirst { case s if s.master == master => s.replicas }.getOrElse(Vector.empty)
+    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
     val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
     ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
   }
@@ -841,13 +878,14 @@ final private[client] class ClusterLive(
             case Fault.Redirected(redirect)       =>
               redirect.kind match {
                 // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
-                case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
+                case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, result)
                 case RedirectKind.Ask                                               =>
                   onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
                 case RedirectKind.Moved                                             => reroute(index)
               }
             case Fault.Lost(false)                => reroute(index)
             case Fault.TryAgain                   => onTryAgain(p.commands(index), error, cluster.maxRedirects, emits(index))
+            case Fault.TemporarilyUnavailable     => onTryAgain(p.commands(index), error, cluster.maxRedirects, emits(index))
             case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
             case Fault.Fatal                      => settle(index, result)
           }
@@ -1133,19 +1171,16 @@ final private[client] class ClusterLive(
     candidates.iterator.flatMap(trySlots).nextOption()
 
   private def trySlots(node: Node): Option[(Node, Vector[Shard])] =
-    try querySlotsVia(getOrEstablish(node)).map(node -> _)
+    try querySlotsVia(getOrEstablish(node)).toOption.filter(_.nonEmpty).map(node -> _)
     catch { case NonFatal(_) => None }
 
-  private def querySlotsVia(nc: NodeClient): Option[Vector[Shard]] = {
+  private def querySlotsVia(nc: NodeClient): Either[Throwable, Vector[Shard]] = {
     val latch   = new CountDownLatch(1)
     val outcome = new AtomicReference[Try[Vector[Shard]]]()
     nc.submit[Vector[Shard]](Cluster.slots, asking = false, result => { outcome.set(result); latch.countDown() })
-    if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS)) None
-    else
-      outcome.get() match {
-        case Success(shards) => Some(shards)
-        case Failure(_)      => None
-      }
+    if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS))
+      Left(ClusterUnavailable(s"CLUSTER SLOTS timed out after ${connectTimeout.toMillis}ms"))
+    else outcome.get().toEither
   }
 
   // prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak; an empty announce-IP from CLUSTER SLOTS

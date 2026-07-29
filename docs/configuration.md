@@ -37,7 +37,17 @@ val config = SageConfig(
 ```
 
 Seeds bootstrap discovery only. Once the topology is known, sage routes to the nodes the cluster reports; any one seed answering is enough.
+Bootstrap requires at least one reported slot owner. A reachable node whose `CLUSTER SLOTS` reply is empty fails with
+`ClusterUnavailable`, while a non-cluster server's own error is preserved instead of being reported as a connection failure. A later refresh
+that briefly sees no slot owners keeps the last usable topology rather than retiring every known node.
 Set `database` to a non-zero value for a Valkey 9+ cluster configured with a sufficiently large `cluster-databases` setting. Sage issues `SELECT` while establishing every node connection, including after reconnects and redirects. Servers without numbered cluster database support reject the connection.
+
+Topology refresh is event-driven rather than periodic. `MOVED`, unreachable owners, transaction ownership faults, subscription re-homing,
+and replica-policy fallbacks trigger discovery. Ordinary triggers are throttled by `ClusterConfig.minRefreshInterval`; recovery paths for a
+command known not to have reached the server and transaction re-pinning force a single-flight refresh outside that interval.
+
+All-masters broadcasts fail as a whole if any master fails. When a failure proves a request was not sent, sage refreshes topology for the
+next call but does not replay successful masters; callers may retry the whole broadcast only when repeating its successful portions is safe.
 
 ### Hash tags
 
@@ -131,7 +141,7 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
 | `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
 | `closeTimeout` | how long `close` waits for in-flight commands on the multiplexed connection to drain (blocking commands and transactions on the dedicated pool are force-closed at once) | `5.seconds` |
-| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions | max `8`, acquire `5.seconds`, idle `30.seconds` |
+| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions; in cluster mode the limit is per master | max `8` per master, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
 | `clientName` | `CLIENT SETNAME`, shown in `CLIENT LIST` / `CLIENT INFO` | none |
@@ -150,6 +160,9 @@ val config = SageConfig(
   clientName = Some("orders-service")
 )
 ```
+
+For a cluster with `N` masters, the maximum number of Dedicated Connections is `N × dedicatedPool.maxConnections` (in addition to each
+master's multiplexed connection). Replica reads do not consume this pool: blocking commands and transactions remain master-routed.
 
 Disable client-side caching where the server permits ordinary commands but denies `CLIENT TRACKING` (some proxies and ACL setups); `cached` reads then run without caching, keeping the call portable:
 

@@ -66,6 +66,12 @@ object SageException {
   final case class NotConnected() extends SageException("not connected")
 
   /**
+    * A cluster endpoint was reachable, but no usable slot topology was available. Unlike [[NotConnected]], this says the transport itself
+    * worked; the cluster is still forming, has no assigned slots, or otherwise cannot currently route keyed commands.
+    */
+  final case class ClusterUnavailable(message: String) extends SageException(message)
+
+  /**
     * The server rejected `HELLO 3`: it predates RESP3 (Redis < 6.0) or is a RESP2-only proxy.
     */
   final case class UnsupportedServer(message: String) extends SageException(message)
