@@ -161,11 +161,13 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
 | `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
 | `closeTimeout` | how long `close` waits for in-flight commands on the multiplexed connection to drain (blocking commands and transactions on the dedicated pool are force-closed at once) | `5.seconds` |
-| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions | max `8`, acquire `5.seconds`, idle `30.seconds` |
+| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
 | `clientName` | `CLIENT SETNAME`, shown in `CLIENT LIST` / `CLIENT INFO` | none |
 | `listeners` | observers of runtime events (`SageListener`) | none |
+
+`dedicatedPool.maxConnections` is a ceiling per node, not per client: a blocking command runs on the node holding its keys, so every node gets its own pool. Connections open on demand and idle ones are evicted, so the ceiling is what a burst can reach, but size it against `maxclients` with your node count in mind.
 
 For example, a cluster client with a shorter connect timeout, a larger blocking-command pool, a more frequent watchdog, and a name:
 
