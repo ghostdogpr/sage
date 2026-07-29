@@ -27,6 +27,16 @@ enum Role {
   case Master(replicationOffset: Long, replicas: Vector[ReplicaNode])
   case Replica(masterHost: String, masterPort: Int, state: String, replicationOffset: Long)
   case Sentinel(masterNames: Vector[String])
+
+  /**
+    * Whether this is a replica whose replication stream has caught up, and so holds the full dataset. `ROLE` reports a replica's link as one of
+    * `none`, `connect`, `connecting`, `sync` or `connected`, and only the last means caught up; the others are mid-handshake or mid-transfer,
+    * where the node still answers reads from a partial dataset unless the server is configured to refuse them.
+    */
+  def isOnlineReplica: Boolean = this match {
+    case Replica(_, _, state, _) => state == "connected"
+    case _                       => false
+  }
 }
 
 /**

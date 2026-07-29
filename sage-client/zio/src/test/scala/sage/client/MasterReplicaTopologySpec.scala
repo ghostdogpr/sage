@@ -261,18 +261,17 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     assert(!dialled.contains(advertisedReplica), s"a failover must not introduce a discovered address, dialled $dialled")
   }
 
-  test("a replica whose replication stream is not caught up is not used as a read target") {
-    val f = new Fixture(
-      seeds = Vector(primary, reader),
-      roles = Map(primary -> masterRole(), reader -> replicaRole(primary, state = "sync"))
-    )
+  test("a replica whose replication stream is not caught up is excluded, then re-admitted once it catches up") {
+    val roles = collection.mutable.Map[Node, Frame](primary -> masterRole(), reader -> replicaRole(primary, state = "sync"))
+    val f     = new Fixture(seeds = Vector(primary, reader), roles = roles, minRefreshInterval = 50.millis)
     f.live.bootstrapRoles()
 
     assertEquals(f.read(), 1L)
-    val served = f.readsServedBy(reader)
-    f.close()
+    assertEquals(f.readsServedBy(reader), 0, "a resyncing replica serves a partial dataset, so reads must stay on the master")
 
-    assertEquals(served, 0, "a resyncing replica serves a partial dataset, so reads must stay on the master")
+    roles(reader) = replicaRole(primary, state = "connected")
+    f.awaitTrue({ val _ = f.read(); f.readsServedBy(reader) > 0 }, "reads should return to the replica once it has caught up")
+    f.close()
   }
 
   test("a replica that fails to establish after discovery leaves the roster instead of costing every read") {

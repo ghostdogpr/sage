@@ -73,11 +73,8 @@ final private[client] class MasterReplicaLive(
   private val subLock                                         = new ReentrantLock()
   @volatile private var subscriptions: SubscriptionConnection = null
 
-  private val refreshThrottle    = new RefreshThrottle(scheduler, minRefreshInterval.toMillis)
-  private val degradedProbeDue   = new AtomicLong(0L)
-  private val degradedAttempt    = new AtomicInteger()
-  @volatile private var degraded = false
-  private val reportedDown       = ConcurrentHashMap.newKeySet[Node]()
+  private val refreshThrottle = new RefreshThrottle(scheduler, minRefreshInterval.toMillis)
+  private val degraded        = new MasterReplicaLive.Degraded(scheduler, minRefreshInterval.toMillis)
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
@@ -107,11 +104,15 @@ final private[client] class MasterReplicaLive(
     */
   private def resolvePinned(): Either[Throwable, MasterReplicaLive.Roles] = {
     val (roles, lastError) = probeSeeds()
-    setDegraded(roles.sizeIs < seeds.size)
     roles.collectFirst { case (node, _: Role.Master) => node } match {
-      case Some(master)          => Right(MasterReplicaLive.Roles(master, roles.collect(MasterReplicaLive.onlineReplica)))
-      case None if roles.isEmpty => Left(lastError.getOrElse(NotConnected()))
+      case Some(master)          =>
+        val replicas = roles.collect { case (node, role) if role.isOnlineReplica => node }
+        // every seed but the master should be a usable replica
+        degraded.set(replicas.sizeIs < seeds.size - 1)
+        Right(MasterReplicaLive.Roles(master, replicas))
+      case None if roles.isEmpty => degraded.set(true); Left(lastError.getOrElse(NotConnected()))
       case None                  =>
+        degraded.set(true)
         val cause = lastError.fold("")(error => s", last failure: ${error.getMessage}")
         Left(
           ConnectionFailed(
@@ -136,9 +137,11 @@ final private[client] class MasterReplicaLive(
       val node = walk.next()
       try {
         val role = probeRole(node)
-        if (role.isDefined) { answered = true; markUp(node) }
+        if (role.isDefined) answered = true
         resolved = role.flatMap(rolesFrom(node, _))
-      } catch { case NonFatal(error) => lastError = Some(error); reportDown(node, error) }
+      } catch {
+        case NonFatal(error) => lastError = Some(error); events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
+      }
     }
     resolved.toRight(
       lastError.getOrElse(
@@ -154,8 +157,13 @@ final private[client] class MasterReplicaLive(
   private def probeSeeds(): (Vector[(Node, Role)], Option[Throwable]) = {
     val failure = new AtomicReference[Throwable](null)
     val roles   = probeConcurrently(seeds) { seed =>
-      try { val role = probeRole(seed); if (role.isDefined) markUp(seed); role }
-      catch { case NonFatal(error) => val _ = failure.compareAndSet(null, error); reportDown(seed, error); None }
+      try probeRole(seed)
+      catch {
+        case NonFatal(error) =>
+          val _ = failure.compareAndSet(null, error)
+          events.emit(SageEvent.Connection.ConnectFailed(Some(seed), error))
+          None
+      }
     }
     (roles, Option(failure.get()))
   }
@@ -167,7 +175,7 @@ final private[client] class MasterReplicaLive(
       case Role.Replica(host, port, _, _) =>
         val master = Node(host, port)
         try probeRole(master).collect { case Role.Master(_, replicas) => MasterReplicaLive.Roles(master, reachable(replicas)) }
-        catch { case NonFatal(error) => reportDown(master, error); None }
+        catch { case NonFatal(error) => events.emit(SageEvent.Connection.ConnectFailed(Some(master), error)); None }
       case _: Role.Sentinel               => None
     }
 
@@ -180,13 +188,13 @@ final private[client] class MasterReplicaLive(
     val (live, unknown) = nodes.partition(node => replicaPool.existingLive(node).isDefined)
     val answered        = probeConcurrently(unknown)(node => if (connects(node)) Some(()) else None).map(_._1).toSet
     val kept            = nodes.filter(node => live.contains(node) || answered.contains(node))
-    setDegraded(kept.sizeIs < nodes.size)
+    degraded.set(kept.sizeIs < nodes.size)
     kept
   }
 
   private def connects(node: Node): Boolean =
-    try { connectProbe(node).close(); markUp(node); true }
-    catch { case NonFatal(error) => reportDown(node, error); false }
+    try { connectProbe(node).close(); true }
+    catch { case NonFatal(error) => events.emit(SageEvent.Connection.ConnectFailed(Some(node), error)); false }
 
   /**
     * Probes every node at once under one shared deadline, so unreachable addresses cost one connect timeout rather than one apiece. A probe that
@@ -220,35 +228,13 @@ final private[client] class MasterReplicaLive(
   private def dropReplica(node: Node): Unit =
     if (replicasRef.get().contains(node)) {
       val _ = replicasRef.updateAndGet(_.filterNot(_ == node))
-      setDegraded(true)
+      degraded.set(true)
     }
-
-  private def setDegraded(value: Boolean): Unit = {
-    degraded = value
-    if (!value) { degradedAttempt.set(0); degradedProbeDue.set(0L) }
-  }
 
   /**
-    * Only a refresh re-admits a dropped node, and a replica-preferring read that falls back to the master fires no other trigger. Consecutive
-    * failed re-probes widen the window.
+    * Only a refresh re-admits a dropped node, and a replica-preferring read that falls back to the master fires no other trigger.
     */
-  private def refreshWhileDegraded(): Unit =
-    if (degraded) {
-      val now = scheduler.nowMillis
-      val due = degradedProbeDue.get()
-      if (now >= due && degradedProbeDue.compareAndSet(due, now + degradedWindowMillis)) {
-        val _ = degradedAttempt.incrementAndGet()
-        triggerRefresh()
-      }
-    }
-
-  private def degradedWindowMillis: Long =
-    minRefreshInterval.toMillis * (1L << math.min(degradedAttempt.get(), MasterReplicaLive.maxDegradedBackoffShift))
-
-  private def reportDown(node: Node, error: Throwable): Unit =
-    if (reportedDown.add(node)) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
-
-  private def markUp(node: Node): Unit = { val _ = reportedDown.remove(node) }
+  private def refreshWhileDegraded(): Unit = if (degraded.probeDue()) triggerRefresh()
 
   // a throwaway connection (must not leave a pooled one behind): a connect/handshake failure propagates so bootstrapRoles surfaces it like a
   // standalone connect; a node that handshakes but doesn't answer ROLE yields None
@@ -596,8 +582,31 @@ private[client] object MasterReplicaLive {
   // the degraded re-probe window doubles out from minRefreshInterval, at most this many times
   private val maxDegradedBackoffShift = 5
 
-  // ROLE's replication states are none/connect/connecting/sync/connected; only the last is caught up and safe to read from
-  private val onlineReplica: PartialFunction[(Node, Role), Node] = { case (node, replica: Role.Replica) if replica.state == "connected" => node }
+  /**
+    * Whether the roster is missing a node, and when to re-probe for it. Consecutive re-probes that still find it missing widen the window;
+    * clearing the state resets it, so a node that comes back stops the probing.
+    */
+  final private class Degraded(scheduler: Scheduler, baseMillis: Long) {
+    private val due               = new AtomicLong(0L)
+    private val attempt           = new AtomicInteger()
+    @volatile private var missing = false
+
+    def set(value: Boolean): Unit = {
+      missing = value
+      if (!value) { attempt.set(0); due.set(0L) }
+    }
+
+    def probeDue(): Boolean =
+      if (!missing) false
+      else {
+        val now = scheduler.nowMillis
+        val at  = due.get()
+        if (now >= at && due.compareAndSet(at, now + baseMillis * (1L << math.min(attempt.get(), maxDegradedBackoffShift)))) {
+          val _ = attempt.incrementAndGet()
+          true
+        } else false
+      }
+  }
 
   final private[client] class TxLease(val scope: Client.TxScope, val nc: NodeClient)
 
