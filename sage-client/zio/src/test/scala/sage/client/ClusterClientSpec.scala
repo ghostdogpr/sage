@@ -143,12 +143,13 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a refresh whose candidate owns no slots keeps the working topology instead of closing every master") {
-    val reset     = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) if (reset.get) Seq(Frame.Array(Vector.empty)) else Seq(wholeClusterOn(nodeA))
-      else if (node == nodeA && reset.compareAndSet(false, true)) Seq(Frame.SimpleError(s"MOVED ${Slot.of(Bytes.utf8("foo")).value} a:6379"))
+    val emptySlotsAfterRedirect = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) if (emptySlotsAfterRedirect.get) Seq(Frame.Array(Vector.empty)) else Seq(wholeClusterOn(nodeA))
+      else if (node == nodeA && emptySlotsAfterRedirect.compareAndSet(false, true))
+        Seq(Frame.SimpleError(s"MOVED ${Slot.of(Bytes.utf8("foo")).value} a:6379"))
       else Seq(Frame.BulkString(Bytes.utf8(node.host)))
-    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val fixture                 = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.flatMap { result =>
       assertEquals(result, Some(nodeA.host))

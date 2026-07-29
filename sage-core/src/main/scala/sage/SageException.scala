@@ -85,7 +85,8 @@ object SageException {
   final case class CrossSlot(message: String) extends SageException(message)
 
   /**
-    * A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout.
+    * A wait ran past its budget: a blocking command or transaction past `dedicatedPool.acquireTimeout` for a free pooled connection, or a
+    * topology probe (`ROLE`, `CLUSTER SLOTS`) past `connectTimeout`. Not a per-command timeout.
     */
   final case class TimedOut(message: String) extends SageException(message)
 
