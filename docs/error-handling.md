@@ -75,8 +75,9 @@ since those leave the master list intact.
 
 Here the "nothing ran" guarantee does not apply, because the fan-out is not atomic. Masters that answered before the refusal have already run the
 command, and your retry runs them again. That is harmless for the read-only ones and for `SCRIPT LOAD` and the `FLUSH` family, which are idempotent.
-`FUNCTION LOAD`, `FUNCTION DELETE`, and `FUNCTION RESTORE` are not: a second pass reports an error on the masters that already applied it, `already
-exists` or `not found`. Pass `replace = true` to make `functionLoad` repeatable.
+The `function*` mutations are not, unless you ask for one that tolerates what the first pass left behind: a second `FUNCTION LOAD` answers `already
+exists` and `FUNCTION DELETE` answers `not found`, while `FUNCTION RESTORE` answers `already exists` under its default `APPEND` policy. Pass
+`replace = true` to `functionLoad`, or `RestorePolicy.Replace` or `RestorePolicy.Flush` to `functionRestore`, and the retry is repeatable.
 
 ## How failures surface per backend
 

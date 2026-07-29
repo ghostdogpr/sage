@@ -136,11 +136,8 @@ class ClusterClientSpec extends munit.FunSuite {
     await(s"expected a second CLUSTER SLOTS, saw $slotsCalls")(slotsCalls >= 2)
   }
 
-  private def awaitAtLeast(counter: java.util.concurrent.atomic.AtomicInteger, target: Int, clue: String): Unit = {
-    val deadline = System.nanoTime() + 2000000000L
-    while (counter.get() < target && System.nanoTime() < deadline) Thread.sleep(5)
-    assert(counter.get() >= target, s"$clue (saw ${counter.get()}, wanted $target)")
-  }
+  private def awaitAtLeast(counter: java.util.concurrent.atomic.AtomicInteger, target: Int, clue: String): Unit =
+    await(s"$clue (saw ${counter.get()}, wanted $target)")(counter.get() >= target)
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
 
@@ -810,6 +807,22 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some("value"))
       assert(attempts.get() >= 2, s"LOADING was not retried: ${attempts.get()} attempts")
       assertEquals(clusterCalls.get(), 1, "a node-local refusal must not trigger a topology refresh")
+    }
+  }
+
+  test("a pipeline position refused with CLUSTERDOWN retries on the adopted mapping, off the reader thread") {
+    val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour    = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(if (clusterCalls.incrementAndGet() == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
+      // the batch carries both positions, so nodeA answers both; the retries reach nodeB one command at a time
+      else if (text.contains("GET"))
+        if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(Frame.BulkString(Bytes.utf8("from-b")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture      = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
+      assertEquals(result, (Some("from-b"), Some("from-b")))
+      assertEquals(fixture.written(nodeA).count(_.contains("GET")), 1, "the refused master must see the batch once, never a retry")
     }
   }
 

@@ -555,7 +555,7 @@ final private[client] class ClusterLive(
     attemptsLeft: Int,
     settle: Try[B] => Unit
   ): Unit =
-    if (attemptsLeft <= 0) { refreshBeforeFailing(); settle(Failure(error)) }
+    if (attemptsLeft <= 0) { if (refreshFirst) refreshBeforeFailing(); settle(Failure(error)) }
     else
       afterBackoff(attemptsLeft) {
         if (refreshFirst) refresh(force = true)
@@ -897,23 +897,26 @@ final private[client] class ClusterLive(
     val callbacks: Vector[Try[Any] => Unit]        = indices.map { index => (result: Try[Any]) =>
       result match {
         case Success(_)     => settle(index, result)
+        // a fault's disposition can block on CLUSTER SLOTS, whose reply needs the very reader thread this callback runs on
         case Failure(error) =>
-          Fault.categorize(error) match {
-            // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
-            // to the importing node with ASKING. MOVED and connection loss re-route normally.
-            case Fault.Redirected(redirect)       =>
-              redirect.kind match {
-                // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
-                case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
-                case RedirectKind.Ask                                               =>
-                  onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
-                case RedirectKind.Moved                                             => reroute(index)
-              }
-            case Fault.Lost(false)                => reroute(index)
-            case Fault.TryAgain                   => onRetryable(p.commands(index), error, refreshFirst = false, cluster.maxRedirects, emits(index))
-            case Fault.Unavailable(clusterWide)   => onRetryable(p.commands(index), error, clusterWide, cluster.maxRedirects, emits(index))
-            case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
-            case Fault.Fatal                      => settle(index, result)
+          offload {
+            Fault.categorize(error) match {
+              // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
+              // to the importing node with ASKING. MOVED and connection loss re-route normally.
+              case Fault.Redirected(redirect)       =>
+                redirect.kind match {
+                  // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
+                  case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
+                  case RedirectKind.Ask                                               =>
+                    onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
+                  case RedirectKind.Moved                                             => reroute(index)
+                }
+              case Fault.Lost(false)                => reroute(index)
+              case Fault.TryAgain                   => onRetryable(p.commands(index), error, refreshFirst = false, cluster.maxRedirects, emits(index))
+              case Fault.Unavailable(clusterWide)   => onRetryable(p.commands(index), error, clusterWide, cluster.maxRedirects, emits(index))
+              case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
+              case Fault.Fatal                      => settle(index, result)
+            }
           }
       }
     }
