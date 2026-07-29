@@ -687,8 +687,7 @@ final private[client] class ClusterLive(
   private def malformedKeys(name: String): InvalidArgument =
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
-  // a transaction never follows a redirect, so the caller's retry depends on the topology actually refreshing — bypass the throttle window
-  // (single-flight still collapses concurrent refreshes); ordinary commands re-route, so they use the throttled triggerRefresh
+  // a transaction never follows a redirect, so an ownership move must be adopted before the caller can retry: bypass the throttle window
   private def forceRefresh(): Unit = offload(refresh(force = true))
 
   // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
@@ -917,8 +916,14 @@ final private[client] class ClusterLive(
 
     // a transaction never follows a redirect (that would break MULTI/EXEC atomicity), but on any ownership/connection fault it refreshes in the
     // background so the caller's retry re-pins to the new owner instead of looping on the stale node; a data error refreshes nothing
-    private def refreshOnFault(error: Throwable): Unit =
-      if (Fault.categorize(error).refreshesTopology) forceRefresh()
+    private def refreshOnFault(error: Throwable): Unit = refreshFor(Vector(Fault.categorize(error)))
+
+    private def refreshFor(faults: Vector[Fault]): Unit =
+      faults.iterator.map(_.refreshPolicy).maxByOption(_.ordinal) match {
+        case Some(RefreshPolicy.Forced)    => forceRefresh()
+        case Some(RefreshPolicy.Throttled) => triggerRefresh()
+        case _                             => ()
+      }
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
       case failure @ Failure(error) => refreshOnFault(error); complete(failure)
@@ -929,8 +934,7 @@ final private[client] class ClusterLive(
     // level and the EXEC array and refresh on any non-terminal one so the caller's retry re-pins
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
       val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
-      val fault  = (frames.iterator ++ nested).flatMap(TxSupport.errorOf).exists(m => Fault.categorize(ServerError.of(m)).refreshesTopology)
-      if (fault) forceRefresh()
+      refreshFor((frames.iterator ++ nested).flatMap(TxSupport.errorOf).map(m => Fault.categorize(ServerError.of(m))).toVector)
     }
 
     private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =

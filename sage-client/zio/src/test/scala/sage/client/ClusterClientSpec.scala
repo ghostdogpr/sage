@@ -1060,6 +1060,27 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("an ASK during a transaction refreshes only within the throttle window") {
+    val slot      = Slot.of(Bytes.utf8("{a}1")).value
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+      else if (text.contains("MULTI"))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"ASK $slot b:6379"), Frame.SimpleError("EXECABORT discarded"))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    val tx = fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
+    for {
+      _ <- tx.unsafeRun.failed
+      _  = Thread.sleep(150)
+      _ <- tx.unsafeRun.failed
+    } yield {
+      Thread.sleep(150)
+      val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
+      assertEquals(clusterCalls, 2, s"an ASK must not force a refresh past the throttle; CLUSTER calls: $clusterCalls")
+    }
+  }
+
   test("a cross-slot MGET remains forbidden inside a transaction") {
     val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))

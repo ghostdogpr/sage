@@ -1,7 +1,7 @@
 package sage.client.internal
 
 import sage.SageException.{ConnectionLost, NotConnected, ServerError}
-import sage.cluster.Redirect
+import sage.cluster.{Redirect, RedirectKind}
 
 /**
   * The shared categorization of a failed command: both runtimes read a [[Throwable]] the same way, so they cannot drift on what a fault is.
@@ -13,11 +13,19 @@ private[client] enum Fault {
   case TryAgain
   case Fatal
 
-  // an ownership or connection change the topology must adopt; a data error or a transient mid-migration TryAgain leaves the mapping valid
-  def refreshesTopology: Boolean = this match {
-    case Fatal | TryAgain => false
-    case _                => true
+  def refreshPolicy: RefreshPolicy = this match {
+    case Fatal | TryAgain                                          => RefreshPolicy.Skip
+    // ASK moves no ownership: discovery has nothing to adopt until the migration finalizes
+    case Redirected(redirect) if redirect.kind == RedirectKind.Ask => RefreshPolicy.Throttled
+    case Redirected(_) | Demoted | Lost(_)                         => RefreshPolicy.Forced
   }
+}
+
+/**
+  * What a [[Fault]] asks of topology discovery, weakest first: no refresh, one inside the `minRefreshInterval` window, or one that bypasses it.
+  */
+private[client] enum RefreshPolicy {
+  case Skip, Throttled, Forced
 }
 
 private[client] object Fault {
