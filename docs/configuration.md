@@ -60,14 +60,16 @@ one slot.
 While a slot is being migrated, the server answers a multi-key command whose keys briefly straddle the moving slot with `-TRYAGAIN`. The command
 did not run, so sage retries it. The retry shares the same `maxRedirects` budget as `MOVED`/`ASK` follows, but where those are resent
 immediately, a `-TRYAGAIN` retry is paced by a short jittered delay. If the migration outlasts that budget, the original `-TRYAGAIN` surfaces as
-a `ServerError`.
+a `ServerError`. `-CLUSTERDOWN`, `-LOADING`, and `-MASTERDOWN` are retried the same way, with one exception; see
+[Refusals sage retries for you](/error-handling#refusals-sage-retries-for-you).
 
 ### Commands that run on every master
 
 A cluster replicates no script or function cache, and no node sees the whole keyspace. So `scriptLoad`, `scriptExists`, `scriptFlush`, the
 `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master, and their replies
-are folded into one. One master failing fails the whole call, with no partial result. A master that is only reconnecting is retried on the
-`maxRedirects` budget; a retried `waitReplicas` or `waitAof` waits again on that node.
+are folded into one. One master failing fails the whole call, with no partial result. A master that is only reconnecting, or refusing with `-LOADING`
+or `-TRYAGAIN`, is retried on the `maxRedirects` budget; a retried `waitReplicas` or `waitAof` waits again there. A `-CLUSTERDOWN` is not retried,
+since it may have moved the masters the call fanned out to.
 
 ### Topology refresh
 

@@ -331,10 +331,11 @@ final private[client] class MasterReplicaLive(
     complete: Try[A] => Unit
   ): Unit = {
     if (isMaster && isOwnershipFault(error)) triggerRefresh()
-    if (isConnLoss(error)) {
+    def fail(): Unit = { Events.attributeNode(complete, node); complete(Failure(error)) }
+    if (servesNoRead(error))
       if (rest.nonEmpty) tryRead(command, rest, master, complete)
-      else { triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error)) }
-    } else { Events.attributeNode(complete, node); complete(Failure(error)) }
+      else { triggerRefresh(); fail() }
+    else fail()
   }
 
   private def isOwnershipFault(error: Throwable): Boolean = Fault.categorize(error) match {
@@ -342,9 +343,10 @@ final private[client] class MasterReplicaLive(
     case _                             => false
   }
 
-  private def isConnLoss(error: Throwable): Boolean = Fault.categorize(error) match {
+  // this node cannot answer the read, which says nothing about the read itself
+  private def servesNoRead(error: Throwable): Boolean = Fault.categorize(error) match {
     case Fault.Lost(_) => true
-    case _             => false
+    case fault         => fault.selfClearing
   }
 
   // --- pipelines -----------------------------------------------------------------------------------------------------------------------

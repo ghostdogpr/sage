@@ -27,6 +27,21 @@ class FaultSpec extends munit.FunSuite {
     assertEquals(Fault.categorize(ServerError("TRYAGAIN", "Multiple keys request during rehashing of slot")), Fault.TryAgain)
   }
 
+  test("a CLUSTERDOWN reply categorizes as a cluster-wide unavailability, whose mapping must be re-read past the throttle") {
+    val fault = Fault.categorize(ServerError("CLUSTERDOWN", "The cluster is down"))
+    assertEquals(fault, Fault.Unavailable(clusterWide = true))
+    assertEquals(fault.refreshPolicy, RefreshPolicy.Forced)
+  }
+
+  test("LOADING and MASTERDOWN categorize as node-local unavailabilities, which leave the topology alone") {
+    val loading    = Fault.categorize(ServerError("LOADING", "Redis is loading the dataset in memory"))
+    val masterDown = Fault.categorize(ServerError("MASTERDOWN", "Link with MASTER is down and replica-serve-stale-data is set to 'no'"))
+    assertEquals(loading, Fault.Unavailable(clusterWide = false))
+    assertEquals(masterDown, Fault.Unavailable(clusterWide = false))
+    assertEquals(loading.refreshPolicy, RefreshPolicy.Skip)
+    assertEquals(masterDown.refreshPolicy, RefreshPolicy.Skip)
+  }
+
   test("any other ServerError categorizes as Fatal") {
     assertEquals(Fault.categorize(ServerError("WRONGTYPE", "Operation against a key holding the wrong kind of value")), Fault.Fatal)
     assertEquals(Fault.categorize(ServerError("ERR", "foo bar")), Fault.Fatal)

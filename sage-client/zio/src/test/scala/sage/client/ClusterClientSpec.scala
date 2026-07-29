@@ -136,6 +136,9 @@ class ClusterClientSpec extends munit.FunSuite {
     await(s"expected a second CLUSTER SLOTS, saw $slotsCalls")(slotsCalls >= 2)
   }
 
+  private def awaitAtLeast(counter: java.util.concurrent.atomic.AtomicInteger, target: Int, clue: String): Unit =
+    await(s"$clue (saw ${counter.get()}, wanted $target)")(counter.get() >= target)
+
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
 
   test("a seed that owns no slots fails the bootstrap rather than adopting an empty topology") {
@@ -576,6 +579,79 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a broadcast leg retries a LOADING master on its own node, so one loading node does not fail the command") {
+    val mid       = Slot.Count / 2
+    val attempts  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("SCRIPT"))
+        if (node == nodeB && attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
+        else Seq(Frame.BulkString(Bytes.utf8("sha1")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Scripting.scriptLoad("return 1")).unsafeRun.map { sha =>
+      assertEquals(sha, "sha1")
+      assert(attempts.get() >= 2, s"the loading leg was not retried: ${attempts.get()} attempts")
+    }
+  }
+
+  test("a broadcast leg surfaces a CLUSTERDOWN instead of retrying the node that may no longer be a master") {
+    val mid          = Slot.Count / 2
+    val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour    = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) { clusterCalls.incrementAndGet(); Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))) }
+      else if (text.contains("SCRIPT"))
+        Seq(if (node == nodeB) Frame.SimpleError("CLUSTERDOWN The cluster is down") else Frame.BulkString(Bytes.utf8("sha1")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture      = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Scripting.scriptLoad("return 1")).unsafeRun.failed.map { error =>
+      assert(
+        error.isInstanceOf[ServerError] && error.asInstanceOf[ServerError].code == "CLUSTERDOWN",
+        s"the refusal must reach the caller intact, not as a NotConnected from a retry: $error"
+      )
+      assertEquals(fixture.written(nodeB).count(_.contains("SCRIPT")), 1, "a cluster-wide refusal must not be retried on the node that gave it")
+      awaitAtLeast(clusterCalls, 2, "a cluster-wide refusal must refresh the topology")
+    }
+  }
+
+  test("under ReplicaPreferred a replica answering MASTERDOWN falls through to the master") {
+    val nodeR                   = Node("r", 6379)
+    def slotsWithReplica: Frame =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+      else if (text.contains("GET"))
+        if (node == nodeR) Seq(Frame.SimpleError("MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'"))
+        else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("from-master"))
+      assert(fixture.written(nodeR).exists(_.contains("GET")), "the replica should have been tried before the master")
+    }
+  }
+
+  test("under a strict Replica policy a replica answering MASTERDOWN fails the read rather than reaching the master") {
+    val nodeR                   = Node("r", 6379)
+    def slotsWithReplica: Frame =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+      else if (text.contains("GET"))
+        if (node == nodeR) Seq(Frame.SimpleError("MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'"))
+        else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ServerError] && error.asInstanceOf[ServerError].code == "MASTERDOWN", s"unexpected error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("GET")), "a strict Replica read must not fall back to the master")
+    }
+  }
+
   test("under a Replica policy an eligible read routes to the shard's replica, which gets READONLY at setup") {
     val nodeR                   = Node("r", 6379)
     // CLUSTER SLOTS lists nodeR as nodeA's replica for the whole keyspace
@@ -713,6 +789,59 @@ class ClusterClientSpec extends munit.FunSuite {
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
       assertEquals(result, Some("value"))
       assert(attempts.get() >= 2, s"TRYAGAIN was not retried: ${attempts.get()} attempts")
+    }
+  }
+
+  test("a LOADING reply is retried, without refreshing the topology") {
+    val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val attempts     = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour    = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) { clusterCalls.incrementAndGet(); Seq(wholeClusterOn(nodeA)) }
+      else if (text.contains("GET"))
+        if (attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
+        else Seq(Frame.BulkString(Bytes.utf8("value")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture      = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("value"))
+      assert(attempts.get() >= 2, s"LOADING was not retried: ${attempts.get()} attempts")
+      assertEquals(clusterCalls.get(), 1, "a node-local refusal must not trigger a topology refresh")
+    }
+  }
+
+  test("a pipeline position refused with CLUSTERDOWN retries on the adopted mapping, off the reader thread") {
+    val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour    = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(if (clusterCalls.incrementAndGet() == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
+      // the batch carries both positions; the retries reach nodeB one at a time
+      else if (text.contains("GET"))
+        if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(Frame.BulkString(Bytes.utf8("from-b")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture      = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
+      assertEquals(result, (Some("from-b"), Some("from-b")))
+      assertEquals(fixture.written(nodeA).count(_.contains("GET")), 1, "the refused master must see the batch once, never a retry")
+    }
+  }
+
+  test("a CLUSTERDOWN retry re-dispatches on the mapping the refresh adopted, not the one that refused") {
+    val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
+    val behaviour    = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) {
+        val call = clusterCalls.incrementAndGet()
+        // slow on purpose: a refresh merely fired alongside the retry would leave it on the stale mapping
+        if (call > 1) Thread.sleep(300)
+        Seq(if (call == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
+      } else if (text.contains("GET"))
+        Seq(if (node == nodeA) Frame.SimpleError("CLUSTERDOWN The cluster is down") else Frame.BulkString(Bytes.utf8("from-b")))
+      else Seq(Frame.SimpleString("OK"))
+    val fixture      = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("from-b"))
+      assertEquals(fixture.written(nodeA).count(_.contains("GET")), 1, "the retry must not go back to the master that refused")
     }
   }
 
