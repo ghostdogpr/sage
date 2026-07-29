@@ -343,7 +343,7 @@ final private[client] class MasterReplicaLive(
     case _                             => false
   }
 
-  // a lost connection or a self-clearing refusal (`-MASTERDOWN`, `-LOADING`) means this node cannot answer the read, not that the read must fail
+  // this node cannot answer the read, which says nothing about the read itself
   private def servesNoRead(error: Throwable): Boolean = Fault.categorize(error) match {
     case Fault.Lost(_) => true
     case fault         => fault.selfClearing

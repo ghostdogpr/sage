@@ -534,12 +534,12 @@ final private[client] class ClusterLive(
       )
   }
 
-  // only a node that lost its connection, or refused for its own reasons, is retried; a command carrying its own timeout (WAIT) re-serves it there
+  // only the node that lost its connection or refused for its own reasons is retried; a WAIT re-serves its own timeout there
   private def onBroadcastFailure[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
     Fault.categorize(error) match {
       case Fault.Lost(false)                         => retryBroadcast(node, command, error, refreshFirst = true, attemptsLeft, settle)
       case Fault.TryAgain | Fault.Unavailable(false) => retryBroadcast(node, command, error, refreshFirst = false, attemptsLeft, settle)
-      // a cluster-wide refusal may have moved the masters this fan-out captured, so the caller re-broadcasts against an adopted topology
+      // a cluster-wide refusal may have moved the masters this fan-out captured, so it is not chased
       case Fault.Unavailable(true)                   => refreshBeforeFailing(); settle(Failure(error))
       case fault                                     =>
         if (fault.refreshPolicy != RefreshPolicy.Skip) triggerRefresh()
@@ -689,7 +689,7 @@ final private[client] class ClusterLive(
       )
     }
 
-  // a self-clearing refusal (-TRYAGAIN, -LOADING, -MASTERDOWN, -CLUSTERDOWN): retry bounded and jittered, then surface the original error
+  // a self-clearing refusal (-TRYAGAIN, -LOADING, -MASTERDOWN, -CLUSTERDOWN): retry bounded and jittered
   private def onRetryable[A](
     command: Command[A],
     error: Throwable,
@@ -897,7 +897,7 @@ final private[client] class ClusterLive(
     val callbacks: Vector[Try[Any] => Unit]        = indices.map { index => (result: Try[Any]) =>
       result match {
         case Success(_)     => settle(index, result)
-        // a fault's disposition can block on CLUSTER SLOTS, whose reply needs the very reader thread this callback runs on
+        // a fault's disposition can block on CLUSTER SLOTS, whose reply needs this very reader thread
         case Failure(error) =>
           offload {
             Fault.categorize(error) match {

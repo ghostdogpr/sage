@@ -53,8 +53,8 @@ When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command:
 
 ## Refusals sage retries for you
 
-Some replies mean the server turned the command down *before* running it, for a reason that goes away on its own. Sage retries those for you. It is
-safe: nothing ran, so nothing can run twice.
+Some replies mean the server turned the command down *before* running it, for a reason that goes away on its own. Sage retries those for you; nothing
+ran, so nothing can run twice.
 
 | Reply | What it means |
 | --- | --- |
@@ -63,21 +63,14 @@ safe: nothing ran, so nothing can run twice.
 | `-LOADING` | The node is still loading its dataset. |
 | `-MASTERDOWN` | A replica cut off from its master, running with `replica-serve-stale-data no`. |
 
-Retries are bounded and spaced out by a short random delay, sharing the cluster's `maxRedirects` budget. If the condition lasts longer than that, the
-original reply reaches you as a `ServerError`, code intact.
+Retries are bounded and spaced by a short random delay, sharing the cluster's `maxRedirects` budget. If the condition outlasts it, the original reply
+reaches you as a `ServerError`, code intact. A read tries its next [`ReadFrom`](/configuration#read-routing) candidate first, so a refusing replica
+costs one hop when the master or another replica can serve it.
 
-Reads try the next node first. Under a [`ReadFrom`](/configuration#read-routing) policy, a replica answering `-MASTERDOWN` or `-LOADING` costs one hop
-when the master or another replica can serve the read instead.
-
-One exception. Commands that run on every master (`SCRIPT LOAD`, `FUNCTION LOAD`, `KEYS`, `WAIT`) do not retry a `-CLUSTERDOWN`: a failover may have
-moved the very masters they fan out to, so the reply reaches you and you retry the command yourself. `-LOADING` and `-MASTERDOWN` are still retried,
-since those leave the master list intact.
-
-Here the "nothing ran" guarantee does not apply, because the fan-out is not atomic. Masters that answered before the refusal have already run the
-command, and your retry runs them again. That is harmless for the read-only ones and for `SCRIPT LOAD` and the `FLUSH` family, which are idempotent.
-The `function*` mutations are not, unless you ask for one that tolerates what the first pass left behind: a second `FUNCTION LOAD` answers `already
-exists` and `FUNCTION DELETE` answers `not found`, while `FUNCTION RESTORE` answers `already exists` under its default `APPEND` policy. Pass
-`replace = true` to `functionLoad`, or `RestorePolicy.Replace` or `RestorePolicy.Flush` to `functionRestore`, and the retry is repeatable.
+Commands that run on every master are the exception: a `-CLUSTERDOWN` there reaches you, because the failover may have moved the masters the call
+fanned out to. Retry it yourself, remembering that the fan-out is not atomic, so masters that already ran it run it again. Harmless for the read-only
+ones, `SCRIPT LOAD`, and the `FLUSH` family. `FUNCTION LOAD`, `FUNCTION DELETE`, and `FUNCTION RESTORE` answer `already exists` or `not found` unless
+you pass `replace = true`, or `RestorePolicy.Replace` or `RestorePolicy.Flush`.
 
 ## How failures surface per backend
 

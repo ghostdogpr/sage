@@ -314,14 +314,12 @@ abstract class MasterReplicaReplicaDownSuite(image: String, serverBinary: String
 }
 
 /**
-  * A replica that refuses to serve stale data. With `replica-serve-stale-data no` set, breaking its replication link makes it answer reads with
-  * `-MASTERDOWN` while staying perfectly reachable, so the policy's fallback cannot be reached by connection loss: `ReplicaPreferred` must fall
-  * through to the master on the server's refusal, and strict `Replica` has nowhere left to go and fails. Both clients connect before the link
-  * breaks, so the stale replica really is the candidate they try first. `sd:k` is written after the link broke, so only the master can hold it.
+  * A replica that refuses to serve stale data: with `replica-serve-stale-data no` and its link broken, it answers reads `-MASTERDOWN` while staying
+  * reachable, so only a fall-through on the refusal itself saves the read. Both clients connect first, so the stale replica is the candidate they try.
   */
 abstract class MasterReplicaStaleReplicaSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
 
-  // 6399 is a port nothing listens on: the link stays down while the replica itself keeps answering
+  // 6399 listens to nothing, so the link stays down while the replica keeps answering
   private def refuseStaleReads(replica: Client[CIO, String]): CIO[Unit] =
     for {
       _ <- replica.run(admin("CONFIG", "SET", "replica-serve-stale-data", "no"))

@@ -814,7 +814,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour    = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(if (clusterCalls.incrementAndGet() == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
-      // the batch carries both positions, so nodeA answers both; the retries reach nodeB one command at a time
+      // the batch carries both positions; the retries reach nodeB one at a time
       else if (text.contains("GET"))
         if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(Frame.BulkString(Bytes.utf8("from-b")))
       else Seq(Frame.SimpleString("OK"))
@@ -831,7 +831,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour    = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) {
         val call = clusterCalls.incrementAndGet()
-        // a slow topology query: a retry that merely fires the refresh alongside itself re-dispatches on the mapping that just refused
+        // slow on purpose: a refresh merely fired alongside the retry would leave it on the stale mapping
         if (call > 1) Thread.sleep(300)
         Seq(if (call == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
       } else if (text.contains("GET"))
