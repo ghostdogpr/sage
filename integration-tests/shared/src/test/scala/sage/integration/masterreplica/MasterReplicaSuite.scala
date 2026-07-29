@@ -313,6 +313,61 @@ abstract class MasterReplicaReplicaDownSuite(image: String, serverBinary: String
   }
 }
 
+/**
+  * A replica that refuses to serve stale data. With `replica-serve-stale-data no` set, breaking its replication link makes it answer reads with
+  * `-MASTERDOWN` while staying perfectly reachable, so the policy's fallback cannot be reached by connection loss: `ReplicaPreferred` must fall
+  * through to the master on the server's refusal, and strict `Replica` has nowhere left to go and fails. Both clients connect before the link
+  * breaks, so the stale replica really is the candidate they try first. `sd:k` is written after the link broke, so only the master can hold it.
+  */
+abstract class MasterReplicaStaleReplicaSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
+
+  // 6399 is a port nothing listens on: the link stays down while the replica itself keeps answering
+  private def refuseStaleReads(replica: Client[CIO, String]): CIO[Unit] =
+    for {
+      _ <- replica.run(admin("CONFIG", "SET", "replica-serve-stale-data", "no"))
+      _ <- replica.run(admin("REPLICAOF", "127.0.0.1", "6399"))
+      _ <- awaitLinkDown(replica, 100)
+    } yield ()
+
+  private def awaitLinkDown(replica: Client[CIO, String], attempts: Int): CIO[Unit] =
+    replica.run(infoReplication).flatMap { info =>
+      if (info.contains("master_link_status:down")) CIO.value(())
+      else if (attempts <= 0) CIO.fail(new RuntimeException(s"replica link never went down: $info"))
+      else CIO.sleep(100.millis).flatMap(_ => awaitLinkDown(replica, attempts - 1))
+    }
+
+  test("a replica answering MASTERDOWN falls through to the master under ReplicaPreferred, and fails a strict Replica read") {
+    withContainers { server =>
+      val host       = server.host
+      val pm         = server.mappedPort(masterPort)
+      val pr         = server.mappedPort(replicaPort)
+      val replicaCfg = standalone(host, pr)
+
+      val program =
+        connectAndUse(replicaCfg)(ensureReplicating(_, host, pr)).flatMap { _ =>
+          connectAndUse(masterReplica(host, pm, ReadFrom.Replica)) { strict =>
+            connectAndUse(masterReplica(host, pm, ReadFrom.ReplicaPreferred)) { preferred =>
+              for {
+                warmStrict    <- strict.get[String](marker)
+                warmPreferred <- preferred.get[String](marker)
+                _             <- connectAndUse(replicaCfg)(refuseStaleReads)
+                _             <- preferred.set("sd:k", "v")
+                fallback      <- preferred.get[String]("sd:k")
+                strictFailed  <- strict.get[String]("sd:k").fold(_ => CIO.value(false), _ => CIO.value(true))
+              } yield {
+                assertEquals(warmStrict, Some("from-replica"))
+                assertEquals(warmPreferred, Some("from-replica"))
+                assertEquals(fallback, Some("v"))
+                assert(strictFailed, "strict Replica read should fail when the only replica refuses to serve stale data")
+              }
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+}
+
 class RedisMasterReplicaSuite extends MasterReplicaSuite(Images.redis, "redis-server")
 
 class ValkeyMasterReplicaSuite extends MasterReplicaSuite(Images.valkey, "valkey-server")
@@ -328,3 +383,7 @@ class ValkeyMasterReplicaConnectionLossFailoverSuite extends MasterReplicaConnec
 class RedisMasterReplicaReplicaDownSuite extends MasterReplicaReplicaDownSuite(Images.redis, "redis-server")
 
 class ValkeyMasterReplicaReplicaDownSuite extends MasterReplicaReplicaDownSuite(Images.valkey, "valkey-server")
+
+class RedisMasterReplicaStaleReplicaSuite extends MasterReplicaStaleReplicaSuite(Images.redis, "redis-server")
+
+class ValkeyMasterReplicaStaleReplicaSuite extends MasterReplicaStaleReplicaSuite(Images.valkey, "valkey-server")

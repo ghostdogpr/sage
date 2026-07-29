@@ -45,11 +45,38 @@ def classify(e: SageException): String = e match {
 - `false` means the command was never sent, so retrying is always safe.
 - `true` means it was already in flight when the connection dropped, so the server may or may not have applied it. A non-idempotent command (an `INCR`, an `LPUSH`) is then not safe to blindly retry; an idempotent one (a `SET` to a fixed value) is.
 
-Sage does not retry for you, and it does not queue commands while disconnected (see [What happens when the connection drops?](/faq#what-happens-when-the-connection-drops)). This flag gives you what you need to decide.
+Sage does not retry a lost command for you, and it does not queue commands while disconnected (see [What happens when the connection drops?](/faq#what-happens-when-the-connection-drops)). This flag gives you what you need to decide.
 
 ::: warning
 When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command: it may already have run. Retry only when the command is idempotent, or make it so first.
 :::
+
+## Refusals sage retries for you
+
+Some replies mean the server turned the command down *before* running it, for a reason that goes away on its own. Sage retries those for you. It is
+safe: nothing ran, so nothing can run twice.
+
+| Reply | What it means |
+| --- | --- |
+| `-TRYAGAIN` | A multi-key command whose keys straddle a slot being migrated. |
+| `-CLUSTERDOWN` | The cluster is mid-failover, or the slot is not served right now. |
+| `-LOADING` | The node is still loading its dataset. |
+| `-MASTERDOWN` | A replica cut off from its master, running with `replica-serve-stale-data no`. |
+
+Retries are bounded and spaced out by a short random delay, sharing the cluster's `maxRedirects` budget. If the condition lasts longer than that, the
+original reply reaches you as a `ServerError`, code intact.
+
+Reads try the next node first. Under a [`ReadFrom`](/configuration#read-routing) policy, a replica answering `-MASTERDOWN` or `-LOADING` costs one hop
+when the master or another replica can serve the read instead.
+
+One exception. Commands that run on every master (`SCRIPT LOAD`, `FUNCTION LOAD`, `KEYS`, `WAIT`) do not retry a `-CLUSTERDOWN`: a failover may have
+moved the very masters they fan out to, so the reply reaches you and you retry the command yourself. `-LOADING` and `-MASTERDOWN` are still retried,
+since those leave the master list intact.
+
+Here the "nothing ran" guarantee does not apply, because the fan-out is not atomic. Masters that answered before the refusal have already run the
+command, and your retry runs them again. That is harmless for the read-only ones and for `SCRIPT LOAD` and the `FLUSH` family, which are idempotent.
+`FUNCTION LOAD`, `FUNCTION DELETE`, and `FUNCTION RESTORE` are not: a second pass reports an error on the masters that already applied it, `already
+exists` or `not found`. Pass `replace = true` to make `functionLoad` repeatable.
 
 ## How failures surface per backend
 

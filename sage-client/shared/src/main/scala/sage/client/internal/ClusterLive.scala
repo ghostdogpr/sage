@@ -431,7 +431,10 @@ final private[client] class ClusterLive(
         }
       case Fault.Lost(false)                =>
         if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
-      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete)
+      case Fault.Unavailable(clusterWide)   =>
+        if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete)
+        else onRetryable(command, error, clusterWide, redirectsLeft, complete)
+      case Fault.TryAgain                   => onRetryable(command, error, refreshFirst = false, redirectsLeft, complete)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -514,7 +517,7 @@ final private[client] class ClusterLive(
   private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
     val nc = resolve(node)
     // the dispatch fast path resolves inline on the caller, which the retry's refresh would block
-    if (nc == null) offload(retryBroadcast(node, command, NotConnected(), attemptsLeft, settle))
+    if (nc == null) offload(retryBroadcast(node, command, NotConnected(), refreshFirst = true, attemptsLeft, settle))
     else
       nc.submit[B](
         command,
@@ -526,21 +529,31 @@ final private[client] class ClusterLive(
       )
   }
 
-  // only the node that lost its connection is retried; a command carrying its own timeout (WAIT) re-serves it there
+  // only a node that lost its connection, or refused for its own reasons, is retried; a command carrying its own timeout (WAIT) re-serves it there
   private def onBroadcastFailure[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
     Fault.categorize(error) match {
-      case Fault.Lost(false) => retryBroadcast(node, command, error, attemptsLeft, settle)
-      case fault             =>
+      case Fault.Lost(false)                         => retryBroadcast(node, command, error, refreshFirst = true, attemptsLeft, settle)
+      case Fault.TryAgain | Fault.Unavailable(false) => retryBroadcast(node, command, error, refreshFirst = false, attemptsLeft, settle)
+      // a cluster-wide refusal may have moved the masters this fan-out captured, so the caller re-broadcasts against an adopted topology
+      case Fault.Unavailable(true)                   => refreshBeforeFailing(); settle(Failure(error))
+      case fault                                     =>
         if (fault.refreshPolicy != RefreshPolicy.Skip) triggerRefresh()
         settle(Failure(error))
     }
 
   // a node the refreshed topology no longer lists as a slot-owning master makes this broadcast's target set stale, so it fails unchased
-  private def retryBroadcast[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
+  private def retryBroadcast[B](
+    node: Node,
+    command: Command[B],
+    error: Throwable,
+    refreshFirst: Boolean,
+    attemptsLeft: Int,
+    settle: Try[B] => Unit
+  ): Unit =
     if (attemptsLeft <= 0) { refreshBeforeFailing(); settle(Failure(error)) }
     else
       afterBackoff(attemptsLeft) {
-        refresh(force = true)
+        if (refreshFirst) refresh(force = true)
         if (closed || !slotOwningMasters(topologyRef.get()).contains(node)) settle(Failure(error))
         else submitBroadcast(node, command, establishOrNull, attemptsLeft - 1, settle)
       }
@@ -625,7 +638,8 @@ final private[client] class ClusterLive(
     Fault.categorize(error) match {
       case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
-      case Fault.TryAgain                   => onTryAgain(command, error, redirectsLeft, complete, lease, cacheCtx)
+      case Fault.TryAgain                   => onRetryable(command, error, refreshFirst = false, redirectsLeft, complete, lease, cacheCtx)
+      case Fault.Unavailable(clusterWide)   => onRetryable(command, error, clusterWide, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
@@ -670,20 +684,23 @@ final private[client] class ClusterLive(
       )
     }
 
-  // -TRYAGAIN is a transient mid-migration refusal: the slot mapping is still valid, so retry (bounded, jittered) without refreshing the topology.
-  private def onTryAgain[A](
+  // a self-clearing refusal (-TRYAGAIN, -LOADING, -MASTERDOWN, -CLUSTERDOWN): retry bounded and jittered, then surface the original error
+  private def onRetryable[A](
     command: Command[A],
     error: Throwable,
+    refreshFirst: Boolean,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
   ): Unit =
-    if (redirectsLeft <= 0) complete(Failure(error))
-    else
+    if (redirectsLeft <= 0) { if (refreshFirst) refreshBeforeFailing(); complete(Failure(error)) }
+    else {
+      if (refreshFirst) refresh(force = true)
       afterBackoff(redirectsLeft)(
         dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
       )
+    }
 
   // paces a retry, growing with the attempts already spent, so an in-progress failover or migration is not hammered
   private def afterBackoff(attemptsLeft: Int)(retry: => Unit): Unit =
@@ -883,7 +900,8 @@ final private[client] class ClusterLive(
                 case RedirectKind.Moved                                             => reroute(index)
               }
             case Fault.Lost(false)                => reroute(index)
-            case Fault.TryAgain                   => onTryAgain(p.commands(index), error, cluster.maxRedirects, emits(index))
+            case Fault.TryAgain                   => onRetryable(p.commands(index), error, refreshFirst = false, cluster.maxRedirects, emits(index))
+            case Fault.Unavailable(clusterWide)   => onRetryable(p.commands(index), error, clusterWide, cluster.maxRedirects, emits(index))
             case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
             case Fault.Fatal                      => settle(index, result)
           }
