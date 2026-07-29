@@ -96,7 +96,7 @@ final private[client] class MasterReplicaLive(
   private def resolvePinned(): Either[Throwable, (Node, Vector[Node])] = {
     var lastError: Throwable = NotConnected()
     val roles                = seeds.flatMap { seed =>
-      try probeRole(seed, reportConnectFailure = true).map(seed -> _)
+      try probeRole(seed).map(seed -> _)
       catch {
         case NonFatal(error) =>
           lastError = error
@@ -119,7 +119,7 @@ final private[client] class MasterReplicaLive(
     while (!done && candidates.hasNext) {
       val seed = candidates.next()
       try
-        resolveFrom(seed, reportConnectFailure = true) match {
+        resolveFrom(seed) match {
           case Some((master, replicas)) => masterNodeRef.set(master); replicasRef.set(replicas); done = true
           case None                     => ()
         }
@@ -129,12 +129,12 @@ final private[client] class MasterReplicaLive(
   }
 
   // probes a node's ROLE; a master answers with its replica list, a replica points at its master (followed once), a sentinel is skipped
-  private def resolveFrom(node: Node, reportConnectFailure: Boolean): Option[(Node, Vector[Node])] =
-    probeRole(node, reportConnectFailure).flatMap {
+  private def resolveFrom(node: Node): Option[(Node, Vector[Node])] =
+    probeRole(node).flatMap {
       case Role.Master(_, replicas)       => Some(node -> replicas.map(r => Node(r.host, r.port)))
       case Role.Replica(host, port, _, _) =>
         val master = Node(host, port)
-        probeRole(master, reportConnectFailure).collect { case Role.Master(_, replicas) =>
+        probeRole(master).collect { case Role.Master(_, replicas) =>
           master -> replicas.map(r => Node(r.host, r.port))
         }
       case _: Role.Sentinel               => None
@@ -142,7 +142,7 @@ final private[client] class MasterReplicaLive(
 
   // a throwaway connection (must not leave a pooled one behind): a connect/handshake failure propagates so bootstrapRoles surfaces it like a
   // standalone connect; a node that handshakes but doesn't answer ROLE yields None
-  private def probeRole(node: Node, reportConnectFailure: Boolean): Option[Role] = {
+  private def probeRole(node: Node): Option[Role] = {
     val nc =
       try
         NodeClient.connect(
@@ -159,7 +159,7 @@ final private[client] class MasterReplicaLive(
         )
       catch {
         case NonFatal(error) =>
-          reportProbeFailure(node, error, reportConnectFailure)
+          reportProbeFailure(node, error)
           throw error
       }
     try {
@@ -168,20 +168,20 @@ final private[client] class MasterReplicaLive(
       nc.submit[Role](Server.role, asking = false, result => { outcome.set(result); latch.countDown() })
       if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) {
         val error = TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
-        reportProbeFailure(node, error, reportConnectFailure)
+        reportProbeFailure(node, error)
         None
       } else
         outcome.get() match {
           case Success(role)  => Some(role)
           case Failure(error) =>
-            reportProbeFailure(node, error, reportConnectFailure)
+            reportProbeFailure(node, error)
             None
         }
     } finally nc.close()
   }
 
-  private def reportProbeFailure(node: Node, error: Throwable, enabled: Boolean): Unit =
-    if (enabled) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
+  private def reportProbeFailure(node: Node, error: Throwable): Unit =
+    events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
   private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscover())
 
@@ -195,7 +195,7 @@ final private[client] class MasterReplicaLive(
         val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
         candidates.iterator
           .flatMap(n =>
-            try resolveFrom(n, reportConnectFailure = true)
+            try resolveFrom(n)
             catch { case NonFatal(_) => None }
           )
           .nextOption()

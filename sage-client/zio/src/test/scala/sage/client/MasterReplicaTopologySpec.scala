@@ -173,16 +173,17 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
   test("throwaway ROLE probes do not report Connected") {
     val connected = new ConcurrentLinkedQueue[SageEvent.Connection.Connected]()
-    val events    = Events(
-      Vector(
-        new SageListener {
-          def onEvent(event: SageEvent): Unit = event match {
-            case event: SageEvent.Connection.Connected => val _ = connected.add(event)
-            case _                                     => ()
-          }
-        }
-      )
-    )
+    val events    = new Events {
+      def enabled: Boolean             = true
+      def emitsEvents: Boolean         = true
+      def tracer                       = None
+      def serverNode                   = None
+      def close(): Unit                = ()
+      def emit(event: SageEvent): Unit = event match {
+        case event: SageEvent.Connection.Connected => val _ = connected.add(event)
+        case _                                     => ()
+      }
+    }
     val fixture   = new Fixture(
       seeds = Vector(primary, reader),
       initialRoles = Map(primary -> masterRole(), reader -> replicaRole(primary)),
