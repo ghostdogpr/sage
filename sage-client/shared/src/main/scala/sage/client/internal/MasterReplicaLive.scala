@@ -84,16 +84,18 @@ final private[client] class MasterReplicaLive(
   private val pinnedToSeeds = seeds.sizeIs > 1
 
   private[client] def bootstrapRoles(): Unit =
-    if (pinnedToSeeds)
-      resolvePinned() match {
-        case Right((master, replicas)) => masterNodeRef.set(master); replicasRef.set(replicas)
-        case Left(error)               => closeAll(); throw error
-      }
-    else bootstrapDiscovered()
+    resolveTopology(seeds) match {
+      case Right(topology) => installTopology(topology)
+      case Left(error)     => closeAll(); throw error
+    }
+
+  private def resolveTopology(discoveredCandidates: => Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] =
+    if (pinnedToSeeds) resolvePinned()
+    else resolveDiscovered(discoveredCandidates)
 
   // classifies every supplied endpoint by its own ROLE; an endpoint that cannot be opened is omitted, but reported because the successful
   // topology resolution otherwise hides its failure from the caller
-  private def resolvePinned(): Either[Throwable, (Node, Vector[Node])] = {
+  private def resolvePinned(): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
     var lastError: Throwable = NotConnected()
     val roles                = seeds.flatMap { seed =>
       try probeRole(seed).map(seed -> _)
@@ -105,37 +107,36 @@ final private[client] class MasterReplicaLive(
     }
     roles.collectFirst { case (node, _: Role.Master) => node } match {
       case Some(master)          =>
-        Right(master -> roles.collect { case (node, role) if role.isConnectedReplica => node })
+        Right(MasterReplicaLive.ResolvedTopology(master, roles.collect { case (node, role) if role.isConnectedReplica => node }))
       case None if roles.isEmpty => Left(lastError)
       case None                  => Left(ConnectionFailed("no supplied endpoint reports the master role"))
     }
   }
 
   // contacts seeds until one answers ROLE, resolving the master and its advertised replicas; this is the original single-seed discovery path
-  private def bootstrapDiscovered(): Unit = {
+  private def resolveDiscovered(candidates: Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
     var lastError: Throwable = NotConnected()
-    val candidates           = seeds.iterator
-    var done                 = false
-    while (!done && candidates.hasNext) {
-      val seed = candidates.next()
+    val it                   = candidates.iterator
+    while (it.hasNext) {
+      val seed = it.next()
       try
         resolveFrom(seed) match {
-          case Some((master, replicas)) => masterNodeRef.set(master); replicasRef.set(replicas); done = true
-          case None                     => ()
+          case Some(topology) => return Right(topology)
+          case None           => ()
         }
       catch { case NonFatal(error) => lastError = error }
     }
-    if (!done) { closeAll(); throw lastError }
+    Left(lastError)
   }
 
   // probes a node's ROLE; a master answers with its replica list, a replica points at its master (followed once), a sentinel is skipped
-  private def resolveFrom(node: Node): Option[(Node, Vector[Node])] =
+  private def resolveFrom(node: Node): Option[MasterReplicaLive.ResolvedTopology] =
     probeRole(node).flatMap {
-      case Role.Master(_, replicas)       => Some(node -> replicas.map(r => Node(r.host, r.port)))
+      case Role.Master(_, replicas)       => Some(MasterReplicaLive.ResolvedTopology(node, replicas.map(r => Node(r.host, r.port))))
       case Role.Replica(host, port, _, _) =>
         val master = Node(host, port)
         probeRole(master).collect { case Role.Master(_, replicas) =>
-          master -> replicas.map(r => Node(r.host, r.port))
+          MasterReplicaLive.ResolvedTopology(master, replicas.map(r => Node(r.host, r.port)))
         }
       case _: Role.Sentinel               => None
     }
@@ -189,23 +190,15 @@ final private[client] class MasterReplicaLive(
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
   private def rediscover(): Unit = {
-    val resolved =
-      if (pinnedToSeeds) resolvePinned().toOption
-      else {
-        val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
-        candidates.iterator
-          .flatMap(n =>
-            try resolveFrom(n)
-            catch { case NonFatal(_) => None }
-          )
-          .nextOption()
-      }
-    resolved.foreach { case (master, replicas) =>
-      masterNodeRef.set(master)
-      replicasRef.set(replicas)
-      replicaPool.retain(replicas.toSet.contains)
-      masterPool.retain(_ == master)
-    }
+    val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
+    resolveTopology(candidates).foreach(installTopology)
+  }
+
+  private def installTopology(topology: MasterReplicaLive.ResolvedTopology): Unit = {
+    masterNodeRef.set(topology.master)
+    replicasRef.set(topology.replicas)
+    replicaPool.retain(topology.replicas.toSet.contains)
+    masterPool.retain(_ == topology.master)
   }
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
@@ -278,10 +271,14 @@ final private[client] class MasterReplicaLive(
   private def sendRead[A](command: Command[A], complete: Try[A] => Unit): Unit = {
     if (closed) { complete(Failure(NotConnected())); return }
     val master     = masterNodeRef.get()
-    val replicas   = replicasRef.get()
-    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
-    val candidates = ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
+    val candidates = readCandidates(master)
     tryRead(command, candidates, master, complete)
+  }
+
+  private def readCandidates(master: Node): Vector[Node] = {
+    val replicas = replicasRef.get()
+    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
+    ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
   }
 
   private def tryRead[A](command: Command[A], candidates: Vector[Node], master: Node, complete: Try[A] => Unit): Unit =
@@ -373,9 +370,7 @@ final private[client] class MasterReplicaLive(
         }
         val master                                     = masterNodeRef.get()
         if (useReplica) {
-          val replicas   = replicasRef.get()
-          if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
-          val candidates = ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
+          val candidates = readCandidates(master)
           liveEstablished(candidates, master) match {
             case Some((node, nc)) => submitOn(node, nc)
             case None             => offload { val (node, nc) = establishRead(candidates, master); submitOn(node, nc) }
@@ -509,6 +504,8 @@ final private[client] class MasterReplicaLive(
 }
 
 private[client] object MasterReplicaLive {
+
+  final private[client] case class ResolvedTopology(master: Node, replicas: Vector[Node])
 
   final private[client] class TxLease(val scope: Client.TxScope, val nc: NodeClient)
 

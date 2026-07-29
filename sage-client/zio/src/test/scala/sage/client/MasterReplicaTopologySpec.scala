@@ -1,7 +1,7 @@
 package sage.client
 
 import java.io.IOException
-import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable
@@ -11,9 +11,9 @@ import scala.util.Try
 
 import kyo.compat.*
 
-import sage.{Bytes, SageEvent, SageListener}
+import sage.{Bytes, SageEvent}
 import sage.SageException.{ConnectionFailed, NotConnected, TimedOut}
-import sage.client.internal.{Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
+import sage.client.internal.{ConnectFailureRecorder, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
 import sage.protocol.Frame
@@ -197,60 +197,34 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   }
 
   test("a single seed ROLE timeout is returned and reported") {
-    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
-    val delivered = new CountDownLatch(1)
-    val events    = Events(
-      Vector(
-        new SageListener {
-          def onEvent(event: SageEvent): Unit = event match {
-            case failure: SageEvent.Connection.ConnectFailed =>
-              val _ = failures.add(failure)
-              delivered.countDown()
-            case _                                           => ()
-          }
-        }
-      )
-    )
-    val fixture   = new Fixture(
+    val recorder = new ConnectFailureRecorder
+    val fixture  = new Fixture(
       seeds = Vector(primary),
       initialRoles = Map.empty,
-      events = events
+      events = recorder.events
     )
 
     intercept[NotConnected](fixture.live.bootstrapRoles())
-    assert(delivered.await(2, TimeUnit.SECONDS), "the singleton ROLE timeout was not reported")
-    val failure   = failures.peek()
+    assert(recorder.await(), "the singleton ROLE timeout was not reported")
+    val failure  = recorder.failures.head
 
     assertEquals(failure.node, Some(primary))
     assert(failure.error.isInstanceOf[TimedOut], s"unexpected cause: ${failure.error}")
   }
 
   test("an unreachable supplied endpoint is omitted and reported while the available topology connects") {
-    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
-    val delivered = new CountDownLatch(1)
-    val events    = Events(
-      Vector(
-        new SageListener {
-          def onEvent(event: SageEvent): Unit = event match {
-            case failure: SageEvent.Connection.ConnectFailed =>
-              val _ = failures.add(failure)
-              delivered.countDown()
-            case _                                           => ()
-          }
-        }
-      )
-    )
-    val fixture   = new Fixture(
+    val recorder = new ConnectFailureRecorder
+    val fixture  = new Fixture(
       seeds = Vector(primary, reader),
       initialRoles = Map(primary -> masterRole(), reader -> replicaRole(primary)),
       unreachable = Set(reader),
-      events = events
+      events = recorder.events
     )
     fixture.live.bootstrapRoles()
 
     assertEquals(fixture.read(), 1L)
-    assert(delivered.await(2, TimeUnit.SECONDS), "ConnectFailed was not delivered")
-    val failure = failures.peek()
+    assert(recorder.await(), "ConnectFailed was not delivered")
+    val failure = recorder.failures.head
     fixture.close()
 
     assertEquals(failure.node, Some(reader))
@@ -284,29 +258,16 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   }
 
   test("a supplied endpoint that handshakes but does not answer ROLE is reported") {
-    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
-    val delivered = new CountDownLatch(1)
-    val events    = Events(
-      Vector(
-        new SageListener {
-          def onEvent(event: SageEvent): Unit = event match {
-            case failure: SageEvent.Connection.ConnectFailed =>
-              val _ = failures.add(failure)
-              delivered.countDown()
-            case _                                           => ()
-          }
-        }
-      )
-    )
-    val fixture   = new Fixture(
+    val recorder = new ConnectFailureRecorder
+    val fixture  = new Fixture(
       seeds = Vector(primary, reader),
       initialRoles = Map(primary -> masterRole()),
-      events = events
+      events = recorder.events
     )
     fixture.live.bootstrapRoles()
 
-    assert(delivered.await(2, TimeUnit.SECONDS), "the ROLE timeout was not reported")
-    val failure = failures.peek()
+    assert(recorder.await(), "the ROLE timeout was not reported")
+    val failure = recorder.failures.head
     fixture.close()
 
     assertEquals(failure.node, Some(reader))
@@ -314,26 +275,13 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   }
 
   test("a singleton refresh reports a failed address once when discovery reaches it directly and through a replica") {
-    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
-    val delivered = new CountDownLatch(1)
-    val events    = Events(
-      Vector(
-        new SageListener {
-          def onEvent(event: SageEvent): Unit = event match {
-            case failure: SageEvent.Connection.ConnectFailed =>
-              val _ = failures.add(failure)
-              delivered.countDown()
-            case _                                           => ()
-          }
-        }
-      )
-    )
-    val down      = mutable.Set.empty[Node]
-    val fixture   = new Fixture(
+    val recorder = new ConnectFailureRecorder
+    val down     = mutable.Set.empty[Node]
+    val fixture  = new Fixture(
       seeds = Vector(primary),
       initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary)),
       unreachable = down,
-      events = events
+      events = recorder.events
     )
     fixture.live.bootstrapRoles()
     assert(fixture.write().isSuccess, "the master pool should be established before discovery connections fail")
@@ -342,9 +290,9 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.writesFailReadonly = true
     assert(fixture.write().isFailure, "READONLY should trigger a singleton role refresh")
 
-    assert(delivered.await(2, TimeUnit.SECONDS), s"expected the failed address, got ${failures.asScala.toVector}")
+    assert(recorder.await(), s"expected the failed address, got ${recorder.failures}")
     Thread.sleep(50)
-    val reported = failures.asScala.toVector
+    val reported = recorder.failures
     fixture.close()
 
     assertEquals(reported.map(_.node), Vector(Some(primary)))
