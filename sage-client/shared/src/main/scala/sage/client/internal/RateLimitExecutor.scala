@@ -7,7 +7,8 @@ import sage.commands.Command
 import sage.ratelimit.{Decision, RateLimiter}
 
 /**
-  * Runs one bound limiter: [[evalSha]] validates, runs by digest, and reloads the script once on a `NOSCRIPT`.
+  * Runs one bound limiter: [[evalSha]] validates, runs by digest, and falls back once to sending the script body on a `NOSCRIPT`. The
+  * fallback is keyed like the check itself, so in a cluster it routes to the one owning master and needs no all-masters `SCRIPT LOAD`.
   */
 final private[client] class RateLimitExecutor[K](definition: RateLimiter[K]) {
 
@@ -19,9 +20,8 @@ final private[client] class RateLimitExecutor[K](definition: RateLimiter[K]) {
     definition.validate(cost) match {
       case Some(problem) => CIO.fail(InvalidArgument(problem))
       case None          =>
-        val check = definition.evalSha(subject, cost, peek)
-        runner.run(check).recover {
-          case ServerError(code, _) if code == "NOSCRIPT" => runner.run(definition.loadCommand).flatMap(_ => runner.run(check))
+        runner.run(definition.evalSha(subject, cost, peek)).recover {
+          case ServerError(code, _) if code == "NOSCRIPT" => runner.run(definition.evalScript(subject, cost, peek))
           case other                                      => CIO.fail(other)
         }
     }

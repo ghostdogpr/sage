@@ -216,18 +216,8 @@ final private[client] class ClusterLive(
       val topology = topologyRef.get()
       if (command.allMasters)
         if (slotOwningMasters(topology).forall(node => masterPool.existing(node) != null))
-          broadcast(topology, command, complete, masterPool.existing)
-        else
-          offload {
-            broadcast(
-              topology,
-              command,
-              complete,
-              node =>
-                try getOrEstablish(node)
-                catch { case NonFatal(_) => null }
-            )
-          }
+          broadcast(topology, command, redirectsLeft, complete, masterPool.existing)
+        else offload(broadcast(topology, command, redirectsLeft, complete, establishOrNull))
       else
         topology.route(command) match {
           case Route.ToNode(node, slot) =>
@@ -445,16 +435,28 @@ final private[client] class ClusterLive(
       case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
     }
 
-  private def broadcast[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit, resolve: Node => NodeClient): Unit =
+  private def broadcast[A](
+    topology: ClusterTopology,
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    resolve: Node => NodeClient
+  ): Unit =
     command.broadcast match {
-      case BroadcastReduce.First      => sendToAllMasters(topology, command, complete, resolve)
-      case BroadcastReduce.Concat     => broadcastCombine(topology, command, concatFrames, complete, resolve)
-      case BroadcastReduce.Fold(fold) => broadcastCombine(topology, command, _.reduce(fold), complete, resolve)
+      case BroadcastReduce.First      => sendToAllMasters(topology, command, redirectsLeft, complete, resolve)
+      case BroadcastReduce.Concat     => broadcastCombine(topology, command, concatFrames, redirectsLeft, complete, resolve)
+      case BroadcastReduce.Fold(fold) => broadcastCombine(topology, command, _.reduce(fold), redirectsLeft, complete, resolve)
     }
 
   // a broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
-  // cache; any node failing fails the command
-  private def sendToAllMasters[A](topology: ClusterTopology, command: Command[A], complete: Try[A] => Unit, resolve: Node => NodeClient): Unit = {
+  // cache; any node failing terminally fails the command
+  private def sendToAllMasters[A](
+    topology: ClusterTopology,
+    command: Command[A],
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    resolve: Node => NodeClient
+  ): Unit = {
     val masters = slotOwningMasters(topology)
     if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
     else {
@@ -469,21 +471,18 @@ final private[client] class ClusterLive(
         if (remaining.decrementAndGet() == 0)
           complete(Option(firstError.get()).map(Failure(_)).getOrElse(firstValue.get()))
       }
-      masters.foreach { node =>
-        val nc = resolve(node)
-        if (nc == null) settle(Failure(NotConnected()))
-        else nc.submit[A](command, asking = false, settle)
-      }
+      masters.foreach(node => submitBroadcast(node, command, resolve, redirectsLeft, settle))
     }
   }
 
   // an all-masters broadcast whose per-node replies fold into one: KEYS concatenates each node's node-local slice (no single node sees the
   // whole keyspace), WAIT/WAITAOF reduce to the weakest shard. Frames are collected raw and combined before a single decode; any node
-  // failing fails the command
+  // failing terminally fails the command
   private def broadcastCombine[A](
     topology: ClusterTopology,
     command: Command[A],
     combine: Vector[Frame] => Frame,
+    redirectsLeft: Int,
     complete: Try[A] => Unit,
     resolve: Node => NodeClient
   ): Unit = {
@@ -506,12 +505,47 @@ final private[client] class ClusterLive(
           }
       }
       masters.iterator.zipWithIndex.foreach { case (node, index) =>
-        val nc = resolve(node)
-        if (nc == null) settle(index, Failure(NotConnected()))
-        else nc.submit[Frame](raw, asking = false, result => settle(index, result))
+        submitBroadcast(node, raw, resolve, redirectsLeft, result => settle(index, result))
       }
     }
   }
+
+  private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
+    val nc = resolve(node)
+    if (nc == null) retryBroadcast(node, command, NotConnected(), attemptsLeft, settle)
+    else
+      nc.submit[B](
+        command,
+        asking = false,
+        {
+          case Success(value) => settle(Success(value))
+          case Failure(error) => offload(onBroadcastFailure(node, command, error, attemptsLeft, settle))
+        }
+      )
+  }
+
+  // a broadcast is all-or-nothing, so one master reconnecting must not fail it: that node provably never ran the command, so retry it alone,
+  // leaving the masters that already answered untouched. A command carrying its own timeout (WAIT) re-serves it on the retried node.
+  private def onBroadcastFailure[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
+    Fault.categorize(error) match {
+      case Fault.Lost(false) => retryBroadcast(node, command, error, attemptsLeft, settle)
+      case fault             =>
+        if (fault.refreshesTopology) triggerRefresh()
+        settle(Failure(error))
+    }
+
+  // refresh first: a node the new topology no longer lists as a slot-owning master means the broadcast's target set is stale, so fail rather
+  // than chase a departed node — the adopted topology makes the caller's next broadcast the right one
+  private def retryBroadcast[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
+    if (attemptsLeft <= 0) settle(Failure(error))
+    else {
+      val attempt = (cluster.maxRedirects - attemptsLeft).max(0)
+      scheduler.after(Backoff.jitteredMillis(reconnect, attempt, scheduler).millis) {
+        refresh(force = true)
+        if (closed || !slotOwningMasters(topologyRef.get()).contains(node)) settle(Failure(error))
+        else submitBroadcast(node, command, establishOrNull, attemptsLeft - 1, settle)
+      }
+    }
 
   private def collectFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Vector[Frame] = {
     val out = Vector.newBuilder[Frame]
@@ -1110,6 +1144,11 @@ final private[client] class ClusterLive(
   }
 
   private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
+
+  // blocking establish for a caller that treats a failure as the node being unreachable
+  private def establishOrNull(node: Node): NodeClient =
+    try getOrEstablish(node)
+    catch { case NonFatal(_) => null }
 
   private def flushNode(node: Node): Unit =
     if (cachingEnabled) { val nc = masterPool.existing(node); if (nc != null) nc.flushCache() }

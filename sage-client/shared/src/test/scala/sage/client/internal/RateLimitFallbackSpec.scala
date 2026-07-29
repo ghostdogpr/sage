@@ -16,16 +16,17 @@ class RateLimitFallbackSpec extends munit.FunSuite {
   private def executor(limit: RateLimit = RateLimit.perSecond(10)) =
     new RateLimitExecutor[String](RateLimiter[String](limit))
 
-  test("a NOSCRIPT loads the script once and retries the EVALSHA") {
-    var loads    = 0
+  test("a NOSCRIPT retries once with the script body, on the same key, and never broadcasts a SCRIPT LOAD") {
+    var evals    = 0
     var evalShas = 0
     val runner   = new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] = command.name match {
-        case "EVALSHA" =>
-          evalShas += 1
-          if (loads == 0) CIO.fail(ServerError("NOSCRIPT", ""))
-          else CIO.value(Decision.Allowed(3, 1.second).asInstanceOf[A])
-        case "SCRIPT"  => loads += 1; CIO.value("sha".asInstanceOf[A])
+        case "EVALSHA" => evalShas += 1; CIO.fail(ServerError("NOSCRIPT", ""))
+        case "EVAL"    =>
+          evals += 1
+          assertEquals(command.keyIndices, Vector(2))
+          assert(!command.allMasters)
+          CIO.value(Decision.Allowed(3, 1.second).asInstanceOf[A])
         case other     => CIO.fail(ServerError("ERR", s"unexpected $other"))
       }
     }
@@ -33,17 +34,37 @@ class RateLimitFallbackSpec extends munit.FunSuite {
       result <- executor().evalSha(runner, "k", 1, peek = false).unsafeRun
     } yield {
       assertEquals(result, Decision.Allowed(3, 1.second))
-      assertEquals(loads, 1)
-      assertEquals(evalShas, 2)
+      assertEquals(evals, 1)
+      assertEquals(evalShas, 1)
     }
   }
 
-  test("a non-NOSCRIPT error propagates and never loads") {
-    var loads  = 0
+  test("a NOSCRIPT on the fallback itself propagates rather than looping") {
+    var evals  = 0
     val runner = new CommandRunner[CIO, String] {
-      def run[A](command: Command[A]): CIO[A] =
-        if (command.name == "SCRIPT") { loads += 1; CIO.value("sha".asInstanceOf[A]) }
-        else CIO.fail(ServerError("WRONGTYPE", "nope"))
+      def run[A](command: Command[A]): CIO[A] = {
+        if (command.name == "EVAL") evals += 1
+        CIO.fail(ServerError("NOSCRIPT", ""))
+      }
+    }
+    for {
+      failed <- executor().evalSha(runner, "k", 1, peek = false).unsafeRun.failed
+    } yield {
+      failed match {
+        case e: ServerError => assertEquals(e.code, "NOSCRIPT")
+        case other          => fail(s"expected ServerError, got $other")
+      }
+      assertEquals(evals, 1)
+    }
+  }
+
+  test("a non-NOSCRIPT error propagates and never falls back") {
+    var evals  = 0
+    val runner = new CommandRunner[CIO, String] {
+      def run[A](command: Command[A]): CIO[A] = {
+        if (command.name == "EVAL") evals += 1
+        CIO.fail(ServerError("WRONGTYPE", "nope"))
+      }
     }
     for {
       failed <- executor().evalSha(runner, "k", 1, peek = false).unsafeRun.failed
@@ -52,7 +73,7 @@ class RateLimitFallbackSpec extends munit.FunSuite {
         case e: ServerError => assertEquals(e.code, "WRONGTYPE")
         case other          => fail(s"expected ServerError, got $other")
       }
-      assertEquals(loads, 0)
+      assertEquals(evals, 0)
     }
   }
 
