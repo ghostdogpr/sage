@@ -119,7 +119,7 @@ final private[client] class MasterReplicaLive(
     while (!done && candidates.hasNext) {
       val seed = candidates.next()
       try
-        resolveFrom(seed) match {
+        resolveFrom(seed, reportConnectFailure = true) match {
           case Some((master, replicas)) => masterNodeRef.set(master); replicasRef.set(replicas); done = true
           case None                     => ()
         }
@@ -129,7 +129,7 @@ final private[client] class MasterReplicaLive(
   }
 
   // probes a node's ROLE; a master answers with its replica list, a replica points at its master (followed once), a sentinel is skipped
-  private def resolveFrom(node: Node, reportConnectFailure: Boolean = false): Option[(Node, Vector[Node])] =
+  private def resolveFrom(node: Node, reportConnectFailure: Boolean): Option[(Node, Vector[Node])] =
     probeRole(node, reportConnectFailure).flatMap {
       case Role.Master(_, replicas)       => Some(node -> replicas.map(r => Node(r.host, r.port)))
       case Role.Replica(host, port, _, _) =>
@@ -172,9 +172,7 @@ final private[client] class MasterReplicaLive(
         None
       } else
         outcome.get() match {
-          case Success(role)  =>
-            events.emit(SageEvent.Connection.Connected(Some(node)))
-            Some(role)
+          case Success(role)  => Some(role)
           case Failure(error) =>
             reportProbeFailure(node, error, reportConnectFailure)
             None

@@ -47,7 +47,7 @@ object SageEvent {
     /**
       * An attempt to establish a connection to a specific node, or to qualify it during topology discovery, failed. Names the address and cause,
       * and may accompany a failure returned to the caller or one handled internally. Distinct from [[ReconnectFailed]], which concerns restoring
-      * an already-established connection. Repeated failures for the same node are collapsed until that node connects successfully.
+      * an already-established connection. Repeated failures for the same node are collapsed until it establishes a pooled connection.
       */
     final case class ConnectFailed(node: Option[Node], error: Throwable) extends Connection
   }

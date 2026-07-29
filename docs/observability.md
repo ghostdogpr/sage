@@ -20,7 +20,8 @@ Register one or more `SageListener` on `SageConfig`, and each receives every `Sa
 
 Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event
 carries `node`, it is `Some` for cluster and master-replica clients (the relevant node) and `None` for a standalone client.
-Repeated pooled establishment failures for the same node produce one `ConnectFailed` until a connection to that node succeeds.
+Repeated connection-establishment and topology-qualification failures for the same node produce one `ConnectFailed` until a pooled connection
+to that node succeeds.
 
 ### Registering a listener
 

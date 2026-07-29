@@ -12,7 +12,7 @@ import scala.util.Try
 import kyo.compat.*
 
 import sage.{Bytes, SageEvent, SageListener}
-import sage.SageException.{ConnectionFailed, TimedOut}
+import sage.SageException.{ConnectionFailed, NotConnected, TimedOut}
 import sage.client.internal.{Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
@@ -169,6 +169,59 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(advertisedReplica), 1)
     fixture.close()
+  }
+
+  test("throwaway ROLE probes do not report Connected") {
+    val connected = new ConcurrentLinkedQueue[SageEvent.Connection.Connected]()
+    val events    = Events(
+      Vector(
+        new SageListener {
+          def onEvent(event: SageEvent): Unit = event match {
+            case event: SageEvent.Connection.Connected => val _ = connected.add(event)
+            case _                                     => ()
+          }
+        }
+      )
+    )
+    val fixture   = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole(), reader -> replicaRole(primary)),
+      events = events
+    )
+
+    fixture.live.bootstrapRoles()
+    fixture.close()
+
+    assertEquals(connected.asScala.toVector, Vector.empty)
+  }
+
+  test("a single seed ROLE timeout is returned and reported") {
+    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
+    val delivered = new CountDownLatch(1)
+    val events    = Events(
+      Vector(
+        new SageListener {
+          def onEvent(event: SageEvent): Unit = event match {
+            case failure: SageEvent.Connection.ConnectFailed =>
+              val _ = failures.add(failure)
+              delivered.countDown()
+            case _                                           => ()
+          }
+        }
+      )
+    )
+    val fixture   = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map.empty,
+      events = events
+    )
+
+    intercept[NotConnected](fixture.live.bootstrapRoles())
+    assert(delivered.await(2, TimeUnit.SECONDS), "the singleton ROLE timeout was not reported")
+    val failure   = failures.peek()
+
+    assertEquals(failure.node, Some(primary))
+    assert(failure.error.isInstanceOf[TimedOut], s"unexpected cause: ${failure.error}")
   }
 
   test("an unreachable supplied endpoint is omitted and reported while the available topology connects") {
