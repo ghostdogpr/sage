@@ -189,10 +189,8 @@ final private[client] class MasterReplicaLive(
   // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
-  private def rediscover(): Unit = {
-    val candidates = (Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct
-    resolveTopology(candidates).foreach(installTopology)
-  }
+  private def rediscover(): Unit =
+    resolveTopology((Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct).foreach(installTopology)
 
   private def installTopology(topology: MasterReplicaLive.ResolvedTopology): Unit = {
     masterNodeRef.set(topology.master)
