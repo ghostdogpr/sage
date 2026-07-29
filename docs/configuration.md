@@ -82,11 +82,15 @@ The number of endpoints you supply decides which nodes sage dials:
 | Seeds | Nodes sage dials |
 | --- | --- |
 | Several | exactly the endpoints you supplied, each classified by its own `ROLE`. No other address is ever contacted. |
-| One | that endpoint, plus the replica addresses its `ROLE` reply advertises that answer a connection. |
+| One | that endpoint, the master it names if it is itself a replica, and the replica addresses its `ROLE` reply advertises that answer a connection. |
 
 List every endpoint for a managed deployment (ElastiCache, MemoryDB, Azure Cache, a Kubernetes service). Those expose stable names that survive node replacement, while the addresses `ROLE` advertises are per-node and often unreachable from the client, so passing both the primary and reader endpoints is what keeps reads on the reader endpoint.
 
-Either way an endpoint that cannot be reached is dropped rather than routed at, and a `Connection.ConnectFailed` event names it (see [Observability](observability.md)).
+Either way, a node that cannot be reached, or a replica whose replication stream is not caught up, is dropped rather than routed at, and a `Connection.ConnectFailed` event names it (see [Observability](observability.md)). A dropped node is re-probed periodically while the topology is degraded, so it returns on its own once it recovers.
+
+::: warning
+Supplying several seeds means they *are* the topology. If you previously passed several endpoints only for bootstrap redundancy and relied on discovery to find the rest of your replicas, list every replica endpoint you want reads to reach, or pass a single seed to keep discovering them.
+:::
 
 ## Read routing
 

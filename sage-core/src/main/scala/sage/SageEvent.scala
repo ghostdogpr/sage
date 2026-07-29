@@ -45,13 +45,13 @@ object SageEvent {
     final case class ReconnectFailed(node: Option[Node], error: Throwable) extends Connection
 
     /**
-      * A connection to a specific node could not be opened, naming the address that failed and why. Fired for a node the runtime reaches for on
-      * its own — a replica it routes a read to, a seed it classifies during discovery, a cluster node it must reach — where the caller sees only
-      * a fallback or a generic failure and would otherwise have no way to learn which address is broken. Distinct from [[ReconnectFailed]],
-      * which concerns an already-established connection being restored, and from the initial connect, whose failure reaches the caller directly.
+      * A connection to a specific node could not be opened, naming the address that failed and why. Fired wherever the runtime dials a node
+      * itself — a replica it routes a read to, a seed it classifies, a node the cluster topology names — including while a client is still
+      * connecting, where several nodes are dialled and the caller's single failure names none of them. Distinct from [[ReconnectFailed]], which
+      * concerns restoring an already-established connection.
       *
-      * Worth logging at warn: an address that fails *slowly* (dropped packets, a stalled DNS lookup or TLS handshake) costs every command that
-      * considers that node the whole `connectTimeout`, and this event is the only signal that it is happening.
+      * A node that stays unreachable is reported once per outage rather than on every attempt. Worth logging at warn: an address that fails
+      * *slowly* (dropped packets, a stalled DNS lookup or TLS handshake) costs the whole `connectTimeout` wherever it is dialled.
       */
     final case class ConnectFailed(node: Option[Node], error: Throwable) extends Connection
   }
