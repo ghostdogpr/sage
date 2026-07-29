@@ -2375,12 +2375,14 @@ object Client {
         Vector(
           cond(seeds.nonEmpty, "cluster topology requires at least one seed"),
           cond(cluster.maxRedirects >= 0, "cluster.maxRedirects must be >= 0"),
-          atLeastOneMilli(cluster.minRefreshInterval, "cluster.minRefreshInterval")
+          atLeastOneMilli(cluster.minRefreshInterval, "cluster.minRefreshInterval"),
+          cluster.topologyRefreshInterval.flatMap(atLeastOneMilli(_, "cluster.topologyRefreshInterval"))
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
       case Topology.MasterReplica(seeds, masterReplica) =>
         Vector(
           cond(seeds.nonEmpty, "master-replica topology requires at least one seed"),
-          atLeastOneMilli(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval")
+          atLeastOneMilli(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval"),
+          masterReplica.topologyRefreshInterval.flatMap(atLeastOneMilli(_, "masterReplica.topologyRefreshInterval"))
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
       // a Standalone has no replicas, so the strict Replica policy could never serve a read; the *Preferred policies harmlessly degrade to
       // the one node, so they stay valid (a readFrom can then be shared across environments)

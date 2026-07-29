@@ -100,18 +100,24 @@ final case class Endpoint(host: String = "localhost", port: Int = 6379)
   * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops a single command follows before failing (the same default as
   * lettuce); `minRefreshInterval` limits how often a `MOVED` or an unowned slot triggers `CLUSTER SLOTS`: once per window. A retry that
   * must see the new topology first, as after a failover, refreshes regardless of the window and is bounded by `maxRedirects` instead.
+  *
+  * `topologyRefreshInterval` polls `CLUSTER SLOTS` on a timer, off by default. Redirects and faults already cover everything a command can
+  * notice; the poll is for what none can, namely a replica added to a shard that is serving reads normally.
   */
 final case class ClusterConfig(
   maxRedirects: Int = 5,
-  minRefreshInterval: FiniteDuration = 5.seconds
+  minRefreshInterval: FiniteDuration = 5.seconds,
+  topologyRefreshInterval: Option[FiniteDuration] = None
 )
 
 /**
   * Master-replica tuning. `minRefreshInterval` throttles role re-discovery (`ROLE`/`INFO replication`) so a burst of `READONLY`s, reconnects,
-  * or replica-preferred reads with no known replica triggers at most one discovery per window. There is no periodic poll.
+  * or replica-preferred reads with no known replica triggers at most one discovery per window. `topologyRefreshInterval` re-discovers on a
+  * timer as well, off by default, for what no command reveals: a replica added while the known nodes stay healthy.
   */
 final case class MasterReplicaConfig(
-  minRefreshInterval: FiniteDuration = 5.seconds
+  minRefreshInterval: FiniteDuration = 5.seconds,
+  topologyRefreshInterval: Option[FiniteDuration] = None
 )
 
 /**
