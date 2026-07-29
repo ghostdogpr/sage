@@ -48,7 +48,7 @@ RateLimit(permits = 100, per = 1.second, burst = 200) // 100/s sustained, bursti
 
 There is no blocking `acquire`: `tryAcquire` never waits. To retry, sleep for `retryAfter` at the call site and try again.
 
-Waits are reported at microsecond resolution. After an exceptionally large server-clock rollback, a wait that cannot fit in a `FiniteDuration` saturates at `RateLimiter.maximumReportedWait`; the bucket's server-side expiry still covers the complete wait.
+Waits are reported at microsecond resolution, saturating at `RateLimiter.maximumReportedWait` if a server-clock rollback ever pushes one past what a `FiniteDuration` holds.
 
 ## Peek and reset
 
@@ -69,7 +69,7 @@ A subject can be any type with a `KeyCodec`. It is encoded and prefixed with a n
 client.rateLimiter[String](RateLimit.perSecond(100), namespace = "login")
 ```
 
-While bucket state exists, it records the policy that created it. If a limiter keeps the same namespace but changes capacity or refill settings, each subject retains no more than its existing whole tokens or the new capacity, drops fractional credit, and begins refilling under the new policy. This conservative transition prevents overlapping old and new instances during a rolling deployment from repeatedly recreating full buckets. Full idle buckets expire quickly because retaining their state cannot affect decisions under the same policy; after expiry, a later policy sees a new subject and starts at its own capacity. Use distinct namespaces for independently active policies.
+Give each policy that is active at the same time its own namespace. A namespace that does see its policy change, during a rolling deployment say, carries its buckets over safely: a bucket records the policy that created it, and on a change each subject keeps the lesser of its whole tokens and the new capacity, drops the fraction, and refills under the new settings. That stops overlapping old and new instances from handing out full buckets repeatedly. Idle full buckets expire quickly, so a subject first seen after the switch starts at the new capacity.
 
 ## Valid policies
 
@@ -84,15 +84,15 @@ Violations are a programming error, not a runtime outcome. On the `rateLimiter` 
 
 ## When the store is unreachable
 
-A check reaches the server, so it can fail when the server is unreachable. The failure surfaces through the effect `F` for the caller to handle, exactly like any other command. The library hides nothing: decide there whether an outage should admit the request (availability first) or reject it (protection first).
+A check reaches the server, so it can fail when the server is unreachable. The failure surfaces through the effect `F` for the caller to handle, exactly like any other command. Sage applies no fallback of its own: decide at the call site whether an outage should admit the request (availability first) or reject it (protection first).
 
 ## Capacity planning
 
-Every check is one cached-script request and one constant-time atomic operation on the server. It reads and rewrites one small hash and refreshes its expiry, so it consumes write throughput even when the decision is denied. Concurrent checks are automatically multiplexed by the client, but Redis or Valkey still executes each script serially and atomically.
+Each check is one cached-script request and one constant-time atomic operation. It rewrites a small hash and refreshes its expiry, so it consumes write throughput even on a denial, and the server runs each script serially however many the client multiplexes.
 
-One key exists for each subject whose bucket is not full. Its expiry is the remaining time until that bucket can refill completely; a full bucket expires almost immediately. Active-key cardinality therefore depends mainly on the number of distinct subjects seen within a full-refill window. Long refill windows and high-cardinality subjects retain more state than short windows over a stable subject set.
+One key exists per subject whose bucket is not full, expiring when that bucket would refill completely. Active keys therefore track the distinct subjects seen within one refill window: long windows over high-cardinality subjects retain the most state.
 
-For a limiter on every application call, include its operations, memory, replication, and persistence traffic in the store's capacity test. Avoid retrying a denied decision in a tight loop, and use a dedicated deployment or enough cluster shards when limiter traffic would consume a material share of an application's existing store.
+For a limiter on every application call: count its operations, memory, replication, and persistence traffic in the store's capacity test; keep denied callers from retrying in a tight loop; and give it a dedicated deployment or more cluster shards if it would take a material share of an existing store.
 
 ## The composable command
 

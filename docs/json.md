@@ -108,7 +108,7 @@ client.jsonMGet[String](JsonPath("$.name"))("user:1", "user:2", "user:3")
 client.jsonMSet(("user:1", JsonPath.root, """{"n":"Ada"}"""), ("user:2", JsonPath.root, """{"n":"Lin"}"""))
 ```
 
-In a cluster these two commands differ by design. `jsonMGet` is transparently split across slots and its results are recombined, so its keys may live anywhere. `jsonMSet` is atomic, so a call whose keys span slots is rejected rather than partially applied. To set several documents atomically, co-locate their keys with a hash tag so they share one slot:
+In a cluster the two commands differ. `jsonMGet` is transparently split across slots and its results are recombined, so its keys may live anywhere. `jsonMSet` is atomic, so a call whose keys span slots is rejected rather than partially applied. To set several documents atomically, co-locate their keys with a hash tag so they share one slot:
 
 ```scala
 client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", JsonPath.root, "{}"))
@@ -118,7 +118,7 @@ client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", Js
 
 The common surface behaves the same on both servers. A few points differ:
 
-- `jsonMerge` (RFC 7386 merge) is available on Redis only; the Valkey Bundle 9.1.0 does not ship `JSON.MERGE` yet. It is present in the Sage API and works against Redis.
+- `jsonMerge` (RFC 7386 merge) is available on Redis only; the Valkey Bundle 9.1.0 does not ship `JSON.MERGE` yet. Sage exposes it, and it works against Redis.
 - The two servers frame the replies to `jsonType`, `jsonNumIncrBy`, and `jsonNumMultBy` differently on the wire. Sage decodes both into the same result type, so your code does not see the difference.
 - `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but raises a server error on Valkey.
 

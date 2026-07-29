@@ -1,6 +1,6 @@
 # Error handling
 
-Every sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. On ZIO and Kyo the error channel is that `SageException` itself (`IO[SageException, *]`, `Abort[SageException]`), so the compiler holds you to handling it. On Cats Effect, Ox, and Pekko the same `SageException` arrives through the ecosystem's untyped failure channel: a raised `IO`, a thrown exception, a failed `scala.concurrent.Future`. The runtime value is always a `SageException`; ZIO and Kyo also put it in the type.
+Every Sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. On ZIO and Kyo the error channel is that `SageException` itself (`IO[SageException, *]`, `Abort[SageException]`), so the compiler holds you to handling it. On Cats Effect, Ox, and Pekko the same `SageException` arrives through the ecosystem's untyped failure channel: a raised `IO`, a thrown exception, a failed `scala.concurrent.Future`. The runtime value is always a `SageException`; ZIO and Kyo also put it in the type.
 
 ## The hierarchy
 
@@ -51,7 +51,7 @@ Sage does not retry a lost command for you, and it does not queue commands while
 When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command: it may already have run. Retry only when the command is idempotent, or make it so first.
 :::
 
-## Refusals sage retries for you
+## Refusals Sage retries for you
 
 Some replies mean the server turned the command down *before* running it, for a reason that goes away on its own. Sage retries those for you; nothing
 ran, so nothing can run twice.

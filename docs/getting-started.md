@@ -2,7 +2,7 @@
 
 **Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). There is no Java client wrapped underneath: the RESP3 protocol, the commands, and the codecs are implemented directly in Scala, on a zero-dependency, effect-free core.
 
-That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org), so you use sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
+That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org), so you use Sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
 
 ## Installation
 
@@ -155,7 +155,7 @@ import sage.backend.*
 :::
 
 ::: tip How it works
-A `SageClient` is not a single connection, and ordinary commands do not borrow from a pool. They are written to one **multiplexed connection** per node, shared by every fiber: sage **auto-pipelines** them, coalescing concurrent commands into fewer socket writes and matching replies back in FIFO order. This is transparent (you never assemble a pipeline to get it), and it is what keeps throughput high under concurrency.
+A `SageClient` is not a single connection, and ordinary commands do not borrow from a pool. They are written to one **multiplexed connection** per node, shared by every fiber: Sage **auto-pipelines** them, coalescing concurrent commands into fewer socket writes and matching replies back in FIFO order. This happens without you assembling a pipeline.
 
 Two cases step off that connection automatically. Commands that hold per-connection state or block (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) lease a **dedicated connection** from an on-demand pool for the duration. Pub/sub subscriptions share a separate **subscription connection**, created the first time you subscribe, so a slow consumer can never stall command replies.
 :::
@@ -272,7 +272,7 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Ending the stream, or closing its scope, unsubscribes.
 
-Because publishing here happens right after subscribing, these examples use the variant that returns only once the server has confirmed the subscription, so the publish can't outrun the registration: `subscribeScoped` on ZIO, Kyo, and Ox, and `subscribeResource` on Cats Effect. On Pekko, `subscribe` returns a `Source` whose materialized value is a `Future[Done]` that completes once the subscription is registered, so awaiting it before publishing closes the same gap on a standalone or master-replica server (in cluster mode that confirmation is best-effort, as on every backend). The plain stream-returning `subscribe` registers lazily on each run and is the right choice for a long-lived consumer that isn't racing its own publisher.
+These examples publish right after subscribing, so they use the variant that waits for the server to confirm the subscription first: `subscribeScoped` on ZIO, Kyo, and Ox, `subscribeResource` on Cats Effect, and on Pekko the `Future[Done]` that `subscribe` materializes. Plain `subscribe` registers lazily on each run and suits a long-lived consumer that is not racing its own publisher. See [Pub/Sub](/pubsub) for the details.
 
 ::: code-group
 

@@ -29,7 +29,7 @@ Sage uses the server's tracking so that when a key you have cached changes, the 
 
 ## What can be cached
 
-Only reads whose result is a pure function of the named keys' current state are cacheable, because a server invalidation push covers every way such a result can change. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable: nothing would ever fire to invalidate them. Passing such a command to `cached` is not how caching is meant to be used.
+A read is cacheable when its result depends only on the current value of the keys it names, since a server invalidation then covers every way that result can change. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable: nothing would ever fire to invalidate them.
 
 ::: warning
 `cached` rejects a write or a keyless read with `NotCacheable`. A keyless read could only ever be evicted by its TTL, never by an invalidation, so it is refused rather than allowed to go silently stale.
@@ -39,11 +39,11 @@ Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configur
 
 ## Topology
 
-Caching works on every topology. On a standalone or master-replica client, cached reads run on the master, which holds the tracking-backed cache. On a cluster client, each slot-owning master owns its own cache, and a cached read is routed to the master owning the key's slot (never a replica, whatever the read policy). The same call is therefore portable across all three topologies; the result is always correct, you only forgo the local hit where caching is not active.
+Caching works on every topology. On a standalone or master-replica client, cached reads run on the master, which holds the tracking-backed cache. On a cluster client, each slot-owning master owns its own cache, and a cached read is routed to the master owning the key's slot (never a replica, whatever the read policy). The same call therefore runs on all three topologies, serving a local hit only where caching is active.
 
 ## Limitations
 
 - The cache budget is per master, not global: `clientCache.maxBytes` sizes each master's cache, so a cluster's effective ceiling is `maxBytes` times the number of masters.
-- A cache goes cold whenever its connection is replaced or its master stops owning the slot: a reconnect, a cluster failover, or a resharding that moves the slot off its master all start it fresh. Steady-state hit rates are unaffected; only these (rare) events reset it.
+- A cache goes cold whenever its connection is replaced or its master stops owning the slot: a reconnect, a cluster failover, or a resharding that moves the slot off its master all start it fresh.
 - During a live slot migration a cached read of a migrating key runs uncached (following the `ASK` redirect once) until the migration completes.
 - A server that speaks RESP3 but rejects `CLIENT TRACKING` (an ACL or proxy restriction) still connects; cached reads there run uncached, exactly as when caching is disabled.

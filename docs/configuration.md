@@ -36,7 +36,7 @@ val config = SageConfig(
 )
 ```
 
-Seeds bootstrap discovery only. Once the topology is known, sage routes to the nodes the cluster reports; any one seed answering is enough.
+Seeds bootstrap discovery only. Once the topology is known, Sage routes to the nodes the cluster reports; any one seed answering is enough.
 Set `database` to a non-zero value for a Valkey 9+ cluster configured with a sufficiently large `cluster-databases` setting. Sage issues `SELECT` while establishing every node connection, including after reconnects and redirects. Servers without numbered cluster database support reject the connection.
 
 ### Hash tags
@@ -58,10 +58,10 @@ break its all-or-nothing condition. All cross-slot commands remain rejected insi
 one slot.
 
 While a slot is being migrated, the server answers a multi-key command whose keys briefly straddle the moving slot with `-TRYAGAIN`. The command
-did not run, so sage retries it. The retry shares the same `maxRedirects` budget as `MOVED`/`ASK` follows, but where those are resent
+did not run, so Sage retries it. The retry shares the same `maxRedirects` budget as `MOVED`/`ASK` follows, but where those are resent
 immediately, a `-TRYAGAIN` retry is paced by a short jittered delay. If the migration outlasts that budget, the original `-TRYAGAIN` surfaces as
 a `ServerError`. `-CLUSTERDOWN`, `-LOADING`, and `-MASTERDOWN` are retried the same way, with one exception; see
-[Refusals sage retries for you](/error-handling#refusals-sage-retries-for-you).
+[Refusals Sage retries for you](/error-handling#refusals-sage-retries-for-you).
 
 ### Commands that run on every master
 
@@ -76,7 +76,7 @@ since it may have moved the masters the call fanned out to.
 Sage re-reads the slot map whenever a command shows it is out of date: a `MOVED` or `ASK` redirect, a slot no known node covers, a node that is
 unreachable or no longer a master. Reshardings and failovers therefore need no configuration.
 
-Adding a replica breaks nothing, so nothing tells sage to look again, and reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` keep
+Adding a replica breaks nothing, so nothing tells Sage to look again, and reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` keep
 using the replicas already known. Set `topologyRefreshInterval` to check for new ones on a timer:
 
 ```scala
@@ -106,11 +106,11 @@ val config = SageConfig(
 )
 ```
 
-The number of endpoints decides where sage may connect:
+The number of endpoints decides where Sage may connect:
 
-| Seeds | Nodes sage dials |
+| Seeds | Nodes Sage dials |
 | --- | --- |
-| Several | exactly the supplied endpoints, each classified by its own `ROLE`; only replicas reporting `connected` are used, and addresses advertised by `ROLE` are ignored |
+| Several | only the supplied endpoints, each classified by its own `ROLE`. Addresses that `ROLE` advertises are ignored, and a replica is used once it reports `connected` |
 | One | the supplied endpoint and the master or replicas discovered from its `ROLE` reply |
 
 Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises. An

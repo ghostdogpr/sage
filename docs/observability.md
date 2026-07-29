@@ -7,7 +7,7 @@ Sage exposes two integration points, for two different jobs:
 
 ## Events
 
-Register one or more `SageListener` on `SageConfig`, and each receives every `SageEvent`: command completions, connection transitions, cache outcomes, and topology changes. This is how you wire sage into your metrics or logging.
+Register one or more `SageListener` on `SageConfig`, and each receives every `SageEvent`: command completions, connection transitions, cache outcomes, and topology changes. This is how you wire Sage into your metrics or logging.
 
 | Event | Reported when |
 | --- | --- |
