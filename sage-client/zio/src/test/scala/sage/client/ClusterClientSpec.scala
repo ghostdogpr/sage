@@ -7,7 +7,7 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, UnsupportedServer}
 import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
@@ -126,6 +126,35 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
+
+  test("a seed that owns no slots fails the bootstrap rather than adopting an empty topology") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(Frame.Array(Vector.empty)) else Seq(Frame.Null)
+
+    val error = intercept[UnsupportedServer](new Fixture(behaviour, Vector(nodeA)))
+    assert(error.getMessage.contains("not part of a formed cluster"), error.getMessage)
+  }
+
+  test("a seed with cluster support disabled fails the bootstrap with the server's own reply, not NotConnected") {
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(Frame.SimpleError("ERR This instance has cluster support disabled")) else Seq(Frame.Null)
+
+    val error = intercept[UnsupportedServer](new Fixture(behaviour, Vector(nodeA)))
+    assert(error.getMessage.contains("cluster support disabled"), error.getMessage)
+  }
+
+  test("a refresh whose candidate owns no slots keeps the working topology instead of closing every master") {
+    val reset     = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) if (reset.get) Seq(Frame.Array(Vector.empty)) else Seq(wholeClusterOn(nodeA))
+      else if (node == nodeA && reset.compareAndSet(false, true)) Seq(Frame.SimpleError(s"MOVED ${Slot.of(Bytes.utf8("foo")).value} a:6379"))
+      else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.flatMap { result =>
+      assertEquals(result, Some(nodeA.host))
+      fixture.live.run(Strings.get[String, String]("bar")).unsafeRun.map(assertEquals(_, Some(nodeA.host)))
+    }
+  }
 
   test("routes a single-key command to the slot's owner") {
     // nodeA owns the lower half, nodeB the upper half
