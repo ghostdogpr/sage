@@ -35,13 +35,14 @@ final private[client] class NodePool(
   dedicatedBootstrap: Option[Vector[Command[?]]] = None
 ) {
 
-  private val lock             = new ReentrantLock()
+  private val lock                   = new ReentrantLock()
   // lock-free reads; every mutation stays under `lock`
-  private val established      = new java.util.concurrent.ConcurrentHashMap[Node, NodeClient]()
-  private val pendingEstablish = mutable.HashMap.empty[Node, NodePool.Establish]
+  private val established            = new java.util.concurrent.ConcurrentHashMap[Node, NodeClient]()
+  private val pendingEstablish       = mutable.HashMap.empty[Node, NodePool.Establish]
   // connections whose socket is still being opened, so close() can abort one still connecting
-  private val establishing     = mutable.Set.empty[MultiplexedConnection]
-  @volatile private var closed = false
+  private val establishing           = mutable.Set.empty[MultiplexedConnection]
+  private val reportedConnectFailure = mutable.Set.empty[Node]
+  @volatile private var closed       = false
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -108,7 +109,7 @@ final private[client] class NodePool(
               val conn = connRef.get()
               if (conn != null) { val _ = establishing -= conn }
               if (pendingEstablish.get(node).exists(_ eq mine)) { val _ = pendingEstablish.remove(node) }
-              !closed
+              !closed && reportedConnectFailure.add(node)
             }
             mine.fail(error)
             if (report) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
@@ -120,7 +121,7 @@ final private[client] class NodePool(
         if (conn != null) { val _ = establishing -= conn }
         val current = pendingEstablish.get(node).exists(_ eq mine)
         if (current) { val _ = pendingEstablish.remove(node) }
-        if (current && !closed) { established.put(node, nc); true }
+        if (current && !closed) { established.put(node, nc); val _ = reportedConnectFailure -= node; true }
         else false
       }
       if (publish) { mine.succeed(nc); nc }
@@ -133,6 +134,7 @@ final private[client] class NodePool(
     val (gone, rejected) = locked {
       val absent          = established.keySet.asScala.toVector.filterNot(keep).flatMap(node => Option(established.remove(node)))
       val rejectedPending = pendingEstablish.keysIterator.filterNot(keep).toVector.flatMap(node => pendingEstablish.remove(node))
+      reportedConnectFailure.filterInPlace(keep)
       (absent, rejectedPending)
     }
     gone.foreach(nc => scheduler.after(Duration.Zero)(nc.close()))
@@ -147,6 +149,7 @@ final private[client] class NodePool(
       val inFlight = establishing.toVector
       established.clear()
       pendingEstablish.clear()
+      reportedConnectFailure.clear()
       (snap, pending, inFlight)
     }
     // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still

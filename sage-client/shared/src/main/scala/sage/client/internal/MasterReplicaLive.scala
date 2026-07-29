@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{CountDownLatch, TimeoutException, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
@@ -24,9 +24,10 @@ import sage.ratelimit.Decision
   * [[ReadFrom]] policy (round-robin, with the policy's fallback). The same `Client` type as standalone and cluster; only the topology selects
   * it.
   *
-  * Roles refresh only on events — a reconnect-driven command loss, a `READONLY` from the presumed master, or a read that can reach no
-  * candidate — throttled by `minRefreshInterval`, never on a timer. A write that meets a demoted master fails fast (kicking off a
-  * re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
+  * Roles refresh only on events — a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate,
+  * or a replica-preferred read when no replica is known — throttled by `minRefreshInterval`, never on a timer. A write that meets a demoted
+  * master fails fast (kicking off a re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's
+  * `READONLY` disposition.
   */
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -158,17 +159,29 @@ final private[client] class MasterReplicaLive(
         )
       catch {
         case NonFatal(error) =>
-          if (reportConnectFailure) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
+          reportProbeFailure(node, error, reportConnectFailure)
           throw error
       }
     try {
       val latch   = new CountDownLatch(1)
       val outcome = new AtomicReference[Try[Role]]()
       nc.submit[Role](Server.role, asking = false, result => { outcome.set(result); latch.countDown() })
-      if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) None
-      else outcome.get() match { case Success(role) => Some(role); case Failure(_) => None }
+      if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) {
+        val error = new TimeoutException(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
+        reportProbeFailure(node, error, reportConnectFailure)
+        None
+      } else
+        outcome.get() match {
+          case Success(role)  => Some(role)
+          case Failure(error) =>
+            reportProbeFailure(node, error, reportConnectFailure)
+            None
+        }
     } finally nc.close()
   }
+
+  private def reportProbeFailure(node: Node, error: Throwable, enabled: Boolean): Unit =
+    if (enabled) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
   private def triggerRefresh(): Unit = offload(refreshThrottle(force = false)(rediscover()))
 
@@ -265,7 +278,9 @@ final private[client] class MasterReplicaLive(
   private def sendRead[A](command: Command[A], complete: Try[A] => Unit): Unit = {
     if (closed) { complete(Failure(NotConnected())); return }
     val master     = masterNodeRef.get()
-    val candidates = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement())
+    val replicas   = replicasRef.get()
+    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
+    val candidates = ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
     tryRead(command, candidates, master, complete)
   }
 

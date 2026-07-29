@@ -87,6 +87,9 @@ unreachable supplied endpoint is omitted when the roles are resolved, allowing a
 again when an existing reconnect or routing failure triggers a later role refresh. A supplied replica that is still synchronizing is likewise
 omitted until a later event-driven refresh sees its own `ROLE` state become `connected`.
 
+With `ReplicaPreferred`, a read that falls back to the master while no replica is known also schedules this throttled refresh. This lets an
+omitted reader return to service under otherwise healthy master-only traffic without adding background polling.
+
 ## Read routing
 
 `readFrom` governs which node a read-only command may run on, the same setting for both cluster and master-replica deployments:

@@ -14,12 +14,13 @@ Register one or more `SageListener` on `SageConfig`, and each receives every `Sa
 | `CommandCompleted(name, node, duration, outcome)` | One logical command settled. `duration` is client-observed (including any cluster redirects/retries); `outcome` is `Succeeded` or `Failed(error)`. A cached read served locally yields no `CommandCompleted`. |
 | `Connection.Connected(node)` | The multiplexed connection connected, on the initial connect and on every reconnect. |
 | `Connection.Disconnected(node)` | A live connection was lost and the runtime began reconnecting. Graceful close is not reported. |
-| `Connection.ConnectFailed(node, error)` | A connection to a node could not be opened, naming the address and cause when routing or topology discovery handles the failure internally. |
+| `Connection.ConnectFailed(node, error)` | A connection could not be established, or the node could not be qualified during topology discovery. Names the address and cause, whether the failure is handled internally or also returned to the caller. |
 | `Cache.Hit(command)` / `Cache.Miss(command)` | A `cached` read was served locally, or had to fetch from the server. |
 | `TopologyChanged(masters)` | The cluster's slot-owning master set changed (a failover, or scaling a shard in or out). |
 
 Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event
 carries `node`, it is `Some` for cluster and master-replica clients (the relevant node) and `None` for a standalone client.
+Repeated pooled establishment failures for the same node produce one `ConnectFailed` until a connection to that node succeeds.
 
 ### Registering a listener
 

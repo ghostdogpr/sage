@@ -215,6 +215,7 @@ class NodePoolSpec extends munit.FunSuite {
     val node      = Node("unreachable", 6379)
     val seen      = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
     val delivered = new CountDownLatch(1)
+    val failing   = new AtomicReference(true)
     val events    = Events(
       Vector(
         new SageListener {
@@ -225,14 +226,33 @@ class NodePoolSpec extends munit.FunSuite {
         }
       )
     )
-    val pool      = newPool(_ => (_, _) => throw new IOException("refused"), events)
+    val pool      = newPool(
+      _ =>
+        (onFrame, onClosed) =>
+          if (failing.get()) throw new IOException("refused")
+          else new FakeTransport(onFrame, onClosed, respond),
+      events
+    )
 
     try {
       intercept[IOException](pool.getOrEstablish(node))
       assert(delivered.await(2, TimeUnit.SECONDS), "ConnectFailed was not delivered")
-      val failure = seen.peek()
+      intercept[IOException](pool.getOrEstablish(node))
+      val deadline = System.nanoTime() + 250.millis.toNanos
+      while (seen.size() == 1 && System.nanoTime() < deadline) Thread.sleep(10)
+      val failure  = seen.peek()
       assertEquals(failure.node, Some(node))
       assert(failure.error.isInstanceOf[IOException], s"unexpected cause: ${failure.error}")
+      assertEquals(seen.size(), 1, "the same establishment outage should be reported only once")
+
+      failing.set(false)
+      val _                = pool.getOrEstablish(node)
+      pool.retain(_ => false)
+      failing.set(true)
+      intercept[IOException](pool.getOrEstablish(node))
+      val recoveryDeadline = System.nanoTime() + 2.seconds.toNanos
+      while (seen.size() < 2 && System.nanoTime() < recoveryDeadline) Thread.sleep(10)
+      assertEquals(seen.size(), 2, "a new outage after a successful connection should be reported")
     } finally {
       pool.close()
       events.close()

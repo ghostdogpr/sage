@@ -1,7 +1,7 @@
 package sage.client
 
 import java.io.IOException
-import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeoutException, TimeUnit}
 
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable
@@ -105,7 +105,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       factory,
       Scheduler.real,
       Vector(Connection.hello(None)),
-      SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 500.millis),
+      SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 500.millis, closeTimeout = Duration.Zero),
       seeds,
       minRefreshInterval,
       events
@@ -124,8 +124,8 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     def write(): Try[Long] =
       Try(scala.concurrent.Await.result(live.run(writeCommand).unsafeRun, 10.seconds))
 
-    def awaitTrue(condition: => Boolean, clue: String): Unit = {
-      val deadline = System.nanoTime() + 5.seconds.toNanos
+    def awaitTrue(condition: => Boolean, clue: String, timeout: FiniteDuration = 5.seconds): Unit = {
+      val deadline = System.nanoTime() + timeout.toNanos
       while (!condition && System.nanoTime() < deadline) Thread.sleep(25)
       assert(condition, clue)
     }
@@ -198,6 +198,62 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     assert(failure.error.isInstanceOf[IOException], s"unexpected cause: ${failure.error}")
   }
 
+  test("replica-preferred reads reconsider a supplied endpoint after it becomes reachable") {
+    val down    = mutable.Set(reader)
+    val fixture = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole(), reader -> replicaRole(primary)),
+      unreachable = down,
+      minRefreshInterval = 10.millis
+    )
+    fixture.live.bootstrapRoles()
+
+    assertEquals(fixture.read(), 1L)
+    assertEquals(fixture.readsServedBy(primary), 1)
+    assertEquals(fixture.readsServedBy(reader), 0)
+
+    down -= reader
+    fixture.awaitTrue(
+      {
+        val _ = fixture.read()
+        fixture.readsServedBy(reader) > 0
+      },
+      "replica-preferred reads did not reconsider the recovered endpoint",
+      timeout = 1.second
+    )
+    fixture.close()
+  }
+
+  test("a supplied endpoint that handshakes but does not answer ROLE is reported") {
+    val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
+    val delivered = new CountDownLatch(1)
+    val events    = Events(
+      Vector(
+        new SageListener {
+          def onEvent(event: SageEvent): Unit = event match {
+            case failure: SageEvent.Connection.ConnectFailed =>
+              val _ = failures.add(failure)
+              delivered.countDown()
+            case _                                           => ()
+          }
+        }
+      )
+    )
+    val fixture   = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole()),
+      events = events
+    )
+    fixture.live.bootstrapRoles()
+
+    assert(delivered.await(2, TimeUnit.SECONDS), "the ROLE timeout was not reported")
+    val failure = failures.peek()
+    fixture.close()
+
+    assertEquals(failure.node, Some(reader))
+    assert(failure.error.isInstanceOf[TimeoutException], s"unexpected cause: ${failure.error}")
+  }
+
   test("a singleton refresh reports the address whose connection failed, including a replica's advertised master") {
     val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
     val delivered = new CountDownLatch(2)
@@ -247,15 +303,14 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     assertEquals(fixture.readsServedBy(reader), 0)
 
     fixture.roles.update(reader, replicaRole(primary, state = "connected"))
-    fixture.writesFailReadonly = true
-    assert(fixture.write().isFailure, "READONLY should trigger a later role refresh")
 
     fixture.awaitTrue(
       {
         val _ = fixture.read()
         fixture.readsServedBy(reader) > 0
       },
-      "the connected replica was not admitted after the refresh"
+      "replica-preferred reads did not reconsider the connected replica",
+      timeout = 1.second
     )
     fixture.close()
   }
