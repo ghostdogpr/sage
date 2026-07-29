@@ -8,7 +8,7 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, UnsupportedServer}
-import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, MultiplexedConnection, Scheduler}
+import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, ManualScheduler, MultiplexedConnection, Scheduler}
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
 import sage.protocol.Frame
@@ -105,6 +105,8 @@ class ClusterClientSpec extends munit.FunSuite {
     live.bootstrapTopology()
 
     def written(node: Node): Vector[String] = transportsOf(node).flatMap(_.written.map(_.asUtf8String))
+
+    def clusterSlotsCount(node: Node): Int = written(node).count(_.contains("CLUSTER"))
 
     // simulate the server dropping a node's Sharded Subscription Connection (the post-migration disconnect): close the transport that
     // carried the SSUBSCRIBE so its onClosed fires and the manager re-homes
@@ -626,6 +628,48 @@ class ClusterClientSpec extends munit.FunSuite {
       assert(fixture.written(nodeA).exists(_.contains("SET")), "master did not receive the write")
       assert(!fixture.written(nodeR).exists(_.contains("SET")), "replica received a write")
     }
+  }
+
+  test("a replica-preferred read with no known replica schedules a topology refresh") {
+    val scheduler = new ManualScheduler
+    val behaviour =
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred, scheduler = scheduler)
+    val before    = fixture.clusterSlotsCount(nodeA)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("from-master"))
+      scheduler.advance(Duration.Zero)
+      assertEquals(fixture.clusterSlotsCount(nodeA), before + 1, "the master fallback did not look for a replica")
+    }
+  }
+
+  test("an opted-in topologyRefreshInterval polls CLUSTER SLOTS in the background") {
+    val scheduler = new ManualScheduler
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Null)
+    val fixture   =
+      new Fixture(behaviour, Vector(nodeA), scheduler = scheduler, cluster = ClusterConfig(topologyRefreshInterval = Some(1.minute)))
+
+    assertEquals(fixture.clusterSlotsCount(nodeA), 1)
+    scheduler.advance(1.minute)
+    assertEquals(fixture.clusterSlotsCount(nodeA), 2)
+    scheduler.advance(1.minute)
+    assertEquals(fixture.clusterSlotsCount(nodeA), 3)
+
+    fixture.live.close.unsafeRun.map { _ =>
+      scheduler.advance(1.minute)
+      assertEquals(fixture.clusterSlotsCount(nodeA), 3, "the poll outlived the client")
+    }
+  }
+
+  test("no timer refreshes the topology unless topologyRefreshInterval opts in") {
+    val scheduler = new ManualScheduler
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = scheduler)
+
+    scheduler.advance(10.minutes)
+
+    assertEquals(fixture.clusterSlotsCount(nodeA), 1)
   }
 
   test("follows a MOVED redirect to the named node and refreshes") {
