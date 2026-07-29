@@ -20,19 +20,19 @@ private[sage] object Pubsub {
     Command("SPUBLISH", Command.FirstKey, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 
   def pubsubChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, nodeLocal = true)
 
   def pubsubShardChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, nodeLocal = true)
 
   def pubsubNumSub(channels: String*): Command[Map[String, Long]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, nodeLocal = true)
 
   def pubsubShardNumSub(channels: String*): Command[Map[String, Long]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
+    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, nodeLocal = true)
 
   val pubsubNumPat: Command[Long] =
-    Command("PUBSUB", Command.NoKeys, Vector(Bytes.utf8("NUMPAT")), Decode.long)
+    Command("PUBSUB", Command.NoKeys, Vector(Bytes.utf8("NUMPAT")), Decode.long, nodeLocal = true)
 
   def subscribe(channels: Vector[String]): Bytes    = RespWriter.writeCommand("SUBSCRIBE", channels.map(Bytes.utf8))
   def unsubscribe(channels: Vector[String]): Bytes  = RespWriter.writeCommand("UNSUBSCRIBE", channels.map(Bytes.utf8))

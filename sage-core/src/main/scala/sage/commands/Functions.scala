@@ -97,9 +97,9 @@ private[sage] object Functions {
   def functionFlush(mode: Option[FlushMode] = None): Command[Unit] =
     Command("FUNCTION", Command.NoKeys, Flush +: FlushMode.args(mode), Decode.ok, allMasters = true)
 
-  val functionKill: Command[Unit] = Command("FUNCTION", Command.NoKeys, Vector(Kill), Decode.ok)
+  val functionKill: Command[Unit] = Command("FUNCTION", Command.NoKeys, Vector(Kill), Decode.ok, nodeLocal = true)
 
-  val functionDump: Command[Bytes] = Command("FUNCTION", Command.NoKeys, Vector(Dump), Decode.bytes)
+  val functionDump: Command[Bytes] = Command("FUNCTION", Command.NoKeys, Vector(Dump), Decode.bytes, nodeLocal = true)
 
   def functionRestore(payload: Bytes, policy: Option[RestorePolicy] = None): Command[Unit] =
     Command(
@@ -115,7 +115,8 @@ private[sage] object Functions {
       "FUNCTION",
       Command.NoKeys,
       List +: (libraryName.toVector.flatMap(name => Vector(LibraryName, Bytes.utf8(name))) ++ (if (withCode) Vector(WithCode) else Vector.empty)),
-      Decode.vector(decodeLibrary)
+      Decode.vector(decodeLibrary),
+      nodeLocal = true
     )
 
   private val decodeStats: Frame => Either[DecodeError, FunctionStats] =
@@ -130,7 +131,7 @@ private[sage] object Functions {
         } yield FunctionStats(running, engines)
       }
 
-  val functionStats: Command[FunctionStats] = Command("FUNCTION", Command.NoKeys, Vector(Stats), decodeStats)
+  val functionStats: Command[FunctionStats] = Command("FUNCTION", Command.NoKeys, Vector(Stats), decodeStats, nodeLocal = true)
 
   private def decodeLibrary(frame: Frame): Either[DecodeError, LibraryInfo] =
     Decode.fieldMap(frame).flatMap { fields =>

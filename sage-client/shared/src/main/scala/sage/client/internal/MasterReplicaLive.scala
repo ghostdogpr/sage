@@ -216,6 +216,39 @@ final private[client] class MasterReplicaLive(
     else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
   }
 
+  def knownNodes: CIO[Vector[Node]] =
+    CIO.value((Option(masterNodeRef.get()).toVector ++ replicasRef.get()).distinct)
+
+  def runOn[A](node: Node, command: Command[A]): CIO[A] =
+    Client.directCommandProblem(command) match {
+      case Some(error) => CIO.fail(error)
+      case None        =>
+        val pool =
+          if (node == masterNodeRef.get()) masterPool
+          else if (replicasRef.get().contains(node)) replicaPool
+          else null
+        if (pool == null) CIO.fail(InvalidArgument(s"unknown node ${node.host}:${node.port}"))
+        else
+          CIO.async { complete =>
+            val span    = Events.startSpan(events, command)
+            val tracked = Events.trackCommand(events, command, complete, span)
+            offload {
+              Client.completing(tracked) {
+                val nc =
+                  try pool.getOrEstablish(node)
+                  catch { case NonFatal(_) => null }
+                if (nc == null) tracked(Failure(NotConnected()))
+                else
+                  nc.submit[A](
+                    command,
+                    asking = false,
+                    result => { Events.attributeNode(tracked, node); tracked(result) }
+                  )
+              }
+            }
+          }
+    }
+
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)

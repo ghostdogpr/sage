@@ -5,6 +5,7 @@ import scala.concurrent.duration.FiniteDuration
 import kyo.compat.*
 
 import sage.{Message, PatternMessage}
+import sage.cluster.Node
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Command, Pipeline}
 import sage.ratelimit.Decision
@@ -31,6 +32,10 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   final def transaction[A](body: TransactionScope[F, String] => F[A]): F[A] =
     lower(underlying.transaction[A](scope => lift(body(lowerScope(scope)))))
+
+  final def knownNodes: F[Vector[Node]] = lower(underlying.knownNodes)
+
+  final def runOn[A](node: Node, command: Command[A]): F[A] = lower(underlying.runOn(node, command))
 
   final def subscribeChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]] =
     lower(underlying.subscribeChannels[V](channel, rest*).map(lowerSub))

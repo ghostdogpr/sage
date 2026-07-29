@@ -131,6 +131,40 @@ final private[client] class ClusterLive(
     else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
   }
 
+  def knownNodes: CIO[Vector[Node]] =
+    CIO.value(topologyRef.get().shards.flatMap(shard => shard.master +: shard.replicas).distinct)
+
+  def runOn[A](node: Node, command: Command[A]): CIO[A] =
+    Client.directCommandProblem(command) match {
+      case Some(error) => CIO.fail(error)
+      case None        =>
+        val topology = topologyRef.get()
+        val pool     =
+          if (topology.shards.exists(_.master == node)) masterPool
+          else if (topology.shards.exists(_.replicas.contains(node))) replicaPool
+          else null
+        if (pool == null) CIO.fail(InvalidArgument(s"unknown node ${node.host}:${node.port}"))
+        else
+          CIO.async { complete =>
+            val span    = Events.startSpan(events, command)
+            val tracked = Events.trackCommand(events, command, complete, span)
+            offload {
+              Client.completing(tracked) {
+                val nc =
+                  try pool.getOrEstablish(node)
+                  catch { case NonFatal(_) => null }
+                if (nc == null) tracked(Failure(NotConnected()))
+                else
+                  nc.submit[A](
+                    command,
+                    asking = false,
+                    result => { Events.attributeNode(tracked, node); tracked(result) }
+                  )
+              }
+            }
+          }
+    }
+
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)
@@ -214,7 +248,8 @@ final private[client] class ClusterLive(
     if (closed) complete(Failure(NotConnected()))
     else {
       val topology = topologyRef.get()
-      if (command.allMasters)
+      if (command.nodeLocal) complete(Failure(explicitNodeRequired(command)))
+      else if (command.allMasters)
         if (slotOwningMasters(topology).forall(node => masterPool.existing(node) != null))
           broadcast(topology, command, complete, masterPool.existing)
         else
@@ -687,6 +722,9 @@ final private[client] class ClusterLive(
   private def malformedKeys(name: String): InvalidArgument =
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
+  private def explicitNodeRequired(command: Command[?]): InvalidArgument =
+    InvalidArgument(s"${command.name} is node-local in cluster mode; choose a node from knownNodes and use runOn")
+
   // a transaction never follows a redirect, so the caller's retry depends on the topology actually refreshing — bypass the throttle window
   // (single-flight still collapses concurrent refreshes); ordinary commands re-route, so they use the throttled triggerRefresh
   private def forceRefresh(): Unit = offload(refresh(force = true))
@@ -699,6 +737,10 @@ final private[client] class ClusterLive(
     // a blocking command is a programmer error: fail the whole effect up front, never a single position
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
+    else if (p.commands.exists(_.nodeLocal))
+      CIO.fail(
+        InvalidArgument("a Pipeline cannot carry a node-local command; choose a node from knownNodes and run it individually with runOn")
+      )
     // a Pipeline batches per node, so an all-masters command (SCRIPT LOAD, FUNCTION LOAD, KEYS, …) would touch one node only and either
     // break a later key-routed EVALSHA/FCALL or return a partial keyspace; fail up front rather than partially apply it
     else if (p.commands.exists(_.allMasters))
@@ -891,6 +933,8 @@ final private[client] class ClusterLive(
     def run[A](command: Command[A]): CIO[A] =
       if (command.isBlocking)
         CIO.fail(InvalidArgument("a Transaction cannot run blocking commands; run them individually on the client"))
+      else if (command.nodeLocal)
+        CIO.fail(explicitNodeRequired(command))
       else if (command.requiresClusterWideTxResult)
         CIO.fail(
           InvalidArgument(
@@ -949,6 +993,10 @@ final private[client] class ClusterLive(
         CIO.value(Some(Vector.empty))
       else if (p.commands.exists(_.isBlocking))
         CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
+      else if (p.commands.exists(_.nodeLocal))
+        CIO.fail(
+          InvalidArgument("a Transaction cannot carry a node-local command; choose a node from knownNodes and run it individually with runOn")
+        )
       else if (p.commands.exists(_.requiresClusterWideTxResult))
         CIO.fail(
           InvalidArgument(

@@ -492,6 +492,51 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("knownNodes and runOn expose explicit node-local cluster administration") {
+    val mid       = Slot.Count / 2
+    val inspect   = Connection.echo("inspect")
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    fixture.live.knownNodes.unsafeRun.flatMap { nodes =>
+      assertEquals(nodes.toSet, Set(nodeA, nodeB))
+      fixture.live.runOn(nodeB, inspect).unsafeRun.map { result =>
+        assertEquals(result, nodeB.host)
+        assert(fixture.written(nodeB).exists(_.contains("ECHO")), "the explicitly selected node did not receive the command")
+        assert(!fixture.written(nodeA).exists(_.contains("ECHO")), "an arbitrary live node received the explicitly targeted command")
+      }
+    }
+  }
+
+  test("runOn rejects unknown nodes and keyed commands rather than bypassing cluster routing") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+
+    for {
+      unknown <- fixture.live.runOn(nodeB, Connection.ping(None)).unsafeRun.failed
+      keyed   <- fixture.live.runOn(nodeA, Strings.get[String, String]("foo")).unsafeRun.failed
+    } yield {
+      assert(unknown.isInstanceOf[InvalidArgument], s"unexpected unknown-node error: $unknown")
+      assert(keyed.isInstanceOf[InvalidArgument], s"unexpected keyed-command error: $keyed")
+    }
+  }
+
+  test("node-local administration requires runOn instead of choosing an arbitrary cluster node") {
+    val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.SimpleString("OK"))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val configSet = Server.configSet("maxmemory" -> "0")
+
+    fixture.live.run(configSet).unsafeRun.failed.flatMap { error =>
+      assert(error.isInstanceOf[InvalidArgument], s"unexpected plain CONFIG SET error: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("CONFIG")), "ambiguous CONFIG SET reached an arbitrary node")
+      fixture.live.runOn(nodeA, configSet).unsafeRun.map { _ =>
+        assert(fixture.written(nodeA).exists(_.contains("CONFIG")), "explicit CONFIG SET did not reach the selected node")
+      }
+    }
+  }
+
   test("follows a MOVED redirect to the named node and refreshes") {
     // topology says nodeA owns everything, but nodeA reports the slot has MOVED to nodeB
     val behaviour = (node: Node, text: String) =>

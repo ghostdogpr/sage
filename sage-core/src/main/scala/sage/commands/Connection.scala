@@ -77,7 +77,7 @@ private[sage] object Connection {
   def echo(message: String): Command[String] =
     Command("ECHO", Command.NoKeys, Vector(Bytes.utf8(message)), Decode.utf8String)
 
-  val clientId: Command[Long]        = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("ID")), Decode.long)
+  val clientId: Command[Long]        = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("ID")), Decode.long, nodeLocal = true)
   val clientGetName: Command[String] =
     Command(
       "CLIENT",
@@ -87,9 +87,10 @@ private[sage] object Connection {
         case Frame.Null              => Right("")
         case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
         case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
-      }
+      },
+      nodeLocal = true
     )
-  val clientInfo: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("INFO")), Decode.text)
-  val clientList: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("LIST")), Decode.text)
-  val clientGetRedir: Command[Long]  = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("GETREDIR")), Decode.long)
+  val clientInfo: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("INFO")), Decode.text, nodeLocal = true)
+  val clientList: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("LIST")), Decode.text, nodeLocal = true)
+  val clientGetRedir: Command[Long]  = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("GETREDIR")), Decode.long, nodeLocal = true)
 }

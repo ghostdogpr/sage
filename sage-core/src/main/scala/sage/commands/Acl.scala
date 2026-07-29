@@ -45,18 +45,19 @@ private[sage] object Acl {
   private val GetUser  = Bytes.utf8("GETUSER")
   private val Log      = Bytes.utf8("LOG")
 
-  val aclWhoAmI: Command[String]        = Command("ACL", Command.NoKeys, Vector(WhoAmI), Decode.utf8String)
-  val aclList: Command[Vector[String]]  = Command("ACL", Command.NoKeys, Vector(ListWord), Decode.vector(Decode.utf8String))
-  val aclUsers: Command[Vector[String]] = Command("ACL", Command.NoKeys, Vector(Users), Decode.vector(Decode.utf8String))
+  val aclWhoAmI: Command[String]        = Command("ACL", Command.NoKeys, Vector(WhoAmI), Decode.utf8String, nodeLocal = true)
+  val aclList: Command[Vector[String]]  = Command("ACL", Command.NoKeys, Vector(ListWord), Decode.vector(Decode.utf8String), nodeLocal = true)
+  val aclUsers: Command[Vector[String]] =
+    Command("ACL", Command.NoKeys, Vector(Users), Decode.vector(Decode.utf8String), nodeLocal = true)
 
   def aclCat(category: Option[String] = None): Command[Vector[String]] =
-    Command("ACL", Command.NoKeys, Cat +: category.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String))
+    Command("ACL", Command.NoKeys, Cat +: category.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String), nodeLocal = true)
 
   def aclGetUser(username: String): Command[Option[AclUser]] =
-    Command("ACL", Command.NoKeys, Vector(GetUser, Bytes.utf8(username)), decodeUser)
+    Command("ACL", Command.NoKeys, Vector(GetUser, Bytes.utf8(username)), decodeUser, nodeLocal = true)
 
   def aclLog(count: Option[Long] = None): Command[Vector[AclLogEntry]] =
-    Command("ACL", Command.NoKeys, Log +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeLogEntry))
+    Command("ACL", Command.NoKeys, Log +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeLogEntry), nodeLocal = true)
 
   private val decodeUser: Frame => Either[DecodeError, Option[AclUser]] = {
     case Frame.Null => Right(None)

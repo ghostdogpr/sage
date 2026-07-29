@@ -283,7 +283,9 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def renameNx(source: K, destination: K): F[Boolean] = run(Keys.renameNx(source, destination))
 
   /**
-    * One `SCAN` page over the keyspace from `cursor`, optionally filtered by `pattern`/`ofType` with a `count` hint; see [[sage.commands.ScanPage]].
+    * One `SCAN` page over the keyspace from `cursor`, optionally filtered by `pattern`/`ofType` with a `count` hint; see
+    * [[sage.commands.ScanPage]]. In cluster mode a cursor belongs to one node, so use the backend's `scanAll` for a full sweep or explicitly
+    * target each raw [[sage.commands.Commands.scan]] page with [[runOn]].
     */
   final def scan(
     cursor: ScanCursor,
@@ -2222,6 +2224,19 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   def transaction[A](body: TransactionScope[F, K] => F[A]): F[A]
 
   /**
+    * The currently known server processes. A standalone client yields its one configured node; cluster and master-replica clients yield the
+    * latest discovered masters and replicas. The snapshot can change after topology refresh.
+    */
+  def knownNodes: F[Vector[Node]]
+
+  /**
+    * Runs one keyless, non-blocking command on an explicitly selected known node, bypassing arbitrary-node and all-masters routing. Intended
+    * for node-local administration and observability (`INFO`, `CONFIG`, `SLOWLOG`, `LATENCY`, `PUBSUB`, …); keyed commands must use normal slot
+    * routing. Fails with [[sage.SageException.InvalidArgument]] when the node is unknown or the command is not eligible for direct execution.
+    */
+  def runOn[A](node: Node, command: Command[A]): F[A]
+
+  /**
     * A distributed token-bucket rate limiter over this connection, with subject key type `RK`. See [[RateLimiterClient]].
     */
   def rateLimiter[RK](limit: RateLimit, namespace: String = RateLimiter.defaultNamespace)(
@@ -2272,6 +2287,8 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
       private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                              = self.pipeline(p)
       private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                         = self.pipelineAttempt(p)
       def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]                                                              = self.transaction(scope => body(scope.as[K2]))
+      def knownNodes: F[Vector[Node]]                                                                                              = self.knownNodes
+      def runOn[A](node: Node, command: Command[A]): F[A]                                                                          = self.runOn(node, command)
       def subscribeChannels[V: ValueCodec](channel: String, rest: String*)                                                         = self.subscribeChannels(channel, rest*)
       def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)                                                         = self.subscribePatterns(pattern, rest*)
       def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*)                                                    = self.subscribeShardChannels(channel, rest*)
@@ -2287,6 +2304,13 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
 object Client {
 
   private val defaults = SageConfig()
+
+  private[client] def directCommandProblem(command: Command[?]): Option[InvalidArgument] =
+    if (command.hasMalformedKeys || command.keyIndices.nonEmpty)
+      Some(InvalidArgument(s"${command.name} has keys and must use normal slot routing, not runOn"))
+    else if (command.isBlocking)
+      Some(InvalidArgument(s"${command.name} is blocking and cannot run through the node-local runOn interface"))
+    else None
 
   // a cacheable read's result is a pure function of its keys' state (Command.cacheable) and it names at least one key — a keyless read
   // could only ever be evicted by TTL, never by an invalidation push, so it is rejected rather than allowed to silently go stale
@@ -2416,6 +2440,7 @@ object Client {
         config.clientCache.maxBytes,
         config.clientCache.enabled,
         Events(config.listeners, config.tracer, serverNode = Some(Node(endpoint.host, endpoint.port))),
+        Some(Node(endpoint.host, endpoint.port)),
         config.database,
         config.clientName
       )
@@ -2435,6 +2460,7 @@ object Client {
     cacheMaxBytes: Long = defaults.clientCache.maxBytes,
     cachingEnabled: Boolean = defaults.clientCache.enabled,
     events: Events = Events.disabled,
+    serverNode: Option[Node] = None,
     database: Int = 0,
     clientName: Option[String] = None
   ): CIO[Client[CIO, String]] = {
@@ -2461,7 +2487,7 @@ object Client {
           () => connection.isLive,
           events = events
         )
-        new Live(connection, pool, subscriptions, cachingEnabled, events)
+        new Live(connection, pool, subscriptions, cachingEnabled, events, serverNode)
       }
       .mapError { error => events.close(); translateHandshake(error) }
   }
@@ -2488,7 +2514,8 @@ object Client {
     pool: DedicatedPool,
     subscriptions: SubscriptionConnection,
     cachingEnabled: Boolean,
-    events: Events
+    events: Events,
+    serverNode: Option[Node]
   ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
@@ -2512,6 +2539,15 @@ object Client {
       if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
       else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
       else CIO.async(callback => Client.completing(callback)(connection.cachedSubmit(command, ttl.toMillis, callback)))
+
+    def knownNodes: CIO[Vector[Node]] = CIO.value(serverNode.toVector)
+
+    def runOn[A](node: Node, command: Command[A]): CIO[A] =
+      Client.directCommandProblem(command) match {
+        case Some(error)                        => CIO.fail(error)
+        case None if !serverNode.contains(node) => CIO.fail(InvalidArgument(s"unknown node ${node.host}:${node.port}"))
+        case None                               => run(command)
+      }
 
     def scanTargets: CIO[Vector[ScanTarget]] = CIO.value(Vector(ScanTarget.any))
 

@@ -93,9 +93,9 @@ private[sage] object Scripting {
   def scriptFlush(mode: Option[FlushMode] = None): Command[Unit] =
     Command("SCRIPT", Command.NoKeys, Flush +: FlushMode.args(mode), Decode.ok, allMasters = true)
 
-  val scriptKill: Command[Unit] = Command("SCRIPT", Command.NoKeys, Vector(Kill), Decode.ok)
+  val scriptKill: Command[Unit] = Command("SCRIPT", Command.NoKeys, Vector(Kill), Decode.ok, nodeLocal = true)
 
   // Valkey-only: returns the source of a script previously loaded by its SHA
   def scriptShow(sha: String): Command[String] =
-    Command("SCRIPT", Command.NoKeys, Vector(Show, Bytes.utf8(sha)), Decode.utf8String)
+    Command("SCRIPT", Command.NoKeys, Vector(Show, Bytes.utf8(sha)), Decode.utf8String, nodeLocal = true)
 }

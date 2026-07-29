@@ -224,7 +224,8 @@ private[sage] object Keys {
       ScanCursor.bytes(cursor) +:
         (ScanArgs.options(pattern, count) ++
           ofType.toVector.flatMap(t => Vector(Type, Bytes.utf8(RedisType.wireName(t))))),
-      Decode.scanPage(Decode.vector(Decode.key[K]))
+      Decode.scanPage(Decode.vector(Decode.key[K])),
+      nodeLocal = true
     )
 
   def touch[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] =

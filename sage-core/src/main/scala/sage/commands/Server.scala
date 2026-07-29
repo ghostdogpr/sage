@@ -101,8 +101,9 @@ enum CommandFilterBy {
 
 /**
   * Server administration: configuration, introspection, persistence, replication waits, and a read-only slice of cluster introspection.
-  * Most are keyless and route to one arbitrary master in a cluster. Text-format replies (`INFO`, `CLUSTER INFO`/`NODES`) are returned as
-  * raw `String`; structured replies decode to typed ADTs.
+  * Process-local commands require an explicit `runOn` target in cluster mode; logical-database operations such as `DBSIZE`, `FLUSHALL`, and
+  * replication waits broadcast to every master. Text-format replies (`INFO`, `CLUSTER INFO`/`NODES`) are returned as raw `String`; structured
+  * replies decode to typed ADTs.
   */
 private[sage] object Server {
 
@@ -132,13 +133,19 @@ private[sage] object Server {
   private val ClCountKeys     = Bytes.utf8("COUNTKEYSINSLOT")
 
   def configGet(parameter: String, rest: String*): Command[Map[String, String]] =
-    Command("CONFIG", Command.NoKeys, Get +: (parameter +: rest).iterator.map(Bytes.utf8).toVector, decodeStringMap)
+    Command("CONFIG", Command.NoKeys, Get +: (parameter +: rest).iterator.map(Bytes.utf8).toVector, decodeStringMap, nodeLocal = true)
 
   def configSet(setting: (String, String), rest: (String, String)*): Command[Unit] =
-    Command("CONFIG", Command.NoKeys, Set +: (setting +: rest).flatMap { case (k, v) => Vector(Bytes.utf8(k), Bytes.utf8(v)) }.toVector, Decode.ok)
+    Command(
+      "CONFIG",
+      Command.NoKeys,
+      Set +: (setting +: rest).flatMap { case (k, v) => Vector(Bytes.utf8(k), Bytes.utf8(v)) }.toVector,
+      Decode.ok,
+      nodeLocal = true
+    )
 
   def info(sections: String*): Command[String] =
-    Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text)
+    Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text, nodeLocal = true)
 
   private val dbSizeSum: (Frame, Frame) => Frame = (a, b) =>
     (a, b) match {
@@ -170,7 +177,8 @@ private[sage] object Server {
             u <- micros.asUtf8String.toLongOption.toRight(DecodeError("microseconds", micros.asUtf8String))
           } yield Instant.ofEpochSecond(s, u * 1000L)
         case other                                                                => Left(DecodeError("TIME [seconds, microseconds]", Frame.describe(other)))
-      }
+      },
+      nodeLocal = true
     )
 
   private val decodeRole: Frame => Either[DecodeError, Role] = {
@@ -198,7 +206,7 @@ private[sage] object Server {
     case other                                       => Left(DecodeError("ROLE array", Frame.describe(other)))
   }
 
-  val role: Command[Role] = Command("ROLE", Command.NoKeys, Vector.empty, decodeRole)
+  val role: Command[Role] = Command("ROLE", Command.NoKeys, Vector.empty, decodeRole, nodeLocal = true)
 
   // each master holds its own keyspace shard, so flushing the logical database means reaching every master, not one arbitrary node
   def flushAll(mode: Option[FlushMode] = None): Command[Unit] =
@@ -257,65 +265,79 @@ private[sage] object Server {
       Decode.optionalLong
     )
 
-  val memoryPurge: Command[Unit] = Command("MEMORY", Command.NoKeys, Vector(Purge), Decode.ok)
+  val memoryPurge: Command[Unit] = Command("MEMORY", Command.NoKeys, Vector(Purge), Decode.ok, nodeLocal = true)
 
   def slowLogGet(count: Option[Long] = None): Command[Vector[SlowLogEntry]] =
-    Command("SLOWLOG", Command.NoKeys, Get +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeSlowLog))
+    Command("SLOWLOG", Command.NoKeys, Get +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeSlowLog), nodeLocal = true)
 
-  val slowLogLen: Command[Long]   = Command("SLOWLOG", Command.NoKeys, Vector(SlowLen), Decode.long)
-  val slowLogReset: Command[Unit] = Command("SLOWLOG", Command.NoKeys, Vector(Reset), Decode.ok)
+  val slowLogLen: Command[Long]   = Command("SLOWLOG", Command.NoKeys, Vector(SlowLen), Decode.long, nodeLocal = true)
+  val slowLogReset: Command[Unit] = Command("SLOWLOG", Command.NoKeys, Vector(Reset), Decode.ok, nodeLocal = true)
 
   // `count` of -1 returns every entry of the type
   def commandLogGet(count: Long, logType: CommandLogType): Command[Vector[CommandLogEntry]] =
-    Command("COMMANDLOG", Command.NoKeys, Vector(Get, Bytes.utf8(count.toString), CommandLogType.wire(logType)), Decode.vector(decodeCommandLog))
+    Command(
+      "COMMANDLOG",
+      Command.NoKeys,
+      Vector(Get, Bytes.utf8(count.toString), CommandLogType.wire(logType)),
+      Decode.vector(decodeCommandLog),
+      nodeLocal = true
+    )
 
   def commandLogLen(logType: CommandLogType): Command[Long] =
-    Command("COMMANDLOG", Command.NoKeys, Vector(SlowLen, CommandLogType.wire(logType)), Decode.long)
+    Command("COMMANDLOG", Command.NoKeys, Vector(SlowLen, CommandLogType.wire(logType)), Decode.long, nodeLocal = true)
 
   def commandLogReset(logType: CommandLogType): Command[Unit] =
-    Command("COMMANDLOG", Command.NoKeys, Vector(Reset, CommandLogType.wire(logType)), Decode.ok)
+    Command("COMMANDLOG", Command.NoKeys, Vector(Reset, CommandLogType.wire(logType)), Decode.ok, nodeLocal = true)
 
   def latencyHistory(event: String): Command[Vector[(Instant, FiniteDuration)]] =
-    Command("LATENCY", Command.NoKeys, Vector(History, Bytes.utf8(event)), Decode.vector(decodeLatencyHistory))
+    Command("LATENCY", Command.NoKeys, Vector(History, Bytes.utf8(event)), Decode.vector(decodeLatencyHistory), nodeLocal = true)
 
-  val latencyLatest: Command[Vector[LatencyEntry]] = Command("LATENCY", Command.NoKeys, Vector(Latest), Decode.vector(decodeLatencyLatest))
+  val latencyLatest: Command[Vector[LatencyEntry]] =
+    Command("LATENCY", Command.NoKeys, Vector(Latest), Decode.vector(decodeLatencyLatest), nodeLocal = true)
 
   def latencyReset(events: String*): Command[Long] =
-    Command("LATENCY", Command.NoKeys, Reset +: events.iterator.map(Bytes.utf8).toVector, Decode.long)
+    Command("LATENCY", Command.NoKeys, Reset +: events.iterator.map(Bytes.utf8).toVector, Decode.long, nodeLocal = true)
 
   def latencyHistogram(commands: String*): Command[Map[String, CommandHistogram]] =
-    Command("LATENCY", Command.NoKeys, Histogram +: commands.iterator.map(Bytes.utf8).toVector, decodeHistograms)
+    Command("LATENCY", Command.NoKeys, Histogram +: commands.iterator.map(Bytes.utf8).toVector, decodeHistograms, nodeLocal = true)
 
-  val commandCount: Command[Long] = Command("COMMAND", Command.NoKeys, Vector(Count), Decode.long)
+  val commandCount: Command[Long] = Command("COMMAND", Command.NoKeys, Vector(Count), Decode.long, nodeLocal = true)
 
   def commandList(filterBy: Option[CommandFilterBy] = None): Command[Vector[String]] =
-    Command("COMMAND", Command.NoKeys, ListCmd +: filterByArgs(filterBy), Decode.vector(Decode.utf8String))
+    Command("COMMAND", Command.NoKeys, ListCmd +: filterByArgs(filterBy), Decode.vector(Decode.utf8String), nodeLocal = true)
 
   def commandGetKeys(command: String, args: String*): Command[Vector[String]] =
-    Command("COMMAND", Command.NoKeys, GetKeys +: Bytes.utf8(command) +: args.iterator.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String))
+    Command(
+      "COMMAND",
+      Command.NoKeys,
+      GetKeys +: Bytes.utf8(command) +: args.iterator.map(Bytes.utf8).toVector,
+      Decode.vector(Decode.utf8String),
+      nodeLocal = true
+    )
 
   def commandGetKeysAndFlags(command: String, args: String*): Command[Vector[(String, Set[String])]] =
     Command(
       "COMMAND",
       Command.NoKeys,
       GetKeysAndFlags +: Bytes.utf8(command) +: args.iterator.map(Bytes.utf8).toVector,
-      Decode.vector(decodeKeyAndFlags)
+      Decode.vector(decodeKeyAndFlags),
+      nodeLocal = true
     )
 
   def commandInfo(commands: String*): Command[Vector[CommandInfo]] =
-    Command("COMMAND", Command.NoKeys, Info +: commands.iterator.map(Bytes.utf8).toVector, decodeCommandInfos)
+    Command("COMMAND", Command.NoKeys, Info +: commands.iterator.map(Bytes.utf8).toVector, decodeCommandInfos, nodeLocal = true)
 
   // --- cluster introspection (read-only; operator/mutation commands are deliberately not exposed) ----------------------------------------
 
-  val clusterInfo: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClInfo), Decode.text)
-  val clusterNodes: Command[String] = Command("CLUSTER", Command.NoKeys, Vector(ClNodes), Decode.text)
-  val clusterMyId: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClMyId), Decode.text)
+  val clusterInfo: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClInfo), Decode.text, nodeLocal = true)
+  val clusterNodes: Command[String] = Command("CLUSTER", Command.NoKeys, Vector(ClNodes), Decode.text, nodeLocal = true)
+  val clusterMyId: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClMyId), Decode.text, nodeLocal = true)
 
   def clusterKeySlot(key: String): Command[Long] =
     Command("CLUSTER", Command.NoKeys, Vector(ClKeySlot, Bytes.utf8(key)), Decode.long)
 
   def clusterCountKeysInSlot(slot: Int): Command[Long] =
-    Command("CLUSTER", Command.NoKeys, Vector(ClCountKeys, Bytes.utf8(slot.toString)), Decode.long)
+    Command("CLUSTER", Command.NoKeys, Vector(ClCountKeys, Bytes.utf8(slot.toString)), Decode.long, nodeLocal = true)
 
   // --- decoders --------------------------------------------------------------------------------------------------------------------------
 

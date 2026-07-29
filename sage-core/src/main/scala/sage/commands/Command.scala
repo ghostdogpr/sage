@@ -51,6 +51,10 @@ enum BroadcastReduce {
   * `EXEC` — pinned to a single node — cannot produce it and rejects it before the wire. Only `DBSIZE` sets it: its contract is the cluster-wide
   * key count, which one shard cannot give. Other broadcasts (`KEYS`, `FLUSHALL`, `SCRIPT LOAD`, `WAIT`) stay transaction-legal with node-local
   * semantics, matching Redis, which does not flag them `no-multi`. Inert on a standalone server.
+  *
+  * `nodeLocal` marks a keyless command whose reply, effect, or continuation cursor belongs to exactly one server process (`INFO`, `CONFIG`,
+  * `SLOWLOG`, `PUBSUB` introspection, `SCAN`, …). A cluster client requires an explicit `runOn` target for these commands instead of silently
+  * choosing a nondeterministic node. Inert on standalone and master-replica clients.
   */
 final case class Command[+Out](
   name: String,
@@ -63,7 +67,8 @@ final case class Command[+Out](
   allMasters: Boolean = false,
   cursorBound: Boolean = false,
   broadcast: BroadcastReduce = BroadcastReduce.First,
-  requiresClusterWideTxResult: Boolean = false
+  requiresClusterWideTxResult: Boolean = false,
+  nodeLocal: Boolean = false
 ) {
 
   /**
@@ -89,7 +94,8 @@ final case class Command[+Out](
       allMasters = allMasters,
       cursorBound = cursorBound,
       broadcast = broadcast,
-      requiresClusterWideTxResult = requiresClusterWideTxResult
+      requiresClusterWideTxResult = requiresClusterWideTxResult,
+      nodeLocal = nodeLocal
     )
 
   /**
@@ -144,8 +150,10 @@ object Command {
     name: String,
     keyIndices: Vector[Int],
     args: Vector[Bytes],
-    decode: Frame => Either[DecodeError, Out]
-  ): Command[Out] = Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = false, cursorBound = true)
+    decode: Frame => Either[DecodeError, Out],
+    nodeLocal: Boolean = false
+  ): Command[Out] =
+    Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = false, cursorBound = true, nodeLocal = nodeLocal)
 
   /**
     * A read-only command that must not be cached: its result varies with time or is non-deterministic, so no invalidation would evict it.

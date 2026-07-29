@@ -27,7 +27,8 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
 
   /**
     * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once. In cluster
-    * mode it walks every slot-owning master in turn, each with its own node-local cursor, so the sweep covers the whole keyspace.
+    * mode it walks every slot-owning master in turn, each with its own node-local cursor. The master snapshot is fixed when the sweep starts:
+    * resharding during the walk can fail it, miss keys, or return duplicates, so it is not a source-of-truth snapshot during maintenance.
     */
   def scanAll(
     pattern: Option[String] = None,

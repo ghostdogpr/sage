@@ -39,6 +39,24 @@ val config = SageConfig(
 Seeds bootstrap discovery only. Once the topology is known, sage routes to the nodes the cluster reports; any one seed answering is enough.
 Set `database` to a non-zero value for a Valkey 9+ cluster configured with a sufficiently large `cluster-databases` setting. Sage issues `SELECT` while establishing every node connection, including after reconnects and redirects. Servers without numbered cluster database support reject the connection.
 
+### Node-local commands
+
+Some keyless commands are node-local in Redis: server/connection introspection and administration (`INFO`, `CONFIG`, `CLIENT`, `ACL`,
+`COMMAND`, `SLOWLOG`, `LATENCY`, `COMMANDLOG`, `MEMORY PURGE`), process-local scripting/function operations, `PUBSUB` introspection, and
+`SCAN` cursors describe, modify, or resume only on the contacted process. Use `knownNodes` and `runOn` to make that target explicit:
+
+```scala
+for {
+  nodes <- client.knownNodes
+  info  <- client.runOn(nodes.head, Commands.info())
+} yield info
+```
+
+`knownNodes` is a topology snapshot containing the currently discovered masters and replicas. `runOn` accepts a known node and a keyless,
+non-blocking command; keyed commands still require normal slot routing. An all-masters command passed to `runOn` deliberately runs only on
+the selected node. Calling a node-local command through the cluster client's ordinary routed API fails with `InvalidArgument`; for example,
+use `client.runOn(node, Commands.configSet(...))` rather than plain `client.run(Commands.configSet(...))`.
+
 ### Hash tags
 
 Redis Cluster hashes the bytes inside the first non-empty `{...}` pair instead of the whole key. Use the same tag in every key that must live
