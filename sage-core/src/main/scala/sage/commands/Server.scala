@@ -27,6 +27,11 @@ enum Role {
   case Master(replicationOffset: Long, replicas: Vector[ReplicaNode])
   case Replica(masterHost: String, masterPort: Int, state: String, replicationOffset: Long)
   case Sentinel(masterNames: Vector[String])
+
+  private[sage] def isConnectedReplica: Boolean = this match {
+    case Replica(_, _, "connected", _) => true
+    case _                             => false
+  }
 }
 
 /**

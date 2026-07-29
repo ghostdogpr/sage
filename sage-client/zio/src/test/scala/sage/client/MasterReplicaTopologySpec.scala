@@ -1,7 +1,7 @@
 package sage.client
 
 import java.io.IOException
-import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeoutException, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable
@@ -12,7 +12,7 @@ import scala.util.Try
 import kyo.compat.*
 
 import sage.{Bytes, SageEvent, SageListener}
-import sage.SageException.ConnectionFailed
+import sage.SageException.{ConnectionFailed, TimedOut}
 import sage.client.internal.{Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
@@ -87,10 +87,11 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
         val _                            = dials.add(node)
         if (unreachable(node)) throw new IOException(s"cannot reach $node")
         val respond: Bytes => Seq[Frame] = payload => {
-          val text = payload.asUtf8String
+          val text  = payload.asUtf8String
+          val reads = text.sliding("ZSCORE".length).count(_ == "ZSCORE")
           if (text.contains("HELLO")) Seq(helloReply)
           else if (text.contains("ROLE")) roles.get(node).toSeq
-          else if (text.contains("ZSCORE")) Seq(Frame.Integer(1L))
+          else if (reads > 0) Seq.fill(reads)(Frame.Integer(1L))
           else if (text.contains("ZADD") && writesFailReadonly)
             Seq(Frame.SimpleError("READONLY You can't write against a read only replica."))
           else if (text.contains("ZADD")) Seq(Frame.Integer(1L))
@@ -123,6 +124,10 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     def write(): Try[Long] =
       Try(scala.concurrent.Await.result(live.run(writeCommand).unsafeRun, 10.seconds))
+
+    def readPipeline(): Unit = {
+      val _ = scala.concurrent.Await.result(live.pipeline(Seq(readCommand, readCommand)).unsafeRun, 10.seconds)
+    }
 
     def awaitTrue(condition: => Boolean, clue: String, timeout: FiniteDuration = 5.seconds): Unit = {
       val deadline = System.nanoTime() + timeout.toNanos
@@ -251,12 +256,12 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.close()
 
     assertEquals(failure.node, Some(reader))
-    assert(failure.error.isInstanceOf[TimeoutException], s"unexpected cause: ${failure.error}")
+    assert(failure.error.isInstanceOf[TimedOut], s"unexpected cause: ${failure.error}")
   }
 
-  test("a singleton refresh reports the address whose connection failed, including a replica's advertised master") {
+  test("a singleton refresh reports a failed address once when discovery reaches it directly and through a replica") {
     val failures  = new ConcurrentLinkedQueue[SageEvent.Connection.ConnectFailed]()
-    val delivered = new CountDownLatch(2)
+    val delivered = new CountDownLatch(1)
     val events    = Events(
       Vector(
         new SageListener {
@@ -283,11 +288,12 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.writesFailReadonly = true
     assert(fixture.write().isFailure, "READONLY should trigger a singleton role refresh")
 
-    assert(delivered.await(2, TimeUnit.SECONDS), s"expected direct and replica-follow failures, got ${failures.asScala.toVector}")
+    assert(delivered.await(2, TimeUnit.SECONDS), s"expected the failed address, got ${failures.asScala.toVector}")
+    Thread.sleep(50)
     val reported = failures.asScala.toVector
     fixture.close()
 
-    assertEquals(reported.map(_.node), Vector(Some(primary), Some(primary)))
+    assertEquals(reported.map(_.node), Vector(Some(primary)))
     assert(reported.forall(_.error.isInstanceOf[IOException]), s"unexpected causes: ${reported.map(_.error)}")
   }
 
@@ -310,6 +316,30 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
         fixture.readsServedBy(reader) > 0
       },
       "replica-preferred reads did not reconsider the connected replica",
+      timeout = 1.second
+    )
+    fixture.close()
+  }
+
+  test("replica-preferred pipelines reconsider a supplied endpoint after its ROLE state becomes connected") {
+    val fixture = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary, state = "sync")),
+      minRefreshInterval = 10.millis
+    )
+    fixture.live.bootstrapRoles()
+
+    fixture.readPipeline()
+    assertEquals(fixture.readsServedBy(primary), 1)
+    assertEquals(fixture.readsServedBy(reader), 0)
+
+    fixture.roles.update(reader, replicaRole(primary, state = "connected"))
+    fixture.awaitTrue(
+      {
+        fixture.readPipeline()
+        fixture.readsServedBy(reader) > 0
+      },
+      "replica-preferred pipelines did not reconsider the connected replica",
       timeout = 1.second
     )
     fixture.close()

@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.{CountDownLatch, TimeoutException, TimeUnit}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
@@ -25,9 +25,9 @@ import sage.ratelimit.Decision
   * it.
   *
   * Roles refresh only on events — a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate,
-  * or a replica-preferred read when no replica is known — throttled by `minRefreshInterval`, never on a timer. A write that meets a demoted
-  * master fails fast (kicking off a re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's
-  * `READONLY` disposition.
+  * or a replica-preferred read/pipeline when no replica is known — throttled by `minRefreshInterval`, never on a timer. A write that meets a
+  * demoted master fails fast (kicking off a re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster
+  * runtime's `READONLY` disposition.
   */
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -105,7 +105,7 @@ final private[client] class MasterReplicaLive(
     }
     roles.collectFirst { case (node, _: Role.Master) => node } match {
       case Some(master)          =>
-        Right(master -> roles.collect { case (node, replica: Role.Replica) if replica.state == "connected" => node })
+        Right(master -> roles.collect { case (node, role) if role.isConnectedReplica => node })
       case None if roles.isEmpty => Left(lastError)
       case None                  => Left(ConnectionFailed("no supplied endpoint reports the master role"))
     }
@@ -155,7 +155,7 @@ final private[client] class MasterReplicaLive(
           config.closeTimeout,
           config.dedicatedPool,
           node = Some(node),
-          events = events
+          events = Events.disabled
         )
       catch {
         case NonFatal(error) =>
@@ -167,12 +167,14 @@ final private[client] class MasterReplicaLive(
       val outcome = new AtomicReference[Try[Role]]()
       nc.submit[Role](Server.role, asking = false, result => { outcome.set(result); latch.countDown() })
       if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) {
-        val error = new TimeoutException(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
+        val error = TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
         reportProbeFailure(node, error, reportConnectFailure)
         None
       } else
         outcome.get() match {
-          case Success(role)  => Some(role)
+          case Success(role)  =>
+            events.emit(SageEvent.Connection.Connected(Some(node)))
+            Some(role)
           case Failure(error) =>
             reportProbeFailure(node, error, reportConnectFailure)
             None
@@ -183,7 +185,7 @@ final private[client] class MasterReplicaLive(
   private def reportProbeFailure(node: Node, error: Throwable, enabled: Boolean): Unit =
     if (enabled) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
-  private def triggerRefresh(): Unit = offload(refreshThrottle(force = false)(rediscover()))
+  private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscover())
 
   // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
@@ -373,7 +375,9 @@ final private[client] class MasterReplicaLive(
         }
         val master                                     = masterNodeRef.get()
         if (useReplica) {
-          val candidates = ReadRouting.candidates(readFrom, master, replicasRef.get(), cursor.getAndIncrement())
+          val replicas   = replicasRef.get()
+          if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
+          val candidates = ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
           liveEstablished(candidates, master) match {
             case Some((node, nc)) => submitOn(node, nc)
             case None             => offload { val (node, nc) = establishRead(candidates, master); submitOn(node, nc) }

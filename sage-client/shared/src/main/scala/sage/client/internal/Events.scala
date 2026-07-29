@@ -1,6 +1,7 @@
 package sage.client.internal
 
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.concurrent.duration.{FiniteDuration, NANOSECONDS}
 import scala.util.Try
@@ -55,6 +56,7 @@ private[client] object Events {
     def emitsEvents: Boolean = listeners.nonEmpty
 
     private val queue             = if (listeners.isEmpty) null else new ArrayBlockingQueue[SageEvent](QueueDepth)
+    private val failedConnections = ConcurrentHashMap.newKeySet[Node]()
     @volatile private var running = true
 
     private val worker =
@@ -66,7 +68,17 @@ private[client] object Events {
         t
       }
 
-    def emit(event: SageEvent): Unit = if (queue != null) { val _ = queue.offer(event) }
+    def emit(event: SageEvent): Unit =
+      if (queue != null)
+        event match {
+          case failure @ SageEvent.Connection.ConnectFailed(Some(node), _) =>
+            if (failedConnections.add(node) && !queue.offer(failure)) { val _ = failedConnections.remove(node) }
+          case connected @ SageEvent.Connection.Connected(Some(node))      =>
+            val _ = failedConnections.remove(node)
+            val _ = queue.offer(connected)
+          case _                                                           =>
+            val _ = queue.offer(event)
+        }
 
     def close(): Unit = if (worker != null) { running = false; worker.interrupt() }
 
