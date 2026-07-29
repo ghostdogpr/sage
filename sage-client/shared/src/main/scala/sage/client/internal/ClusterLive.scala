@@ -33,7 +33,7 @@ import sage.ratelimit.Decision
   * where the submit fails fast. Only the paths that may establish a connection or refresh the topology hop to an offloaded virtual thread,
   * and a submit's reply callback re-offloads before any blocking continuation (never on the reply thread).
   *
-  * The topology refreshes on events — a redirect, an ownership or connection fault, an unowned slot, a subscription drop — throttled by
+  * The topology refreshes on events (a redirect, an ownership or connection fault, an unowned slot, a subscription drop), throttled by
   * `minRefreshInterval`; a timer only comes into it when `topologyRefreshInterval` opts into the background poll.
   */
 final private[client] class ClusterLive(

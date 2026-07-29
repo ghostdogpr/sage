@@ -24,8 +24,8 @@ import sage.ratelimit.Decision
   * [[ReadFrom]] policy (round-robin, with the policy's fallback). The same `Client` type as standalone and cluster; only the topology selects
   * it.
   *
-  * Roles refresh on events — a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate, or a
-  * replica-preferred read/pipeline when no replica is known — throttled by `minRefreshInterval`; a timer only comes into it when
+  * Roles refresh on events (a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate, or a
+  * replica-preferred read/pipeline when no replica is known), throttled by `minRefreshInterval`; a timer only comes into it when
   * `topologyRefreshInterval` opts into the background poll. A write that meets a demoted master fails fast (kicking off a re-discovery) so the
   * caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
   */
