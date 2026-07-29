@@ -64,13 +64,11 @@ a `ServerError`.
 
 ### Commands that run on every master
 
-A cluster replicates no script or function cache and no single node sees the whole keyspace, so `scriptLoad`, `scriptExists`, `scriptFlush`,
-the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master and their replies are
-folded into one. The call is all or nothing: one master answering with an error fails it, and no partial result is reported. A master that is
-merely reconnecting does not fail it, because the command provably never ran there: sage refreshes the topology and retries that one node,
-within the same `maxRedirects` budget and paced by the same jittered delay, leaving the masters that already answered untouched. A `waitReplicas`
-or `waitAof` retried this way serves its timeout again on the retried node. If the refreshed topology no longer lists the node as a slot-owning
-master, the call fails rather than chasing it, and the adopted topology makes the next call the correct one.
+A cluster replicates no script or function cache and no single node sees the whole keyspace, so `scriptLoad`, `scriptExists`, `scriptFlush`, the
+`function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master and their replies
+are folded into one. The call is all or nothing: one master answering with an error fails it, with no partial result. A master that is only
+reconnecting does not fail it, since the command never ran there: sage refreshes the topology and retries that one node on the `maxRedirects`
+budget. A retried `waitReplicas` or `waitAof` serves its timeout again on that node.
 
 ## Master-replica
 

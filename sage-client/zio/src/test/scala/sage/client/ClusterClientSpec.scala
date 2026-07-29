@@ -53,7 +53,8 @@ class ClusterClientSpec extends munit.FunSuite {
     readFrom: ReadFrom = ReadFrom.Master,
     connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport creation, to park an establish mid-flight
     scheduler: Scheduler = Scheduler.real,
-    caching: Boolean = false
+    caching: Boolean = false,
+    cluster: ClusterConfig = ClusterConfig()
   ) {
 
     // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
@@ -93,7 +94,7 @@ class ClusterClientSpec extends munit.FunSuite {
         1.second,
         Duration.Zero,
         DedicatedPoolConfig(),
-        ClusterConfig(),
+        cluster,
         1024,
         seeds,
         readFrom,
@@ -119,16 +120,18 @@ class ClusterClientSpec extends munit.FunSuite {
     def deliver(node: Node, frame: Frame): Unit = transportsOf(node).lastOption.foreach(_.emit(frame))
   }
 
-  private def awaitWritten(fixture: Fixture, node: Node, token: String): Unit = {
+  private def await(clue: => String)(condition: => Boolean): Unit = {
     val deadline = System.nanoTime() + 2000000000L
-    while (!fixture.written(node).exists(_.contains(token)) && System.nanoTime() < deadline) Thread.sleep(5)
-    assert(fixture.written(node).exists(_.contains(token)), s"$node never received $token")
+    while (!condition && System.nanoTime() < deadline) Thread.sleep(5)
+    assert(condition, clue)
   }
 
-  private def awaitCount(what: String, atLeast: Int)(count: => Int): Unit = {
-    val deadline = System.nanoTime() + 2000000000L
-    while (count < atLeast && System.nanoTime() < deadline) Thread.sleep(5)
-    assert(count >= atLeast, s"$what: expected at least $atLeast, got $count")
+  private def awaitWritten(fixture: Fixture, node: Node, token: String): Unit =
+    await(s"$node never received $token")(fixture.written(node).exists(_.contains(token)))
+
+  private def awaitRefreshed(fixture: Fixture, nodes: Node*): Unit = {
+    def slotsCalls = nodes.map(node => fixture.written(node).count(_.contains("CLUSTER"))).sum
+    await(s"expected a second CLUSTER SLOTS, saw $slotsCalls")(slotsCalls >= 2)
   }
 
   private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
@@ -411,7 +414,7 @@ class ClusterClientSpec extends munit.FunSuite {
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB))
 
-    owned.set(false) // nodeB has left the cluster: the retry's refresh drops it, so the stale broadcast fails instead of retrying it
+    owned.set(false) // nodeB has left the cluster, so the retry's refresh drops it
     fixture.live.run(Scripting.scriptLoad("return 1")).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[NotConnected], s"expected NotConnected, got $error")
       assertEquals(fixture.written(nodeB).count(_.contains("HELLO")), 1, "the departed node was contacted more than once")
@@ -430,8 +433,22 @@ class ClusterClientSpec extends munit.FunSuite {
 
     fixture.live.run(Server.flushAll()).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[ServerError], s"expected ServerError, got $error")
-      // the demoted node is not retried (the command may have run there), but its reply must still cost the topology its trust
-      awaitCount("CLUSTER SLOTS calls", 2)(fixture.written(nodeA).count(_.contains("CLUSTER")) + fixture.written(nodeB).count(_.contains("CLUSTER")))
+      awaitRefreshed(fixture, nodeA, nodeB)
+    }
+  }
+
+  test("maxRedirects = 0 refuses to retry a broadcast but still refreshes, so the next one is not stale") {
+    val mid       = Slot.Count / 2
+    val behaviour = (_: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      else if (text.contains("SCRIPT")) Seq(Frame.BulkString(Bytes.utf8("digest")))
+      else Seq(Frame.Null)
+    val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB), cluster = ClusterConfig(maxRedirects = 0))
+
+    fixture.live.run(Scripting.scriptLoad("return 1")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[NotConnected], s"expected NotConnected, got $error")
+      assertEquals(fixture.written(nodeB).count(_.contains("HELLO")), 1, "a zero budget still retried the unreachable node")
+      awaitRefreshed(fixture, nodeA, nodeB)
     }
   }
 
