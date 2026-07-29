@@ -18,7 +18,8 @@ Register one or more `SageListener` on `SageConfig`, and each receives every `Sa
 | `Cache.Hit(command)` / `Cache.Miss(command)` | A `cached` read was served locally, or had to fetch from the server. |
 | `TopologyChanged(masters)` | The cluster's slot-owning master set changed (a failover, or scaling a shard in or out). |
 
-Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. `node` is `Some` in a cluster (the relevant master) and `None` on a standalone server.
+Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event
+carries `node`, it is `Some` for cluster and master-replica clients (the relevant node) and `None` for a standalone client.
 
 ### Registering a listener
 

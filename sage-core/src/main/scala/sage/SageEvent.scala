@@ -26,7 +26,7 @@ object SageEvent {
   /**
     * The Multiplexed Connection's lifecycle. `Connected` fires on the initial connect and on every successful reconnect; `Disconnected`
     * fires when a live connection is lost unexpectedly and the runtime begins reconnecting. Graceful close and individual reconnect attempts
-    * are not reported. `node` is `Some` in cluster (the master this connection serves) and `None` on standalone.
+    * are not reported. `node` is `Some` for cluster and master-replica clients (the node this connection serves) and `None` for standalone.
     */
   sealed trait Connection extends SageEvent {
     def node: Option[Node]
