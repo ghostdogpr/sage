@@ -70,12 +70,41 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   private val writeCommand: Command[Long] =
     Command("ZADD", Command.NoKeys, Vector.empty, (_: Frame) => Right(1L), isReadOnly = false)
 
+  /**
+    * Holds the periodic tick and every zero-delay offload until the test runs them.
+    */
+  final private class DeferringScheduler extends Scheduler {
+    private val ticks  = mutable.ArrayBuffer.empty[() => Unit]
+    private val queued = mutable.ArrayBuffer.empty[() => Unit]
+
+    def nowMillis: Long                          = 0L
+    def jitterMillis(boundExclusive: Long): Long = 0L
+
+    def after(delay: FiniteDuration)(task: => Unit): Unit = { val _ = queued += (() => task) }
+
+    def every(interval: FiniteDuration)(task: => Unit): Scheduler.Cancelable = {
+      val tick = () => task
+      ticks += tick
+      () => { val _ = ticks -= tick }
+    }
+
+    def tick(): Unit = ticks.toVector.foreach(_())
+
+    def runQueued(): Unit = {
+      val pending = queued.toVector
+      queued.clear()
+      pending.foreach(_())
+    }
+  }
+
   final private class Fixture(
     seeds: Vector[Node],
     initialRoles: Map[Node, Frame],
     unreachable: collection.Set[Node] = Set.empty,
     events: Events = Events.disabled,
-    minRefreshInterval: FiniteDuration = 50.millis
+    minRefreshInterval: FiniteDuration = 50.millis,
+    topologyRefreshInterval: Option[FiniteDuration] = None,
+    scheduler: Scheduler = Scheduler.real
   ) {
 
     val roles                                                           = TrieMap.from(initialRoles)
@@ -104,11 +133,11 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     val live = new MasterReplicaLive(
       factory,
-      Scheduler.real,
+      scheduler,
       Vector(Connection.hello(None)),
       SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 500.millis, closeTimeout = Duration.Zero),
       seeds,
-      minRefreshInterval,
+      MasterReplicaConfig(minRefreshInterval, topologyRefreshInterval),
       events
     )
 
@@ -321,6 +350,52 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       timeout = 1.second
     )
     fixture.close()
+  }
+
+  test("an opted-in topologyRefreshInterval adopts a replica that no routing event would reveal") {
+    val fixture = new Fixture(
+      seeds = Vector(primary, reader, advertisedReplica),
+      initialRoles = Map(
+        primary           -> masterRole(),
+        reader            -> replicaRole(primary),
+        advertisedReplica -> replicaRole(primary, state = "sync")
+      ),
+      topologyRefreshInterval = Some(50.millis)
+    )
+    fixture.live.bootstrapRoles()
+
+    assertEquals(fixture.read(), 1L)
+    assertEquals(fixture.readsServedBy(reader), 1)
+    assertEquals(fixture.readsServedBy(advertisedReplica), 0)
+
+    fixture.roles.update(advertisedReplica, replicaRole(primary))
+    fixture.awaitTrue(
+      {
+        val _ = fixture.read()
+        fixture.readsServedBy(advertisedReplica) > 0
+      },
+      "the background poll did not adopt the new replica",
+      timeout = 2.seconds
+    )
+    fixture.close()
+  }
+
+  test("a re-discovery the poll queued before close does not probe after it") {
+    val scheduler          = new DeferringScheduler
+    val fixture            = new Fixture(
+      seeds = Vector(primary, reader),
+      initialRoles = Map(primary -> masterRole(), reader -> replicaRole(primary)),
+      topologyRefreshInterval = Some(1.minute),
+      scheduler = scheduler
+    )
+    fixture.live.bootstrapRoles()
+    val dialledAtBootstrap = fixture.dialled.size
+
+    scheduler.tick()
+    fixture.close()
+    scheduler.runQueued()
+
+    assertEquals(fixture.dialled.size, dialledAtBootstrap, "the queued re-discovery dialled after close")
   }
 
   test("replica-preferred pipelines reconsider a supplied endpoint after its ROLE state becomes connected") {

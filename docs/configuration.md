@@ -72,6 +72,28 @@ reasons (`-LOADING`, `-TRYAGAIN`), is retried on the `maxRedirects` budget; a re
 `-CLUSTERDOWN` is not retried here, since it may have moved the very masters the call fanned out to; see
 [Refusals sage retries for you](/error-handling#refusals-sage-retries-for-you).
 
+### Topology refresh
+
+Sage re-reads the slot map whenever a command shows it is out of date: a `MOVED` or `ASK` redirect, a slot no known node covers, a node that is
+unreachable or no longer a master. Reshardings and failovers therefore need no configuration.
+
+Adding a replica breaks nothing, so nothing tells sage to look again, and reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` keep
+using the replicas already known. Set `topologyRefreshInterval` to check for new ones on a timer:
+
+```scala
+val config = SageConfig(
+  topology = Topology.Cluster(
+    Vector(Endpoint("localhost", 7000)),
+    ClusterConfig(topologyRefreshInterval = Some(30.seconds))
+  ),
+  readFrom = ReadFrom.Replica
+)
+```
+
+There is no timer unless you set one. Each admitted tick costs one `CLUSTER SLOTS`, and a tick landing inside the `minRefreshInterval` window is
+skipped, so a short interval cannot outpace it. The first tick is initially eligible, since discovery at connect opens no window, though an
+event-driven refresh before it can still throttle it. `MasterReplicaConfig` has the same setting.
+
 ## Master-replica
 
 Select `Topology.MasterReplica` with seed endpoints. Sage discovers the nodes' roles, sends writes to the master, and routes reads per the read policy:
@@ -98,7 +120,8 @@ again when an existing reconnect or routing failure triggers a later role refres
 omitted until a later event-driven refresh sees its own `ROLE` state become `connected`.
 
 With `ReplicaPreferred`, a read that falls back to the master while no replica is known also schedules this throttled refresh. This lets an
-omitted reader return to service under otherwise healthy master-only traffic without adding background polling.
+omitted reader return to service under otherwise healthy master-only traffic without any polling. Once one replica is known, a second one is
+only picked up by `topologyRefreshInterval`; see [Topology refresh](#topology-refresh).
 
 ## Read routing
 
