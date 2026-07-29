@@ -110,7 +110,7 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
     }
   }
 
-  test("the native EVALSHA path recovers from NOSCRIPT by loading the script and retrying") {
+  test("the native EVALSHA path recovers from NOSCRIPT by re-running with the script body") {
     withClient { client =>
       val rl = client.rateLimiter[String](limit(2), namespace = "noscript")
       for {
@@ -118,8 +118,8 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
         first  <- rl.tryAcquire("cold")
         second <- rl.tryAcquire("cold")
       } yield {
-        assert(first.isAllowed && first.remainingTokens == 1L, "a cold server is recovered by one load-and-retry")
-        assert(second.isAllowed && second.remainingTokens == 0L, "the loaded script then serves EVALSHA directly")
+        assert(first.isAllowed && first.remainingTokens == 1L, "a cold server is recovered by one EVAL of the body")
+        assert(second.isAllowed && second.remainingTokens == 0L, "that EVAL caches the script, so EVALSHA then serves directly")
       }
     }
   }

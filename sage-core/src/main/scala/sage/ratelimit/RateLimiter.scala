@@ -73,7 +73,9 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   private[sage] def tryAcquireAt(subject: K, cost: Long, nowMicros: Long): Command[Decision] =
     eval(RateLimiter.Invocation.Eval, subject, cost, peek = false, Some(nowMicros))
 
-  private[sage] def loadCommand: Command[String] = Scripting.scriptLoad(RateLimiter.script)
+  // the NOSCRIPT recovery for evalSha: sending the body runs the check and caches it on that node, so no cluster-wide SCRIPT LOAD is needed
+  private[sage] def evalScript(subject: K, cost: Long, peek: Boolean): Command[Decision] =
+    eval(RateLimiter.Invocation.Eval, subject, cost, peek)
 
   // length-framing keeps namespace `a` + subject `b:c` distinct from namespace `a:b` + subject `c`
   private def keyBytes(subject: K): Bytes = Bytes.concat(Vector(keyPrefix, keyCodec.encode(subject)))

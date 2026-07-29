@@ -72,8 +72,11 @@ class RateLimiterSpec extends munit.FunSuite {
     assertEquals(command.keyIndices, Vector(2))
   }
 
-  test("loadCommand is SCRIPT LOAD and sha is a 40-char hex digest") {
-    assertEquals(limiter.loadCommand.name, "SCRIPT")
+  test("evalScript is a keyed EVAL carrying the script body, and sha is a 40-char hex digest") {
+    val command = limiter.evalScript("u", 1, peek = false)
+    assertEquals(command.name, "EVAL")
+    assertEquals(command.args.head.asUtf8String, RateLimiter.script)
+    assertEquals(command.keyIndices, Vector(2))
     assertEquals(RateLimiter.sha.length, 40)
     assert(RateLimiter.sha.forall(c => c.isDigit || ('a' to 'f').contains(c)))
   }
