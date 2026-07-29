@@ -106,7 +106,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         Vector(Connection.hello(None)),
         SageConfig(readFrom = readFrom),
         Vector(master),
-        1.second,
+        MasterReplicaConfig(1.second),
         Events(Vector(listener), Some(tracer))
       )
     live.bootstrapRoles()

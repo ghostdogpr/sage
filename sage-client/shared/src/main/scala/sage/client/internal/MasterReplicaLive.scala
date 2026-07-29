@@ -12,7 +12,7 @@ import kyo.compat.*
 
 import sage.{CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionFailed, ConnectionLost, InvalidArgument, NotConnected, TimedOut}
-import sage.client.{ReadFrom, SageConfig}
+import sage.client.{MasterReplicaConfig, ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
 import sage.commands.{Command, Connection, Pipeline, Role, Server}
@@ -24,10 +24,10 @@ import sage.ratelimit.Decision
   * [[ReadFrom]] policy (round-robin, with the policy's fallback). The same `Client` type as standalone and cluster; only the topology selects
   * it.
   *
-  * Roles refresh only on events — a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate,
-  * or a replica-preferred read/pipeline when no replica is known — throttled by `minRefreshInterval`, never on a timer. A write that meets a
-  * demoted master fails fast (kicking off a re-discovery) so the caller's retry lands on the freshly-discovered master, mirroring the cluster
-  * runtime's `READONLY` disposition.
+  * Roles refresh on events — a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate, or a
+  * replica-preferred read/pipeline when no replica is known — throttled by `minRefreshInterval`; a timer only comes into it when
+  * `topologyRefreshInterval` opts into the background poll. A write that meets a demoted master fails fast (kicking off a re-discovery) so the
+  * caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
   */
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -35,7 +35,7 @@ final private[client] class MasterReplicaLive(
   bootstrap: Vector[Command[?]],
   config: SageConfig,
   seeds: Vector[Node],
-  minRefreshInterval: FiniteDuration,
+  masterReplica: MasterReplicaConfig,
   events: Events = Events.disabled
 ) extends Client[CIO, String] {
 
@@ -73,7 +73,9 @@ final private[client] class MasterReplicaLive(
   private val subLock                                         = new ReentrantLock()
   @volatile private var subscriptions: SubscriptionConnection = null
 
-  private val refreshThrottle = new RefreshThrottle(scheduler, minRefreshInterval.toMillis)
+  private val refreshThrottle = new RefreshThrottle(scheduler, masterReplica.minRefreshInterval.toMillis)
+
+  @volatile private var refreshTicker: Scheduler.Cancelable = null
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
@@ -85,7 +87,7 @@ final private[client] class MasterReplicaLive(
 
   private[client] def bootstrapRoles(): Unit =
     resolveTopology(seeds) match {
-      case Right(topology) => installTopology(topology)
+      case Right(topology) => installTopology(topology); startRefreshTicker()
       case Left(error)     => closeAll(); throw error
     }
 
@@ -185,6 +187,11 @@ final private[client] class MasterReplicaLive(
     events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
   private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscover())
+
+  private def startRefreshTicker(): Unit =
+    masterReplica.topologyRefreshInterval.foreach { interval =>
+      refreshTicker = scheduler.every(interval)(if (!closed) triggerRefresh())
+    }
 
   // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
@@ -493,7 +500,9 @@ final private[client] class MasterReplicaLive(
 
   private def closeAll(): Unit = {
     closed = true
-    val s = subscriptions
+    val ticker = refreshTicker
+    if (ticker != null) { ticker.cancel(); refreshTicker = null }
+    val s      = subscriptions
     if (s != null) s.close()
     masterPool.close()
     replicaPool.close()
@@ -510,7 +519,7 @@ private[client] object MasterReplicaLive {
   def connect(
     config: SageConfig,
     seeds: Vector[Node],
-    masterReplica: sage.client.MasterReplicaConfig,
+    masterReplica: MasterReplicaConfig,
     scheduler: Scheduler,
     translate: Throwable => Throwable
   ): CIO[Client[CIO, String]] =
@@ -522,7 +531,7 @@ private[client] object MasterReplicaLive {
       }
       val events                                                  = Events(config.listeners, config.tracer)
       val live                                                    =
-        new MasterReplicaLive(factory, scheduler, bootstrap, config, seeds, masterReplica.minRefreshInterval, events)
+        new MasterReplicaLive(factory, scheduler, bootstrap, config, seeds, masterReplica, events)
       try { live.bootstrapRoles(); live }
       catch { case NonFatal(error) => events.close(); throw translate(error) }
     }

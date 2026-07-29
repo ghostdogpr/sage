@@ -32,6 +32,9 @@ import sage.ratelimit.Decision
   * Dispatch to an already-established node runs inline on the caller: the registry lookup and the submit never block, even mid-reconnect,
   * where the submit fails fast. Only the paths that may establish a connection or refresh the topology hop to an offloaded virtual thread,
   * and a submit's reply callback re-offloads before any blocking continuation (never on the reply thread).
+  *
+  * The topology refreshes on events — a redirect, an ownership or connection fault, an unowned slot, a subscription drop — throttled by
+  * `minRefreshInterval`; a timer only comes into it when `topologyRefreshInterval` opts into the background poll.
   */
 final private[client] class ClusterLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -102,6 +105,8 @@ final private[client] class ClusterLive(
 
   private val refreshThrottle = new RefreshThrottle(scheduler, cluster.minRefreshInterval.toMillis)
 
+  @volatile private var refreshTicker: Scheduler.Cancelable = null
+
   // if no seed answers, throws the last failure so the first connect surfaces a handshake/TLS error like a standalone connect, not None
   private[client] def bootstrapTopology(): Unit = {
     var lastError: Throwable = NotConnected()
@@ -110,7 +115,7 @@ final private[client] class ClusterLive(
       val node = candidates.next()
       try
         querySlotsVia(node, getOrEstablish(node)) match {
-          case Right(shards) => adopt(node, shards); return
+          case Right(shards) => adopt(node, shards); startRefreshTicker(); return
           case Left(error)   => lastError = error
         }
       catch { case NonFatal(error) => lastError = error }
@@ -352,6 +357,7 @@ final private[client] class ClusterLive(
   private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
     val replicas = topologyRef.get().shardForSlot(slot).map(_.replicas).getOrElse(Vector.empty)
     val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
+    refreshIfNoReplica(replicas)
     tryReadCandidates(command, ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement()), master, redirectsLeft, complete)
   }
 
@@ -360,6 +366,7 @@ final private[client] class ClusterLive(
     pickNode(topology) match {
       case Some(master) =>
         val replicas = topology.shards.iterator.flatMap(_.replicas).toVector.distinct
+        refreshIfNoReplica(replicas)
         tryReadCandidates(
           command,
           ReadRouting.candidates(readFrom, master, replicas, keylessCursor.getAndIncrement()),
@@ -795,8 +802,13 @@ final private[client] class ClusterLive(
   private def readCandidates(master: Node): Vector[Node] = {
     val replicas = topologyRef.get().shards.collectFirst { case s if s.master == master => s.replicas }.getOrElse(Vector.empty)
     val cursor   = replicaCursors.computeIfAbsent(master, _ => new java.util.concurrent.atomic.AtomicInteger())
+    refreshIfNoReplica(replicas)
     ReadRouting.candidates(readFrom, master, replicas, cursor.getAndIncrement())
   }
+
+  // strict Replica refreshes by exhausting its candidates instead; replica-preferred falls back silently and would never look again
+  private def refreshIfNoReplica(replicas: Vector[Node]): Unit =
+    if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
 
   // lock-free walk: the first live established candidate, Some((master, null)) when all are established but none live, and None when an
   // unestablished candidate is met first — only then must the caller offload to establish
@@ -1163,6 +1175,11 @@ final private[client] class ClusterLive(
 
   private def triggerRefresh(): Unit = offload(refresh(force = false))
 
+  private def startRefreshTicker(): Unit =
+    cluster.topologyRefreshInterval.foreach { interval =>
+      refreshTicker = scheduler.every(interval)(if (!closed) triggerRefresh())
+    }
+
   private def refresh(force: Boolean): Unit =
     refreshThrottle(force) {
       querySlots(refreshCandidates()) match {
@@ -1229,6 +1246,8 @@ final private[client] class ClusterLive(
 
   private def closeAll(): Unit = {
     closed = true
+    val ticker = refreshTicker
+    if (ticker != null) { ticker.cancel(); refreshTicker = null }
     masterPool.close()
     subscriptions.close()
     replicaPool.close()

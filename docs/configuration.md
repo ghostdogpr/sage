@@ -69,6 +69,27 @@ A cluster replicates no script or function cache, and no node sees the whole key
 are folded into one. One master failing fails the whole call, with no partial result. A master that is only reconnecting is retried on the
 `maxRedirects` budget; a retried `waitReplicas` or `waitAof` waits again on that node.
 
+### Topology refresh
+
+Sage re-reads the slot map whenever a command shows it is out of date: a `MOVED` or `ASK` redirect, a slot no known node covers, a node that is
+unreachable or no longer a master. Reshardings and failovers therefore need no configuration.
+
+Adding a replica breaks nothing, so nothing tells sage to look again, and reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` keep
+using the replicas already known. Set `topologyRefreshInterval` to check for new ones on a timer:
+
+```scala
+val config = SageConfig(
+  topology = Topology.Cluster(
+    Vector(Endpoint("localhost", 7000)),
+    ClusterConfig(topologyRefreshInterval = Some(30.seconds))
+  ),
+  readFrom = ReadFrom.Replica
+)
+```
+
+There is no timer unless you set one. Each tick costs one `CLUSTER SLOTS`, and no refresh ever runs more often than `minRefreshInterval`.
+`MasterReplicaConfig` has the same setting.
+
 ## Master-replica
 
 Select `Topology.MasterReplica` with seed endpoints. Sage discovers the nodes' roles, sends writes to the master, and routes reads per the read policy:
@@ -95,7 +116,8 @@ again when an existing reconnect or routing failure triggers a later role refres
 omitted until a later event-driven refresh sees its own `ROLE` state become `connected`.
 
 With `ReplicaPreferred`, a read that falls back to the master while no replica is known also schedules this throttled refresh. This lets an
-omitted reader return to service under otherwise healthy master-only traffic without adding background polling.
+omitted reader return to service under otherwise healthy master-only traffic without any polling. Once one replica is known, a second one is
+only picked up by `topologyRefreshInterval`; see [Topology refresh](#topology-refresh).
 
 ## Read routing
 

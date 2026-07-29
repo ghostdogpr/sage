@@ -75,7 +75,8 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     initialRoles: Map[Node, Frame],
     unreachable: collection.Set[Node] = Set.empty,
     events: Events = Events.disabled,
-    minRefreshInterval: FiniteDuration = 50.millis
+    minRefreshInterval: FiniteDuration = 50.millis,
+    topologyRefreshInterval: Option[FiniteDuration] = None
   ) {
 
     val roles                                                           = TrieMap.from(initialRoles)
@@ -108,7 +109,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       Vector(Connection.hello(None)),
       SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 500.millis, closeTimeout = Duration.Zero),
       seeds,
-      minRefreshInterval,
+      MasterReplicaConfig(minRefreshInterval, topologyRefreshInterval),
       events
     )
 
@@ -319,6 +320,34 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       },
       "replica-preferred reads did not reconsider the connected replica",
       timeout = 1.second
+    )
+    fixture.close()
+  }
+
+  test("an opted-in topologyRefreshInterval adopts a replica that no routing event would reveal") {
+    val fixture = new Fixture(
+      seeds = Vector(primary, reader, advertisedReplica),
+      initialRoles = Map(
+        primary           -> masterRole(),
+        reader            -> replicaRole(primary),
+        advertisedReplica -> replicaRole(primary, state = "sync")
+      ),
+      topologyRefreshInterval = Some(50.millis)
+    )
+    fixture.live.bootstrapRoles()
+
+    assertEquals(fixture.read(), 1L)
+    assertEquals(fixture.readsServedBy(reader), 1)
+    assertEquals(fixture.readsServedBy(advertisedReplica), 0)
+
+    fixture.roles.update(advertisedReplica, replicaRole(primary))
+    fixture.awaitTrue(
+      {
+        val _ = fixture.read()
+        fixture.readsServedBy(advertisedReplica) > 0
+      },
+      "the background poll did not adopt the new replica",
+      timeout = 2.seconds
     )
     fixture.close()
   }
