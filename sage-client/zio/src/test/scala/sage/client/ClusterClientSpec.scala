@@ -636,6 +636,48 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("under ReplicaPreferred a read whose connection dies mid-flight falls through to the master") {
+    val nodeR                   = Node("r", 6379)
+    def slotsWithReplica: Frame =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    var fixture: Fixture        = null
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+      else if (text.contains("GET"))
+        if (node == nodeR) {
+          fixture.drop(nodeR)
+          Seq.empty
+        } else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+      else Seq(Frame.SimpleString("OK"))
+    fixture = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
+      assertEquals(result, Some("from-master"))
+      assert(fixture.written(nodeR).exists(_.contains("GET")), "the replica should have been tried before the master")
+    }
+  }
+
+  test("a read whose connection dies mid-flight on its last candidate fails without re-running the command") {
+    val nodeR                   = Node("r", 6379)
+    def slotsWithReplica: Frame =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+    var fixture: Fixture        = null
+    val behaviour               = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+      else if (text.contains("GET"))
+        if (node == nodeR) {
+          fixture.drop(nodeR)
+          Seq.empty
+        } else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+      else Seq(Frame.SimpleString("OK"))
+    fixture = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+
+    fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ConnectionLost], s"a command that may have executed must surface its loss, not a re-dispatch: $error")
+      assert(!fixture.written(nodeA).exists(_.contains("GET")), "a read that may have executed must not be re-dispatched to the master")
+    }
+  }
+
   test("under a strict Replica policy a replica answering MASTERDOWN fails the read rather than reaching the master") {
     val nodeR                   = Node("r", 6379)
     def slotsWithReplica: Frame =
@@ -719,6 +761,20 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, Some("from-master"))
       scheduler.advance(Duration.Zero)
       assertEquals(fixture.clusterSlotsCount(nodeA), before + 1, "the master fallback did not look for a replica")
+    }
+  }
+
+  test("a keyless replica-preferred read with no known replica schedules a topology refresh") {
+    val scheduler = new ManualScheduler
+    val behaviour =
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8("k")))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred, scheduler = scheduler)
+    val before    = fixture.clusterSlotsCount(nodeA)
+
+    fixture.live.run(Keys.randomKey[String]).unsafeRun.map { result =>
+      assertEquals(result, Some("k"))
+      scheduler.advance(Duration.Zero)
+      assertEquals(fixture.clusterSlotsCount(nodeA), before + 1, "the keyless master fallback did not look for a replica")
     }
   }
 
