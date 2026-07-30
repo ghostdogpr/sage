@@ -23,7 +23,10 @@ private[codec] object Primitives {
       val negative  = value < 0
       var counter   = value
       var digits    = 0
-      while (counter != 0L) { counter /= 10; digits += 1 }
+      while (counter != 0L) {
+        counter /= 10
+        digits += 1
+      }
       val start     = if (negative) 1 else 0
       val out       = new Array[Byte](start + digits)
       var i         = out.length - 1

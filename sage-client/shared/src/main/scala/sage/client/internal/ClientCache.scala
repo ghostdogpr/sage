@@ -96,8 +96,10 @@ final private[client] class ClientCache(maxBytes: Long) {
 
   def flush(): Unit = {
     lock.lock()
-    try { clearEntries(); epoch = epoch.next }
-    finally lock.unlock()
+    try {
+      clearEntries()
+      epoch = epoch.next
+    } finally lock.unlock()
   }
 
   def flushForReroute(): Unit = {
@@ -150,7 +152,7 @@ final private[client] class ClientCache(maxBytes: Long) {
     entry.keys.foreach { k =>
       reverse.get(k).foreach { set =>
         set -= key
-        if (set.isEmpty) { val _ = reverse.remove(k) }
+        if (set.isEmpty) { reverse.remove(k): Unit }
       }
     }
 }

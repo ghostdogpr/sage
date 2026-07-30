@@ -25,7 +25,10 @@ private[sage] object RespWriter {
       val count     = wordBytes.length.toLong + args.length
       var bodySize  = 0
       var s         = 0
-      while (s < wordBytes.length) { bodySize += bulkSize(wordBytes(s).length); s += 1 }
+      while (s < wordBytes.length) {
+        bodySize += bulkSize(wordBytes(s).length)
+        s += 1
+      }
       val sink      = new Sink(headerSize(count) + bodySize + argsSize(args))
       sink.writeByte('*')
       sink.writeLong(count)

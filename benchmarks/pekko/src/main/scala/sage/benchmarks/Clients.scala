@@ -44,7 +44,7 @@ final class SagePekkoBench(host: String, port: Int) extends BenchClient {
       case h :: t => client.hSet(hashKey, h, t*).map(_ => ())
       case Nil    => Future.unit
     }
-    val _    = Await.result(sets.flatMap(_ => hash), 120.seconds)
+    Await.result(sets.flatMap(_ => hash), 120.seconds)
   }
 
   def getAll(keys: Array[String], concurrency: Int): Long =
@@ -70,8 +70,8 @@ final class SagePekkoBench(host: String, port: Int) extends BenchClient {
     Await.result(client.hGetAll[String, String](key).map(_.size.toLong), 120.seconds)
 
   def close(): Unit = {
-    val _ = Await.result(client.close, 30.seconds)
+    Await.result(client.close, 30.seconds)
     system.terminate()
-    val _ = Await.ready(system.whenTerminated, 10.seconds)
+    Await.ready(system.whenTerminated, 10.seconds)
   }
 }

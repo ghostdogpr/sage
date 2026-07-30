@@ -131,7 +131,9 @@ class DedicatedPoolSpec extends munit.FunSuite {
   test("a dropped queued command marks the connection dead before failing the work, so the pool cannot recycle it") {
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil)); transports += t; t
+      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil))
+      transports += t
+      t
     }
     val conn                                            = DedicatedConnection.create(factory, 1000L)
     conn.establish(Vector(Connection.hello()))
@@ -187,7 +189,10 @@ class DedicatedPoolSpec extends munit.FunSuite {
     // the multiplexed connection reconnects (generation bumps) while the first dedicated connection is running its HELLO bootstrap
     val respond: Bytes => Seq[Frame]                  = payload =>
       if (payload.asUtf8String.contains("HELLO")) {
-        if (!bumped) { bumped = true; live = Some(MultiplexedConnection.Generation.initial.next) }
+        if (!bumped) {
+          bumped = true
+          live = Some(MultiplexedConnection.Generation.initial.next)
+        }
         Seq(helloReply)
       } else Seq(popReply)
     val (pool, scheduler, transports)                 = make(respond, liveGeneration = () => live)
@@ -282,7 +287,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     assertEquals(transports.head.closeCount, 1)
 
-    val _ = pool.acquireForTransaction()
+    pool.acquireForTransaction()
     assertEquals(transports.size, 2)
   }
 
@@ -296,7 +301,9 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil)); transports += t; t
+      val t = new FakeTransport(onFrame, onClosed, replyWith(Nil))
+      transports += t
+      t
     }
     val connection                                      = MultiplexedConnection.connect(
       factory,

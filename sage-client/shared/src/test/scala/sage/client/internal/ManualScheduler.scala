@@ -17,9 +17,8 @@ final class ManualScheduler extends Scheduler {
 
   def jitterMillis(boundExclusive: Long): Long = if (boundExclusive <= 0) 0L else boundExclusive - 1
 
-  def after(delay: FiniteDuration)(task: => Unit): Unit = {
-    val _ = oneShots += ((clockMillis + delay.toMillis, () => task))
-  }
+  def after(delay: FiniteDuration)(task: => Unit): Unit =
+    oneShots += ((clockMillis + delay.toMillis, () => task))
 
   def every(interval: FiniteDuration)(task: => Unit): Scheduler.Cancelable = {
     val periodic = new ManualScheduler.Periodic(interval.toMillis, clockMillis + interval.toMillis, () => task)

@@ -21,7 +21,9 @@ class RateLimitFallbackSpec extends munit.FunSuite {
     var evalShas = 0
     val runner   = new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] = command.name match {
-        case "EVALSHA" => evalShas += 1; CIO.fail(ServerError("NOSCRIPT", ""))
+        case "EVALSHA" =>
+          evalShas += 1
+          CIO.fail(ServerError("NOSCRIPT", ""))
         case "EVAL"    =>
           evals += 1
           assertEquals(command.keyIndices, Vector(2))
@@ -80,7 +82,10 @@ class RateLimitFallbackSpec extends munit.FunSuite {
   test("a misconfigured policy fails through the effect without touching the runner") {
     var calls  = 0
     val runner = new CommandRunner[CIO, String] {
-      def run[A](command: Command[A]): CIO[A] = { calls += 1; CIO.fail(ServerError("ERR", "should not run")) }
+      def run[A](command: Command[A]): CIO[A] = {
+        calls += 1
+        CIO.fail(ServerError("ERR", "should not run"))
+      }
     }
     val bad    = new RateLimitExecutor[String](RateLimiter[String](RateLimit(0, 1, 1.second)))
     for {

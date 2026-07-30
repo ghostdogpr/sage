@@ -50,7 +50,12 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a refused connection surfaces as a recoverable ConnectionFailed carrying the cause") {
-    val deadPort = { val s = new java.net.ServerSocket(0); val p = s.getLocalPort; s.close(); p } // a port nothing listens on
+    val deadPort = {
+      val s = new java.net.ServerSocket(0)
+      val p = s.getLocalPort
+      s.close()
+      p
+    } // a port nothing listens on
     val config   = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", deadPort)), connectTimeout = 1.second)
     Client.connect(config).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[ConnectionFailed], s"expected ConnectionFailed, got $error")
@@ -187,7 +192,9 @@ class ConnectSpec extends munit.FunSuite {
     val latch                = new CountDownLatch(2)
     val listener             = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
-        case c: SageEvent.CommandCompleted => completions.add(c); latch.countDown()
+        case c: SageEvent.CommandCompleted =>
+          completions.add(c)
+          latch.countDown()
         case _                             => ()
       }
     }

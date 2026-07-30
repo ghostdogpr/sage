@@ -78,7 +78,9 @@ final private[client] class NodePool(
       if (existing == null)
         pendingEstablish.get(node) match {
           case Some(p) => waitOn = p
-          case None    => mine = new NodePool.Establish; val _ = pendingEstablish.put(node, mine)
+          case None    =>
+            mine = new NodePool.Establish
+            pendingEstablish.put(node, mine): Unit
         }
     }
     if (existing != null) existing
@@ -100,14 +102,21 @@ final private[client] class NodePool(
             Some(node),
             events,
             dedicatedBootstrap,
-            onConstructed = conn => { connRef.set(conn); if (locked { establishing += conn; closed }) conn.close() }
+            onConstructed = conn => {
+              connRef.set(conn)
+              val poolClosed = locked {
+                establishing += conn
+                closed
+              }
+              if (poolClosed) conn.close()
+            }
           )
         catch {
           case error: Throwable =>
             locked {
               val conn = connRef.get()
-              if (conn != null) { val _ = establishing -= conn }
-              if (pendingEstablish.get(node).exists(_ eq mine)) { val _ = pendingEstablish.remove(node) }
+              if (conn != null) establishing -= conn
+              if (pendingEstablish.get(node).exists(_ eq mine)) { pendingEstablish.remove(node): Unit }
             }
             mine.fail(error)
             if (!closed) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
@@ -116,14 +125,22 @@ final private[client] class NodePool(
       // publish only if our token is still current: a retain, close, or newer attempt supersedes us, and the new client is discarded not leaked
       val publish = locked {
         val conn    = connRef.get()
-        if (conn != null) { val _ = establishing -= conn }
+        if (conn != null) establishing -= conn
         val current = pendingEstablish.get(node).exists(_ eq mine)
-        if (current) { val _ = pendingEstablish.remove(node) }
-        if (current && !closed) { established.put(node, nc); true }
-        else false
+        if (current) { pendingEstablish.remove(node): Unit }
+        if (current && !closed) {
+          established.put(node, nc)
+          true
+        } else false
       }
-      if (publish) { mine.succeed(nc); nc }
-      else { nc.close(); mine.fail(NotConnected()); throw NotConnected() }
+      if (publish) {
+        mine.succeed(nc)
+        nc
+      } else {
+        nc.close()
+        mine.fail(NotConnected())
+        throw NotConnected()
+      }
     }
   }
 
@@ -169,7 +186,10 @@ private[client] object NodePool {
     def fail(error: Throwable): Unit  = settle(Left(error))
 
     private def settle(outcome: Either[Throwable, NodeClient]): Unit =
-      if (settled.compareAndSet(false, true)) { result = outcome; latch.countDown() }
+      if (settled.compareAndSet(false, true)) {
+        result = outcome
+        latch.countDown()
+      }
 
     def get(): NodeClient = {
       latch.await()

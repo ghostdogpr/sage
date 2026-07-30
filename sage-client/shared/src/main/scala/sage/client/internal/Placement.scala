@@ -63,8 +63,10 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
           case None       => incomplete = true
           case Some(conn) =>
             groups.foreach { group =>
-              try { conn.attach(sink, group, Kind.Shard); actual.update(node, actual.getOrElse(node, Set.empty) ++ group) }
-              catch { case NonFatal(_) => incomplete = true }
+              try {
+                conn.attach(sink, group, Kind.Shard)
+                actual.update(node, actual.getOrElse(node, Set.empty) ++ group)
+              } catch { case NonFatal(_) => incomplete = true }
             }
         }
       }

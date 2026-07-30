@@ -80,12 +80,12 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     def nowMillis: Long                          = 0L
     def jitterMillis(boundExclusive: Long): Long = 0L
 
-    def after(delay: FiniteDuration)(task: => Unit): Unit = { val _ = queued += (() => task) }
+    def after(delay: FiniteDuration)(task: => Unit): Unit = queued += (() => task)
 
     def every(interval: FiniteDuration)(task: => Unit): Scheduler.Cancelable = {
       val tick = () => task
       ticks += tick
-      () => { val _ = ticks -= tick }
+      () => ticks -= tick
     }
 
     def tick(): Unit = ticks.toVector.foreach(_())
@@ -113,7 +113,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     private val transports                                              = new ConcurrentLinkedQueue[(Node, FakeTransport)]()
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
-        val _                            = dials.add(node)
+        dials.add(node)
         if (unreachable(node)) throw new IOException(s"cannot reach $node")
         val respond: Bytes => Seq[Frame] = payload => {
           val text  = payload.asUtf8String
@@ -127,7 +127,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
           else Seq(Frame.SimpleString("OK"))
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
-        val _                            = transports.add(node -> transport)
+        transports.add(node -> transport)
         transport
       }
 
@@ -154,9 +154,8 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     def write(): Try[Long] =
       Try(scala.concurrent.Await.result(live.run(writeCommand).unsafeRun, 10.seconds))
 
-    def readPipeline(): Unit = {
-      val _ = scala.concurrent.Await.result(live.pipeline(Seq(readCommand, readCommand)).unsafeRun, 10.seconds)
-    }
+    def readPipeline(): Unit =
+      scala.concurrent.Await.result(live.pipeline(Seq(readCommand, readCommand)).unsafeRun, 10.seconds): Unit
 
     def awaitTrue(condition: => Boolean, clue: String, timeout: FiniteDuration = 5.seconds): Unit = {
       val deadline = System.nanoTime() + timeout.toNanos
@@ -209,7 +208,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       def serverNode                   = None
       def close(): Unit                = ()
       def emit(event: SageEvent): Unit = event match {
-        case event: SageEvent.Connection.Connected => val _ = connected.add(event)
+        case event: SageEvent.Connection.Connected => connected.add(event): Unit
         case _                                     => ()
       }
     }
@@ -277,7 +276,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     down -= reader
     fixture.awaitTrue(
       {
-        val _ = fixture.read()
+        fixture.read()
         fixture.readsServedBy(reader) > 0
       },
       "replica-preferred reads did not reconsider the recovered endpoint",
@@ -343,7 +342,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     fixture.awaitTrue(
       {
-        val _ = fixture.read()
+        fixture.read()
         fixture.readsServedBy(reader) > 0
       },
       "replica-preferred reads did not reconsider the connected replica",
@@ -371,7 +370,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.roles.update(advertisedReplica, replicaRole(primary))
     fixture.awaitTrue(
       {
-        val _ = fixture.read()
+        fixture.read()
         fixture.readsServedBy(advertisedReplica) > 0
       },
       "the background poll did not adopt the new replica",
@@ -450,7 +449,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     val before  = fixture.readsServedBy(primary)
     fixture.awaitTrue(
       {
-        val _ = fixture.read()
+        fixture.read()
         fixture.readsServedBy(primary) > before
       },
       "the refresh did not move reads to the demoted endpoint"

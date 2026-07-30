@@ -130,8 +130,10 @@ final private[sage] class RespParser {
           if (top.kind == Attr) closing = false // an attribute yields no value; the value it prefixes is produced next, for the same slot
           else {
             val value = build(top)
-            if (stackDepth == 0) { onFrame(value); closing = false }
-            else addChild(stack(stackDepth - 1), value) // re-check: the parent may now be complete too
+            if (stackDepth == 0) {
+              onFrame(value)
+              closing = false
+            } else addChild(stack(stackDepth - 1), value) // re-check: the parent may now be complete too
           }
         } else closing = false
 
@@ -304,7 +306,10 @@ final private[sage] class RespParser {
     else {
       readPos = cursor
       val agg = new Agg(kind, count)
-      if (kind == Map) { agg.pairs = Vector.newBuilder[(Frame, Frame)]; agg.pairs.sizeHint(count) }
+      if (kind == Map) {
+        agg.pairs = Vector.newBuilder[(Frame, Frame)]
+        agg.pairs.sizeHint(count)
+      }
       push(agg)
     }
   }

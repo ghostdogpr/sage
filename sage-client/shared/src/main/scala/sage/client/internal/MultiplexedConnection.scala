@@ -78,7 +78,8 @@ final private[client] class MultiplexedConnection private (
   // Reserves n drain slots against the live connection under the same lock that admits the command, so close() can never sample
   // inFlight == 0 for a command that already passed the Live gate but hasn't reached Conn.submit yet (#95). null => not Live.
   private def reserved(n: Int): Conn = locked(if (state == State.Live) {
-    current.reserve(n); current
+    current.reserve(n)
+    current
   } else null)
 
   def submit[A](command: Command[A], callback: Try[A] => Unit): Unit = {
@@ -134,7 +135,7 @@ final private[client] class MultiplexedConnection private (
     }
     if (aborting != null) aborting.close()
     if (draining != null) {
-      val _ = draining.beginDrain().await(closeTimeout.toMillis, TimeUnit.MILLISECONDS)
+      draining.beginDrain().await(closeTimeout.toMillis, TimeUnit.MILLISECONDS)
       locked(stopWatchdog())
       draining.close()
     }
@@ -162,8 +163,10 @@ final private[client] class MultiplexedConnection private (
     val teardown = locked {
       // a close() during establish() wins: tear down rather than publish Live
       if (state == State.Closed) conn
-      else if (conn.isTerminated) { scheduleReconnect(0); null }
-      else {
+      else if (conn.isTerminated) {
+        scheduleReconnect(0)
+        null
+      } else {
         current = conn
         generation = generation.next
         transition(State.Live)
@@ -177,7 +180,10 @@ final private[client] class MultiplexedConnection private (
 
   private def establish(): Conn = {
     val conn = new Conn
-    locked { establishing = conn; if (state == State.Closed) conn.close() }
+    locked {
+      establishing = conn
+      if (state == State.Closed) conn.close()
+    }
     try {
       conn.start()
       var tracking = true
@@ -186,7 +192,10 @@ final private[client] class MultiplexedConnection private (
       Bootstrap.run(
         bootstrap,
         connectTimeout.toMillis,
-        (c, cb) => { conn.reserve(1); conn.submit(c, cb) },
+        (c, cb) => {
+          conn.reserve(1)
+          conn.submit(c, cb)
+        },
         () => conn.close(),
         onTolerated = c => if (Connection.isClientTracking(c)) tracking = false
       )
@@ -195,7 +204,10 @@ final private[client] class MultiplexedConnection private (
     } finally locked { if (establishing eq conn) establishing = null }
   }
 
-  private[internal] def flushCache(): Unit = { val c = locked(current); if (c != null) c.flushCache() }
+  private[internal] def flushCache(): Unit = {
+    val c = locked(current)
+    if (c != null) c.flushCache()
+  }
 
   private def scheduleReconnect(attempt: Int): Unit = {
     reconnectAttempt = attempt
@@ -230,7 +242,10 @@ final private[client] class MultiplexedConnection private (
         }
       } catch {
         case NonFatal(error) =>
-          locked(if (state == State.Reconnecting) { events.emit(SageEvent.Connection.ReconnectFailed(node, error)); scheduleReconnect(attempt + 1) })
+          locked(if (state == State.Reconnecting) {
+            events.emit(SageEvent.Connection.ReconnectFailed(node, error))
+            scheduleReconnect(attempt + 1)
+          })
       }
   }
 
@@ -242,9 +257,17 @@ final private[client] class MultiplexedConnection private (
       if (conn eq current)
         state match {
           case State.Live         =>
-            transition(State.Reconnecting); scheduleReconnect(nextReconnectAttempt()); events.emit(SageEvent.Connection.Disconnected(node)); true
-          case State.Reconnecting => scheduleReconnect(0); false
-          case State.Draining     => transition(State.Closed); stopWatchdog(); false
+            transition(State.Reconnecting)
+            scheduleReconnect(nextReconnectAttempt())
+            events.emit(SageEvent.Connection.Disconnected(node))
+            true
+          case State.Reconnecting =>
+            scheduleReconnect(0)
+            false
+          case State.Draining     =>
+            transition(State.Closed)
+            stopWatchdog()
+            false
           case State.Closed       => false
         }
       else false
@@ -306,13 +329,18 @@ final private[client] class MultiplexedConnection private (
     }
 
     // Reserves drain slots; the matching retire() (per completed entry) or release() (per unsent reservation) balances them.
-    def reserve(n: Int): Unit = { val _ = inFlight.addAndGet(n) }
+    def reserve(n: Int): Unit =
+      inFlight.addAndGet(n): Unit
 
     // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
     // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
     def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
       // tracking off: run uncached, releasing one of the two slots reserved for the (now unsent) caching prefix
-      if (!trackingActive) { release(1); uncached(command, callback, deferred); return }
+      if (!trackingActive) {
+        release(1)
+        uncached(command, callback, deferred)
+        return
+      }
       val commandBytes                = command.encode
       val keys                        = command.keys
       def deliver(frame: Frame): Unit = callback(decodeFrame(command, frame))
@@ -325,11 +353,19 @@ final private[client] class MultiplexedConnection private (
           // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
           // and release the two slots reserved for the (now unsent) fetch
           case ClientCache.Acquire.Hit(frame, epoch) =>
-            if (cache.isCurrent(epoch)) { release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name)); deliver(frame) }
+            if (cache.isCurrent(epoch)) {
+              release(2)
+              if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
+              deliver(frame)
+            }
             // reroute a hit retired by a topology change or a dead connection; refetch here one retired by a server flush (ownership unchanged)
-            else if (terminated || cache.rerouteRetired(epoch)) { release(2); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
-            else attempt()
-          case ClientCache.Acquire.Wait              => release(2); if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
+            else if (terminated || cache.rerouteRetired(epoch)) {
+              release(2)
+              callback(Failure(ConnectionLost(mayHaveExecuted = false)))
+            } else attempt()
+          case ClientCache.Acquire.Wait              =>
+            release(2)
+            if (events.emitsEvents) events.emit(SageEvent.Cache.Hit(command.name))
           case ClientCache.Acquire.Fetch             =>
             if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
             traced(command, deferred) { settle =>
@@ -345,7 +381,9 @@ final private[client] class MultiplexedConnection private (
               try submitAll(Vector(Connection.clientCachingYes, raw), Vector(_ => (), onReply.asInstanceOf[Try[Any] => Unit]))
               catch {
                 // nothing was sent: release the slots the entries won't retire, and fail the fetch as a reply failure would
-                case NonFatal(error) => release(2); onReply(Failure(error))
+                case NonFatal(error) =>
+                  release(2)
+                  onReply(Failure(error))
               }
             }
         }
@@ -353,7 +391,15 @@ final private[client] class MultiplexedConnection private (
     }
 
     private def uncached[A](command: Command[A], callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =
-      traced(command, deferred)(settle => submit(command, (result: Try[A]) => { settle(Outcome.of(result)); callback(result) }))
+      traced(command, deferred)(settle =>
+        submit(
+          command,
+          (result: Try[A]) => {
+            settle(Outcome.of(result))
+            callback(result)
+          }
+        )
+      )
 
     // span and CommandCompleted bookkeeping around a server-bound submit; `send` is handed a settle hook to call with the outcome
     private def traced(command: Command[?], deferred: () => CommandSpan)(send: ((=> Outcome) => Unit) => Unit): Unit = {
@@ -398,7 +444,10 @@ final private[client] class MultiplexedConnection private (
       if (head != null) {
         // offload: close() blocks joining I/O threads, and the watchdog tick runs on the shared timer thread, which must not block
         if (now - head.sentAtMillis >= timeoutMillis) scheduler.after(Duration.Zero)(close())
-      } else if (now - lastReplyAtMillis >= intervalMillis) { reserve(1); submit(Connection.ping(None), _ => ()) }
+      } else if (now - lastReplyAtMillis >= intervalMillis) {
+        reserve(1)
+        submit(Connection.ping(None), _ => ())
+      }
     }
 
     // Out-of-band frames never consume a pending entry. A READONLY reply fails its command, then poisons the connection: an in-place
@@ -443,15 +492,24 @@ final private[client] class MultiplexedConnection private (
 
       def writeAttempted(): Unit = {
         sentAtMillis = scheduler.nowMillis
-        val _ = pending.add(this)
+        pending.add(this): Unit
       }
 
-      def dropped(): Unit = { callback(Failure(ConnectionLost(mayHaveExecuted = false))); retire() }
+      def dropped(): Unit = {
+        callback(Failure(ConnectionLost(mayHaveExecuted = false)))
+        retire()
+      }
 
       // decodeFrame guards against throwing user decoders: an escaped exception would otherwise lose the callback and hang the awaiting fiber
-      def complete(frame: Frame): Unit = { callback(decodeFrame(command, frame)); retire() }
+      def complete(frame: Frame): Unit = {
+        callback(decodeFrame(command, frame))
+        retire()
+      }
 
-      def fail(error: SageException): Unit = { callback(Failure(error)); retire() }
+      def fail(error: SageException): Unit = {
+        callback(Failure(error))
+        retire()
+      }
     }
 
     // A pipeline as one write unit: its payload is the entries concatenated, and its write/drop hooks fan out to every entry so each is

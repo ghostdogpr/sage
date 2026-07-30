@@ -38,7 +38,7 @@ object Tour {
     try Await.result(program, 60.seconds)
     finally {
       system.terminate()
-      val _ = Await.ready(system.whenTerminated, 10.seconds)
+      Await.ready(system.whenTerminated, 10.seconds): Unit
     }
   }
 }

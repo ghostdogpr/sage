@@ -43,7 +43,12 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
       val handle = scheduler.every(period)(tick)
       lock.lock()
       val keep   =
-        try if (stopped) false else { ticker = handle; true }
+        try
+          if (stopped) false
+          else {
+            ticker = handle
+            true
+          }
         finally lock.unlock()
       if (!keep) handle.cancel()
     }
@@ -51,17 +56,26 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
   def stopPolling(): Unit = {
     lock.lock()
     val handle =
-      try { stopped = true; val current = ticker; ticker = null; current }
-      finally lock.unlock()
+      try {
+        stopped = true
+        val current = ticker
+        ticker = null
+        current
+      } finally lock.unlock()
     if (handle != null) handle.cancel()
   }
 
   private def claim(force: Boolean, wait: Boolean): Boolean = {
     lock.lock()
     try
-      if (refreshing && wait) { while (refreshing) done.awaitUninterruptibly(); false }
-      else if (refreshing || (!force && scheduler.nowMillis - lastRefreshMs < minRefreshMs)) false
-      else { refreshing = true; true }
+      if (refreshing && wait) {
+        while (refreshing) done.awaitUninterruptibly()
+        false
+      } else if (refreshing || (!force && scheduler.nowMillis - lastRefreshMs < minRefreshMs)) false
+      else {
+        refreshing = true
+        true
+      }
     finally lock.unlock()
   }
 
@@ -71,7 +85,10 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
 
   private def finish(): Unit = {
     lock.lock()
-    try { refreshing = false; lastRefreshMs = scheduler.nowMillis; done.signalAll() }
-    finally lock.unlock()
+    try {
+      refreshing = false
+      lastRefreshMs = scheduler.nowMillis
+      done.signalAll()
+    } finally lock.unlock()
   }
 }

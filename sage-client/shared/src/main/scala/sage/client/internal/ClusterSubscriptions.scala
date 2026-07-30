@@ -80,7 +80,10 @@ final private[client] class ClusterSubscriptions(
         }
       conn.attach(sink, names, kind)
     } catch {
-      case e: Throwable => locked(classicSubs -= sub); sink.terminate(); throw e
+      case e: Throwable =>
+        locked(classicSubs -= sub)
+        sink.terminate()
+        throw e
     }
     new RawSubscription(sink, () => closeClassic(sub))
   }
@@ -121,8 +124,13 @@ final private[client] class ClusterSubscriptions(
   private def scheduleRehomeClassic(): Unit = {
     val go = locked {
       if (closed) false
-      else if (rehomeRunning) { rehomeQueued = true; false }
-      else { rehomeRunning = true; true }
+      else if (rehomeRunning) {
+        rehomeQueued = true
+        false
+      } else {
+        rehomeRunning = true
+        true
+      }
     }
     if (go) offload(runRehomeClassicPass())
   }
@@ -130,9 +138,15 @@ final private[client] class ClusterSubscriptions(
   private def runRehomeClassicPass(): Unit = {
     refresh()
     rehomeClassic()
-    val again = locked(if (!closed && rehomeQueued) {
-      rehomeQueued = false; true
-    } else { rehomeRunning = false; false })
+    val again = locked {
+      if (!closed && rehomeQueued) {
+        rehomeQueued = false
+        true
+      } else {
+        rehomeRunning = false
+        false
+      }
+    }
     if (again) offload(runRehomeClassicPass())
   }
 
@@ -155,7 +169,7 @@ final private[client] class ClusterSubscriptions(
           try {
             conn.attach(sub.sink, sub.names, sub.kind)
             // closed during attach: closeClassic couldn't detach a not-yet-attached sub, so detach here or its channels leak on `conn`
-            if (!locked(classicSubs.contains(sub))) { val _ = conn.detach(sub.sink, sub.names, sub.kind) }
+            if (!locked(classicSubs.contains(sub))) { conn.detach(sub.sink, sub.names, sub.kind): Unit }
           } catch { case NonFatal(_) => failed = true }
         }
         if (failed) {
@@ -188,7 +202,11 @@ final private[client] class ClusterSubscriptions(
     }
     // roll back partial placements on failure: closeShard detaches whatever landed (no orphaned SSUBSCRIBE) and terminates the sink
     try place(sub)
-    catch { case e: Throwable => closeShard(sub); throw e }
+    catch {
+      case e: Throwable =>
+        closeShard(sub)
+        throw e
+    }
     new RawSubscription(sink, () => closeShard(sub))
   }
 
@@ -225,7 +243,10 @@ final private[client] class ClusterSubscriptions(
     locked(shardConns.remove(node))
     // a drop may mean the slot migrated (server sends sunsubscribe then disconnects); force a refresh — stale topology still names the dead
     // owner, which planFor would not see as unowned — then reconcile onto the current owner
-    offload { refresh(); scheduleReconcile() }
+    offload {
+      refresh()
+      scheduleReconcile()
+    }
   }
 
   def onTopologyChanged(): Unit = scheduleReconcile()
@@ -234,17 +255,28 @@ final private[client] class ClusterSubscriptions(
   private def scheduleReconcile(): Unit = {
     val go = locked {
       if (closed) false
-      else if (reconcileRunning) { reconcileQueued = true; false }
-      else { reconcileRunning = true; true }
+      else if (reconcileRunning) {
+        reconcileQueued = true
+        false
+      } else {
+        reconcileRunning = true
+        true
+      }
     }
     if (go) offload(runReconcilePass())
   }
 
   private def runReconcilePass(): Unit = {
     reconcileShard()
-    val again = locked(if (!closed && reconcileQueued) {
-      reconcileQueued = false; true
-    } else { reconcileRunning = false; false })
+    val again = locked {
+      if (!closed && reconcileQueued) {
+        reconcileQueued = false
+        true
+      } else {
+        reconcileRunning = false
+        false
+      }
+    }
     if (again) offload(runReconcilePass())
   }
 
@@ -257,7 +289,7 @@ final private[client] class ClusterSubscriptions(
       subs.foreach { sub =>
         val failed = sub.placement.reconcile(planFor(sub.channels), conns)
         // closed during this pass: a racing closeShard may have detached before we re-attached, so reconcile back to empty
-        if (!locked(shardSubs.contains(sub))) { val _ = sub.placement.reconcile(Map.empty, conns) }
+        if (!locked(shardSubs.contains(sub))) { sub.placement.reconcile(Map.empty, conns): Unit }
         // an unowned slot is dropped from the plan, so reconcile reports no failure though the sub isn't placed; retry until fullyPlaced
         else if (failed || !sub.placement.fullyPlaced) incomplete = true
       }

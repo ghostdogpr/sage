@@ -16,7 +16,9 @@ final private[sage] class ConnectFailureRecorder {
     Vector(
       new SageListener {
         def onEvent(event: SageEvent): Unit = event match {
-          case failure: SageEvent.Connection.ConnectFailed => val _ = seen.add(failure); delivered.countDown()
+          case failure: SageEvent.Connection.ConnectFailed =>
+            seen.add(failure)
+            delivered.countDown()
           case _                                           => ()
         }
       }

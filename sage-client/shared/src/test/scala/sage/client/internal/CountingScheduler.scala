@@ -16,7 +16,7 @@ final class CountingScheduler extends Scheduler {
   def jitterMillis(boundExclusive: Long): Long = Scheduler.real.jitterMillis(boundExclusive)
 
   def after(delay: FiniteDuration)(task: => Unit): Unit = {
-    if (delay <= Duration.Zero) { val _ = zeroDelays.incrementAndGet() }
+    if (delay <= Duration.Zero) { zeroDelays.incrementAndGet(): Unit }
     Scheduler.real.after(delay)(task)
   }
 
