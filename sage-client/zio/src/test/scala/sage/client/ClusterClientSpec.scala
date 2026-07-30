@@ -636,20 +636,28 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
-  test("under ReplicaPreferred a read whose connection dies mid-flight falls through to the master") {
-    val nodeR                   = Node("r", 6379)
-    def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
-    var fixture: Fixture        = null
-    val behaviour               = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
+  /**
+    * A shard whose replica's socket dies with the read already written, so its reply fails as `ConnectionLost(mayHaveExecuted = true)`.
+    */
+  private def replicaDiesMidRead(readFrom: ReadFrom, replica: Node): Fixture = {
+    val slots            =
+      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(replica)))))
+    var fixture: Fixture = null
+    val behaviour        = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(slots)
       else if (text.contains("GET"))
-        if (node == nodeR) {
-          fixture.drop(nodeR)
+        if (node == replica) {
+          fixture.drop(replica)
           Seq.empty
         } else Seq(Frame.BulkString(Bytes.utf8("from-master")))
       else Seq(Frame.SimpleString("OK"))
-    fixture = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred)
+    fixture = new Fixture(behaviour, Vector(nodeA), readFrom = readFrom)
+    fixture
+  }
+
+  test("under ReplicaPreferred a read whose connection dies mid-flight falls through to the master") {
+    val nodeR   = Node("r", 6379)
+    val fixture = replicaDiesMidRead(ReadFrom.ReplicaPreferred, nodeR)
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
       assertEquals(result, Some("from-master"))
@@ -658,19 +666,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a read whose connection dies mid-flight on its last candidate fails without re-running the command") {
-    val nodeR                   = Node("r", 6379)
-    def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
-    var fixture: Fixture        = null
-    val behaviour               = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsWithReplica)
-      else if (text.contains("GET"))
-        if (node == nodeR) {
-          fixture.drop(nodeR)
-          Seq.empty
-        } else Seq(Frame.BulkString(Bytes.utf8("from-master")))
-      else Seq(Frame.SimpleString("OK"))
-    fixture = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
+    val nodeR   = Node("r", 6379)
+    val fixture = replicaDiesMidRead(ReadFrom.Replica, nodeR)
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[ConnectionLost], s"a command that may have executed must surface its loss, not a re-dispatch: $error")
