@@ -48,13 +48,10 @@ private[client] object Scheduler {
 
     def after(delay: FiniteDuration)(task: => Unit): Unit =
       // zero-delay offloads must not queue behind watchdog/reconnect timing on the timer thread
-      if (delay <= Duration.Zero) { val _ = Thread.ofVirtual().name("sage-offload").start(() => task) }
+      if (delay <= Duration.Zero) { Thread.ofVirtual().name("sage-offload").start(() => task): Unit }
       else {
-        val _ = timer.schedule(
-          (() => { val _ = Thread.ofVirtual().name("sage-reconnect").start(() => task) }): Runnable,
-          delay.toMillis,
-          TimeUnit.MILLISECONDS
-        )
+        val fire: Runnable = () => Thread.ofVirtual().name("sage-reconnect").start(() => task): Unit
+        timer.schedule(fire, delay.toMillis, TimeUnit.MILLISECONDS): Unit
       }
 
     def every(interval: FiniteDuration)(task: => Unit): Cancelable = {
@@ -63,7 +60,7 @@ private[client] object Scheduler {
         try task
         catch { case NonFatal(_) => () }
       val future: ScheduledFuture[?] = timer.scheduleAtFixedRate(guarded, interval.toMillis, interval.toMillis, TimeUnit.MILLISECONDS)
-      () => { val _ = future.cancel(false) }
+      () => future.cancel(false): Unit
     }
   }
 }

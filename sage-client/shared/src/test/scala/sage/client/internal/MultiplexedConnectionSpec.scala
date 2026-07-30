@@ -175,7 +175,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
   test("a batch's single write concatenates every command's encoding") {
     val (connection, _, transports) = make(autoWrite = false)
     val commands                    = Vector(Connection.ping(Some("a")), Connection.ping(Some("b")))
-    val _                           = connection.submitAll(commands, Vector.fill(2)((_: Try[Any]) => ()))
+    connection.submitAll(commands, Vector.fill(2)((_: Try[Any]) => ()))
     transports.head.writeNext()
     val expected                    = Bytes.concat(commands.map(_.encode))
     assertEquals(transports.head.written.length, 1)
@@ -194,7 +194,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val commands                    = Vector(Connection.ping(Some("a")), Connection.ping(Some("b")), Connection.ping(Some("c")))
     val results                     = new Array[Try[Any]](3)
     val callbacks                   = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
-    val _                           = connection.submitAll(commands, callbacks)
+    connection.submitAll(commands, callbacks)
     transports.head.writeNext() // the whole batch is one write
     transports.head.emit(Frame.SimpleString("a"))
     connection.close()
@@ -207,7 +207,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val (connection, _, _) = make(autoWrite = false)
     val results            = new Array[Try[Any]](3)
     val callbacks          = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
-    val _                  = connection.submitAll(Vector.fill(3)(Connection.ping()), callbacks)
+    connection.submitAll(Vector.fill(3)(Connection.ping()), callbacks)
     connection.close()
     assertEquals(results.toVector, Vector.fill[Try[Any]](3)(Failure(ConnectionLost(mayHaveExecuted = false))))
   }
@@ -334,8 +334,10 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     var first                                           = true
     val scheduler                                       = new ManualScheduler
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
-      if (first) { first = false; new DyingAfterBootstrap(onFrame, onClosed) }
-      else {
+      if (first) {
+        first = false
+        new DyingAfterBootstrap(onFrame, onClosed)
+      } else {
         val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
         healthy += t
         t

@@ -82,8 +82,8 @@ object OpenTelemetryCommandTracer {
     private val ended = new AtomicBoolean(false)
 
     def routedTo(node: Node): Unit = {
-      val _ = span.setAttribute(ServerAddress, node.host)
-      val _ = span.setAttribute(ServerPort, node.port.toLong)
+      span.setAttribute(ServerAddress, node.host)
+      span.setAttribute(ServerPort, node.port.toLong): Unit
     }
 
     def settled(outcome: Outcome): Unit =
@@ -91,8 +91,8 @@ object OpenTelemetryCommandTracer {
         outcome match {
           case Outcome.Succeeded   => ()
           case Outcome.Failed(err) =>
-            val _ = span.setStatus(StatusCode.ERROR, Option(err.getMessage).getOrElse(err.getClass.getName))
-            val _ = span.recordException(err)
+            span.setStatus(StatusCode.ERROR, Option(err.getMessage).getOrElse(err.getClass.getName))
+            span.recordException(err)
         }
         span.end()
       }

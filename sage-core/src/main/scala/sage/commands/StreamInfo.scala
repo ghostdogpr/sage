@@ -249,7 +249,10 @@ private[sage] object StreamInfo {
           val pairs = Vector.newBuilder[(Frame, Frame)]
           pairs.sizeHint(elements.length / 2)
           var i     = 0
-          while (i < elements.length) { pairs += (elements(i) -> elements(i + 1)); i += 2 }
+          while (i < elements.length) {
+            pairs += (elements(i) -> elements(i + 1))
+            i += 2
+          }
           build(pairs.result())
         case other => Left(DecodeError("introspection map", Frame.describe(other)))
       }

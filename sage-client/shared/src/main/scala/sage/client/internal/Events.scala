@@ -72,15 +72,18 @@ private[client] object Events {
       if (queue != null)
         event match {
           case failure @ SageEvent.Connection.ConnectFailed(Some(node), _) =>
-            if (failedConnections.add(node) && !queue.offer(failure)) { val _ = failedConnections.remove(node) }
+            if (failedConnections.add(node) && !queue.offer(failure)) { failedConnections.remove(node): Unit }
           case connected @ SageEvent.Connection.Connected(Some(node))      =>
-            val _ = failedConnections.remove(node)
-            val _ = queue.offer(connected)
+            failedConnections.remove(node)
+            queue.offer(connected): Unit
           case _                                                           =>
-            val _ = queue.offer(event)
+            queue.offer(event): Unit
         }
 
-    def close(): Unit = if (worker != null) { running = false; worker.interrupt() }
+    def close(): Unit = if (worker != null) {
+      running = false
+      worker.interrupt()
+    }
 
     private def drain(): Unit = {
       // keep serving while running: a listener may leave the interrupt flag set, and shutdown clears running first, so only it ends the loop
@@ -89,7 +92,10 @@ private[client] object Events {
         catch { case _: InterruptedException => () }
       // best-effort: deliver what is already queued before exiting
       var event = queue.poll()
-      while (event != null) { dispatch(event); event = queue.poll() }
+      while (event != null) {
+        dispatch(event)
+        event = queue.poll()
+      }
     }
 
     private def dispatch(event: SageEvent): Unit = {
@@ -192,7 +198,10 @@ private[client] object Events {
 
     @volatile private var node: Option[Node] = None
 
-    def at(n: Node): Unit = { node = Some(n); routeSpan(span, n) }
+    def at(n: Node): Unit = {
+      node = Some(n)
+      routeSpan(span, n)
+    }
 
     def abandon(error: Throwable): Unit = settleSpan(span, Outcome.Failed(error))
 

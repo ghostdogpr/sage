@@ -12,10 +12,10 @@ import sage.backend.*
 object TransactionsExample {
 
   def run(client: SageClient)(using Ox): Unit = {
-    val _      = client.set("tx:n", 1)
+    client.set("tx:n", 1)
     val result = client.transaction { tx =>
-      val _ = tx.watch("tx:n")
-      val _ = tx.get[Int]("tx:n")
+      tx.watch("tx:n")
+      tx.get[Int]("tx:n")
       tx.exec((Commands.incr("tx:n"), Commands.incrBy("tx:n", 4)))
     }
     println(s"transaction result=$result")

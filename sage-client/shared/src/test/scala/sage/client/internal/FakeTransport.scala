@@ -28,9 +28,11 @@ final class FakeTransport(
 
   def send(item: Transport.Item): Unit = {
     val shouldDrain = synchronized {
-      val _ = queued += item
-      if (autoWrite && !draining) { draining = true; true }
-      else false
+      queued += item
+      if (autoWrite && !draining) {
+        draining = true
+        true
+      } else false
     }
     if (shouldDrain) drain()
   }
@@ -45,8 +47,11 @@ final class FakeTransport(
   def close(): Unit = {
     val (first, dropped) = synchronized {
       closeCount += 1
-      if (closeCount == 1) { val pending = queued.toVector; queued.clear(); true -> pending }
-      else false -> Vector.empty
+      if (closeCount == 1) {
+        val pending = queued.toVector
+        queued.clear()
+        true -> pending
+      } else false -> Vector.empty
     }
     if (first) {
       dropped.foreach(_.dropped())
@@ -70,12 +75,15 @@ final class FakeTransport(
   private def next(): Transport.Item =
     synchronized {
       if (queued.nonEmpty) queued.remove(0)
-      else { draining = false; null }
+      else {
+        draining = false
+        null
+      }
     }
 
   private def write(item: Transport.Item): Unit = {
     item.writeAttempted()
-    synchronized { val _ = writes += item.payload }
+    synchronized(writes += item.payload)
     respond(item.payload).foreach(onFrame)
   }
 }

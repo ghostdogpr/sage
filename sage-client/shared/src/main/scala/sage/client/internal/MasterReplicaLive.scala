@@ -85,8 +85,12 @@ final private[client] class MasterReplicaLive(
 
   private[client] def bootstrapRoles(): Unit =
     resolveTopology(seeds) match {
-      case Right(topology) => installTopology(topology); startRefreshPoll()
-      case Left(error)     => closeAll(); throw error
+      case Right(topology) =>
+        installTopology(topology)
+        startRefreshPoll()
+      case Left(error)     =>
+        closeAll()
+        throw error
     }
 
   private def resolveTopology(discoveredCandidates: => Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] =
@@ -166,7 +170,14 @@ final private[client] class MasterReplicaLive(
     try {
       val latch   = new CountDownLatch(1)
       val outcome = new AtomicReference[Try[Role]]()
-      nc.submit[Role](Server.role, asking = false, result => { outcome.set(result); latch.countDown() })
+      nc.submit[Role](
+        Server.role,
+        asking = false,
+        result => {
+          outcome.set(result)
+          latch.countDown()
+        }
+      )
       if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) {
         val error = TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
         reportProbeFailure(node, error)
@@ -245,7 +256,11 @@ final private[client] class MasterReplicaLive(
   // run `submit` on the master, completing with node attribution; an ownership fault (a demoted master) kicks a re-discovery.
   // `onDown` fires on any short-circuit that never reaches `submit`.
   private def onMaster[A](complete: Try[A] => Unit, onDown: () => Unit = () => ())(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {
-    if (closed) { onDown(); complete(Failure(NotConnected())); return }
+    if (closed) {
+      onDown()
+      complete(Failure(NotConnected()))
+      return
+    }
     val node     = masterNodeRef.get()
     val existing = masterPool.existing(node)
     if (existing != null) submitMaster(existing, node, complete, submit)
@@ -254,8 +269,11 @@ final private[client] class MasterReplicaLive(
         val nc =
           try masterPool.getOrEstablish(node)
           catch { case NonFatal(_) => null }
-        if (nc == null) { triggerRefresh(); onDown(); complete(Failure(NotConnected())) }
-        else submitMaster(nc, node, complete, submit)
+        if (nc == null) {
+          triggerRefresh()
+          onDown()
+          complete(Failure(NotConnected()))
+        } else submitMaster(nc, node, complete, submit)
       }
   }
 
@@ -264,13 +282,21 @@ final private[client] class MasterReplicaLive(
       nc,
       node,
       {
-        case s @ Success(_) => Events.attributeNode(complete, node); complete(s)
-        case f @ Failure(e) => if (isOwnershipFault(e)) triggerRefresh(); Events.attributeNode(complete, node); complete(f)
+        case s @ Success(_) =>
+          Events.attributeNode(complete, node)
+          complete(s)
+        case f @ Failure(e) =>
+          if (isOwnershipFault(e)) triggerRefresh()
+          Events.attributeNode(complete, node)
+          complete(f)
       }
     )
 
   private def sendRead[A](command: Command[A], complete: Try[A] => Unit): Unit = {
-    if (closed) { complete(Failure(NotConnected())); return }
+    if (closed) {
+      complete(Failure(NotConnected()))
+      return
+    }
     val master     = masterNodeRef.get()
     val candidates = readCandidates(master)
     tryRead(command, candidates, master, complete)
@@ -300,7 +326,9 @@ final private[client] class MasterReplicaLive(
             else submitRead(nc, node, isMaster, command, rest, master, complete)
           }
       // nothing reached the wire, so no fault event fires: re-discover here or a strict-Replica read stays stuck on a stale replica set
-      case _            => triggerRefresh(); complete(Failure(NotConnected()))
+      case _            =>
+        triggerRefresh()
+        complete(Failure(NotConnected()))
     }
 
   private def submitRead[A](
@@ -316,7 +344,9 @@ final private[client] class MasterReplicaLive(
       command,
       asking = false,
       {
-        case s @ Success(_) => Events.attributeNode(complete, node); complete(s)
+        case s @ Success(_) =>
+          Events.attributeNode(complete, node)
+          complete(s)
         case Failure(error) => offload(onReadFault(node, isMaster, error, command, rest, master, complete))
       }
     )
@@ -331,10 +361,16 @@ final private[client] class MasterReplicaLive(
     complete: Try[A] => Unit
   ): Unit = {
     if (isMaster && isOwnershipFault(error)) triggerRefresh()
-    def fail(): Unit = { Events.attributeNode(complete, node); complete(Failure(error)) }
+    def fail(): Unit = {
+      Events.attributeNode(complete, node)
+      complete(Failure(error))
+    }
     if (servesNoRead(error))
       if (rest.nonEmpty) tryRead(command, rest, master, complete)
-      else { triggerRefresh(); fail() }
+      else {
+        triggerRefresh()
+        fail()
+      }
     else fail()
   }
 
@@ -376,7 +412,11 @@ final private[client] class MasterReplicaLive(
           val candidates = readCandidates(master)
           liveEstablished(candidates, master) match {
             case Some((node, nc)) => submitOn(node, nc)
-            case None             => offload { val (node, nc) = establishRead(candidates, master); submitOn(node, nc) }
+            case None             =>
+              offload {
+                val (node, nc) = establishRead(candidates, master)
+                submitOn(node, nc)
+              }
           }
         } else {
           val existing = masterPool.existing(master)
@@ -431,14 +471,22 @@ final private[client] class MasterReplicaLive(
       val nc =
         try masterPool.getOrEstablish(masterNodeRef.get())
         catch {
-          case e: SageException => triggerRefresh(); throw e
-          case NonFatal(_)      => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
+          case e: SageException =>
+            triggerRefresh()
+            throw e
+          case NonFatal(_)      =>
+            triggerRefresh()
+            throw ConnectionLost(mayHaveExecuted = false)
         }
       try new MasterReplicaLive.TxLease(new Client.TxScope(nc.acquireForTransaction(), refreshOnTxFault, events), nc)
       catch {
         case e: TimedOut      => throw e
-        case e: SageException => triggerRefresh(); throw e
-        case NonFatal(_)      => triggerRefresh(); throw ConnectionLost(mayHaveExecuted = false)
+        case e: SageException =>
+          triggerRefresh()
+          throw e
+        case NonFatal(_)      =>
+          triggerRefresh()
+          throw ConnectionLost(mayHaveExecuted = false)
       }
     }
 
@@ -529,7 +577,13 @@ private[client] object MasterReplicaLive {
       val events                                                  = Events(config.listeners, config.tracer)
       val live                                                    =
         new MasterReplicaLive(factory, scheduler, bootstrap, config, seeds, masterReplica, events)
-      try { live.bootstrapRoles(); live }
-      catch { case NonFatal(error) => events.close(); throw translate(error) }
+      try {
+        live.bootstrapRoles()
+        live
+      } catch {
+        case NonFatal(error) =>
+          events.close()
+          throw translate(error)
+      }
     }
 }

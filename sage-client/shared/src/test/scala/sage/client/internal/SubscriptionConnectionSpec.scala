@@ -75,7 +75,10 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   private def nextBlocking(sub: SubscriptionConnection.RawSubscription): Option[SubscriptionConnection.Delivery] = {
     val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
     val latch = new CountDownLatch(1)
-    sub.next { delivery => box.set(delivery); latch.countDown() }
+    sub.next { delivery =>
+      box.set(delivery)
+      latch.countDown()
+    }
     latch.await()
     box.get()
   }
@@ -83,7 +86,10 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   private def nextBlocking(sink: SubscriptionConnection.Sink): Option[SubscriptionConnection.Delivery] = {
     val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
     val latch = new CountDownLatch(1)
-    sink.next { delivery => box.set(delivery); latch.countDown() }
+    sink.next { delivery =>
+      box.set(delivery)
+      latch.countDown()
+    }
     latch.await()
     box.get()
   }
@@ -91,7 +97,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   // Bytes has no structural `==` (CONTEXT: compare with sameBytes), so destructure and compare the payload as text
   private def assertChannel(delivery: Option[SubscriptionConnection.Delivery], channel: String, payload: String)(using munit.Location): Unit =
     delivery match {
-      case Some(SubscriptionConnection.Delivery.Channel(ch, p)) => assertEquals(ch, channel); assertEquals(p.asUtf8String, payload)
+      case Some(SubscriptionConnection.Delivery.Channel(ch, p)) =>
+        assertEquals(ch, channel)
+        assertEquals(p.asUtf8String, payload)
       case other                                                => fail(s"expected a channel delivery, got $other")
     }
 
@@ -100,7 +108,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   ): Unit =
     delivery match {
       case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, p)) =>
-        assertEquals(pat, pattern); assertEquals(ch, channel); assertEquals(p.asUtf8String, payload)
+        assertEquals(pat, pattern)
+        assertEquals(ch, channel)
+        assertEquals(p.asUtf8String, payload)
       case other                                                     => fail(s"expected a pattern delivery, got $other")
     }
 
@@ -219,7 +229,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     }
     val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
     val (connection, scheduler, transports) = make(watchdog = watchdog, respond = silentToPing, bootstrap = Vector(Connection.select(0)))
-    val _                                   = connection.subscribeChannels(Vector("news"))
+    connection.subscribeChannels(Vector("news"))
     assertEquals(transports.size, 1)
 
     var iteration = 0
@@ -250,7 +260,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assert(!connection.closeIfEmpty(), "a connection carrying a live sink must not be evicted")
     assertEquals(transports.head.closeCount, 0)
 
-    val _ = connection.detach(sink, Vector("orders"), SubscriptionConnection.Kind.Shard)
+    connection.detach(sink, Vector("orders"), SubscriptionConnection.Kind.Shard)
     assert(connection.closeIfEmpty(), "with its last sink gone the connection is empty and closes")
     assertEquals(transports.head.closeCount, 1)
 
@@ -277,7 +287,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, serverResponder); transports += t; t
+      val t = new FakeTransport(onFrame, onClosed, serverResponder)
+      transports += t
+      t
     }
     val connection                                      = new SubscriptionConnection(
       factory,
@@ -308,7 +320,10 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       def send(item: Transport.Item): Unit = {
         item.writeAttempted()
         serverResponder(item.payload).foreach(onFrame)
-        if (!bootstrapped) { bootstrapped = true; onClosed() }
+        if (!bootstrapped) {
+          bootstrapped = true
+          onClosed()
+        }
       }
       def close(): Unit                    = ()
     }
@@ -349,7 +364,10 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
     val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
     val latch = new CountDownLatch(1)
-    sink.next { delivery => box.set(delivery); latch.countDown() }
+    sink.next { delivery =>
+      box.set(delivery)
+      latch.countDown()
+    }
     sink.offer(SubscriptionConnection.Delivery.Channel("news", Bytes.utf8("hello")))
     latch.await()
     assertChannel(box.get(), "news", "hello")
@@ -372,11 +390,16 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
         item.writeAttempted()
         serverResponder(item.payload).foreach(onFrame)
       }
-      def close(): Unit                    = { closeCount += 1; onClosed() }
+      def close(): Unit                    = {
+        closeCount += 1
+        onClosed()
+      }
     }
     val transports = mutable.ArrayBuffer.empty[FailingSubscribe]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FailingSubscribe(onFrame, onClosed); transports += t; t
+      val t = new FailingSubscribe(onFrame, onClosed)
+      transports += t
+      t
     }
     val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
@@ -395,11 +418,16 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
         item.writeAttempted()
         serverResponder(item.payload).foreach(onFrame)
       }
-      def close(): Unit                    = { closeCount += 1; onClosed() }
+      def close(): Unit                    = {
+        closeCount += 1
+        onClosed()
+      }
     }
     val transports = mutable.ArrayBuffer.empty[FailingUnsubscribe]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FailingUnsubscribe(onFrame, onClosed); transports += t; t
+      val t = new FailingUnsubscribe(onFrame, onClosed)
+      transports += t
+      t
     }
     val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
@@ -407,7 +435,10 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val sub   = connection.subscribeChannels(Vector("news"))
     val box   = new AtomicReference[Option[SubscriptionConnection.Delivery]]()
     val latch = new CountDownLatch(1)
-    sub.next { delivery => box.set(delivery); latch.countDown() }
+    sub.next { delivery =>
+      box.set(delivery)
+      latch.countDown()
+    }
 
     intercept[RuntimeException](sub.close())
     assert(latch.await(1, java.util.concurrent.TimeUnit.SECONDS), "the parked consumer must be woken, not left hanging")
@@ -435,7 +466,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       def emitsEvents: Boolean                  = true
       def tracer: Option[sage.CommandTracer]    = None
       def serverNode: Option[sage.cluster.Node] = None
-      def emit(event: sage.SageEvent): Unit     = { val _ = recorded.add(event) }
+      def emit(event: sage.SageEvent): Unit     = recorded.add(event): Unit
       def close(): Unit                         = ()
     }
     var healthy                                         = true
@@ -444,7 +475,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       else serverResponder(payload)
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val t = new FakeTransport(onFrame, onClosed, respond); transports += t; t
+      val t = new FakeTransport(onFrame, onClosed, respond)
+      transports += t
+      t
     }
     val scheduler                                       = new ManualScheduler
     val connection                                      =
@@ -503,7 +536,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 1000L, 16, () => true)
 
     val subscribing = new Thread(() =>
-      try { val _ = connection.subscribeChannels(Vector("news")) }
+      try connection.subscribeChannels(Vector("news")): Unit
       catch { case _: Throwable => () }
     )
     subscribing.start() // blocks in the connect
@@ -523,12 +556,20 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   test("close unblocks a subscriber parked waiting for the bootstrap reply") {
     val pinged                                          = new CountDownLatch(1)
     val factory: MultiplexedConnection.TransportFactory =
-      (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, payload => { if (payload.asUtf8String.contains("PING")) pinged.countDown(); Nil })
+      (onFrame, onClosed) =>
+        new FakeTransport(
+          onFrame,
+          onClosed,
+          payload => {
+            if (payload.asUtf8String.contains("PING")) pinged.countDown()
+            Nil
+          }
+        )
     val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), new ManualScheduler, fixedBackoff, noWatchdog, 60000L, 16, () => true)
 
     val subscribing = new Thread(() =>
-      try { val _ = connection.subscribeChannels(Vector("news")) }
+      try connection.subscribeChannels(Vector("news")): Unit
       catch { case _: Throwable => () }
     )
     subscribing.start()
@@ -547,8 +588,14 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val connecting                                      = new java.util.concurrent.CopyOnWriteArrayList[ConnectingTransport]()
     var fake: FakeTransport                             = null
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
-      if (attempt.getAndIncrement() == 0) { fake = new FakeTransport(onFrame, onClosed, serverResponder); fake }
-      else { val t = new ConnectingTransport(onClosed); connecting.add(t); t }
+      if (attempt.getAndIncrement() == 0) {
+        fake = new FakeTransport(onFrame, onClosed, serverResponder)
+        fake
+      } else {
+        val t = new ConnectingTransport(onClosed)
+        connecting.add(t)
+        t
+      }
     val connection                                      =
       new SubscriptionConnection(factory, Vector(Connection.ping()), scheduler, fixedBackoff, noWatchdog, 5000L, 16, () => true)
 
@@ -571,7 +618,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     sub.close() // Reconnecting -> Idle, leaving conn1 still establishing
 
     val attaching = new Thread(() =>
-      try { val _ = connection.subscribeChannels(Vector("b")) }
+      try connection.subscribeChannels(Vector("b")): Unit
       catch { case _: Throwable => () }
     )
     attaching.start() // blocks in the attach's connect

@@ -19,7 +19,10 @@ private[client] object ReadRouting {
   def candidates(readFrom: ReadFrom, master: Node, replicas: Vector[Node], rr: Int): Vector[Node] = {
     val rotated =
       if (replicas.isEmpty) Vector.empty
-      else { val k = ((rr % replicas.length) + replicas.length) % replicas.length; replicas.drop(k) ++ replicas.take(k) }
+      else {
+        val k = ((rr % replicas.length) + replicas.length) % replicas.length
+        replicas.drop(k) ++ replicas.take(k)
+      }
     readFrom match {
       case ReadFrom.Master           => Vector(master)
       case ReadFrom.MasterPreferred  => master +: rotated

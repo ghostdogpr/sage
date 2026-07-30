@@ -64,7 +64,10 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
   private def occurrences(haystack: String, needle: String): Int = {
     var count = 0
     var from  = haystack.indexOf(needle)
-    while (from >= 0) { count += 1; from = haystack.indexOf(needle, from + needle.length) }
+    while (from >= 0) {
+      count += 1
+      from = haystack.indexOf(needle, from + needle.length)
+    }
     count
   }
 
@@ -72,7 +75,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     val routed                                      = new ConcurrentLinkedQueue[(String, Node)]()
     def onCommand(command: Command[?]): CommandSpan =
       new CommandSpan {
-        def routedTo(node: Node): Unit      = { val _ = routed.add(command.name -> node) }
+        def routedTo(node: Node): Unit      = routed.add(command.name -> node): Unit
         def settled(outcome: Outcome): Unit = ()
       }
   }
@@ -92,7 +95,9 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     val latch                                                   = new CountDownLatch(2)
     val listener                                                = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
-        case c: SageEvent.CommandCompleted if c.name == "PREAD" || c.name == "PWRITE" => completions.add(c); latch.countDown()
+        case c: SageEvent.CommandCompleted if c.name == "PREAD" || c.name == "PWRITE" =>
+          completions.add(c)
+          latch.countDown()
         case _                                                                        => ()
       }
     }
@@ -121,7 +126,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       f.live.run(writeCmd).unsafeRun.flatMap { _ =>
         f.live.pipeline(Seq(writeCmd, readCmd)).unsafeRun.map { _ =>
           assertEquals(counting.zeroDelays.get(), before, "an established-master dispatch must not offload")
-          val _ = f.live.close.unsafeRun
+          f.live.close.unsafeRun
         }
       }
     }
@@ -134,7 +139,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       val before = counting.zeroDelays.get()
       f.live.pipeline(Seq(readCmd, readCmd)).unsafeRun.map { _ =>
         assertEquals(counting.zeroDelays.get(), before, "a warmed replica pipeline must not offload")
-        val _ = f.live.close.unsafeRun
+        f.live.close.unsafeRun
       }
     }
   }
@@ -150,7 +155,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         assertEquals(nodes, Vector(Some(replica), Some(replica)), s"pipeline commands should attribute to the replica, got $nodes")
         val routed = f.tracer.routed.asScala.toVector.filter(_._1 == "PREAD")
         assertEquals(routed, Vector("PREAD" -> replica, "PREAD" -> replica), s"tracer should route both reads to the replica, got $routed")
-        val _      = f.live.close.unsafeRun
+        f.live.close.unsafeRun
       }
   }
 
@@ -165,7 +170,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         assertEquals(nodes, Vector(Some(master), Some(master)), s"a write forces the whole batch to the master, got $nodes")
         val routed = f.tracer.routed.asScala.toVector.filter(p => p._1 == "PWRITE" || p._1 == "PREAD")
         assertEquals(routed, Vector("PWRITE" -> master, "PREAD" -> master), s"tracer should route both commands to the master, got $routed")
-        val _      = f.live.close.unsafeRun
+        f.live.close.unsafeRun
       }
   }
 }

@@ -18,7 +18,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val values = (1 to 50).toList
           .map(i =>
             fork {
-              val _ = client.set(s"key-$i", s"value-$i")
+              client.set(s"key-$i", s"value-$i")
               client.get[String](s"key-$i")
             }
           )
@@ -32,11 +32,11 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       supervised {
         val client  = SageClient.scoped(configOf(server))
-        val _       = client.set("pipe:a", "x")
-        val _       = client.set("pipe:n", 10)
+        client.set("pipe:a", "x")
+        client.set("pipe:n", 10)
         val out     = client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)))
         assertEquals(out, (Some("x"), 15L))
-        val _       = client.set("pipe:str", "hello")
+        client.set("pipe:str", "hello")
         val attempt = client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")))
         assert(attempt._1 == Right(Some("hello")), attempt._1)
         assert(attempt._2.isLeft, attempt._2)
@@ -48,10 +48,10 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
     withContainers { server =>
       supervised {
         val client = SageClient.scoped(configOf(server))
-        val _      = client.set("tx:n", 1)
+        client.set("tx:n", 1)
         val out    = client.transaction { tx =>
-          val _ = tx.watch("tx:n")
-          val _ = tx.get[Int]("tx:n")
+          tx.watch("tx:n")
+          tx.get[Int]("tx:n")
           tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)))
         }
         assertEquals(out, Some((2L, 6L)))
@@ -64,7 +64,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       supervised {
         val client = SageClient.scoped(configOf(server))
         (1 to 50).foreach { i =>
-          val _ = client.set(s"scan-$i", "v")
+          client.set(s"scan-$i", "v")
         }
         val keys   = client.scanAll(pattern = Some("scan-*"), count = Some(10L)).runToList()
         assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
@@ -78,7 +78,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val client   = SageClient.scoped(configOf(server))
         val stream   = client.subscribeScoped[String]("smoke")
         (1 to 3).foreach { i =>
-          val _ = client.publish("smoke", s"m$i")
+          client.publish("smoke", s"m$i")
         }
         val messages = stream.take(3).runToList()
         assertEquals(messages.map(_.channel).toSet, Set("smoke"))
@@ -92,9 +92,9 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       supervised {
         val client = SageClient.scoped(configOf(server))
         val stream = client.subscribeScoped[String]("scoped-live")
-        val _      = client.publish("scoped-live", "a")
+        client.publish("scoped-live", "a")
         val first  = stream.take(1).runToList()
-        val _      = client.publish("scoped-live", "b")
+        client.publish("scoped-live", "b")
         val second = stream.take(1).runToList()
         assertEquals(first.map(_.payload), List("a"))
         assertEquals(second.map(_.payload), List("b"))
@@ -111,7 +111,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
         val running   = new java.util.concurrent.atomic.AtomicBoolean(true)
         val publisher = fork {
           while (running.get()) {
-            val _ = client.publish("rerun", "tick")
+            client.publish("rerun", "tick")
             Thread.sleep(50)
           }
         }
@@ -133,7 +133,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       supervised {
         val client = SageClient.scoped(configOf(server))
         (1 to 50).foreach { i =>
-          val _ = client.hSet("hscan", (s"f$i", s"v$i"))
+          client.hSet("hscan", (s"f$i", s"v$i"))
         }
         val pairs  = client.hScanAll[String, String]("hscan", count = Some(10L)).runToList()
         assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
@@ -146,7 +146,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       supervised {
         val client  = SageClient.scoped(configOf(server))
         (1 to 50).foreach { i =>
-          val _ = client.sAdd("sscan", s"m$i")
+          client.sAdd("sscan", s"m$i")
         }
         val members = client.sScanAll[String]("sscan", count = Some(10L)).runToList()
         assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
@@ -159,7 +159,7 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
       supervised {
         val client = SageClient.scoped(configOf(server))
         (1 to 50).foreach { i =>
-          val _ = client.zAdd("zscan")((s"m$i", i.toDouble))
+          client.zAdd("zscan")((s"m$i", i.toDouble))
         }
         val pairs  = client.zScanAll[String]("zscan", count = Some(10L)).runToList()
         assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)

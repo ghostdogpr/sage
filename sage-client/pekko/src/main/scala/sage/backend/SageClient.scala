@@ -206,8 +206,8 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
             () => {
               val opened = open
               opened.onComplete {
-                case Success(_) => val _ = confirmed.trySuccess(Done)
-                case Failure(e) => val _ = confirmed.tryFailure(e)
+                case Success(_) => confirmed.trySuccess(Done)
+                case Failure(e) => confirmed.tryFailure(e)
               }(ExecutionContext.parasitic)
               opened
             },

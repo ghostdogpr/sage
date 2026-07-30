@@ -80,7 +80,7 @@ class ClusterClientSpec extends munit.FunSuite {
           else behaviour(node, text)
         }
         val transport                    = new FakeTransport(onFrame, onClosed, respond)
-        transports.synchronized { val _ = transports.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += transport }
+        transports.synchronized(transports.getOrElseUpdate(node, mutable.ArrayBuffer.empty) += transport)
         transport
       }
 
@@ -600,8 +600,10 @@ class ClusterClientSpec extends munit.FunSuite {
     val mid          = Slot.Count / 2
     val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour    = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) { clusterCalls.incrementAndGet(); Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))) }
-      else if (text.contains("SCRIPT"))
+      if (text.contains("CLUSTER")) {
+        clusterCalls.incrementAndGet()
+        Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      } else if (text.contains("SCRIPT"))
         Seq(if (node == nodeB) Frame.SimpleError("CLUSTERDOWN The cluster is down") else Frame.BulkString(Bytes.utf8("sha1")))
       else Seq(Frame.SimpleString("OK"))
     val fixture      = new Fixture(behaviour, Vector(nodeA))
@@ -796,8 +798,10 @@ class ClusterClientSpec extends munit.FunSuite {
     val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
     val attempts     = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour    = (_: Node, text: String) =>
-      if (text.contains("CLUSTER")) { clusterCalls.incrementAndGet(); Seq(wholeClusterOn(nodeA)) }
-      else if (text.contains("GET"))
+      if (text.contains("CLUSTER")) {
+        clusterCalls.incrementAndGet()
+        Seq(wholeClusterOn(nodeA))
+      } else if (text.contains("GET"))
         if (attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
         else Seq(Frame.BulkString(Bytes.utf8("value")))
       else Seq(Frame.SimpleString("OK"))

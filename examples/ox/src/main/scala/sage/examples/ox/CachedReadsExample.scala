@@ -14,7 +14,7 @@ import sage.backend.*
 object CachedReadsExample {
 
   def run(client: SageClient)(using Ox): Unit = {
-    val _      = client.set("cached:key", "v1")
+    client.set("cached:key", "v1")
     val first  = client.cached(Commands.get[String, String]("cached:key"), 1.minute) // fetch + cache
     val second = client.cached(Commands.get[String, String]("cached:key"), 1.minute) // local hit
     println(s"first=$first second=$second")

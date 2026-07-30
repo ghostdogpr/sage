@@ -113,7 +113,10 @@ final private[client] class ClusterLive(
       val node = candidates.next()
       try
         querySlotsVia(node, getOrEstablish(node)) match {
-          case Right(shards) => adopt(node, shards); startRefreshPoll(); return
+          case Right(shards) =>
+            adopt(node, shards)
+            startRefreshPoll()
+            return
           case Left(error)   => lastError = error
         }
       catch { case NonFatal(error) => lastError = error }
@@ -392,7 +395,9 @@ final private[client] class ClusterLive(
             else submitRead(nc, node, command, rest, master, redirectsLeft, complete)
           }
       // strict Replica, all candidates unreachable: refresh so the next read sees the new roster
-      case _            => triggerRefresh(); complete(Failure(NotConnected()))
+      case _            =>
+        triggerRefresh()
+        complete(Failure(NotConnected()))
     }
 
   private def submitRead[A](
@@ -408,7 +413,9 @@ final private[client] class ClusterLive(
       command,
       asking = false,
       {
-        case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
+        case Success(value) =>
+          Events.attributeNode(complete, node)
+          complete(Success(value))
         case Failure(error) => offload(onReadFailure(node, command, error, rest, master, redirectsLeft, complete))
       }
     )
@@ -432,7 +439,9 @@ final private[client] class ClusterLive(
           case RedirectKind.Moved if redirectsLeft <= 0 =>
             refreshBeforeFailing()
             complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
-          case RedirectKind.Moved                       => refresh(force = true); offload(dispatch(command, redirectsLeft - 1, complete))
+          case RedirectKind.Moved                       =>
+            refresh(force = true)
+            offload(dispatch(command, redirectsLeft - 1, complete))
         }
       case Fault.Lost(false)                =>
         if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete) else onUnreachable(command, redirectsLeft, complete)
@@ -440,8 +449,13 @@ final private[client] class ClusterLive(
         if (rest.nonEmpty) tryReadCandidates(command, rest, master, redirectsLeft, complete)
         else onRetryable(command, error, clusterWide, redirectsLeft, complete)
       case Fault.TryAgain                   => onRetryable(command, error, refreshFirst = false, redirectsLeft, complete)
-      case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
-      case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
+      case Fault.Demoted | Fault.Lost(true) =>
+        triggerRefresh()
+        Events.attributeNode(complete, node)
+        complete(Failure(error))
+      case Fault.Fatal                      =>
+        Events.attributeNode(complete, node)
+        complete(Failure(error))
     }
 
   private def broadcast[A](
@@ -540,7 +554,9 @@ final private[client] class ClusterLive(
       case Fault.Lost(false)                         => retryBroadcast(node, command, error, refreshFirst = true, attemptsLeft, settle)
       case Fault.TryAgain | Fault.Unavailable(false) => retryBroadcast(node, command, error, refreshFirst = false, attemptsLeft, settle)
       // a cluster-wide refusal may have moved the masters this fan-out captured, so it is not chased
-      case Fault.Unavailable(true)                   => refreshBeforeFailing(); settle(Failure(error))
+      case Fault.Unavailable(true)                   =>
+        refreshBeforeFailing()
+        settle(Failure(error))
       case fault                                     =>
         if (fault.refreshPolicy != RefreshPolicy.Skip) triggerRefresh()
         settle(Failure(error))
@@ -555,8 +571,10 @@ final private[client] class ClusterLive(
     attemptsLeft: Int,
     settle: Try[B] => Unit
   ): Unit =
-    if (attemptsLeft <= 0) { if (refreshFirst) refreshBeforeFailing(); settle(Failure(error)) }
-    else
+    if (attemptsLeft <= 0) {
+      if (refreshFirst) refreshBeforeFailing()
+      settle(Failure(error))
+    } else
       afterBackoff(attemptsLeft) {
         if (refreshFirst) refresh(force = true)
         if (closed || !slotOwningMasters(topologyRef.get()).contains(node)) settle(Failure(error))
@@ -566,7 +584,10 @@ final private[client] class ClusterLive(
   private def collectFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Vector[Frame] = {
     val out = Vector.newBuilder[Frame]
     var i   = 0
-    while (i < size) { out += frames.get(i); i += 1 }
+    while (i < size) {
+      out += frames.get(i)
+      i += 1
+    }
     out.result()
   }
 
@@ -624,7 +645,9 @@ final private[client] class ClusterLive(
     cacheCtx: Cached
   ): Unit = {
     val onReply: Try[A] => Unit = {
-      case Success(value) => Events.attributeNode(complete, node); complete(Success(value))
+      case Success(value) =>
+        Events.attributeNode(complete, node)
+        complete(Success(value))
       case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete, lease, cacheCtx))
     }
     if (cacheCtx != null && !asking) nc.cachedSubmit[A](command, cacheCtx.ttlMillis, onReply, cacheCtx.deferred)
@@ -645,8 +668,13 @@ final private[client] class ClusterLive(
       case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
       case Fault.TryAgain                   => onRetryable(command, error, refreshFirst = false, redirectsLeft, complete, lease, cacheCtx)
       case Fault.Unavailable(clusterWide)   => onRetryable(command, error, clusterWide, redirectsLeft, complete, lease, cacheCtx)
-      case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); Events.attributeNode(complete, node); complete(Failure(error))
-      case Fault.Fatal                      => Events.attributeNode(complete, node); complete(Failure(error))
+      case Fault.Demoted | Fault.Lost(true) =>
+        triggerRefresh()
+        Events.attributeNode(complete, node)
+        complete(Failure(error))
+      case Fault.Fatal                      =>
+        Events.attributeNode(complete, node)
+        complete(Failure(error))
     }
 
   private def onRedirect[A](
@@ -666,7 +694,9 @@ final private[client] class ClusterLive(
     } else {
       val target = resolve(redirect.target, from)
       redirect.kind match {
-        case RedirectKind.Moved => triggerRefresh(); sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease, cacheCtx)
+        case RedirectKind.Moved =>
+          triggerRefresh()
+          sendTo(target, command, asking = false, redirectsLeft - 1, complete, lease, cacheCtx)
         case RedirectKind.Ask   => sendTo(target, command, asking = true, redirectsLeft - 1, complete, lease, cacheCtx)
       }
     }
@@ -681,8 +711,10 @@ final private[client] class ClusterLive(
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
   ): Unit =
-    if (redirectsLeft <= 0) { refreshBeforeFailing(); complete(Failure(NotConnected())) }
-    else {
+    if (redirectsLeft <= 0) {
+      refreshBeforeFailing()
+      complete(Failure(NotConnected()))
+    } else {
       refresh(force = true)
       afterBackoff(redirectsLeft)(
         dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
@@ -699,8 +731,10 @@ final private[client] class ClusterLive(
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
   ): Unit =
-    if (redirectsLeft <= 0) { if (refreshFirst) refreshBeforeFailing(); complete(Failure(error)) }
-    else {
+    if (redirectsLeft <= 0) {
+      if (refreshFirst) refreshBeforeFailing()
+      complete(Failure(error))
+    } else {
       if (refreshFirst) refresh(force = true)
       afterBackoff(redirectsLeft)(
         dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
@@ -893,7 +927,10 @@ final private[client] class ClusterLive(
     reroute: Int => Unit,
     useReplica: Boolean
   ): Unit = {
-    def settle(index: Int, result: Try[Any]): Unit = { Events.attributeNode(emits(index), target); emits(index)(result) }
+    def settle(index: Int, result: Try[Any]): Unit = {
+      Events.attributeNode(emits(index), target)
+      emits(index)(result)
+    }
     val callbacks: Vector[Try[Any] => Unit]        = indices.map { index => (result: Try[Any]) =>
       result match {
         case Success(_)     => settle(index, result)
@@ -914,7 +951,9 @@ final private[client] class ClusterLive(
               case Fault.Lost(false)                => reroute(index)
               case Fault.TryAgain                   => onRetryable(p.commands(index), error, refreshFirst = false, cluster.maxRedirects, emits(index))
               case Fault.Unavailable(clusterWide)   => onRetryable(p.commands(index), error, clusterWide, cluster.maxRedirects, emits(index))
-              case Fault.Demoted | Fault.Lost(true) => triggerRefresh(); settle(index, result)
+              case Fault.Demoted | Fault.Lost(true) =>
+                triggerRefresh()
+                settle(index, result)
               case Fault.Fatal                      => settle(index, result)
             }
           }
@@ -951,7 +990,10 @@ final private[client] class ClusterLive(
       val command = Connection.watch(key, rest*)
       CIO.async[Unit] { complete =>
         val tracked = Events.trackSpan(events, command, complete)
-        offload(withConn(command, tracked) { c => armed.set(true); c.submit(command, faulting(tracked)) })
+        offload(withConn(command, tracked) { c =>
+          armed.set(true)
+          c.submit(command, faulting(tracked))
+        })
       }
     }
 
@@ -977,7 +1019,11 @@ final private[client] class ClusterLive(
           try
             if (released) complete(Failure(TxSupport.scopeReleasedError))
             else if (conn == null) complete(Success(())) // nothing leased, nothing watched
-            else Client.completing(complete) { armed.set(false); conn.submit(Connection.unwatch, faulting(complete)) }
+            else
+              Client.completing(complete) {
+                armed.set(false)
+                conn.submit(Connection.unwatch, faulting(complete))
+              }
           finally lock.unlock()
         }
       }
@@ -994,14 +1040,19 @@ final private[client] class ClusterLive(
       }
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
-      case failure @ Failure(error) => refreshOnFault(error); complete(failure)
+      case failure @ Failure(error) =>
+        refreshOnFault(error)
+        complete(failure)
       case success                  => complete(success)
     }
 
     // EXEC replies arrive as a Success carrying raw frames, so an ownership fault is an error *frame*, invisible to `faulting`; scan the top
     // level and the EXEC array and refresh on any non-terminal one so the caller's retry re-pins
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
-      val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
+      val nested = frames.lastOption match {
+        case Some(Frame.Array(elems)) => elems.iterator
+        case _                        => Iterator.empty[Frame]
+      }
       refreshFor((frames.iterator ++ nested).flatMap(TxSupport.errorOf).map(m => Fault.categorize(ServerError.of(m))).toVector)
     }
 
@@ -1059,12 +1110,18 @@ final private[client] class ClusterLive(
           if (released) complete(Failure(TxSupport.scopeReleasedError))
           else
             slotResult match {
-              case Left(error) => fault = error; complete(Failure(error))
+              case Left(error) =>
+                fault = error
+                complete(Failure(error))
               case Right(s)    =>
-                if (conn == null) { acquire = true; slot = s }
-                else
+                if (conn == null) {
+                  acquire = true
+                  slot = s
+                } else
                   checkPin(s) match {
-                    case Left(error) => fault = error; complete(Failure(error))
+                    case Left(error) =>
+                      fault = error
+                      complete(Failure(error))
                     case Right(())   => Client.completing(complete)(use(conn))
                   }
             }
@@ -1072,14 +1129,22 @@ final private[client] class ClusterLive(
         if (fault != null) refreshOnFault(fault)
         else if (acquire)
           acquireConn(slot) match {
-            case Left(error)               => refreshOnFault(error); complete(Failure(error))
+            case Left(error)               =>
+              refreshOnFault(error)
+              complete(Failure(error))
             case Right((nc, c, node, pin)) =>
               var giveBack = false
               lock.lock()
               try
-                if (released) { giveBack = true; complete(Failure(TxSupport.scopeReleasedError)) }
-                else if (conn != null) { giveBack = true; retry = true } // lost the acquire race; re-validate against the winner's pin
-                else {
+                if (released) {
+                  giveBack = true
+                  complete(Failure(TxSupport.scopeReleasedError))
+                }
+                // lost the acquire race; re-validate against the winner's pin
+                else if (conn != null) {
+                  giveBack = true
+                  retry = true
+                } else {
                   nodeClient = nc
                   conn = c
                   pinnedNode = node
@@ -1102,8 +1167,10 @@ final private[client] class ClusterLive(
             case Some(ps)            =>
               Left(CrossSlot(s"transaction touches slot ${s.value} but is pinned to slot ${ps.value}; MULTI/EXEC requires a single slot"))
             case None                =>
-              if (topologyRef.get().nodeForSlot(s).contains(pinnedNode)) { pinnedSlot = Some(s); Right(()) }
-              else Left(CrossSlot(s"transaction touches slot ${s.value} on a node other than its pinned one; MULTI/EXEC requires a single slot"))
+              if (topologyRef.get().nodeForSlot(s).contains(pinnedNode)) {
+                pinnedSlot = Some(s)
+                Right(())
+              } else Left(CrossSlot(s"transaction touches slot ${s.value} on a node other than its pinned one; MULTI/EXEC requires a single slot"))
           }
       }
 
@@ -1127,7 +1194,10 @@ final private[client] class ClusterLive(
     }
 
     private def nodeForSlotRefreshing(slot: Slot): Option[Node] =
-      topologyRef.get().nodeForSlot(slot).orElse { refresh(force = true); topologyRef.get().nodeForSlot(slot) }
+      topologyRef.get().nodeForSlot(slot).orElse {
+        refresh(force = true)
+        topologyRef.get().nodeForSlot(slot)
+      }
 
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       if (command.hasMalformedKeys)
@@ -1175,8 +1245,10 @@ final private[client] class ClusterLive(
     private[internal] def release(): Unit = {
       lock.lock()
       val (nc, c, reusable) =
-        try { released = true; (nodeClient, conn, conn != null && conn.isHealthy && conn.isQuiescent && !armed.get) }
-        finally lock.unlock()
+        try {
+          released = true
+          (nodeClient, conn, conn != null && conn.isHealthy && conn.isQuiescent && !armed.get)
+        } finally lock.unlock()
       if (nc != null) nc.releaseTransaction(c, reusable)
     }
   }
@@ -1188,7 +1260,10 @@ final private[client] class ClusterLive(
     catch { case NonFatal(_) => null }
 
   private def flushNode(node: Node): Unit =
-    if (cachingEnabled) { val nc = masterPool.existing(node); if (nc != null) nc.flushCache() }
+    if (cachingEnabled) {
+      val nc = masterPool.existing(node)
+      if (nc != null) nc.flushCache()
+    }
 
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
@@ -1219,7 +1294,14 @@ final private[client] class ClusterLive(
   private def querySlotsVia(node: Node, nc: NodeClient): Either[Throwable, Vector[Shard]] = {
     val latch   = new CountDownLatch(1)
     val outcome = new AtomicReference[Try[Vector[Shard]]]()
-    nc.submit[Vector[Shard]](Cluster.slots, asking = false, result => { outcome.set(result); latch.countDown() })
+    nc.submit[Vector[Shard]](
+      Cluster.slots,
+      asking = false,
+      result => {
+        outcome.set(result)
+        latch.countDown()
+      }
+    )
     if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS))
       Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
     else
@@ -1306,7 +1388,13 @@ private[client] object ClusterLive {
       )
       // translate discovery's handshake/TLS failures here rather than via mapError, which the per-backend CIO alias does not reconcile through
       // `Client`'s invariant type parameter
-      try { live.bootstrapTopology(); live }
-      catch { case NonFatal(error) => events.close(); throw translate(error) }
+      try {
+        live.bootstrapTopology()
+        live
+      } catch {
+        case NonFatal(error) =>
+          events.close()
+          throw translate(error)
+      }
     }
 }

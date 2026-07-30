@@ -84,7 +84,14 @@ final private[client] class DedicatedPool(
             val onInterrupt = () => callback(scala.util.Failure(ConnectionLost(mayHaveExecuted = true)))
             if (lease.attach(this, conn, onInterrupt)) {
               if (asking) conn.submit[Unit](Connection.asking, _ => ())
-              conn.submit(command, result => if (lease.finish(conn)) { release(conn); callback(result) })
+              conn.submit(
+                command,
+                result =>
+                  if (lease.finish(conn)) {
+                    release(conn)
+                    callback(result)
+                  }
+              )
             } else onInterrupt()
         }
       }
@@ -140,7 +147,7 @@ final private[client] class DedicatedPool(
         }
         val remaining = deadlineNanos - System.nanoTime()
         if (remaining <= 0L) throw acquireTimedOut
-        val _         = available.awaitNanos(remaining)
+        available.awaitNanos(remaining): Unit
       }
       throw new IllegalStateException("unreachable")
     }
@@ -155,7 +162,11 @@ final private[client] class DedicatedPool(
     try connection.establish(bootstrap)
     catch {
       case e: Throwable =>
-        locked { establishing -= connection; reserved -= 1; available.signal() }
+        locked {
+          establishing -= connection
+          reserved -= 1
+          available.signal()
+        }
         lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
         throw e
     }
@@ -205,7 +216,7 @@ final private[client] class DedicatedPool(
       val due     = Vector.newBuilder[DedicatedConnection]
       idle.filterInPlace { entry =>
         val keep = reusable(entry)
-        if (!keep) { val _ = due += entry.connection }
+        if (!keep) due += entry.connection
         keep
       }
       val expired = due.result()
@@ -279,7 +290,10 @@ private[client] object DedicatedPool {
 
     private[internal] def attach(pool: DedicatedPool, conn: DedicatedConnection, onInterrupt: () => Unit): Boolean =
       if (state.compareAndSet(null, Held(pool, conn, onInterrupt))) true
-      else { pool.releaseTransaction(conn, reusable = false); false }
+      else {
+        pool.releaseTransaction(conn, reusable = false)
+        false
+      }
 
     private[internal] def finish(conn: DedicatedConnection): Boolean =
       state.get() match {
@@ -288,7 +302,9 @@ private[client] object DedicatedPool {
       }
 
     def cancel(): Unit = state.getAndSet(Cancelled) match {
-      case h: Held => h.pool.releaseTransaction(h.conn, reusable = false); h.onInterrupt()
+      case h: Held =>
+        h.pool.releaseTransaction(h.conn, reusable = false)
+        h.onInterrupt()
       case _       => ()
     }
   }

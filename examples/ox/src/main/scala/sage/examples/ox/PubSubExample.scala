@@ -15,7 +15,7 @@ object PubSubExample {
     // subscribeScoped confirms before returning, so the publishes below can't outrun the registration
     val news     = client.subscribeScoped[String]("news")
     (1 to 3).foreach { i =>
-      val _ = client.publish("news", s"item-$i")
+      client.publish("news", s"item-$i")
     }
     val messages = news.take(3).runToList()
     println(s"received=${messages.map(_.payload)}")

@@ -79,7 +79,7 @@ class NodePoolSpec extends munit.FunSuite {
     val pool  = newPool(gated.factory)
     assertEquals(pool.existing(node), null)
 
-    val establishing = new Thread(() => { val _ = Try(pool.getOrEstablish(node)) }, "establisher")
+    val establishing = new Thread(() => Try(pool.getOrEstablish(node)): Unit, "establisher")
     establishing.start()
     gated.awaitReached(0)
     assertEquals(pool.existing(node), null)
@@ -235,7 +235,7 @@ class NodePoolSpec extends munit.FunSuite {
       assertEquals(recorder.failures.size, 1, "the same establishment outage should be reported only once")
 
       failing.set(false)
-      val _                = pool.getOrEstablish(node)
+      pool.getOrEstablish(node)
       pool.retain(_ => false)
       failing.set(true)
       intercept[IOException](pool.getOrEstablish(node))

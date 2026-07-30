@@ -27,7 +27,7 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
       )
     finally {
       system.terminate()
-      val _ = Await.ready(system.whenTerminated, 10.seconds)
+      Await.ready(system.whenTerminated, 10.seconds): Unit
     }
   }
 

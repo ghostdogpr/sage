@@ -182,7 +182,10 @@ final private[client] class SocketTransport private (
         if (Thread.currentThread() ne writer) writer.join()
         // fence the reader before onClosed, else an in-flight reply races the consumer's pending drain (#94); interrupt frees a reader
         // parked on backpressure so the join cannot hang
-        if (Thread.currentThread() ne reader) { reader.interrupt(); reader.join() }
+        if (Thread.currentThread() ne reader) {
+          reader.interrupt()
+          reader.join()
+        }
       }
       drainQueue()
       onClosed()

@@ -24,14 +24,17 @@ class EventsSpec extends munit.FunSuite {
     private val buf                  = mutable.ArrayBuffer.empty[SageEvent]
     def enabled: Boolean             = true
     def emitsEvents: Boolean         = true
-    def emit(event: SageEvent): Unit = synchronized { val _ = buf += event }
+    def emit(event: SageEvent): Unit = synchronized(buf += event: Unit)
     def close(): Unit                = ()
     def events: Vector[SageEvent]    = synchronized(buf.toVector)
   }
 
   final private class Capturing(latch: CountDownLatch) extends SageListener {
     val received                        = new ConcurrentLinkedQueue[SageEvent]()
-    def onEvent(event: SageEvent): Unit = { received.add(event); latch.countDown() }
+    def onEvent(event: SageEvent): Unit = {
+      received.add(event)
+      latch.countDown()
+    }
   }
 
   private def connect(
@@ -88,13 +91,19 @@ class EventsSpec extends munit.FunSuite {
     val seen     = new java.util.concurrent.atomic.AtomicInteger(0)
     // blocks on the first event so the queue fills behind it
     val blocking = new SageListener {
-      def onEvent(event: SageEvent): Unit = { seen.incrementAndGet(); release.await() }
+      def onEvent(event: SageEvent): Unit = {
+        seen.incrementAndGet()
+        release.await()
+      }
     }
     val bus      = Events(Vector(blocking))
     try {
       val started = System.nanoTime()
       var i       = 0
-      while (i < 5000) { bus.emit(SageEvent.Cache.Miss("GET")); i += 1 }
+      while (i < 5000) {
+        bus.emit(SageEvent.Cache.Miss("GET"))
+        i += 1
+      }
       val elapsed = (System.nanoTime() - started).nanos
       assert(elapsed < 2.seconds, s"emit blocked: took $elapsed for 5000 events")
     } finally {
@@ -131,13 +140,18 @@ class EventsSpec extends munit.FunSuite {
     val calls        = new java.util.concurrent.atomic.AtomicInteger(0)
     val interrupting = new SageListener {
       def onEvent(event: SageEvent): Unit =
-        if (calls.getAndIncrement() == 0) { started.countDown(); block.await() }
-        else throw new InterruptedException("interrupted again during the drain")
+        if (calls.getAndIncrement() == 0) {
+          started.countDown()
+          block.await()
+        } else throw new InterruptedException("interrupted again during the drain")
     }
     val peer         = new ConcurrentLinkedQueue[SageEvent]()
     val delivered    = new CountDownLatch(2)
     val healthy      = new SageListener {
-      def onEvent(event: SageEvent): Unit = { peer.add(event); delivered.countDown() }
+      def onEvent(event: SageEvent): Unit = {
+        peer.add(event)
+        delivered.countDown()
+      }
     }
     val bus          = Events(Vector(interrupting, healthy))
     try {
@@ -156,7 +170,10 @@ class EventsSpec extends munit.FunSuite {
     val worker           = new java.util.concurrent.atomic.AtomicReference[Thread]()
     val first            = new java.util.concurrent.atomic.AtomicBoolean(true)
     val selfInterrupting = new SageListener {
-      def onEvent(event: SageEvent): Unit = if (first.getAndSet(false)) { worker.set(Thread.currentThread()); Thread.currentThread().interrupt() }
+      def onEvent(event: SageEvent): Unit = if (first.getAndSet(false)) {
+        worker.set(Thread.currentThread())
+        Thread.currentThread().interrupt()
+      }
     }
     val healthy          = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
@@ -216,7 +233,10 @@ class EventsSpec extends munit.FunSuite {
       rec,
       commands,
       Events.startSpans(rec, commands),
-      (_, cbs) => { cbs.foreach(_(Success("PONG"))); true },
+      (_, cbs) => {
+        cbs.foreach(_(Success("PONG")))
+        true
+      },
       _ => (),
       Some(node)
     )
@@ -257,7 +277,10 @@ class EventsSpec extends munit.FunSuite {
     assertEquals(tracer.log.toVector, Vector("start:PING"))
     tracked(Success("PONG"))
     assertEquals(tracer.log.toVector, Vector("start:PING", "settled:Succeeded"))
-    assert(rec.events.exists { case _: SageEvent.CommandCompleted => true; case _ => false })
+    assert(rec.events.exists {
+      case _: SageEvent.CommandCompleted => true
+      case _                             => false
+    })
   }
 
   test("startSpan routes to a fixed serverNode when set (standalone), without a node ever being attributed") {
@@ -336,16 +359,17 @@ class EventsSpec extends munit.FunSuite {
       transports += t
       t
     }
-    val connection                                      =
-      MultiplexedConnection
-        .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec)
-    val _                                               = connection
+    MultiplexedConnection
+      .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec): Unit
 
     healthy = false
     transports.head.close()
     scheduler.advance(1.milli)
     assert(
-      rec.events.exists { case SageEvent.Connection.ReconnectFailed(`node`, _: sage.SageException.ServerError) => true; case _ => false },
+      rec.events.exists {
+        case SageEvent.Connection.ReconnectFailed(`node`, _: sage.SageException.ServerError) => true
+        case _                                                                               => false
+      },
       rec.events
     )
   }
@@ -359,10 +383,16 @@ class EventsSpec extends munit.FunSuite {
     val first                                           = new java.util.concurrent.atomic.AtomicReference[FakeTransport]()
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       attempt += 1
-      if (attempt == 1) { val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG"))); first.set(t); t }
-      else
+      if (attempt == 1) {
+        val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
+        first.set(t)
+        t
+      } else
         new Transport {
-          def start(): Unit                    = { connection.close(); throw new RuntimeException("aborted by close") }
+          def start(): Unit                    = {
+            connection.close()
+            throw new RuntimeException("aborted by close")
+          }
           def send(item: Transport.Item): Unit = ()
           def close(): Unit                    = ()
         }
@@ -372,7 +402,13 @@ class EventsSpec extends munit.FunSuite {
 
     first.get().close()
     scheduler.advance(1.milli)
-    assert(!rec.events.exists { case _: SageEvent.Connection.ReconnectFailed => true; case _ => false }, rec.events)
+    assert(
+      !rec.events.exists {
+        case _: SageEvent.Connection.ReconnectFailed => true
+        case _                                       => false
+      },
+      rec.events
+    )
   }
 
   // --- cache -----------------------------------------------------------------------------------------------------------------------------

@@ -20,7 +20,10 @@ class SocketTransportSpec extends munit.FunSuite {
     @volatile var clears: Int         = 0
     def writeAttempted(): Unit        = writeAttempts += 1
     def dropped(): Unit               = drops += 1
-    override def clearPayload(): Unit = { clears += 1; payload = Bytes.empty }
+    override def clearPayload(): Unit = {
+      clears += 1
+      payload = Bytes.empty
+    }
   }
 
   private def withTransport(
@@ -151,8 +154,14 @@ class SocketTransportSpec extends munit.FunSuite {
     val proceed                                 = new CountDownLatch(1)
     @volatile var transportRef: SocketTransport = null
     withTransport(
-      onClosed = () => { readerAliveAtClose.set(transportRef.reader.isAlive); proceed.countDown() },
-      onFrame = _ => { inOnFrame.countDown(); proceed.await() }
+      onClosed = () => {
+        readerAliveAtClose.set(transportRef.reader.isAlive)
+        proceed.countDown()
+      },
+      onFrame = _ => {
+        inOnFrame.countDown()
+        proceed.await()
+      }
     ) { (transport, peer) =>
       transportRef = transport
       peer.getOutputStream.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8))

@@ -95,7 +95,11 @@ final private[client] class SubscriptionConnection(
     // closeOwned, not bare terminate: if attach registered the sink but awaitActive then threw, fully unwind it so no phantom channel is
     // resubscribed on the next reconnect
     try attachInternal(sink, names, kind, failIfUnconfirmed = true)
-    catch { case e: Throwable => closeOwned(sink); throw e }
+    catch {
+      case e: Throwable =>
+        closeOwned(sink)
+        throw e
+    }
     new RawSubscription(sink, () => closeOwned(sink))
   }
 
@@ -122,8 +126,10 @@ final private[client] class SubscriptionConnection(
           case State.Live         =>
             val fresh = register(sink, names, kind)
             // nothing sent (names already subscribed): target the confirmed count, not subscribeSent, so we don't wait on an unrelated pending ack
-            if (fresh.nonEmpty) { sendSubscribe(current, kind, fresh); confirmTarget = subscribeSent }
-            else confirmTarget = subscribeConfirmed
+            if (fresh.nonEmpty) {
+              sendSubscribe(current, kind, fresh)
+              confirmTarget = subscribeSent
+            } else confirmTarget = subscribeConfirmed
             settled = true
           case State.Reconnecting =>
             register(sink, names, kind) // the next successful reconnect resubscribes everything currently registered
@@ -142,7 +148,11 @@ final private[client] class SubscriptionConnection(
       catch {
         case e: Throwable =>
           // drop the phantom sink, but only if a concurrent close/goLive hasn't already moved us off Establishing
-          locked(if (state == State.Establishing) { deregister(sink, names, kind); state = State.Idle; established.signalAll() })
+          locked(if (state == State.Establishing) {
+            deregister(sink, names, kind)
+            state = State.Idle
+            established.signalAll()
+          })
           throw e
       }
     awaitActive(failIfUnconfirmed, confirmTarget)
@@ -179,8 +189,15 @@ final private[client] class SubscriptionConnection(
     locked {
       if (state != State.Establishing && state != State.Reconnecting) teardown = conn
       else if (conn.isTerminated) {
-        if (cluster) { stopWatchdog(); current = null; state = State.Closed; notify = true }
-        else { state = State.Reconnecting; reconnect = true }
+        if (cluster) {
+          stopWatchdog()
+          current = null
+          state = State.Closed
+          notify = true
+        } else {
+          state = State.Reconnecting
+          reconnect = true
+        }
         established.signalAll()
         confirmed.signalAll()
       } else {
@@ -198,7 +215,10 @@ final private[client] class SubscriptionConnection(
           if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
         } catch {
           // resubscribe write failed: drop this socket and clear current so a superseded generation can't keep dispatching, then rethrow
-          case e: Throwable => current = null; teardown = conn; failure = e
+          case e: Throwable =>
+            current = null
+            teardown = conn
+            failure = e
         }
         if (failure == null)
           if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
@@ -240,8 +260,10 @@ final private[client] class SubscriptionConnection(
           case State.Closed => settled = true
           case State.Live   =>
             if (target < 0) target = liveTarget
-            if (subscribeConfirmed >= target) { active = true; settled = true }
-            else if (awaitOrTimeout(deadline)) settled = true
+            if (subscribeConfirmed >= target) {
+              active = true
+              settled = true
+            } else if (awaitOrTimeout(deadline)) settled = true
           case _            =>
             target = -1L // a reconnect reset the counters: re-arm to liveTarget
             if (awaitOrTimeout(deadline)) settled = true
@@ -254,12 +276,18 @@ final private[client] class SubscriptionConnection(
   private def awaitOrTimeout(deadline: Long): Boolean = {
     val remaining = deadline - scheduler.nowMillis
     if (remaining <= 0) true
-    else { val _ = confirmed.await(remaining, TimeUnit.MILLISECONDS); false }
+    else {
+      confirmed.await(remaining, TimeUnit.MILLISECONDS)
+      false
+    }
   }
 
   private def establish(): Conn = {
     val conn = new Conn
-    locked { establishing += conn; if (state == State.Closed) conn.close() }
+    locked {
+      establishing += conn
+      if (state == State.Closed) conn.close()
+    }
     try {
       try conn.start()
       catch {
@@ -271,7 +299,7 @@ final private[client] class SubscriptionConnection(
       }
       runBootstrap(conn)
       conn
-    } finally locked { val _ = establishing -= conn }
+    } finally locked(establishing -= conn): Unit
   }
 
   // per-conn waiter (two establishes can bootstrap concurrently and must not cross-complete); the finally clears it so a later PONG isn't misrouted
@@ -282,7 +310,7 @@ final private[client] class SubscriptionConnection(
         connectTimeoutMillis,
         (command, cb) => {
           conn.armBootstrap(result => cb(result.flatMap(frame => Reply.decode(command, frame))))
-          if (conn.isTerminated) { val _ = conn.completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false))) }
+          if (conn.isTerminated) { conn.completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false))): Unit }
           else conn.send(command.encode)
         },
         () => conn.close()
@@ -299,7 +327,10 @@ final private[client] class SubscriptionConnection(
       try goLive(establish())
       catch {
         case NonFatal(error) =>
-          locked(if (state == State.Reconnecting) { events.emit(SageEvent.Connection.ReconnectFailed(node, error)); scheduleReconnect(attempt + 1) })
+          locked(if (state == State.Reconnecting) {
+            events.emit(SageEvent.Connection.ReconnectFailed(node, error))
+            scheduleReconnect(attempt + 1)
+          })
       }
     }
   }
@@ -313,7 +344,12 @@ final private[client] class SubscriptionConnection(
         else
           state match {
             case State.Live | State.Establishing =>
-              stopWatchdog(); current = null; state = State.Closed; established.signalAll(); confirmed.signalAll(); true
+              stopWatchdog()
+              current = null
+              state = State.Closed
+              established.signalAll()
+              confirmed.signalAll()
+              true
             case _                               => false
           }
       }
@@ -323,7 +359,10 @@ final private[client] class SubscriptionConnection(
         if (conn ne current) false
         else
           state match {
-            case State.Live | State.Reconnecting => state = State.Reconnecting; confirmed.signalAll(); true
+            case State.Live | State.Reconnecting =>
+              state = State.Reconnecting
+              confirmed.signalAll()
+              true
             case _                               => false
           }
       }
@@ -340,7 +379,10 @@ final private[client] class SubscriptionConnection(
           case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) => dispatch(patternSinks, pattern, Delivery.Pattern(pattern, ch, payload))
           case Some(_: Pubsub.Event.Subscribed)                        =>
             // conn eq current: a late ack from a superseded generation must not advance this generation's count
-            locked(if (conn eq current) { subscribeConfirmed += 1; confirmed.signalAll() })
+            locked(if (conn eq current) {
+              subscribeConfirmed += 1
+              confirmed.signalAll()
+            })
           case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
@@ -403,7 +445,10 @@ final private[client] class SubscriptionConnection(
     var toClose: Vector[Conn] = Vector.empty
     val closing               = locked {
       if (!isEmptyUnlocked) false
-      else { toClose = markClosed(); true }
+      else {
+        toClose = markClosed()
+        true
+      }
     }
     toClose.foreach(_.close())
     closing
@@ -454,7 +499,10 @@ final private[client] class SubscriptionConnection(
     names.foreach { name =>
       map.get(name).foreach { set =>
         set -= sink
-        if (set.isEmpty) { map -= name; emptied += name }
+        if (set.isEmpty) {
+          map -= name
+          emptied += name
+        }
       }
     }
     emptied.result()
@@ -504,7 +552,7 @@ final private[client] class SubscriptionConnection(
 
     private def onTerminated(): Unit = {
       terminated = true
-      val _ = completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false)))
+      completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false)))
       onConnClosed(this)
     }
 
@@ -513,8 +561,10 @@ final private[client] class SubscriptionConnection(
 
     def completeBootstrap(result: Try[Frame]): Boolean = {
       val waiter = bootstrapWaiter.getAndSet(null)
-      if (waiter != null) { waiter(result); true }
-      else false
+      if (waiter != null) {
+        waiter(result)
+        true
+      } else false
     }
 
     def send(payload: Bytes): Unit = {
@@ -593,8 +643,10 @@ private[client] object SubscriptionConnection {
         // an existing waiter means a concurrent consumer; fail loud rather than silently evict it
         if (waiter != null) throw new IllegalStateException("a subscription is single-consumer; concurrent next is not supported")
         val head = backlog.poll()
-        if (head != null) { notFull.signal(); ready = Some(head) }
-        else if (closed) ready = None
+        if (head != null) {
+          notFull.signal()
+          ready = Some(head)
+        } else if (closed) ready = None
         else waiter = callback
       } finally lock.unlock()
       if (ready != null) callback(ready)
@@ -614,9 +666,18 @@ private[client] object SubscriptionConnection {
         var settled = false
         while (!settled)
           if (closed) settled = true
-          else if (waiter != null) { hungry = waiter; waiter = null; settled = true }
-          else if (backlog.size < cap) { backlog.add(delivery); settled = true }
-          else { blocked = true; notFull.await() } // backlog full, no consumer: backpressure the reader
+          else if (waiter != null) {
+            hungry = waiter
+            waiter = null
+            settled = true
+          } else if (backlog.size < cap) {
+            backlog.add(delivery)
+            settled = true
+          } else {
+            // backlog full, no consumer: backpressure the reader
+            blocked = true
+            notFull.await()
+          }
       } finally lock.unlock()
       if (hungry != null) hungry(Some(delivery))
       blocked

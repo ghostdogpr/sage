@@ -43,14 +43,22 @@ private[client] object Bootstrap {
     commands.foreach { command =>
       val latch   = new CountDownLatch(1)
       val outcome = new AtomicReference[Try[Any]]()
-      submit(command, result => { outcome.set(result); latch.countDown() })
+      submit(
+        command,
+        result => {
+          outcome.set(result)
+          latch.countDown()
+        }
+      )
       if (!latch.await(connectTimeoutMillis, TimeUnit.MILLISECONDS)) {
         close()
         throw ConnectionLost(mayHaveExecuted = false)
       }
       outcome.get() match {
         case Failure(_: ServerError) if bestEffort(command) => onTolerated(command)
-        case Failure(error)                                 => close(); throw error
+        case Failure(error)                                 =>
+          close()
+          throw error
         case Success(_)                                     => ()
       }
     }

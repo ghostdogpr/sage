@@ -23,9 +23,9 @@ object ClusterFormation {
       }
       def clusterOk: Boolean             = command("CLUSTER", "INFO").contains("cluster_state:ok")
 
-      val _        = command("CONFIG", "SET", "cluster-announce-ip", host)
-      val _        = command("CONFIG", "SET", "cluster-announce-port", port.toString)
-      if (!clusterOk) { val _ = command("CLUSTER", "ADDSLOTSRANGE", "0", "16383") }
+      command("CONFIG", "SET", "cluster-announce-ip", host)
+      command("CONFIG", "SET", "cluster-announce-port", port.toString)
+      if (!clusterOk) { command("CLUSTER", "ADDSLOTSRANGE", "0", "16383"): Unit }
       var attempts = 100
       var ok       = clusterOk
       while (!ok && attempts > 0) {

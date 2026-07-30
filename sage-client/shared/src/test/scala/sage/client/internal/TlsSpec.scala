@@ -69,17 +69,23 @@ class TlsSpec extends munit.FunSuite {
       .asInstanceOf[SSLServerSocket]
     socket.setSoTimeout(10000)
     val accept = Thread.ofVirtual().start { () =>
-      try { val s = socket.accept(); s.getInputStream.read(); s.close() }
-      catch { case _: Throwable => () }
+      try {
+        val s = socket.accept()
+        s.getInputStream.read()
+        s.close()
+      } catch { case _: Throwable => () }
     }
     try body(socket.getLocalPort)
-    finally { socket.close(); accept.join() }
+    finally {
+      socket.close()
+      accept.join()
+    }
   }
 
   private def upgrade(host: String, port: Int): Unit = {
     val plain = new Socket()
     plain.connect(new InetSocketAddress("127.0.0.1", port), 5000)
-    try { val _ = Tls.buildUpgrade(Some(TlsConfig(TrustSource.Custom(material._2))), host, port)(plain) }
+    try Tls.buildUpgrade(Some(TlsConfig(TrustSource.Custom(material._2))), host, port)(plain): Unit
     finally plain.close()
   }
 

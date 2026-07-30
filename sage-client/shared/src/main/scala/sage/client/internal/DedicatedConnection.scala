@@ -106,10 +106,15 @@ final private[client] class DedicatedConnection private (
 
     override def clearPayload(): Unit = payload = Bytes.empty
 
-    def writeAttempted(): Unit = { val _ = pending.add(this) }
+    def writeAttempted(): Unit =
+      pending.add(this): Unit
 
     // dropped fires only during teardown, ahead of onClosed; mark dead first so the pool can't recycle this connection mid-close
-    def dropped(): Unit = { dead = true; inFlight.decrementAndGet(); callback(Failure(ConnectionLost(mayHaveExecuted = false))) }
+    def dropped(): Unit = {
+      dead = true
+      inFlight.decrementAndGet()
+      callback(Failure(ConnectionLost(mayHaveExecuted = false)))
+    }
 
     def complete(frame: Frame): Unit = {
       val result = Reply.decode(command, frame)
@@ -117,7 +122,10 @@ final private[client] class DedicatedConnection private (
       callback(result)
     }
 
-    def fail(error: SageException): Unit = { inFlight.decrementAndGet(); callback(Failure(error)) }
+    def fail(error: SageException): Unit = {
+      inFlight.decrementAndGet()
+      callback(Failure(error))
+    }
   }
 
   // One write, N waiters: the batch is written (or dropped) atomically, and each reply frame fills its slot. The shared collector fires the
@@ -135,10 +143,16 @@ final private[client] class DedicatedConnection private (
 
     def writeAttempted(): Unit = {
       var i = 0
-      while (i < n) { val _ = pending.add(new Slot(i)); i += 1 }
+      while (i < n) {
+        pending.add(new Slot(i))
+        i += 1
+      }
     }
 
-    def dropped(): Unit = { dead = true; finish(Failure(ConnectionLost(mayHaveExecuted = false))) }
+    def dropped(): Unit = {
+      dead = true
+      finish(Failure(ConnectionLost(mayHaveExecuted = false)))
+    }
 
     private def finish(result: Try[Vector[Frame]]): Unit =
       if (done.compareAndSet(false, true)) {

@@ -16,7 +16,8 @@ import sage.protocol.Frame
   */
 final case class StreamId(ms: Long, seq: Long) extends Ordered[StreamId] {
   def compare(that: StreamId): Int  = {
-    val c = java.lang.Long.compareUnsigned(ms, that.ms); if (c != 0) c else java.lang.Long.compareUnsigned(seq, that.seq)
+    val c = java.lang.Long.compareUnsigned(ms, that.ms)
+    if (c != 0) c else java.lang.Long.compareUnsigned(seq, that.seq)
   }
   private[commands] def wire: Bytes = Bytes.utf8(s"$ms-$seq")
 }
@@ -483,10 +484,12 @@ private[sage] object Streams {
     }
 
   private def thresholdKeyword(threshold: TrimThreshold): Bytes = threshold match {
-    case _: TrimThreshold.MaxLen => MaxLenWord; case _: TrimThreshold.MinId => MinIdWord
+    case _: TrimThreshold.MaxLen => MaxLenWord
+    case _: TrimThreshold.MinId  => MinIdWord
   }
   private def thresholdValue(threshold: TrimThreshold): Bytes   = threshold match {
-    case TrimThreshold.MaxLen(c) => Bytes.utf8(c.toString); case TrimThreshold.MinId(id) => id.wire
+    case TrimThreshold.MaxLen(c) => Bytes.utf8(c.toString)
+    case TrimThreshold.MinId(id) => id.wire
   }
 
   private def policyArgs(policy: StreamDeletionPolicy): Vector[Bytes] =

@@ -2302,7 +2302,10 @@ object Client {
 
   // attributes the node at the completion site, so a batch that never reaches the wire (a false submit) leaves its callbacks unattributed
   private def attributeOnComplete(cb: Try[Any] => Unit, node: Node): Try[Any] => Unit =
-    result => { Events.attributeNode(cb, node); cb(result) }
+    result => {
+      Events.attributeNode(cb, node)
+      cb(result)
+    }
 
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
@@ -2465,7 +2468,10 @@ object Client {
         )
         new Live(connection, pool, subscriptions, cachingEnabled, events)
       }
-      .mapError { error => events.close(); translateHandshake(error) }
+      .mapError { error =>
+        events.close()
+        translateHandshake(error)
+      }
   }
 
   // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO. A
@@ -2566,7 +2572,12 @@ object Client {
     def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
-    def close: CIO[Unit] = CIO.blocking { subscriptions.close(); pool.close(); connection.close(); events.close() }
+    def close: CIO[Unit] = CIO.blocking {
+      subscriptions.close()
+      pool.close()
+      connection.close()
+      events.close()
+    }
   }
 
   // wrap a raw subscription as the effect-typed interface each backend lowers into its native stream; `build` returns None to end the stream
@@ -2578,7 +2589,11 @@ object Client {
       def next: CIO[Option[M]] = {
         // deregister the parked waiter if this next is interrupted, else a stale waiter trips the single-consumer guard
         val registered = new AtomicReference[Option[SubscriptionConnection.Delivery] => Unit]()
-        CIO.ensure(CIO.defer { val cb = registered.getAndSet(null); if (cb ne null) raw.cancelNext(cb) }) {
+        val deregister = CIO.defer {
+          val cb = registered.getAndSet(null)
+          if (cb ne null) raw.cancelNext(cb)
+        }
+        CIO.ensure(deregister) {
           CIO.async { complete =>
             val cb: Option[SubscriptionConnection.Delivery] => Unit = {
               case Some(delivery) => complete(Try(build(delivery)))
@@ -2624,13 +2639,18 @@ object Client {
     val armed = new AtomicBoolean(false)
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
-      case failure @ Failure(error) => onFault(error); complete(failure)
+      case failure @ Failure(error) =>
+        onFault(error)
+        complete(failure)
       case success                  => complete(success)
     }
 
     // an EXEC fault arrives as an error *frame* in a Success, invisible to `faulting`, so scan the top level and the EXEC array
     private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
-      val nested = frames.lastOption match { case Some(Frame.Array(elems)) => elems.iterator; case _ => Iterator.empty[Frame] }
+      val nested = frames.lastOption match {
+        case Some(Frame.Array(elems)) => elems.iterator
+        case _                        => Iterator.empty[Frame]
+      }
       (frames.iterator ++ nested).flatMap(TxSupport.errorOf).foreach(message => onFault(ServerError.of(message)))
     }
 

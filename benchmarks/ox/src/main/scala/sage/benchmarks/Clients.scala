@@ -55,10 +55,10 @@ final class SageOxBench(host: String, port: Int) extends BenchClient {
 
   def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = supervised {
     (0 until count).foreach { i =>
-      val _ = client.set(s"$prefix:$i", value)
+      client.set(s"$prefix:$i", value)
     }
     (0 until fields).foreach { i =>
-      val _ = client.hSet(hashKey, (s"f$i", value))
+      client.hSet(hashKey, (s"f$i", value))
     }
   }
 
@@ -77,7 +77,8 @@ final class SageOxBench(host: String, port: Int) extends BenchClient {
       .toList
       .map(g =>
         fork(g.foldLeft(0L) { (n, k) =>
-          val _ = client.set(k, value); n + 1
+          client.set(k, value)
+          n + 1
         })
       )
       .map(_.join())
@@ -109,7 +110,7 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
   def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
     val writes = (0 until count).map(i => async.set(s"$prefix:$i", value)) ++ (0 until fields).map(i => async.hset(hashKey, s"f$i", value))
     writes.foreach { f =>
-      val _ = f.get()
+      f.get()
     }
   }
 
@@ -125,23 +126,26 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
     def fireNext(): Unit = {
       val i = nextIndex.getAndIncrement()
       if (i < n) {
-        try {
-          val _ = submit(keys(i)).whenComplete { (v, t) =>
-            if (t != null) { val _ = failure.compareAndSet(null, t) }
-            else if (v != null) { val _ = total.addAndGet(score(v)) }
+        try
+          submit(keys(i)).whenComplete { (v, t) =>
+            if (t != null) { failure.compareAndSet(null, t): Unit }
+            else if (v != null) { total.addAndGet(score(v)): Unit }
             remaining.countDown()
             fireNext()
-          }
-        } catch {
+          }: Unit
+        catch {
           case t: Throwable =>
-            val _ = failure.compareAndSet(null, t)
+            failure.compareAndSet(null, t)
             remaining.countDown()
             fireNext()
         }
       }
     }
     var k                = 0
-    while (k < width) { fireNext(); k += 1 }
+    while (k < width) {
+      fireNext()
+      k += 1
+    }
     remaining.await()
     val t                = failure.get()
     if (t != null) throw t // never publish numbers for a run where commands failed
@@ -152,7 +156,7 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
     slidingWindow(keys, concurrency)(async.get)(v => v.length.toLong)
 
   def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    val _ = slidingWindow(keys, concurrency)(k => async.set(k, value))(_ => 0L)
+    slidingWindow(keys, concurrency)(k => async.set(k, value))(_ => 0L)
     keys.length.toLong
   }
 
@@ -184,7 +188,7 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
   def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
     val writes = (0 until count).map(i => client.set(s"$prefix:$i", value)) ++ (0 until fields).map(i => client.hset(hashKey, s"f$i", value))
     writes.foreach { f =>
-      val _ = await(f)
+      await(f)
     }
   }
 
@@ -201,15 +205,18 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
       if (i < n)
         submit(keys(i)).onComplete { result =>
           result match {
-            case Success(v) => val _ = total.addAndGet(score(v))
-            case Failure(t) => val _ = failure.compareAndSet(null, t)
+            case Success(v) => total.addAndGet(score(v))
+            case Failure(t) => failure.compareAndSet(null, t)
           }
           remaining.countDown()
           fireNext()
         }
     }
     var k                = 0
-    while (k < width) { fireNext(); k += 1 }
+    while (k < width) {
+      fireNext()
+      k += 1
+    }
     remaining.await()
     val t                = failure.get()
     if (t != null) throw t // never publish numbers for a run where commands failed
@@ -220,7 +227,7 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
     slidingWindow(keys, concurrency)(k => client.get[String](k))(_.fold(0L)(_.length.toLong))
 
   def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    val _ = slidingWindow(keys, concurrency)(k => client.set(k, value))(_ => 0L)
+    slidingWindow(keys, concurrency)(k => client.set(k, value))(_ => 0L)
     keys.length.toLong
   }
 
@@ -230,7 +237,7 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
 
   def close(): Unit = {
     client.stop()
-    val _ = Await.result(system.terminate(), 30.seconds)
+    Await.result(system.terminate(), 30.seconds): Unit
   }
 }
 
@@ -257,10 +264,10 @@ final class JedisBench(host: String, port: Int) extends BenchClient {
     try {
       val p = j.pipelined()
       (0 until count).foreach { i =>
-        val _ = p.set(s"$prefix:$i", value)
+        p.set(s"$prefix:$i", value)
       }
       (0 until fields).foreach { i =>
-        val _ = p.hset(hashKey, s"f$i", value)
+        p.hset(hashKey, s"f$i", value)
       }
       p.sync()
     } finally j.close()
@@ -284,9 +291,9 @@ final class JedisBench(host: String, port: Int) extends BenchClient {
     lanes(keys, concurrency)((j, g) => g.foldLeft(0L)((t, k) => t + Option(j.get(k)).fold(0L)(_.length.toLong)))
 
   def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    val _ = lanes(keys, concurrency) { (j, g) =>
+    lanes(keys, concurrency) { (j, g) =>
       g.foreach { k =>
-        val _ = j.set(k, value)
+        j.set(k, value)
       }
       g.length.toLong
     }
