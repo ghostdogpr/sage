@@ -109,6 +109,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     val roles                                                           = TrieMap.from(initialRoles)
     @volatile var writesFailReadonly                                    = false
+    @volatile var diesOnRead: Node                                      = null
     private val dials                                                   = new ConcurrentLinkedQueue[Node]()
     private val transports                                              = new ConcurrentLinkedQueue[(Node, FakeTransport)]()
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
@@ -120,7 +121,10 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
           val reads = text.sliding("ZSCORE".length).count(_ == "ZSCORE")
           if (text.contains("HELLO")) Seq(helloReply)
           else if (text.contains("ROLE")) roles.get(node).toSeq
-          else if (reads > 0) Seq.fill(reads)(Frame.Integer(1L))
+          else if (reads > 0 && node == diesOnRead) {
+            kill(node)
+            Nil
+          } else if (reads > 0) Seq.fill(reads)(Frame.Integer(1L))
           else if (text.contains("ZADD") && writesFailReadonly)
             Seq(Frame.SimpleError("READONLY You can't write against a read only replica."))
           else if (text.contains("ZADD")) Seq(Frame.Integer(1L))
@@ -142,6 +146,9 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     )
 
     def dialled: Vector[Node] = dials.asScala.toVector
+
+    private def kill(node: Node): Unit =
+      transports.asScala.toVector.collect { case (`node`, transport) => transport }.foreach(_.close())
 
     def readsServedBy(node: Node): Int =
       transports.asScala.toVector.collect { case (`node`, transport) =>
@@ -185,6 +192,20 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.close()
 
     assert(!dialled.contains(advertisedReplica), s"advertised address must not be dialled: $dialled")
+  }
+
+  test("a read whose connection dies mid-flight falls through to the next candidate") {
+    val fixture = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map(primary -> masterRole(advertisedReplica), advertisedReplica -> replicaRole(primary))
+    )
+    fixture.live.bootstrapRoles()
+    fixture.diesOnRead = advertisedReplica
+
+    assertEquals(fixture.read(), 1L)
+    assertEquals(fixture.readsServedBy(advertisedReplica), 1)
+    assertEquals(fixture.readsServedBy(primary), 1, "the master should serve the read the replica's dead socket could not")
+    fixture.close()
   }
 
   test("a single seed retains advertised-replica discovery") {
