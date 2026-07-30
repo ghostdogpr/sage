@@ -25,7 +25,7 @@ object ClusterFormation {
 
       command("CONFIG", "SET", "cluster-announce-ip", host)
       command("CONFIG", "SET", "cluster-announce-port", port.toString)
-      if (!clusterOk) command("CLUSTER", "ADDSLOTSRANGE", "0", "16383")
+      if (!clusterOk) { command("CLUSTER", "ADDSLOTSRANGE", "0", "16383"): Unit }
       var attempts = 100
       var ok       = clusterOk
       while (!ok && attempts > 0) {

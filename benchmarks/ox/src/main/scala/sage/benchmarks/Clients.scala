@@ -126,14 +126,14 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
     def fireNext(): Unit = {
       val i = nextIndex.getAndIncrement()
       if (i < n) {
-        try {
+        try
           submit(keys(i)).whenComplete { (v, t) =>
-            if (t != null) failure.compareAndSet(null, t)
-            else if (v != null) total.addAndGet(score(v))
+            if (t != null) { failure.compareAndSet(null, t): Unit }
+            else if (v != null) { total.addAndGet(score(v)): Unit }
             remaining.countDown()
             fireNext()
-          }
-        } catch {
+          }: Unit
+        catch {
           case t: Throwable =>
             failure.compareAndSet(null, t)
             remaining.countDown()
@@ -237,7 +237,7 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
 
   def close(): Unit = {
     client.stop()
-    Await.result(system.terminate(), 30.seconds)
+    Await.result(system.terminate(), 30.seconds): Unit
   }
 }
 

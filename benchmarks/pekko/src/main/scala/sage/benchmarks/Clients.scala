@@ -72,6 +72,6 @@ final class SagePekkoBench(host: String, port: Int) extends BenchClient {
   def close(): Unit = {
     Await.result(client.close, 30.seconds)
     system.terminate()
-    Await.ready(system.whenTerminated, 10.seconds)
+    Await.ready(system.whenTerminated, 10.seconds): Unit
   }
 }
