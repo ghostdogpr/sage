@@ -58,11 +58,6 @@ class NodePoolSpec extends munit.FunSuite {
     assert(cond, clue)
   }
 
-  // every waiter parks on the single-flight latch (or, briefly, the pool lock); once all are WAITING at once none holds the lock, so each
-  // must be blocked on the establishment, not still racing toward it
-  private def awaitAllWaiting(threads: Seq[Thread]): Unit =
-    awaitTrue(threads.forall(_.getState == Thread.State.WAITING), "a waiter never blocked on the in-flight establishment")
-
   test("existing answers immediately while an establishment is in flight, and tracks publish and retain") {
     val node  = Node("gated", 6379)
     val gated = new GatedFactory(1)
@@ -101,7 +96,7 @@ class NodePoolSpec extends munit.FunSuite {
       thread.start()
       (thread, result)
     }
-    awaitAllWaiting(waiters.map(_._1)) // every waiter is parked on the original token before retain runs
+    awaitTrue(pool.pendingWaiterCount(node) == waiters.size, "a waiter never blocked on the in-flight establishment")
 
     pool.retain(_ => false)
 

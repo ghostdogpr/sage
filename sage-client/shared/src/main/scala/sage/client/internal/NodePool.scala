@@ -61,6 +61,9 @@ final private[client] class NodePool(
 
   def foreachEstablished(f: NodeClient => Unit): Unit = established.values.forEach(nc => f(nc))
 
+  private[internal] def pendingWaiterCount(node: Node): Int =
+    locked(pendingEstablish.get(node).fold(0)(_.waiterCount))
+
   // live nodes first, so a refresh prefers a known-good node
   def candidatesByLiveness: Vector[Node] = {
     val (live, others) = established.asScala.toVector.partition(_._2.isLive)
@@ -188,7 +191,10 @@ private[client] object NodePool {
   final private class Establish {
     private val latch                                           = new CountDownLatch(1)
     private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)
+    private val waiters                                         = new java.util.concurrent.atomic.AtomicInteger(0)
     @volatile private var result: Either[Throwable, NodeClient] = null
+
+    def waiterCount: Int = waiters.get()
 
     def succeed(nc: NodeClient): Unit = settle(Right(nc))
     def fail(error: Throwable): Unit  = settle(Left(error))
@@ -200,11 +206,14 @@ private[client] object NodePool {
       }
 
     def get(): NodeClient = {
-      latch.await()
-      result match {
-        case Right(nc)   => nc
-        case Left(error) => throw error
-      }
+      waiters.incrementAndGet()
+      try {
+        latch.await()
+        result match {
+          case Right(nc)   => nc
+          case Left(error) => throw error
+        }
+      } finally waiters.decrementAndGet(): Unit
     }
   }
 }
