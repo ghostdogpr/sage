@@ -226,9 +226,7 @@ final private[client] class MasterReplicaLive(
           else sendMaster(command, tracked, lease)
         }
       }
-    if (!command.isBlocking) body(null)
-    // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
-    else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+    Client.withBlockingLease(command)(body)
   }
 
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =

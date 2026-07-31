@@ -2300,6 +2300,11 @@ object Client {
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
+  // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
+  private[internal] def withBlockingLease[A](command: Command[?])(body: DedicatedPool.Lease => CIO[A]): CIO[A] =
+    if (!command.isBlocking) body(null)
+    else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+
   // attributes the node at the completion site, so a batch that never reaches the wire (a false submit) leaves its callbacks unattributed
   private def attributeOnComplete(cb: Try[Any] => Unit, node: Node): Try[Any] => Unit =
     result => {
@@ -2500,20 +2505,14 @@ object Client {
   ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
-      command.execution match {
-        case Execution.Ordinary =>
-          CIO.async { callback =>
-            val tracked = Events.trackCommand(events, command, callback)
-            Client.completing(tracked)(connection.submit(command, tracked))
+      Client.withBlockingLease(command) { lease =>
+        CIO.async { callback =>
+          val tracked = Events.trackCommand(events, command, callback)
+          Client.completing(tracked) {
+            if (lease == null) connection.submit(command, tracked)
+            else pool.use(command, tracked, lease)
           }
-        case Execution.Blocking =>
-          // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
-          CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel())) { lease =>
-            CIO.async { callback =>
-              val tracked = Events.trackCommand(events, command, callback)
-              Client.completing(tracked)(pool.use(command, tracked, lease))
-            }
-          }
+        }
       }
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =

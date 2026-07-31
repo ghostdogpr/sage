@@ -43,14 +43,10 @@ final private[client] class ClusterSubscriptions(
   // --- classic state (guarded by lock) ---
   private var classicConn: SubscriptionConnection = null
   private val classicSubs                         = mutable.LinkedHashSet.empty[ClassicSub]
-  private var rehomeRunning                       = false
-  private var rehomeQueued                        = false
 
   // --- sharded state (guarded by lock) ---
-  private val shardConns       = mutable.HashMap.empty[Node, SubscriptionConnection]
-  private val shardSubs        = mutable.LinkedHashSet.empty[ShardSub]
-  private var reconcileRunning = false
-  private var reconcileQueued  = false
+  private val shardConns = mutable.HashMap.empty[Node, SubscriptionConnection]
+  private val shardSubs  = mutable.LinkedHashSet.empty[ShardSub]
 
   private var closed = false
 
@@ -61,6 +57,46 @@ final private[client] class ClusterSubscriptions(
   }
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
+
+  // single-flight (one running, at most one queued): a mid-pass trigger queues one follow-up rather than racing a concurrent pass
+  final private class CoalescedPass(body: () => Unit) {
+    private var running = false
+    private var queued  = false
+
+    def schedule(): Unit = {
+      val go = locked {
+        if (closed) false
+        else if (running) {
+          queued = true
+          false
+        } else {
+          running = true
+          true
+        }
+      }
+      if (go) offload(run())
+    }
+
+    private def run(): Unit = {
+      body()
+      val again = locked {
+        if (!closed && queued) {
+          queued = false
+          true
+        } else {
+          running = false
+          false
+        }
+      }
+      if (again) offload(run())
+    }
+  }
+
+  private val classicRehome  = new CoalescedPass(() => {
+    refresh()
+    rehomeClassic()
+  })
+  private val shardReconcile = new CoalescedPass(() => reconcileShard())
 
   // --- classic (channels / patterns) -------------------------------------------------------------------------------------------------------
 
@@ -116,40 +152,10 @@ final private[client] class ClusterSubscriptions(
 
   private def onClassicTerminated(): Unit = {
     locked { classicConn = null }
-    scheduleRehomeClassic()
+    classicRehome.schedule()
   }
 
-  // single-flight (one running, at most one queued): a mid-pass trigger queues a follow-up rather than racing a concurrent pass. Refresh the
-  // topology first — the master may be gone, so the re-home target comes from the current topology, not the stale one.
-  private def scheduleRehomeClassic(): Unit = {
-    val go = locked {
-      if (closed) false
-      else if (rehomeRunning) {
-        rehomeQueued = true
-        false
-      } else {
-        rehomeRunning = true
-        true
-      }
-    }
-    if (go) offload(runRehomeClassicPass())
-  }
-
-  private def runRehomeClassicPass(): Unit = {
-    refresh()
-    rehomeClassic()
-    val again = locked {
-      if (!closed && rehomeQueued) {
-        rehomeQueued = false
-        true
-      } else {
-        rehomeRunning = false
-        false
-      }
-    }
-    if (again) offload(runRehomeClassicPass())
-  }
-
+  // refresh first: the failed master may be gone, so the re-home target must come from the current topology
   private def rehomeClassic(): Unit = {
     val subs = locked(if (closed || classicSubs.isEmpty) Vector.empty[ClassicSub] else classicSubs.toVector)
     if (subs.nonEmpty) {
@@ -183,7 +189,7 @@ final private[client] class ClusterSubscriptions(
   }
 
   private def scheduleRehomeRetry(): Unit =
-    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(scheduleRehomeClassic())
+    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(classicRehome.schedule())
 
   // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
@@ -245,40 +251,11 @@ final private[client] class ClusterSubscriptions(
     // owner, which planFor would not see as unowned — then reconcile onto the current owner
     offload {
       refresh()
-      scheduleReconcile()
+      shardReconcile.schedule()
     }
   }
 
-  def onTopologyChanged(): Unit = scheduleReconcile()
-
-  // single-flight (one running, at most one queued): a mid-pass trigger queues a follow-up rather than racing a concurrent pass that would corrupt the ledger
-  private def scheduleReconcile(): Unit = {
-    val go = locked {
-      if (closed) false
-      else if (reconcileRunning) {
-        reconcileQueued = true
-        false
-      } else {
-        reconcileRunning = true
-        true
-      }
-    }
-    if (go) offload(runReconcilePass())
-  }
-
-  private def runReconcilePass(): Unit = {
-    reconcileShard()
-    val again = locked {
-      if (!closed && reconcileQueued) {
-        reconcileQueued = false
-        true
-      } else {
-        reconcileRunning = false
-        false
-      }
-    }
-    if (again) offload(runReconcilePass())
-  }
+  def onTopologyChanged(): Unit = shardReconcile.schedule()
 
   // re-home each sub onto its channels' current owners. One refresh per pass; an incomplete pass retries so a transient failover failure converges.
   private def reconcileShard(): Unit = {
@@ -300,7 +277,7 @@ final private[client] class ClusterSubscriptions(
 
   // an incomplete placement (owner unreachable, or a Slot still unowned mid-failover) retries after a short delay until it converges
   private def scheduleRetry(): Unit =
-    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(scheduleReconcile())
+    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(shardReconcile.schedule())
 
   private def closeShard(sub: ShardSub): Unit = {
     locked(shardSubs -= sub)
