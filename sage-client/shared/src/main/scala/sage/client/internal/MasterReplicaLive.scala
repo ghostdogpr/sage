@@ -226,7 +226,7 @@ final private[client] class MasterReplicaLive(
           else sendMaster(command, tracked, lease)
         }
       }
-    Client.withBlockingLease(command)(body)
+    Client.withLeaseIfBlocking(command)(body)
   }
 
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =

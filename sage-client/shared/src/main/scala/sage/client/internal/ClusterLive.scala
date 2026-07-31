@@ -131,7 +131,7 @@ final private[client] class ClusterLive(
         val tracked = Events.trackCommand(events, command, complete, span)
         Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, lease = lease))
       }
-    Client.withBlockingLease(command)(body)
+    Client.withLeaseIfBlocking(command)(body)
   }
 
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
@@ -174,7 +174,7 @@ final private[client] class ClusterLive(
             val tracked = Events.trackCommand(events, command, complete, span)
             Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked, lease))
           }
-        Client.withBlockingLease(command)(body)
+        Client.withLeaseIfBlocking(command)(body)
       case None       => run(command)
     }
 

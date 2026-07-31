@@ -9,8 +9,8 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * One cluster Node's connection bundle: the same Multiplexed Connection + Dedicated Pool a standalone client uses, pinned to a single
-  * node. The cluster runtime holds one per master it routes to. `asking` prefixes the command with `ASKING` to follow an `ASK` redirect.
+  * One node's connection bundle: a Multiplexed Connection + Dedicated Pool pinned to that node. A standalone client holds one; the cluster
+  * runtime holds one per master it routes to. `asking` prefixes the command with `ASKING` to follow an `ASK` redirect.
   */
 final private[client] class NodeClient(connection: MultiplexedConnection, pool: DedicatedPool) {
 
@@ -22,7 +22,7 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
     } else if (asking) connection.submitAsking(command, callback)
     else connection.submit(command, callback)
 
-  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit =
+  def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan = null): Unit =
     connection.cachedSubmit(command, ttlMillis, callback, deferred)
 
   // a pipeline's per-node batch: one round-trip on this node's Multiplexed Connection. False when not connected (nothing submitted), so

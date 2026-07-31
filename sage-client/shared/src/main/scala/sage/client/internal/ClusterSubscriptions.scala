@@ -92,6 +92,7 @@ final private[client] class ClusterSubscriptions(
     }
   }
 
+  // refresh first: the failed master may be gone, so the re-home target must come from the current topology
   private val classicRehome  = new CoalescedPass(() => {
     refresh()
     rehomeClassic()
@@ -155,7 +156,6 @@ final private[client] class ClusterSubscriptions(
     classicRehome.schedule()
   }
 
-  // refresh first: the failed master may be gone, so the re-home target must come from the current topology
   private def rehomeClassic(): Unit = {
     val subs = locked(if (closed || classicSubs.isEmpty) Vector.empty[ClassicSub] else classicSubs.toVector)
     if (subs.nonEmpty) {
