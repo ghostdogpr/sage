@@ -162,7 +162,7 @@ Two cases step off that connection automatically. Commands that hold per-connect
 
 ## A short tour
 
-The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; in ZIO, Cats Effect, Kyo, and Pekko they are steps in a for-comprehension over that ecosystem's effect type, where on Pekko that type is `scala.concurrent.Future` (each `for` needs an `ExecutionContext`, for example `system.executionContext`). Each assumes a `client` in scope and the usual imports for your effect type (plus `import scala.concurrent.duration.*` where a duration appears).
+The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; on the other backends they are steps in a for-comprehension over that ecosystem's effect type (`Future` on Pekko, which means each `for` needs an `ExecutionContext`). All of them assume a `client` in scope and the usual imports for your effect type.
 
 ### Commands
 
@@ -272,7 +272,7 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Ending the stream, or closing its scope, unsubscribes.
 
-These examples publish right after subscribing, so they use the variant that waits for the server to confirm the subscription first: `subscribeScoped` on ZIO, Kyo, and Ox, `subscribeResource` on Cats Effect, and on Pekko the `Future[Done]` that `subscribe` materializes. Plain `subscribe` registers lazily on each run and suits a long-lived consumer that is not racing its own publisher. See [Pub/Sub](/pubsub) for the details.
+These examples publish immediately after subscribing, so they use the variant that waits for the server to confirm the subscription first. [Pub/Sub](/pubsub) explains when you need it.
 
 ::: code-group
 
@@ -316,8 +316,7 @@ for {
 ```
 
 ```scala [Pekko]
-// Keep.both keeps the confirmation Future[Done] and the collected messages;
-// await it before publishing so the publish can't outrun the registration (best-effort in cluster)
+// Keep.both gives both the confirmation Future[Done] and the collected messages
 val (confirmed, collected) =
   client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
 val messages =

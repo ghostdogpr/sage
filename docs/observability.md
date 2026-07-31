@@ -19,9 +19,7 @@ Register one or more `SageListener` on `SageConfig`, and each receives every `Sa
 | `Cache.Hit(command)` / `Cache.Miss(command)` | A `cached` read was served locally, or had to fetch from the server. |
 | `TopologyChanged(masters)` | The cluster's slot-owning master set changed (a failover, or scaling a shard in or out). |
 
-Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event carries `node`, it is `Some` for cluster and master-replica clients (the relevant node) and `None` for a standalone client.
-Repeated connection-establishment and topology-qualification failures for the same node produce one `ConnectFailed` until a pooled connection to that node succeeds.
-`ConnectFailed` concerns establishing a connection to a node; `ReconnectFailed` concerns restoring an already-established one.
+Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event carries `node`, it is `Some` for cluster and master-replica clients and `None` for a standalone client. A node that keeps failing to connect produces one `ConnectFailed`, not one per attempt.
 
 ### Registering a listener
 
@@ -53,19 +51,15 @@ val config = SageConfig(
 
 ### Delivery guarantees
 
-Listeners are invoked off the command path, so they cannot block or break command execution:
-
-- The callback must not block. A slow listener only delays event delivery.
-- A thrown exception is swallowed.
-- Events are shed once the internal dispatch queue fills, so delivery is lossy under load.
+Listeners are invoked off the command path, so a slow or throwing listener cannot block or break command execution. It only delays or loses events.
 
 ::: warning
-Delivery is best-effort: events are dropped once the dispatch queue fills, and a throwing listener is swallowed. Listeners suit metrics, sampling, and operational logging, not anything that must be a complete or lossless record.
+Delivery is best-effort: a thrown exception is swallowed, and events are dropped once the internal dispatch queue fills. Listeners suit metrics, sampling, and operational logging, not anything that must be a complete record.
 :::
 
 ## Distributed tracing
 
-A `SageListener` is the wrong tool for distributed tracing: by the time it runs on the dispatcher thread the caller's trace context is gone, so its spans would not nest under the in-flight request, and a dropped event would orphan a span. A `CommandTracer` instead runs synchronously on the command path, so each Redis span is a child of whatever span is active when the command is issued.
+Use a `CommandTracer` rather than a listener here: it runs synchronously on the command path, so each Redis span is a child of whatever span is active when the command is issued. A listener runs too late, off that path, and its spans would be orphaned.
 
 Set one on `SageConfig.tracer`. The `sage-opentelemetry` module provides an OpenTelemetry implementation:
 
@@ -83,13 +77,11 @@ val config = SageConfig(
 )
 ```
 
-It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), with `db.system=redis`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component=redis-client`, and the server address (the configured endpoint for a standalone server, the routed node for a cluster or master/replica); a failure sets an error status carrying the exception. Only the command name is recorded, never arguments or keys, so secrets and user values stay out of your traces. Spans follow the ambient sampling decision.
+It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), carrying `db.system`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component`, and the server address; a failure sets an error status with the exception. Only the command name is recorded, never arguments or keys, so secrets and user values stay out of your traces. Spans follow the ambient sampling decision.
 
-One span is emitted per command that reaches the server: an ordinary command, a blocking command, and each command in a pipeline (cluster redirects fold into the command's own span). A `cached` read served from the local cache reaches no server and produces no span; one that misses and fetches from the server is traced like any other command.
+One span is emitted per command that reaches the server, including each command in a pipeline (cluster redirects fold into the command's own span). A `cached` read served locally reaches no server and produces no span; one that misses is traced like any other command. In a `transaction`, the watch-phase reads are traced individually and the `MULTI`/`EXEC` body gets a single span named `MULTI`, which reflects the round trip rather than whether the transaction committed.
 
-In a `transaction`, each read during the watch phase and the `WATCH` itself are traced like ordinary commands, and the atomic `MULTI`/`EXEC` body gets a single span named `MULTI`. That span reflects the round trip, not whether the transaction committed, so a `WATCH` abort or an error inside `EXEC` still settles it successfully. Transaction commands are traced but emit no `CommandCompleted`, so the listener contract is unchanged.
-
-The tracer reads the active span from OpenTelemetry's thread-local current context (`Context.current()`) on the fiber that submits the command. The module depends only on the OpenTelemetry API, so an APM agent supplies the implementation: when the agent instruments your runtime and propagates its context across that runtime's threads, the Redis span nests under the active request span with no further wiring. This is the case for ZIO under the Datadog Java agent. Configuring the agent itself (for Datadog, enabling its OpenTelemetry support) is covered by the agent's own documentation.
+The tracer reads the active span from OpenTelemetry's thread-local current context (`Context.current()`) on the fiber that submits the command, and the module depends only on the OpenTelemetry API. So under an APM agent that instruments your runtime and propagates context across its threads, the Redis span nests under the active request span with no further wiring. That is the case for ZIO under the Datadog Java agent; configuring the agent itself is covered by its own documentation.
 
 ### Context on a fiber runtime without an agent
 

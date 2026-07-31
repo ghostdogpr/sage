@@ -1,6 +1,6 @@
 # Configuration
 
-Everything about how a client connects is set on one value, `SageConfig`. The command surface never changes: the same `SageClient` talks to a standalone server, a cluster, or a master-replica deployment, and the only difference is configuration. Standalone, cluster, and master-replica are choices here, not different code.
+Everything about how a client connects is set on one value, `SageConfig`. The command surface never changes: the same `SageClient` talks to a standalone server, a cluster, or a master-replica deployment, and the only difference is configuration.
 
 ```scala
 val config = SageConfig(
@@ -21,7 +21,7 @@ val config = SageConfig(
 )
 ```
 
-The `database` is selected once at connection setup and fixed for the client's lifetime, re-applied on every reconnect. It is never changed by a runtime command, because that would move the keyspace under every fiber sharing the connection. Valkey 9+ also supports numbered databases in cluster mode; Redis Cluster and older Valkey versions reject a non-zero database during connection setup.
+The `database` is selected at connection setup and fixed for the client's lifetime. There is no runtime `SELECT`, because it would move the keyspace under every fiber sharing the connection.
 
 ## Cluster
 
@@ -37,7 +37,8 @@ val config = SageConfig(
 ```
 
 Seeds bootstrap discovery only. Once the topology is known, Sage routes to the nodes the cluster reports; any one seed answering is enough.
-Set `database` to a non-zero value for a Valkey 9+ cluster configured with a sufficiently large `cluster-databases` setting. Sage issues `SELECT` while establishing every node connection, including after reconnects and redirects. Servers without numbered cluster database support reject the connection.
+
+A non-zero `database` in cluster mode needs Valkey 9+ with a large enough `cluster-databases` setting. Redis Cluster and older Valkey versions reject the connection.
 
 ### Hash tags
 
@@ -46,30 +47,25 @@ in one slot, for example `user:{42}:profile` and `user:{42}:settings`. Transacti
 
 ### Supported cross-slot commands
 
-Ordinary `mGet`, `mSet`, `exists`, `del`, `unlink`, and `touch` calls may span cluster slots. Sage transparently groups their keys by exact slot and
-sends one subcommand per slot through the normal routing and redirect machinery. This also works when the command is an entry in a pipeline.
-For `mGet`, Sage restores values to request order, retaining missing and repeated positions. For `exists`, `del`, `unlink`, and `touch`, it
-sums the slot-specific counts; `mSet` succeeds only when every slot subgroup returns `OK`.
+`mGet`, `mSet`, `exists`, `del`, `unlink`, and `touch` may span slots. Sage groups their keys by slot, sends one subcommand per slot, and merges the
+replies back into one: `mGet` restores request order (keeping missing and repeated positions), `exists`, `del`, `unlink`, and `touch` sum their
+counts, and `mSet` succeeds only if every group returns `OK`. This works inside a pipeline too.
 
-Each slot-specific command is atomic, but the combined operation is not cluster-wide atomic. A cross-slot `mGet` is not a point-in-time
-snapshot, and a failing cross-slot `mSet`, `del`, or `unlink` may already have applied writes in successful slot groups. If any subgroup
-fails, the logical call fails as a whole. Use a common hash tag when the operation must be atomic. `mSetNx` is not split because doing so would
-break its all-or-nothing condition. All cross-slot commands remain rejected inside a transaction because `MULTI`/`EXEC` must stay pinned to
-one slot.
+Each slot's subcommand is atomic on its own, but the call as a whole is not. A cross-slot `mGet` is not a point-in-time snapshot, and a failing
+`mSet`, `del`, or `unlink` may already have written to the groups that succeeded. If any group fails, the whole call fails. Use a common hash tag
+when the operation must be atomic.
 
-While a slot is being migrated, the server answers a multi-key command whose keys briefly straddle the moving slot with `-TRYAGAIN`. The command
-did not run, so Sage retries it. The retry shares the same `maxRedirects` budget as `MOVED`/`ASK` follows, but where those are resent
-immediately, a `-TRYAGAIN` retry is paced by a short jittered delay. If the migration outlasts that budget, the original `-TRYAGAIN` surfaces as
-a `ServerError`. `-CLUSTERDOWN`, `-LOADING`, and `-MASTERDOWN` are retried the same way, with one exception; see
-[Refusals Sage retries for you](/error-handling#refusals-sage-retries-for-you).
+`mSetNx` is never split, since that would break its all-or-nothing condition, and no cross-slot command is allowed inside a transaction, which must
+stay pinned to one slot.
 
 ### Commands that run on every master
 
-A cluster replicates no script or function cache, and no node sees the whole keyspace. So `scriptLoad`, `scriptExists`, `scriptFlush`, the
-`function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master, and their replies
-are folded into one. One master failing fails the whole call, with no partial result. A master that is only reconnecting, or refusing with `-LOADING`
-or `-TRYAGAIN`, is retried on the `maxRedirects` budget; a retried `waitReplicas` or `waitAof` waits again there. A `-CLUSTERDOWN` is not retried,
-since it may have moved the masters the call fanned out to.
+No node sees the whole keyspace, and a cluster replicates neither the script nor the function cache. So `scriptLoad`, `scriptExists`, `scriptFlush`,
+the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master, and their replies
+are folded into one. There is no partial result: if one master fails, the call fails.
+
+This is also the one case where Sage does not retry a `-CLUSTERDOWN` for you; see
+[Refusals Sage retries for you](/error-handling#refusals-sage-retries-for-you).
 
 ### Topology refresh
 
@@ -89,9 +85,8 @@ val config = SageConfig(
 )
 ```
 
-There is no timer unless you set one. Each admitted tick costs one `CLUSTER SLOTS`, and a tick landing inside the `minRefreshInterval` window is
-skipped, so a short interval cannot outpace it. The first tick is initially eligible, since discovery at connect opens no window, though an
-event-driven refresh before it can still throttle it. `MasterReplicaConfig` has the same setting.
+There is no timer unless you set one. Each refresh costs one `CLUSTER SLOTS`, and ticks arriving within `minRefreshInterval` of the last refresh are
+skipped, so a short interval cannot flood the cluster. `MasterReplicaConfig` has the same setting.
 
 ## Master-replica
 
@@ -113,14 +108,11 @@ The number of endpoints decides where Sage may connect:
 | Several | only the supplied endpoints, each classified by its own `ROLE`. Addresses that `ROLE` advertises are ignored, and a replica is used once it reports `connected` |
 | One | the supplied endpoint and the master or replicas discovered from its `ROLE` reply |
 
-Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises. An
-unreachable supplied endpoint is omitted when the roles are resolved, allowing a partially available deployment to connect. It can be considered
-again when an existing reconnect or routing failure triggers a later role refresh. A supplied replica that is still synchronizing is likewise
-omitted until a later event-driven refresh sees its own `ROLE` state become `connected`.
+Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises.
 
-With `ReplicaPreferred`, a read that falls back to the master while no replica is known also schedules this throttled refresh. This lets an
-omitted reader return to service under otherwise healthy master-only traffic without any polling. Once one replica is known, a second one is
-only picked up by `topologyRefreshInterval`; see [Topology refresh](#topology-refresh).
+An endpoint that is unreachable, or a replica that is still synchronizing, is left out at connect time so a partially available deployment still
+connects. Sage picks it up again on its own once traffic reveals the topology has changed, with no polling. Adding a *second* replica is the case
+nothing signals, so set `topologyRefreshInterval` if you scale readers out; see [Topology refresh](#topology-refresh).
 
 ## Read routing
 
@@ -159,10 +151,10 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 
 | Field | Tunes | Defaults |
 | --- | --- | --- |
-| `connectTimeout` | per socket connect/TLS step and per bootstrap command (`HELLO 3`, identification, optional `SELECT`/`CLIENT SETNAME`, cache setup) | `10.seconds` |
+| `connectTimeout` | each socket connect, TLS handshake, and connection-setup command | `10.seconds` |
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
 | `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
-| `closeTimeout` | how long `close` waits for in-flight commands on the multiplexed connection to drain (blocking commands and transactions on the dedicated pool are force-closed at once) | `5.seconds` |
+| `closeTimeout` | how long `close` waits for in-flight commands to drain (blocking commands and transactions are closed at once) | `5.seconds` |
 | `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
