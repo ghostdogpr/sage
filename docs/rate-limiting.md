@@ -2,7 +2,7 @@
 
 A **rate limiter** caps how often something may happen: so many requests per second for an API key, a budget of login attempts per account, a fair-use quota per tenant. Sage ships one built in, so every client has it with no extra dependency.
 
-The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server (they share the keyspace, not a connection). Each check runs its whole decide-and-consume cycle atomically on the server; in steady state that is a single round trip. The script is cached on the server, so only a cold server (or one after `SCRIPT FLUSH`) costs a second round trip to resend the script body. In a cluster that resend goes to the node owning the subject's key, like the check itself.
+The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server. Each check decides and consumes atomically on the server, in a single round trip.
 
 `rateLimiter` binds a policy to the client. Each `tryAcquire` consumes tokens for a subject and returns a `Decision`.
 
@@ -48,8 +48,6 @@ RateLimit(permits = 100, per = 1.second, burst = 200) // 100/s sustained, bursti
 
 There is no blocking `acquire`: `tryAcquire` never waits. To retry, sleep for `retryAfter` at the call site and try again.
 
-Waits are reported at microsecond resolution, saturating at `RateLimiter.maximumReportedWait` if a server-clock rollback ever pushes one past what a `FiniteDuration` holds.
-
 ## Peek and reset
 
 - `peek(subject)` reports the current standing without consuming: `Allowed` while at least one token is available, otherwise `Denied` with the wait until one is. The bucket is still refilled by elapsed time, but no tokens are taken.
@@ -69,30 +67,23 @@ A subject can be any type with a `KeyCodec`. It is encoded and prefixed with a n
 client.rateLimiter[String](RateLimit.perSecond(100), namespace = "login")
 ```
 
-Give each policy that is active at the same time its own namespace. A namespace that does see its policy change, during a rolling deployment say, carries its buckets over safely: a bucket records the policy that created it, and on a change each subject keeps the lesser of its whole tokens and the new capacity, drops the fraction, and refills under the new settings. That stops overlapping old and new instances from handing out full buckets repeatedly. Idle full buckets expire quickly, so a subject first seen after the switch starts at the new capacity.
+Give each policy that is active at the same time its own namespace. Changing the policy on an existing namespace is safe during a rolling deployment: a bucket remembers the policy that created it, and on a change each subject carries over the lesser of its current tokens and the new capacity, so overlapping old and new instances cannot hand out full buckets repeatedly.
 
-## Valid policies
+## Invalid policies
 
-A policy and a `cost` must satisfy:
+A policy needs a positive `capacity` and `refillTokens` and a `refillPeriod` of at least a microsecond, and `cost` must be between `1` and `capacity`. Very large values are also rejected, since the server-side arithmetic has to stay exact.
 
-- `capacity` greater than 0, `refillTokens` greater than 0, `refillPeriod` at least one microsecond.
-- `capacity`, `refillTokens`, and `refillPeriod` in microseconds each within `2^53` (the range a server-side Lua number represents exactly).
-- `capacity` multiplied by `refillPeriod` in microseconds within `2^53`, so the refill arithmetic stays exact on the server.
-- `cost` in the range `1` to `capacity`.
-
-Violations are a programming error, not a runtime outcome. On the `rateLimiter` factory path (`tryAcquire`, `peek`) a bad policy or cost fails with a typed `SageException.InvalidArgument` through the effect before any server call. On the composable `command` path the server rejects the call with an error and never modifies the bucket.
+These are programming errors, not runtime outcomes: `tryAcquire` and `peek` fail with `SageException.InvalidArgument` before any server call.
 
 ## When the store is unreachable
 
-A check reaches the server, so it can fail when the server is unreachable. The failure surfaces through the effect `F` for the caller to handle, exactly like any other command. Sage applies no fallback of its own: decide at the call site whether an outage should admit the request (availability first) or reject it (protection first).
+A check reaches the server, so it fails like any other command when the server is unreachable, through the effect `F`. Sage applies no fallback of its own: decide at the call site whether an outage should admit the request (availability first) or reject it (protection first).
 
 ## Capacity planning
 
-Each check is one cached-script request and one constant-time atomic operation. It rewrites a small hash and refreshes its expiry, so it consumes write throughput even on a denial, and the server runs each script serially however many the client multiplexes.
+Each check is one script call and one constant-time atomic operation. It writes even on a denial, so a limiter on every application call adds real write throughput. One key exists per subject whose bucket is not full, expiring once that bucket would be full again, so live keys track the distinct subjects seen within one refill window: long windows over many subjects hold the most state.
 
-One key exists per subject whose bucket is not full, expiring when that bucket would refill completely. Active keys therefore track the distinct subjects seen within one refill window: long windows over high-cardinality subjects retain the most state.
-
-For a limiter on every application call: count its operations, memory, replication, and persistence traffic in the store's capacity test; keep denied callers from retrying in a tight loop; and give it a dedicated deployment or more cluster shards if it would take a material share of an existing store.
+If the limiter would take a material share of an existing store, give it its own deployment or more cluster shards, and keep denied callers from retrying in a tight loop.
 
 ## The composable command
 

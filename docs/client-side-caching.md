@@ -39,7 +39,7 @@ Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configur
 
 ## Topology
 
-Caching works on every topology. On a standalone or master-replica client, cached reads run on the master, which holds the tracking-backed cache. On a cluster client, each slot-owning master owns its own cache, and a cached read is routed to the master owning the key's slot (never a replica, whatever the read policy). The same call therefore runs on all three topologies, serving a local hit only where caching is active.
+Caching works on every topology, with no change to your code. A cached read always runs against a master, never a replica whatever the read policy, since that is where the tracking-backed cache lives. In a cluster each slot-owning master keeps its own cache, and the read is routed to the master owning the key's slot.
 
 ## Limitations
 

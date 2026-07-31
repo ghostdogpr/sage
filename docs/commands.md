@@ -41,7 +41,7 @@ Commands mirror the server's documented groups, and the methods are named one-fo
 - **Pub/Sub**, **Scripting**, **Functions**
 - **Server**, **Connection**, **ACL**
 
-The full surface lives on the client and on `Commands`; the API docs list every method with its signature.
+The full surface lives on the client and on `Commands`; the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) list every method with its signature.
 
 ## Typed keys and values
 
@@ -59,7 +59,7 @@ There are two separate typeclasses, by design:
 - `KeyCodec[A]` for **key and hash-field** positions (identifiers into the keyspace or a hash).
 - `ValueCodec[A]` for **payloads**.
 
-They are deliberately unrelated, which keeps `given` resolution unambiguous and lets key positions carry the cluster-slot hashing that value positions do not need.
+They are deliberately unrelated: a key position needs cluster-slot hashing that a value position does not, and keeping them apart makes `given` resolution unambiguous.
 
 ### Non-String keys
 

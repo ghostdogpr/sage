@@ -6,9 +6,9 @@ Implementing RESP3, the commands, and the codecs directly in Scala keeps the cor
 
 ## How does Sage perform?
 
-Fast, by design rather than by tuning. Ordinary commands from every fiber share one auto-pipelined connection per node: a writer drains the send queue and coalesces whatever is waiting into a single socket write, so concurrent commands collapse into one syscall and one round trip instead of one each. The I/O runs on virtual threads with plain blocking reads and writes, with no callbacks and no carrier pinning, and replies are matched to in-flight commands through a lock-free queue, so the reader and writer never contend. With no Java client underneath, the RESP3 parser and codecs decode straight to your types with full control over allocation.
+Fast by design rather than by tuning. Commands from every fiber share one auto-pipelined connection per node, so concurrent commands coalesce into a single socket write and one round trip instead of one each. The I/O runs on virtual threads with plain blocking reads and writes, and replies are matched to in-flight commands without the reader and writer contending. With no Java client underneath, the RESP3 parser and the codecs decode straight to your types.
 
-In practice Sage matches or beats the established Scala clients on concurrent workloads. Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) yourself: they pit Sage against Lettuce, redis4cats, and zio-redis on a real server. No numbers are committed because competitor results drift with their versions, so measure fresh on your own hardware.
+In practice Sage matches or beats the established Scala clients on concurrent workloads. Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) yourself against a real server. No numbers are committed, since results drift with every version, so measure on your own hardware.
 
 ## Which backend artifact should I use?
 

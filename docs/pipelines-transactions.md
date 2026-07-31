@@ -4,11 +4,7 @@ Both group several commands together, but they answer different needs. A **pipel
 
 ## Pipelines
 
-A pipeline is an applicative composition of `Command` values, sent in one round-trip and decoded into a typed tuple. There is no atomicity: other clients' commands may interleave, and in a cluster the pipeline is split and routed per key, then reassembled in order.
-
-A supported cross-slot command (`MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, or `TOUCH`) inside a cluster pipeline is itself split once more by exact
-slot and merged back into its one logical pipeline position. Each slot-specific operation is atomic individually, not across the cluster;
-write subgroups may already have applied when another subgroup fails.
+A pipeline is a composition of `Command` values, sent in one round-trip and decoded into a typed tuple. There is no atomicity: other clients' commands may interleave, and in a cluster the pipeline is split and routed per key, then reassembled in order. [Cross-slot commands](/configuration#supported-cross-slot-commands) work inside a pipeline exactly as they do on their own.
 
 ::: code-group
 
@@ -124,7 +120,7 @@ A few rules follow from how Redis transactions work:
 - **A queueing-phase rejection discards the whole transaction**, so nothing runs.
 - **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
 - **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
-- **In a cluster, bound your retries.** A transaction never follows a redirect, because that would break atomicity, so the whole block is retried by the caller, exactly as a `WATCH` abort already requires. While a slot is migrating, a key that has already moved keeps answering `ASK` until the migration finalizes, and no retry can commit until then. Retry with backoff and a ceiling rather than in a tight loop.
+- **In a cluster, bound your retries.** A transaction never follows a redirect, since that would break atomicity, so you retry the whole block yourself, exactly as a `WATCH` abort already requires. While a slot is migrating no retry can commit until the migration finalizes, so retry with backoff and a ceiling rather than in a tight loop.
 
 ## Which to use
 

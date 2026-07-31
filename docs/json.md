@@ -1,10 +1,12 @@
 # JSON
 
-Sage supports the `JSON.*` command surface shipped by Redis 8, which has JSON built in (RedisJSON), and by the Valkey Bundle (the valkey-json module). Documents are stored server-side and addressed with JSONPath expressions. Sage takes no JSON-library dependency: a document is raw JSON text on the wire, and any structured typing is your own codec.
+Sage supports the `JSON.*` commands, which store documents server-side and address them with JSONPath expressions. You need a server that provides them: Redis 8 has JSON built in, and on Valkey they come from the valkey-json module (shipped in the `valkey/valkey-bundle` image, not in the stock `valkey` one).
+
+Sage takes no JSON-library dependency. A document is raw JSON text on the wire, and any structured typing comes from your own codec.
 
 ## Paths
 
-Every JSON command locates values with a `JsonPath`. Sage supports the JSONPath dialect (expressions beginning with `$`), and a path defaults to the document root `$`. Location commands always send an explicit path; `jsonGet` alone omits it when you pass none, to return the whole document unwrapped (see below).
+Every JSON command locates values with a `JsonPath`, using the JSONPath dialect (expressions beginning with `$`). A path defaults to the document root `$`.
 
 ```scala
 JsonPath.root          // $
@@ -118,8 +120,7 @@ client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", Js
 
 The common surface behaves the same on both servers. A few points differ:
 
-- `jsonMerge` (RFC 7386 merge) is available on Redis only; the Valkey Bundle 9.1.0 does not ship `JSON.MERGE` yet. Sage exposes it, and it works against Redis.
-- The two servers frame the replies to `jsonType`, `jsonNumIncrBy`, and `jsonNumMultBy` differently on the wire. Sage decodes both into the same result type, so your code does not see the difference.
-- `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but raises a server error on Valkey.
+- `jsonMerge` (RFC 7386 merge) works on Redis only. Valkey does not ship `JSON.MERGE` yet.
+- `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but fails with a server error on Valkey.
 
-Redis 8 ships JSON built in, but the stock `valkey` image carries no modules, so the tests run against JSON-capable images: `redis:8.8.0` and `valkey/valkey-bundle` (which adds valkey-json).
+The two servers also frame a few replies differently on the wire, but Sage decodes both into the same result type, so your code does not see it.

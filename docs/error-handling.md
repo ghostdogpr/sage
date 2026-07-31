@@ -18,7 +18,7 @@ Every Sage failure is a `SageException`, a single sealed hierarchy you can match
 | `TimedOut(message)` | A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout; bound a command's own duration with your backend's timeout combinator. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
 | `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |
-| `InvalidArgument(message)` | An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction, or a command a cluster client cannot serve as routed (an all-masters command in a cluster pipeline, a cluster-wide result in a single-node transaction, a hand-built command it cannot route by key). A programming error, rejected before any server call. |
+| `InvalidArgument(message)` | A programming error, rejected before any server call: an invalid configuration or rate-limit policy, a blocking command inside a pipeline or transaction, or a command a cluster client cannot route as written. |
 
 ## Branching on the failure
 
@@ -67,10 +67,10 @@ Retries are bounded and spaced by a short random delay, sharing the cluster's `m
 reaches you as a `ServerError`, code intact. A read tries its next [`ReadFrom`](/configuration#read-routing) candidate first, so a refusing replica
 costs one hop when the master or another replica can serve it.
 
-Commands that run on every master are the exception: a `-CLUSTERDOWN` there reaches you, because the failover may have moved the masters the call
-fanned out to. Retry it yourself, remembering that the fan-out is not atomic, so masters that already ran it run it again. Harmless for the read-only
-ones, `SCRIPT LOAD`, and the `FLUSH` family. `FUNCTION LOAD`, `FUNCTION DELETE`, and `FUNCTION RESTORE` answer `already exists` or `not found` unless
-you pass `replace = true`, or `RestorePolicy.Replace` or `RestorePolicy.Flush`.
+The exception is [commands that run on every master](/configuration#commands-that-run-on-every-master): a `-CLUSTERDOWN` there reaches you, because
+the failover may have moved the very masters the call fanned out to. Retry it yourself, keeping in mind that the fan-out is not atomic, so masters
+that already ran the command run it again. That is harmless for reads, `SCRIPT LOAD`, and the `FLUSH` family, but the `FUNCTION` mutations refuse a
+second run unless you pass `replace = true` (or `RestorePolicy.Replace` / `RestorePolicy.Flush`).
 
 ## How failures surface per backend
 

@@ -48,8 +48,7 @@ for {
 ```
 
 ```scala [Pekko]
-// Keep.both keeps the confirmation Future[Done] alongside the collected messages;
-// await it before publishing so the publish can't outrun the registration (best-effort in cluster)
+// await the confirmation before publishing so the publish can't outrun the subscription
 val (confirmed, collected) =
   client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
 val messages =
@@ -72,7 +71,7 @@ The plain `subscribe` returns the stream immediately and registers the subscript
 - **Ox**: `subscribeScoped`, bound to the enclosing Ox scope.
 - **Pekko**: plain `subscribe` returns a `Source` whose materialized `Future[Done]` completes once registered; await it before publishing.
 
-The examples above use these. Confirmation closes the race on a standalone or master-replica server; in cluster mode it is best-effort, as on every backend. With the scoped and resource variants that scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes; on Pekko, ending the `Source` (cancel, complete, or fail) unsubscribes.
+Confirmation closes the race on a standalone or master-replica server; in a cluster it is best-effort. With the scoped and resource variants the scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes. On Pekko, ending the `Source` unsubscribes.
 :::
 
 ::: tip Connection isolation
@@ -81,9 +80,10 @@ All classic subscriptions share one **subscription connection**, created the fir
 
 ## Sharded channels (cluster)
 
-In a cluster, a **shard channel** keeps its traffic within the shard that owns the channel's slot: `sSubscribe` and `sPublish` target that owning node rather than broadcasting across the whole cluster. There is no pattern form, and a delivery surfaces as an ordinary message.
+In a cluster, a **shard channel** keeps its traffic within the shard that owns the channel's slot: `sSubscribe` and `sPublish` target that owning node rather than broadcasting across the whole cluster. There is no pattern form, and a delivery arrives as an ordinary message.
 
-```scala [ZIO]
+```scala
+// ZIO; the shape is the same on every backend
 ZIO.scoped {
   for {
     stream   <- client.sSubscribeScoped[String]("orders")
@@ -93,6 +93,6 @@ ZIO.scoped {
 }
 ```
 
-The shape is the same on every backend, using each one's native stream type exactly as classic pub/sub does. Sage holds one sharded subscription connection per owning node and re-homes the affected subscriptions automatically when a slot migrates or a node fails over.
+Sage holds one sharded subscription connection per owning node and re-homes the affected subscriptions automatically when a slot migrates or a node fails over.
 
 See [Configuration](/configuration) for how to connect to a cluster.

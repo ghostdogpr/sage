@@ -1,6 +1,6 @@
 # Streams
 
-A Stream is an append-only log. Each entry has a Stream Entry ID (a millisecond timestamp and a per-millisecond sequence) and an ordered, duplicate-permitting list of field/value pairs. You read a Stream by range or by tailing, and you consume it cooperatively through Consumer Groups.
+A stream is an append-only log. Each entry has an ID (a millisecond timestamp plus a sequence number) and an ordered list of field/value pairs, where a field may repeat. You read a stream by range or by tailing it, and several workers can share one cooperatively through a consumer group.
 
 ## Appending and reading
 
@@ -29,11 +29,11 @@ for {
 
 :::
 
-Field and value types are codec-driven, exactly like [other commands](/commands): `xRange[K, F, V]` here decodes string fields and string values.
+Field and value types are codec-driven, exactly like [other commands](/commands): the two type parameters above name the field type and the value type.
 
 ## Consumer groups
 
-A Consumer Group lets several consumers split a Stream's entries between them without overlap. The group tracks a last-delivered ID and a Pending Entries List (PEL) of entries delivered but not yet acknowledged. `xReadGroup` with `GroupReadId.New` (the `>` token) delivers never-seen entries and records them as pending; `xAck` removes them from the PEL once handled.
+A consumer group lets several consumers split a stream's entries between them without overlap. The group tracks a last-delivered ID and a pending entries list (PEL) of entries delivered but not yet acknowledged. `xReadGroup` with `GroupReadId.New` (the `>` token) delivers never-seen entries and records them as pending; `xAck` removes them from the PEL once handled.
 
 ::: code-group
 
@@ -72,10 +72,12 @@ Each command position that admits a special ID token carries its own type, so an
 
 ## Tailing a group
 
-For a long-running worker, `xConsume` tails a group as a stream in your ecosystem's native type. It first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new entries. Your handler runs per entry, and the entry is acknowledged only after the handler succeeds, so a failure leaves it in the PEL for another attempt. On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` hands back a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`. Pekko tailing helpers require a finite block timeout; the default bounded poll keeps stop/cancel responsive.
+For a long-running worker, `xConsume` tails a group and runs your handler on each entry. It first replays this consumer's own pending entries (recovering whatever a previous run left unacknowledged), then blocks waiting for new ones. An entry is acknowledged only once the handler succeeds, so a failure leaves it in the PEL for another attempt.
+
+On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` returns a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`.
 
 ::: tip At-least-once delivery
-Because an entry is acknowledged only after the handler succeeds, the same entry can be delivered again after a crash or a failed handler. Make your handler idempotent. `xConsume` also blocks while tailing, so it is the body of a long-running worker, not a one-shot read.
+The same entry can be delivered again after a crash or a failed handler, so make your handler idempotent. `xConsume` blocks while tailing: it is the body of a long-running worker, not a one-shot read.
 :::
 
 ::: code-group
@@ -116,4 +118,4 @@ val consumer = client.xConsume[String, String]("workers", "w1", "stream:orders")
 
 :::
 
-Beyond these, the full `X*` surface is available: trimming (`xTrim`), reverse range (`xRevRange`), blocking reads (`xRead`), claim and auto-claim (`xClaim`, `xAutoClaim`), pending inspection (`xPending`), and group management. See the API docs for the complete list.
+Beyond these, the full `X*` surface is available: trimming (`xTrim`), reverse range (`xRevRange`), blocking reads (`xRead`), claim and auto-claim (`xClaim`, `xAutoClaim`), pending inspection (`xPending`), and group management. See the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) for the complete list.
