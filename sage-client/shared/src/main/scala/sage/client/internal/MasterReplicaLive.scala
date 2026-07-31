@@ -1,6 +1,5 @@
 package sage.client.internal
 
-import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
@@ -74,8 +73,6 @@ final private[client] class MasterReplicaLive(
   @volatile private var subscriptions: SubscriptionConnection = null
 
   private val refreshThrottle = new RefreshThrottle(scheduler, masterReplica.minRefreshInterval.toMillis)
-
-  private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
@@ -159,7 +156,7 @@ final private[client] class MasterReplicaLive(
           config.connectTimeout,
           config.closeTimeout,
           config.dedicatedPool,
-          node = Some(node),
+          node = node,
           events = Events.disabled
         )
       catch {
@@ -167,29 +164,17 @@ final private[client] class MasterReplicaLive(
           reportProbeFailure(node, error)
           throw error
       }
-    try {
-      val latch   = new CountDownLatch(1)
-      val outcome = new AtomicReference[Try[Role]]()
-      nc.submit[Role](
-        Server.role,
-        asking = false,
-        result => {
-          outcome.set(result)
-          latch.countDown()
-        }
-      )
-      if (!latch.await(config.connectTimeout.toMillis, TimeUnit.MILLISECONDS)) {
-        val error = TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms")
-        reportProbeFailure(node, error)
-        None
-      } else
-        outcome.get() match {
-          case Success(role)  => Some(role)
-          case Failure(error) =>
-            reportProbeFailure(node, error)
-            None
-        }
-    } finally nc.close()
+    try
+      Bootstrap.awaitReply[Role](config.connectTimeout.toMillis)(callback => nc.submit(Server.role, asking = false, callback)) match {
+        case Some(Success(role))  => Some(role)
+        case Some(Failure(error)) =>
+          reportProbeFailure(node, error)
+          None
+        case None                 =>
+          reportProbeFailure(node, TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms"))
+          None
+      }
+    finally nc.close()
   }
 
   private def reportProbeFailure(node: Node, error: Throwable): Unit =
@@ -219,8 +204,7 @@ final private[client] class MasterReplicaLive(
   def run[A](command: Command[A]): CIO[A] = {
     def body(lease: DedicatedPool.Lease): CIO[A] =
       CIO.async[A] { complete =>
-        val span    = Events.startSpan(events, command)
-        val tracked = Events.trackCommand(events, command, complete, span)
+        val tracked = Events.trackCommand(events, command, complete)
         Client.completing(tracked) {
           if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked)
           else sendMaster(command, tracked, lease)
@@ -233,8 +217,7 @@ final private[client] class MasterReplicaLive(
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)
       CIO.async[A] { complete =>
-        val span    = Events.startSpan(events, command)
-        val tracked = Events.trackCommand(events, command, complete, span)
+        val tracked = Events.trackCommand(events, command, complete)
         Client.completing(tracked)(sendMaster(command, tracked))
       }
     else
@@ -264,10 +247,8 @@ final private[client] class MasterReplicaLive(
     val existing = masterPool.existing(node)
     if (existing != null) submitMaster(existing, node, complete, submit)
     else
-      offload {
-        val nc =
-          try masterPool.getOrEstablish(node)
-          catch { case NonFatal(_) => null }
+      scheduler.offload {
+        val nc = masterPool.getOrEstablishOrNull(node)
         if (nc == null) {
           triggerRefresh()
           onDown()
@@ -368,10 +349,8 @@ final private[client] class MasterReplicaLive(
           val existing = masterPool.existing(master)
           if (existing != null) submitOn(Some((master, existing)))
           else
-            offload {
-              val nc =
-                try masterPool.getOrEstablish(master)
-                catch { case NonFatal(_) => null }
+            scheduler.offload {
+              val nc = masterPool.getOrEstablishOrNull(master)
               submitOn(Option(nc).map(master -> _))
             }
         }

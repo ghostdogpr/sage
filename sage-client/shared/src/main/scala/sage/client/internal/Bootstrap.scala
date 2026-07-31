@@ -41,27 +41,30 @@ private[client] object Bootstrap {
     onTolerated: Command[?] => Unit = _ => ()
   ): Unit =
     commands.foreach { command =>
-      val latch   = new CountDownLatch(1)
-      val outcome = new AtomicReference[Try[Any]]()
-      submit(
-        command,
-        result => {
-          outcome.set(result)
-          latch.countDown()
-        }
-      )
-      if (!latch.await(connectTimeoutMillis, TimeUnit.MILLISECONDS)) {
-        close()
-        throw ConnectionLost(mayHaveExecuted = false)
-      }
-      outcome.get() match {
-        case Failure(_: ServerError) if bestEffort(command) => onTolerated(command)
-        case Failure(error)                                 =>
+      awaitReply[Any](connectTimeoutMillis)(callback => submit(command, callback)) match {
+        case None                                                 =>
+          close()
+          throw ConnectionLost(mayHaveExecuted = false)
+        case Some(Failure(_: ServerError)) if bestEffort(command) => onTolerated(command)
+        case Some(Failure(error))                                 =>
           close()
           throw error
-        case Success(_)                                     => ()
+        case Some(Success(_))                                     => ()
       }
     }
+
+  /**
+    * Submits one command and blocks the calling thread for its reply; `None` is the timeout.
+    */
+  def awaitReply[A](timeoutMillis: Long)(submit: (Try[A] => Unit) => Unit): Option[Try[A]] = {
+    val latch   = new CountDownLatch(1)
+    val outcome = new AtomicReference[Try[A]]()
+    submit { result =>
+      outcome.set(result)
+      latch.countDown()
+    }
+    if (latch.await(timeoutMillis, TimeUnit.MILLISECONDS)) Some(outcome.get()) else None
+  }
 
   /**
     * Whether a server-error reply to this command may be tolerated during bootstrap. `CLIENT SETINFO` qualifies because it is library

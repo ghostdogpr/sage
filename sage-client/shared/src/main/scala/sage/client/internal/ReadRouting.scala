@@ -3,9 +3,7 @@ package sage.client.internal
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success, Try}
-import scala.util.control.NonFatal
 
 import sage.SageException.NotConnected
 import sage.client.ReadFrom
@@ -94,8 +92,8 @@ final private[client] class ReadRouting(
           if (existing.isLive) submit(existing, node, command, rest, complete)(onFault)
           else walk(command, rest, master, complete)(onFault)
         else
-          offload {
-            val nc = establishOrNull(pool, node)
+          scheduler.offload {
+            val nc = pool.getOrEstablishOrNull(node)
             if (nc == null || !nc.isLive) walk(command, rest, master, complete)(onFault)
             else submit(nc, node, command, rest, complete)(onFault)
           }
@@ -114,7 +112,7 @@ final private[client] class ReadRouting(
       val node = it.next()
       val nc   = poolFor(node, master).existing(node)
       if (nc == null) {
-        offload(onPick(establishOne(candidates, master)))
+        scheduler.offload(onPick(establishOne(candidates, master)))
         return
       }
       if (nc.isLive) {
@@ -135,7 +133,7 @@ final private[client] class ReadRouting(
         case success @ Success(_) =>
           Events.attributeNode(complete, node)
           complete(success)
-        case Failure(error)       => offload(onFault(node, error, rest))
+        case Failure(error)       => scheduler.offload(onFault(node, error, rest))
       }
     )
 
@@ -143,17 +141,11 @@ final private[client] class ReadRouting(
     val it = candidates.iterator
     while (it.hasNext) {
       val node = it.next()
-      val nc   = establishOrNull(poolFor(node, master), node)
+      val nc   = poolFor(node, master).getOrEstablishOrNull(node)
       if (nc != null && nc.isLive) return Some((node, nc))
     }
     None
   }
 
-  private def establishOrNull(pool: NodePool, node: Node): NodeClient =
-    try pool.getOrEstablish(node)
-    catch { case NonFatal(_) => null }
-
   private def poolFor(node: Node, master: Node): NodePool = if (node == master) masterPool else replicaPool
-
-  private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 }

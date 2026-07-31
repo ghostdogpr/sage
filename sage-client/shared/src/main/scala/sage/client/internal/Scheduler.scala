@@ -21,6 +21,8 @@ private[client] trait Scheduler {
   def after(delay: FiniteDuration)(task: => Unit): Unit
 
   def every(interval: FiniteDuration)(task: => Unit): Scheduler.Cancelable
+
+  final def offload(task: => Unit): Unit = after(Duration.Zero)(task)
 }
 
 private[client] object Scheduler {

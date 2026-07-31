@@ -6,6 +6,7 @@ import java.util.concurrent.locks.ReentrantLock
 import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 import sage.SageEvent
 import sage.SageException.NotConnected
@@ -99,7 +100,7 @@ final private[client] class NodePool(
             closeTimeout,
             dedicatedPool,
             cacheMaxBytes,
-            Some(node),
+            node,
             events,
             dedicatedBootstrap,
             onConstructed = conn => {
@@ -143,6 +144,13 @@ final private[client] class NodePool(
       }
     }
   }
+
+  /**
+    * As [[getOrEstablish]], blocking to connect if need be, but `null` rather than throwing when the connect fails.
+    */
+  def getOrEstablishOrNull(node: Node): NodeClient =
+    try getOrEstablish(node)
+    catch { case NonFatal(_) => null }
 
   // drops/closes bundles `keep` rejects and invalidates in-flight establishments for rejected nodes, so neither leaks; closes are offloaded
   def retain(keep: Node => Boolean): Unit = {

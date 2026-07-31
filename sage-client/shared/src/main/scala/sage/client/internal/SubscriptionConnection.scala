@@ -52,9 +52,7 @@ final private[client] class SubscriptionConnection(
   private var current: Conn = null
   // connections still being opened; a set, since a reconnect and a fresh attach can be establishing at once
   private val establishing  = mutable.Set.empty[Conn]
-  private val channelSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
-  private val patternSinks  = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
-  private val shardSinks    = mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]]
+  private val sinksByKind   = Array.fill(Kind.values.length)(mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]])
 
   // SUBSCRIBE-ack accounting (guarded by `lock`): the server confirms each subscribed name with one push frame in send order, so a subscribe
   // waits until `subscribeConfirmed` catches `subscribeSent` before returning — otherwise `subscribe` then `publish` races across the sockets.
@@ -75,12 +73,7 @@ final private[client] class SubscriptionConnection(
     finally lock.unlock()
   }
 
-  private def sinksFor(kind: Kind): mutable.HashMap[String, mutable.LinkedHashSet[Sink]] =
-    kind match {
-      case Kind.Channel => channelSinks
-      case Kind.Pattern => patternSinks
-      case Kind.Shard   => shardSinks
-    }
+  private def sinksFor(kind: Kind): mutable.HashMap[String, mutable.LinkedHashSet[Sink]] = sinksByKind(kind.ordinal)
 
   // --- standalone conveniences: the connection owns the sink -------------------------------------------------------------------------------
 
@@ -174,7 +167,7 @@ final private[client] class SubscriptionConnection(
 
   def isEmpty: Boolean = locked(isEmptyUnlocked)
 
-  private def isEmptyUnlocked: Boolean = channelSinks.isEmpty && patternSinks.isEmpty && shardSinks.isEmpty
+  private def isEmptyUnlocked: Boolean = sinksByKind.forall(_.isEmpty)
 
   // --- shared establish/dispatch machinery -------------------------------------------------------------------------------------------------
 
@@ -206,14 +199,12 @@ final private[client] class SubscriptionConnection(
         subscribeConfirmed = 0L
         pingSentAtMillis = 0L
         lastReplyAtMillis = scheduler.nowMillis
-        val channels = channelSinks.keys.toVector
-        val patterns = patternSinks.keys.toVector
-        val shards   = shardSinks.keys.toVector
-        try {
-          if (channels.nonEmpty) sendSubscribe(conn, Kind.Channel, channels)
-          if (patterns.nonEmpty) sendSubscribe(conn, Kind.Pattern, patterns)
-          if (shards.nonEmpty) sendSubscribe(conn, Kind.Shard, shards)
-        } catch {
+        val pending = Kind.values.map(kind => kind -> sinksFor(kind).keys.toVector)
+        try
+          pending.foreach { case (kind, names) =>
+            if (names.nonEmpty) sendSubscribe(conn, kind, names)
+          }
+        catch {
           // resubscribe write failed: drop this socket and clear current so a superseded generation can't keep dispatching, then rethrow
           case e: Throwable =>
             current = null
@@ -221,7 +212,7 @@ final private[client] class SubscriptionConnection(
             failure = e
         }
         if (failure == null)
-          if (channels.isEmpty && patterns.isEmpty && shards.isEmpty) {
+          if (pending.forall(_._2.isEmpty)) {
             // everything closed during the establish; tear back down rather than hold an idle socket open
             teardown = conn
             current = null
@@ -374,9 +365,12 @@ final private[client] class SubscriptionConnection(
       case Frame.Push(elements) =>
         // not touching lastReplyAtMillis: a push proves only the read path, so push-only traffic must still get the idle keepalive PING
         Pubsub.decode(elements) match {
-          case Some(Pubsub.Event.Message(channel, payload))            => dispatch(channelSinks, channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.ShardMessage(channel, payload))       => dispatch(shardSinks, channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) => dispatch(patternSinks, pattern, Delivery.Pattern(pattern, ch, payload))
+          case Some(Pubsub.Event.Message(channel, payload))            =>
+            dispatch(sinksFor(Kind.Channel), channel, Delivery.Channel(channel, payload))
+          case Some(Pubsub.Event.ShardMessage(channel, payload))       =>
+            dispatch(sinksFor(Kind.Shard), channel, Delivery.Channel(channel, payload))
+          case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) =>
+            dispatch(sinksFor(Kind.Pattern), pattern, Delivery.Pattern(pattern, ch, payload))
           case Some(_: Pubsub.Event.Subscribed)                        =>
             // conn eq current: a late ack from a superseded generation must not advance this generation's count
             locked(if (conn eq current) {
@@ -455,25 +449,16 @@ final private[client] class SubscriptionConnection(
   }
 
   // close socket/watchdog but keep the sinks (unlike close), so a re-home re-attaches them
-  def shutdown(): Unit = {
-    val toClose = locked {
-      val conns = markClosed()
-      channelSinks.clear()
-      patternSinks.clear()
-      shardSinks.clear()
-      conns
-    }
-    toClose.foreach(_.close())
-  }
+  def shutdown(): Unit = tearDown(terminateSinks = false)
 
-  def close(): Unit = {
+  def close(): Unit = tearDown(terminateSinks = true)
+
+  private def tearDown(terminateSinks: Boolean): Unit = {
     var sinks: Set[Sink] = Set.empty
     val toClose          = locked {
-      sinks = (channelSinks.values.flatten ++ patternSinks.values.flatten ++ shardSinks.values.flatten).toSet
+      if (terminateSinks) sinks = sinksByKind.iterator.flatMap(_.values.flatten).toSet
       val conns = markClosed()
-      channelSinks.clear()
-      patternSinks.clear()
-      shardSinks.clear()
+      sinksByKind.foreach(_.clear())
       conns
     }
     // terminate before close: conn.close() joins the reader, which only exits Sink.offer once its sink is closed — closing first deadlocks.

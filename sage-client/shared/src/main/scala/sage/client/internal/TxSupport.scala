@@ -7,7 +7,7 @@ import scala.util.{Failure, Success, Try}
 import kyo.compat.*
 
 import sage.SageException
-import sage.SageException.{DecodeError, ProtocolError, TransactionDiscarded}
+import sage.SageException.{DecodeError, ProtocolError, ServerError, TransactionDiscarded}
 import sage.commands.{Command, Reply}
 import sage.protocol.Frame
 
@@ -67,6 +67,15 @@ private[internal] object TxSupport {
       case Frame.BulkError(message)   => Some(message.asUtf8String)
       case _                          => None
     }
+
+  // an EXEC fault is an error frame carried in a Success, sitting either at the top level or inside the EXEC array
+  def execErrors(frames: Vector[Frame]): Iterator[ServerError] = {
+    val nested = frames.lastOption match {
+      case Some(Frame.Array(elems)) => elems.iterator
+      case _                        => Iterator.empty[Frame]
+    }
+    (frames.iterator ++ nested).flatMap(errorOf).map(ServerError.of)
+  }
 
   // a state error, not an argument, so deliberately outside the sealed hierarchy: a scope captured past its block
   def scopeReleasedError: IllegalStateException =
