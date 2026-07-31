@@ -57,6 +57,16 @@ final private[client] class ReadRouting(
 
   private val cursors = new ConcurrentHashMap[Node, AtomicInteger]()
 
+  private enum Lookup {
+    case Existing, Establish
+  }
+
+  private enum Selection {
+    case Found(picked: ReadRouting.Picked)
+    case NeedsEstablish
+    case Exhausted
+  }
+
   /**
     * The candidates for `master`'s replicas under the policy, advancing that master's cursor once.
     */
@@ -108,23 +118,18 @@ final private[client] class ReadRouting(
     * The one Node a batch of reads should land on with its connection and the candidates after it, established if need be, or `None` when no
     * candidate can serve the read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
     */
-  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit = {
-    var remaining = candidates
-    while (remaining.nonEmpty) {
-      val node = remaining.head
-      val nc   = poolFor(node, master).existing(node)
-      if (nc == null) {
-        scheduler.offload(onPick(establishOneWithRest(candidates, master)))
-        return
-      }
-      if (nc.isLive) {
-        onPick(Some(ReadRouting.Picked(node, nc, remaining.tail)))
-        return
-      }
-      remaining = remaining.tail
+  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit =
+    select(candidates, master, Lookup.Existing) match {
+      case Selection.Found(picked)  => onPick(Some(picked))
+      case Selection.Exhausted      => onPick(None)
+      case Selection.NeedsEstablish =>
+        scheduler.offload {
+          select(candidates, master, Lookup.Establish) match {
+            case Selection.Found(picked) => onPick(Some(picked))
+            case _                       => onPick(None)
+          }
+        }
     }
-    onPick(None)
-  }
 
   private def submit[A](nc: NodeClient, node: Node, command: Command[A], rest: Vector[Node], complete: Try[A] => Unit)(
     onFault: (Node, Throwable, Vector[Node]) => Unit
@@ -140,15 +145,20 @@ final private[client] class ReadRouting(
       }
     )
 
-  private def establishOneWithRest(candidates: Vector[Node], master: Node): Option[ReadRouting.Picked] = {
+  private def select(candidates: Vector[Node], master: Node, lookup: Lookup): Selection = {
     var remaining = candidates
     while (remaining.nonEmpty) {
       val node = remaining.head
-      val nc   = poolFor(node, master).getOrEstablishOrNull(node)
-      if (nc != null && nc.isLive) return Some(ReadRouting.Picked(node, nc, remaining.tail))
+      val pool = poolFor(node, master)
+      val nc   = lookup match {
+        case Lookup.Existing  => pool.existing(node)
+        case Lookup.Establish => pool.getOrEstablishOrNull(node)
+      }
+      if (nc == null && lookup == Lookup.Existing) return Selection.NeedsEstablish
+      if (nc != null && nc.isLive) return Selection.Found(ReadRouting.Picked(node, nc, remaining.tail))
       remaining = remaining.tail
     }
-    None
+    Selection.Exhausted
   }
 
   private def poolFor(node: Node, master: Node): NodePool = if (node == master) masterPool else replicaPool

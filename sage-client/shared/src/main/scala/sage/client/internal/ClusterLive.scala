@@ -760,7 +760,8 @@ final private[client] class ClusterLive(
     plan: SplitPlan
   ): Unit = {
     val n                         = p.commands.length
-    val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
+    val collector                 =
+      new TxSupport.IndexedCollector[Either[SageException, Any]](n, results => complete(Success(results)))
     val emits                     = Vector.tabulate(n) { i =>
       val span = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
       Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)

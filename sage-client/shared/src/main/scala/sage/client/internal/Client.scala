@@ -2321,7 +2321,8 @@ object Client {
     spans: Vector[CommandSpan],
     complete: Try[Vector[Either[SageException, Any]]] => Unit
   ) {
-    private val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
+    private val collector =
+      new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, results => complete(Success(results)))
     private val tracked   = Vector.tabulate(commands.length) { i =>
       val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
       Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
@@ -2339,22 +2340,15 @@ object Client {
         tracked(i)(results(i))
       }
 
-    def failUnsent(): Unit = {
+    def failUnsent(onUnsent: () => Unit = () => ()): Unit = {
       val error = NotConnected()
+      onUnsent()
       tracked.foreach(Events.abandonSpan(_, error))
       if (events.emitsEvents)
         commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
       complete(Failure(error))
     }
   }
-
-  private[internal] def trackBatch(
-    events: Events,
-    commands: Vector[Command[?]],
-    spans: Vector[CommandSpan],
-    complete: Try[Vector[Either[SageException, Any]]] => Unit
-  ): TrackedBatch =
-    new TrackedBatch(events, commands, spans, complete)
 
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
@@ -2364,10 +2358,11 @@ object Client {
     spans: Vector[CommandSpan],
     submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
-    node: Option[Node] = None
+    node: Option[Node] = None,
+    onUnsent: () => Unit = () => ()
   ): Unit = {
-    val batch = trackBatch(events, commands, spans, complete)
-    if (!submitAll(commands, batch.callbacks(node))) batch.failUnsent()
+    val batch = new TrackedBatch(events, commands, spans, complete)
+    if (!submitAll(commands, batch.callbacks(node))) batch.failUnsent(onUnsent)
   }
 
   /**

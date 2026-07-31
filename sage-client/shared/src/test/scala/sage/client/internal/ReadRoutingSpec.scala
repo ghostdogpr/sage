@@ -180,6 +180,16 @@ class ReadRoutingSpec extends munit.FunSuite {
     fixture.close()
   }
 
+  test("pickOne returns the candidates after the selected node") {
+    val fixture = new Fixture()
+    fixture.establish(r1)
+    fixture.establish(r2)
+    val picked  = new AtomicReference[Option[ReadRouting.Picked]]()
+    fixture.reads.pickOne(Vector(r1, r2), m)(picked.set)
+    assertEquals(picked.get(), Some(ReadRouting.Picked(r1, fixture.replicaPool.existing(r1), Vector(r2))))
+    fixture.close()
+  }
+
   test("pickOne answers None when every candidate is established but dead") {
     val fixture = new Fixture()
     fixture.establish(r1)
