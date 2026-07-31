@@ -149,6 +149,17 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
     assert(Reply.run(Server.dbSize, sum(Frame.Integer(10L), badInt)).isLeft)
   }
 
+  test("MEMORY PURGE broadcasts per master, since purging one arbitrary master leaves every other one unpurged") {
+    assert(Server.memoryPurge.allMasters)
+    assert(Server.memoryPurge.rawFrame.allMasters)
+    assertEquals(Server.memoryPurge.broadcast, BroadcastReduce.First, "every master replies OK, so the first reply stands for all of them")
+    assert(!Server.memoryPurge.requiresClusterWideTxResult)
+  }
+
+  test("MEMORY USAGE stays keyed and node-local, so it is not swept along with PURGE") {
+    assert(!Server.memoryUsage("k").allMasters)
+  }
+
   test("MEMORY USAGE decodes a present count and a missing key as None, and is keyed") {
     assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Integer(64L)), Right(Some(64L)))
     assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Null), Right(None))

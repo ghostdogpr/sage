@@ -1080,27 +1080,30 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def sPublish[V: ValueCodec](channel: String, message: V): F[Long] = run(Pubsub.sPublish(channel, message))
 
   /**
-    * Lists currently-active classic channels with at least one subscriber, optionally filtered by glob `pattern`.
+    * Lists currently-active classic channels with at least one subscriber, optionally filtered by glob `pattern`. A server reports only the
+    * subscribers attached to it, so a cluster sweeps every master and appends the lists, dropping repeats.
     */
   final def pubsubChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubChannels(pattern))
 
   /**
-    * Lists currently-active Shard Channels, optionally filtered by glob `pattern`.
+    * Lists currently-active Shard Channels, optionally filtered by glob `pattern`. Swept across masters like [[pubsubChannels]].
     */
   final def pubsubShardChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubShardChannels(pattern))
 
   /**
-    * Returns the subscriber count of each given classic channel.
+    * Returns the subscriber count of each given classic channel, summed across every master in a cluster. The sweep does not reach replicas,
+    * so a subscriber attached to one is not counted.
     */
   final def pubsubNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubNumSub(channels*))
 
   /**
-    * Returns the subscriber count of each given Shard Channel.
+    * Returns the subscriber count of each given Shard Channel, summed across masters like [[pubsubNumSub]].
     */
   final def pubsubShardNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubShardNumSub(channels*))
 
   /**
-    * Returns the number of active pattern subscriptions across all clients.
+    * Returns the number of active pattern subscriptions, summed across every master in a cluster. The reply is a count rather than the
+    * patterns, so one pattern held on two masters is counted twice.
     */
   final def pubsubNumPat: F[Long] = run(Pubsub.pubsubNumPat)
 
@@ -1822,7 +1825,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def memoryUsage(key: K, samples: Option[Long] = None): F[Option[Long]] = run(Server.memoryUsage(key, samples))
 
   /**
-    * Asks the allocator to release memory back to the OS.
+    * Asks the allocator to release memory back to the OS. The effect is per-node, so a cluster asks every slot-owning master; a swept
+    * command cannot ride in a Pipeline.
     */
   final def memoryPurge: F[Unit] = run(Server.memoryPurge)
 

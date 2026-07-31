@@ -19,58 +19,39 @@ import sage.integration.{ContainerClient, Eventually, Images}
   * `CLUSTER SLOTS` and re-dispatches, bounded by `maxRedirects`. That bound is shorter than an election, so, as with a real application, the
   * caller retries across the failover window while the client refreshes the topology underneath.
   *
-  * A cluster node announces a single address used for both gossip and clients, so the testcontainers-mapped random ports the other suites use
-  * cannot work here: gossip needs an address the nodes reach each other on. The escape is a fixed 1:1 host-port mapping plus
-  * `cluster-announce-ip 127.0.0.1`, so `127.0.0.1:<port>` resolves to the same node inside the container (gossip) and from the host (the test).
-  * The cost is fixed host ports (7100-7105), which must be free on the host — the only single-host scheme a multi-node cluster admits short of
-  * Linux-only host networking.
+  * The fixed host ports are 7100-7105; see [[MultiNodeCluster]] for why a multi-node cluster cannot use mapped random ports.
   */
-abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForEach with ContainerClient {
+abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
+  extends munit.FunSuite
+  with TestContainerForEach
+  with ContainerClient
+  with MultiNodeCluster {
 
-  private val ports  = 7100 to 7105
-  private val victim = 7100 // redis-cli --cluster-create makes the first nodes masters, so 7100 is a master with a replica to promote
+  protected val ports: Seq[Int] = 7100 to 7105
+  private val victim            = 7100 // redis-cli --cluster-create makes the first nodes masters, so 7100 is a master with a replica to promote
 
-  // each node needs its own cluster-config-file (they otherwise collide on nodes.conf); a low node-timeout keeps the failover election short
-  override val containerDef: FixedHostPortGenericContainer.Def = {
-    val starts = ports
-      .map(p =>
-        s"$serverBinary --port $p --cluster-enabled yes --cluster-config-file nodes-$p.conf --cluster-node-timeout 2000 " +
-          // --repl-diskless-sync-delay 0: start the replica's initial sync immediately, not after the default 5s window, so it is a live copy
-          // before the failover rather than still in wait_bgsave
-          s"--cluster-announce-ip 127.0.0.1 --repl-diskless-sync-delay 0 --save '' --appendonly no --protected-mode no --daemonize yes"
-      )
-      .mkString("; ")
-    FixedHostPortGenericContainer.Def(
-      image,
-      command = Seq("sh", "-c", s"$starts; tail -f /dev/null"),
-      portBindings = ports.map(p => (p, p)).toSeq
-    )
-  }
+  override protected val replicasPerMaster: Option[Int] = Some(1)
+
+  // start the replica's initial sync immediately, not after the default 5s window, so it is a live copy before the failover
+  override protected val extraServerFlags: Vector[String] = Vector("--repl-diskless-sync-delay 0")
+
+  override val containerDef: FixedHostPortGenericContainer.Def = clusterContainerDef
 
   given ExecutionContext = munitExecutionContext
 
   // forming a six-node cluster and waiting out an election runs past munit's 30s default on a loaded CI box
   override def munitTimeout: Duration = 120.seconds
 
-  private def exec(container: FixedHostPortGenericContainer, args: String*): String = {
-    val result = container.execInContainer(args*)
-    result.getStdout + result.getStderr
-  }
-
-  private def cli(container: FixedHostPortGenericContainer, port: Int, args: String*): String =
-    exec(container, ("redis-cli" +: "-p" +: port.toString +: args)*)
-
   private def parseKeys(out: String): Vector[String] =
     out.split("\n").iterator.map(_.trim).filter(_.nonEmpty).toVector
 
-  // the victim master's own replica, parsed from CLUSTER NODES (a `slave` line whose master id is the victim's own id)
   private def victimReplicaPort(container: FixedHostPortGenericContainer): Int = {
-    val myId  = cli(container, victim, "cluster", "myid").trim
-    val nodes = cli(container, victim, "cluster", "nodes")
-    parseKeys(nodes).iterator
-      .map(_.split("\\s+"))
-      .collectFirst { case f if f.length > 3 && f(2).contains("slave") && f(3) == myId => f(1).split("@")(0).split(":")(1).toInt }
-      .getOrElse(throw new RuntimeException(s"no replica found for victim $victim:\n$nodes"))
+    val nodes = clusterNodes(container, victim)
+    val myId  =
+      nodes.collectFirst { case node if node.isMyself => node.id }.getOrElse(throw new RuntimeException(s"victim $victim has no myself line"))
+    nodes
+      .collectFirst { case node if node.isReplica && node.masterId == myId => node.port }
+      .getOrElse(throw new RuntimeException(s"no replica found for victim $victim among ${nodes.map(_.port)}"))
   }
 
   // the replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
@@ -78,32 +59,6 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
   private def awaitReplicated(container: FixedHostPortGenericContainer, replicaPort: Int, expected: Set[String], attempts: Int): CIO[Unit] =
     Eventually.converges(attempts)(() => CIO.blocking(parseKeys(cli(container, replicaPort, "keys", "*")).toSet))(expected.subsetOf)(have =>
       s"victim's replica did not catch up; missing ${(expected -- have).take(5)}"
-    )
-
-  // wait for every node to answer, form the cluster (idempotent across a re-run sharing the container), and wait for it to converge
-  private def formCluster(container: FixedHostPortGenericContainer): CIO[Unit] =
-    awaitPortsUp(container, 60).flatMap { _ =>
-      CIO.blocking(cli(container, victim, "cluster", "info").contains("cluster_state:ok")).flatMap { ok =>
-        if (ok) CIO.value(())
-        else
-          CIO
-            .blocking {
-              val create = Vector("redis-cli", "--cluster", "create") ++ ports.map(p => s"127.0.0.1:$p") ++
-                Vector("--cluster-replicas", "1", "--cluster-yes")
-              exec(container, create*)
-            }
-            .flatMap(_ => awaitClusterOk(container, 60))
-      }
-    }
-
-  private def awaitPortsUp(container: FixedHostPortGenericContainer, attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts, 300.millis)(() => CIO.blocking(ports.forall(p => cli(container, p, "ping").contains("PONG"))))(identity)(_ =>
-      "cluster nodes did not start"
-    )
-
-  private def awaitClusterOk(container: FixedHostPortGenericContainer, attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts, 500.millis)(() => CIO.blocking(cli(container, victim, "cluster", "info").contains("cluster_state:ok")))(identity)(
-      _ => "cluster did not converge"
     )
 
   // `cluster_state:ok` flips before every node will actually serve writes, so a freshly formed cluster can briefly answer CLUSTERDOWN; retry
@@ -148,32 +103,12 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
 
   private def masterId(container: FixedHostPortGenericContainer, port: Int): String = cli(container, port, "cluster", "myid").trim
 
-  // queried via the victim, so its own line carries the `myself` flag
-  private def clusterNodeLines(container: FixedHostPortGenericContainer): Vector[Array[String]] =
-    parseKeys(cli(container, victim, "cluster", "nodes")).map(_.split("\\s+"))
-
   private def masterPortsExcludingVictim(container: FixedHostPortGenericContainer): Vector[Int] =
-    clusterNodeLines(container)
-      .filter(f => f.length > 2 && f(2).contains("master"))
-      .map(f => f(1).split("@")(0).split(":")(1).toInt)
-      .filter(_ != victim)
+    clusterNodes(container, victim).filter(_.isMaster).map(_.port).filter(_ != victim)
 
-  // slot tokens are `start-end` or a single slot; `[...]` migration markers are not owned slots
-  private def slotCount(fields: Array[String]): Int =
-    fields
-      .drop(8)
-      .filterNot(_.startsWith("["))
-      .map { token =>
-        val parts = token.split("-")
-        if (parts.length == 2) parts(1).toInt - parts(0).toInt + 1 else 1
-      }
-      .sum
-
+  // queried on the node itself, so its own line carries the `myself` flag
   private def ownSlotCount(container: FixedHostPortGenericContainer, port: Int): Int =
-    parseKeys(cli(container, port, "cluster", "nodes"))
-      .map(_.split("\\s+"))
-      .collectFirst { case f if f.length > 2 && f(2).contains("myself") => slotCount(f) }
-      .getOrElse(0)
+    clusterNodes(container, port).collectFirst { case node if node.isMyself => node.ownedSlotCount }.getOrElse(0)
 
   private def reshard(container: FixedHostPortGenericContainer, fromId: String, toId: String, slots: Int): String =
     exec(

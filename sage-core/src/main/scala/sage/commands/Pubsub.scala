@@ -20,19 +20,31 @@ private[sage] object Pubsub {
     Command("SPUBLISH", Command.FirstKey, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 
   def pubsubChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
+    introspect(Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, Merge.distinctChannels)
 
   def pubsubShardChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings)
+    introspect(Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, Merge.distinctChannels)
 
   def pubsubNumSub(channels: String*): Command[Map[String, Long]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
+    introspect(Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, Merge.sumByChannel)
 
   def pubsubShardNumSub(channels: String*): Command[Map[String, Long]] =
-    Command("PUBSUB", Command.NoKeys, Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub)
+    introspect(Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, Merge.sumByChannel)
 
   val pubsubNumPat: Command[Long] =
-    Command("PUBSUB", Command.NoKeys, Vector(Bytes.utf8("NUMPAT")), Decode.long)
+    introspect(Vector(Bytes.utf8("NUMPAT")), Decode.long, Merge.sum)
+
+  /**
+    * A `PUBSUB` introspection form. A node answers only for the subscribers attached to it, so one master's reply describes one master, and
+    * a cluster must sweep every slot-owning master and merge. The sweep reaches masters only, so a subscriber attached to a replica is not
+    * counted; Sage pins its own subscription connections to a master, so this shows up only for subscribers created outside Sage.
+    */
+  private def introspect[Out](
+    args: Vector[Bytes],
+    decode: Frame => Either[DecodeError, Out],
+    merge: (Frame, Frame) => Frame
+  ): Command[Out] =
+    Command("PUBSUB", Command.NoKeys, args, decode, allMasters = true, broadcast = BroadcastReduce.Fold(merge))
 
   def subscribe(channels: Vector[String]): Bytes    = RespWriter.writeCommand("SUBSCRIBE", channels.map(Bytes.utf8))
   def unsubscribe(channels: Vector[String]): Bytes  = RespWriter.writeCommand("UNSUBSCRIBE", channels.map(Bytes.utf8))
@@ -130,21 +142,9 @@ private[sage] object Pubsub {
       case other                 => Left(DecodeError("array", Frame.describe(other)))
     }
 
-  // NUMSUB replies a flat [channel, count, channel, count, …] array
   private def decodeNumSub(frame: Frame): Either[DecodeError, Map[String, Long]] =
-    frame match {
-      case Frame.Array(elements) if elements.length % 2 == 0 =>
-        val builder = Map.newBuilder[String, Long]
-        builder.sizeHint(elements.length / 2)
-        var i       = 0
-        while (i < elements.length) {
-          (elements(i), elements(i + 1)) match {
-            case (Frame.BulkString(ch), Frame.Integer(count)) => builder += ch.asUtf8String -> count
-            case (a, b)                                       => return Left(DecodeError("channel/count pair", s"${Frame.describe(a)}, ${Frame.describe(b)}"))
-          }
-          i += 2
-        }
-        Right(builder.result())
-      case other => Left(DecodeError("array of channel/count pairs", Frame.describe(other)))
-    }
+    Merge
+      .channelCounts(frame)
+      .map(_.iterator.map { case (channel, count) => channel.value.asUtf8String -> count }.toMap)
+      .toRight(DecodeError("array of channel/count pairs", Frame.describe(frame)))
 }

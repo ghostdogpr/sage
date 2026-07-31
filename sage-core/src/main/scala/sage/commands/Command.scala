@@ -34,9 +34,10 @@ enum BroadcastReduce {
   * change. Time-varying reads (`TTL`, `OBJECT IDLETIME`) and non-deterministic ones (`SRANDMEMBER`) are read-only but **not** cacheable —
   * they change with no key write, so no invalidation would ever fire. Both are intrinsic metadata set by the builders.
   *
-  * `allMasters` marks a keyless command whose effect is per-node and not replicated across shards, so a cluster must run it on every
-  * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, and `FLUSHALL`/
-  * `FLUSHDB`). Inert on a standalone server.
+  * `allMasters` marks a keyless command whose effect or answer is per-node and not shared across shards, so a cluster must run it on every
+  * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, `FLUSHALL`/`FLUSHDB`,
+  * `MEMORY PURGE`, and the `PUBSUB` introspection forms, which report only the subscribers attached to the node answering). Inert on a
+  * standalone server.
   *
   * `cursorBound` marks a command whose reply carries a continuation cursor valid only on the node that issued it (`SCAN`/`HSCAN`/`SSCAN`/
   * `ZSCAN`). Such a read is excluded from replica round-robin routing: iterating its pages across different replicas would feed a cursor to
@@ -44,8 +45,8 @@ enum BroadcastReduce {
   *
   * `broadcast` chooses how an `allMasters` command's per-node replies fold into one: `First` keeps one node's identical acknowledgement,
   * `Concat` appends each node's array slice (`KEYS`, since no single node sees the whole keyspace), `Fold` reduces pairwise (a durability
-  * barrier down to its weakest shard). The broadcast always targets masters regardless of the `ReadFrom` policy (a single replica would only
-  * see one shard's slice). Inert on a standalone server.
+  * barrier down to its weakest shard, a per-channel subscriber sum, a channel list appended and deduplicated). The broadcast always targets
+  * masters regardless of the `ReadFrom` policy (a single replica would only see one shard's slice). Inert on a standalone server.
   *
   * `requiresClusterWideTxResult` marks a command whose result is correct only when aggregated across every master, so a cluster `MULTI`/
   * `EXEC` — pinned to a single node — cannot produce it and rejects it before the wire. Only `DBSIZE` sets it: its contract is the cluster-wide

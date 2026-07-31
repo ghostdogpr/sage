@@ -140,13 +140,6 @@ private[sage] object Server {
   def info(sections: String*): Command[String] =
     Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text)
 
-  private val dbSizeSum: (Frame, Frame) => Frame = (a, b) =>
-    (a, b) match {
-      case (Frame.Integer(x), Frame.Integer(y)) => Frame.Integer(math.addExact(x, y))
-      case (Frame.Integer(_), bad)              => bad
-      case (bad, _)                             => bad
-    }
-
   val dbSize: Command[Long] =
     Command(
       "DBSIZE",
@@ -154,7 +147,7 @@ private[sage] object Server {
       Vector.empty,
       Decode.long,
       allMasters = true,
-      broadcast = BroadcastReduce.Fold(dbSizeSum),
+      broadcast = BroadcastReduce.Fold(Merge.sum),
       requiresClusterWideTxResult = true
     )
 
@@ -206,13 +199,6 @@ private[sage] object Server {
   def flushDb(mode: Option[FlushMode] = None): Command[Unit]  =
     Command("FLUSHDB", Command.NoKeys, FlushMode.args(mode), Decode.ok, allMasters = true)
 
-  private val waitMinReplicas: (Frame, Frame) => Frame = (a, b) =>
-    (a, b) match {
-      case (Frame.Integer(x), Frame.Integer(y)) => Frame.Integer(math.min(x, y))
-      case (Frame.Integer(_), bad)              => bad
-      case (bad, _)                             => bad
-    }
-
   private val waitAofMin: (Frame, Frame) => Frame = (a, b) =>
     (a, b) match {
       case (Frame.Array(Vector(Frame.Integer(l1), Frame.Integer(r1))), Frame.Array(Vector(Frame.Integer(l2), Frame.Integer(r2)))) =>
@@ -233,7 +219,7 @@ private[sage] object Server {
       Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(waitTimeoutMillis(timeout).toString)),
       Decode.long,
       allMasters = true,
-      broadcast = BroadcastReduce.Fold(waitMinReplicas)
+      broadcast = BroadcastReduce.Fold(Merge.min)
     )
 
   def waitAof(numLocal: Long, numReplicas: Long, timeout: FiniteDuration): Command[(Long, Long)] =
@@ -257,7 +243,7 @@ private[sage] object Server {
       Decode.optionalLong
     )
 
-  val memoryPurge: Command[Unit] = Command("MEMORY", Command.NoKeys, Vector(Purge), Decode.ok)
+  val memoryPurge: Command[Unit] = Command("MEMORY", Command.NoKeys, Vector(Purge), Decode.ok, allMasters = true)
 
   def slowLogGet(count: Option[Long] = None): Command[Vector[SlowLogEntry]] =
     Command("SLOWLOG", Command.NoKeys, Get +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeSlowLog))
