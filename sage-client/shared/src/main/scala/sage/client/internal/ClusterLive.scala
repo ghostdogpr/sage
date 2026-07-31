@@ -1109,6 +1109,7 @@ final private[client] class ClusterLive(
         topologyRef.get().nodeForSlot(slot)
       }
 
+    // transaction pinning depends on the key slot, not its current owner, so both owned and unowned routes retain the classified slot
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       topologyRef.get().route(command) match {
         case Route.Malformed        => Left(malformedKeys(command.name))

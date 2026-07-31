@@ -58,7 +58,7 @@ final private[client] class ClusterSubscriptions(
 
   private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
 
-  // single-flight (one running, at most one queued): a mid-pass trigger queues one follow-up rather than racing a concurrent pass
+  // single-flight under the outer lock: a mid-pass trigger queues one follow-up rather than racing a pass that could corrupt placement
   final private class CoalescedPass(body: () => Unit) {
     private var running = false
     private var queued  = false
@@ -77,19 +77,20 @@ final private[client] class ClusterSubscriptions(
       if (go) offload(run())
     }
 
-    private def run(): Unit = {
-      body()
-      val again = locked {
-        if (!closed && queued) {
-          queued = false
-          true
-        } else {
-          running = false
-          false
+    private def run(): Unit =
+      try body()
+      finally {
+        val again = locked {
+          if (!closed && queued) {
+            queued = false
+            true
+          } else {
+            running = false
+            false
+          }
         }
+        if (again) offload(run())
       }
-      if (again) offload(run())
-    }
   }
 
   // refresh first: the failed master may be gone, so the re-home target must come from the current topology

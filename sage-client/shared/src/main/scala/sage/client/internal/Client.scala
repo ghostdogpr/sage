@@ -2300,7 +2300,8 @@ object Client {
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
-  // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
+  // acquire a fresh lease per execution so interruption can release the pool slot; a lease is single-shot (cancel is terminal), so a
+  // captured one would make a re-run of this value hang
   private[internal] def withLeaseIfBlocking[A](command: Command[?])(body: DedicatedPool.Lease => CIO[A]): CIO[A] =
     command.execution match {
       case Execution.Ordinary => body(null)
