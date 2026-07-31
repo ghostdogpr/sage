@@ -336,43 +336,72 @@ final private[client] class MasterReplicaLive(
         val useReplica = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
         val master     = masterNodeRef.get()
         if (useReplica) {
-          val collector                                                        = new TxSupport.IndexedCollector[Either[SageException, Any]](p.commands.length, complete)
-          val tracked                                                          = Vector.tabulate(p.commands.length) { i =>
-            val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
-            Events.trackCommand[Any](events, p.commands(i), result => collector.set(i, TxSupport.toEither(result)), span)
-          }
-          def failUnsent(): Unit                                               = {
+          val batch                                              = Client.trackBatch(events, p.commands, spans, complete)
+          def failUnsent(): Unit                                 = {
             // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
             triggerRefresh()
-            Client.failUnsentBatch(events, p.commands, tracked, complete)
+            batch.failUnsent()
           }
-          def submitOn(picked: Option[(Node, NodeClient, Vector[Node])]): Unit =
+          def submitOn(picked: Option[ReadRouting.Picked]): Unit =
             picked match {
-              case Some((node, nc, rest)) =>
-                val callbacks = Vector.tabulate(p.commands.length) { i => (result: Try[Any]) =>
-                  result match {
-                    case Success(_)     =>
-                      Events.attributeNode(tracked(i), node)
-                      tracked(i)(result)
-                    // deciding whether the Node can serve this read may establish the fallback and must stay off the reply thread
-                    case Failure(error) =>
-                      scheduler.offload(onReadFault(node, node == master, error, p.commands(i), rest, master, tracked(i)))
+              case Some(ReadRouting.Picked(node, nc, rest)) =>
+                val attempt   = new TxSupport.IndexedCollector[Try[Any]](
+                  p.commands.length,
+                  {
+                    case Success(results) =>
+                      if (
+                        results.exists {
+                          case Failure(error) => servesNoRead(error)
+                          case _              => false
+                        }
+                      )
+                        // candidate selection may establish a connection and must stay off the reply thread
+                        scheduler.offload {
+                          if (rest.nonEmpty) reads.pickOne(rest, master)(submitOn)
+                          else {
+                            triggerRefresh()
+                            batch.settleAll(node, results)
+                          }
+                        }
+                      else {
+                        if (
+                          node == master && results.exists {
+                            case Failure(error) => isOwnershipFault(error)
+                            case _              => false
+                          }
+                        )
+                          triggerRefresh()
+                        batch.settleAll(node, results)
+                      }
+                    case Failure(error)   => complete(Failure(error)) // IndexedCollector cannot produce this
                   }
-                }
-                // the liveness race lost before anything reached the wire: retain batching while trying the remaining candidates
+                )
+                val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => attempt.set(i, result))
+                // the selected connection died before reserving the batch; retry the whole batch on the remaining candidates
                 if (!nc.submitAll(p.commands, callbacks))
-                  if (rest.nonEmpty) reads.pickOneWithRest(rest, master)(submitOn)
+                  if (rest.nonEmpty) reads.pickOne(rest, master)(submitOn)
                   else failUnsent()
-              case None                   => failUnsent()
+              case None                                     => failUnsent()
             }
-          reads.pickOneWithRest(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
+          reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
         } else {
           def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
             val submit = picked match {
               case Some((_, nc)) => nc.submitAll
               case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
             }
-            Client.submitBatchOnOne(events, p.commands, spans, submit, complete, picked.map(_._1))
+            Client.submitBatchOnOne(
+              events,
+              p.commands,
+              spans,
+              (commands, callbacks) => {
+                val accepted = submit(commands, callbacks)
+                if (!accepted) triggerRefresh()
+                accepted
+              },
+              complete,
+              picked.map(_._1)
+            )
           }
           val existing                                           = masterPool.existing(master)
           if (existing != null) submitOn(Some((master, existing)))

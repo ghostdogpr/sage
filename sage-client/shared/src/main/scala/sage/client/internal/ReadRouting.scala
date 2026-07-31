@@ -16,6 +16,8 @@ import sage.commands.Command
   */
 private[client] object ReadRouting {
 
+  final case class Picked(node: Node, client: NodeClient, remaining: Vector[Node])
+
   // an ordinary (non-blocking) read; writes, blocking reads, cursor-bound scans (whose cursor is node-local), and `cached` reads (gated
   // separately) never reach here
   def replicaEligible(command: Command[?]): Boolean = command.isReadOnly && !command.isBlocking && !command.cursorBound
@@ -103,31 +105,23 @@ final private[client] class ReadRouting(
     }
 
   /**
-    * The one Node a batch of reads should land on with its connection, established if need be, or `None` when no candidate can serve the
-    * read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
+    * The one Node a batch of reads should land on with its connection and the candidates after it, established if need be, or `None` when no
+    * candidate can serve the read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
     */
-  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient)] => Unit): Unit =
-    pickOneWithRest(candidates, master)(picked => onPick(picked.map { case (node, nc, _) => (node, nc) }))
-
-  /**
-    * As [[pickOne]], retaining the candidates after the selected Node so a failed read batch can fall through without reconsidering the Node
-    * that just refused it.
-    */
-  def pickOneWithRest(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient, Vector[Node])] => Unit): Unit = {
-    val it = candidates.iterator
-    var i  = 0
-    while (it.hasNext) {
-      val node = it.next()
+  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit = {
+    var remaining = candidates
+    while (remaining.nonEmpty) {
+      val node = remaining.head
       val nc   = poolFor(node, master).existing(node)
       if (nc == null) {
         scheduler.offload(onPick(establishOneWithRest(candidates, master)))
         return
       }
       if (nc.isLive) {
-        onPick(Some((node, nc, candidates.drop(i + 1))))
+        onPick(Some(ReadRouting.Picked(node, nc, remaining.tail)))
         return
       }
-      i += 1
+      remaining = remaining.tail
     }
     onPick(None)
   }
@@ -146,14 +140,13 @@ final private[client] class ReadRouting(
       }
     )
 
-  private def establishOneWithRest(candidates: Vector[Node], master: Node): Option[(Node, NodeClient, Vector[Node])] = {
-    val it = candidates.iterator
-    var i  = 0
-    while (it.hasNext) {
-      val node = it.next()
+  private def establishOneWithRest(candidates: Vector[Node], master: Node): Option[ReadRouting.Picked] = {
+    var remaining = candidates
+    while (remaining.nonEmpty) {
+      val node = remaining.head
       val nc   = poolFor(node, master).getOrEstablishOrNull(node)
-      if (nc != null && nc.isLive) return Some((node, nc, candidates.drop(i + 1)))
-      i += 1
+      if (nc != null && nc.isLive) return Some(ReadRouting.Picked(node, nc, remaining.tail))
+      remaining = remaining.tail
     }
     None
   }

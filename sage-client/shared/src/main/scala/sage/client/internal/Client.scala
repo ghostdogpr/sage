@@ -2315,6 +2315,47 @@ object Client {
       cb(result)
     }
 
+  final private[internal] class TrackedBatch(
+    events: Events,
+    commands: Vector[Command[?]],
+    spans: Vector[CommandSpan],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit
+  ) {
+    private val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
+    private val tracked   = Vector.tabulate(commands.length) { i =>
+      val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
+      Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
+    }
+
+    def callbacks(node: Option[Node]): Vector[Try[Any] => Unit] =
+      node match {
+        case Some(n) => tracked.map(attributeOnComplete(_, n))
+        case None    => tracked
+      }
+
+    def settleAll(node: Node, results: Vector[Try[Any]]): Unit =
+      results.indices.foreach { i =>
+        Events.attributeNode(tracked(i), node)
+        tracked(i)(results(i))
+      }
+
+    def failUnsent(): Unit = {
+      val error = NotConnected()
+      tracked.foreach(Events.abandonSpan(_, error))
+      if (events.emitsEvents)
+        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
+      complete(Failure(error))
+    }
+  }
+
+  private[internal] def trackBatch(
+    events: Events,
+    commands: Vector[Command[?]],
+    spans: Vector[CommandSpan],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit
+  ): TrackedBatch =
+    new TrackedBatch(events, commands, spans, complete)
+
   // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
   private[internal] def submitBatchOnOne(
@@ -2325,29 +2366,8 @@ object Client {
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
     node: Option[Node] = None
   ): Unit = {
-    val collector = new TxSupport.IndexedCollector[Either[SageException, Any]](commands.length, complete)
-    val tracked   = Vector.tabulate(commands.length) { i =>
-      val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
-      Events.trackCommand[Any](events, commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
-    }
-    val callbacks = node match {
-      case Some(n) => tracked.map(attributeOnComplete(_, n))
-      case None    => tracked
-    }
-    if (!submitAll(commands, callbacks)) failUnsentBatch(events, commands, tracked, complete)
-  }
-
-  private[internal] def failUnsentBatch(
-    events: Events,
-    commands: Vector[Command[?]],
-    tracked: Vector[Try[Any] => Unit],
-    complete: Try[Vector[Either[SageException, Any]]] => Unit
-  ): Unit = {
-    val error = NotConnected()
-    tracked.foreach(Events.abandonSpan(_, error))
-    if (events.emitsEvents)
-      commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
-    complete(Failure(error))
+    val batch = trackBatch(events, commands, spans, complete)
+    if (!submitAll(commands, batch.callbacks(node))) batch.failUnsent()
   }
 
   /**

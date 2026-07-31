@@ -796,8 +796,8 @@ final private[client] class ClusterLive(
     if (useReplica) {
       val replicas = topologyRef.get().shards.collectFirst { case s if s.master == node => s.replicas }.getOrElse(Vector.empty)
       reads.pickOne(reads.candidatesFor(node, replicas), node) {
-        case Some((target, nc)) => submitBatch(target, nc, indices, p, emits, reroute, useReplica)
-        case None               => indices.foreach(reroute)
+        case Some(picked) => submitBatch(picked.node, picked.client, indices, p, emits, reroute, useReplica)
+        case None         => indices.foreach(reroute)
       }
     } else {
       val existing = masterPool.existing(node)

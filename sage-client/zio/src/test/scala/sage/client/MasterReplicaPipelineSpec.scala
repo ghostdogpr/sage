@@ -1,6 +1,7 @@
 package sage.client
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
+import java.util.concurrent.atomic.AtomicReference
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
@@ -19,27 +20,34 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
 
   private given ExecutionContext = munitExecutionContext
 
-  private val master  = Node("master-host", 7000)
-  private val replica = Node("replica-host", 7001)
-
-  private val roleReply: Frame = Replies.masterRole(replica)
+  private val master   = Node("master-host", 7000)
+  private val replica  = Node("replica-host", 7001)
+  private val replica2 = Node("replica2-host", 7002)
 
   // one reply per command occurrence in a batch; only the master answers ROLE; other bootstrap commands each get a single OK
   private def respondFor(
     node: Node,
-    readFailure: Option[(Node, Frame)],
-    readsByNode: ConcurrentLinkedQueue[Node]
+    role: Frame,
+    readFailure: AtomicReference[Option[(Node, Frame)]],
+    readsByNode: ConcurrentLinkedQueue[Node],
+    readBatches: ConcurrentLinkedQueue[(Node, Int)],
+    disconnectOnRead: Option[Node],
+    disconnect: () => Unit
   ): Bytes => Seq[Frame] = payload => {
     val s = payload.asUtf8String
     if (s.contains("HELLO")) Seq(Replies.hello)
-    else if (s.contains("ROLE")) if (node == master) Seq(roleReply) else Nil
+    else if (s.contains("ROLE")) if (node == master) Seq(role) else Nil
     else {
       val reads  = occurrences(s, "PREAD")
       val writes = occurrences(s, "PWRITE")
       (0 until reads).foreach(_ => readsByNode.add(node))
-      if (reads + writes == 0) Seq(ok)
+      if (reads > 0) { readBatches.add(node -> reads): Unit }
+      if (reads > 0 && disconnectOnRead.contains(node)) {
+        disconnect()
+        Seq.empty
+      } else if (reads + writes == 0) Seq(ok)
       else
-        Seq.fill(reads)(readFailure.collect { case (`node`, failure) => failure }.getOrElse(ok)) ++ Seq.fill(writes)(ok)
+        Seq.fill(reads)(readFailure.get().collect { case (`node`, failure) => failure }.getOrElse(ok)) ++ Seq.fill(writes)(ok)
     }
   }
 
@@ -70,16 +78,24 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     completions: ConcurrentLinkedQueue[SageEvent.CommandCompleted],
     tracer: RoutingTracer,
     latch: CountDownLatch,
-    readsByNode: ConcurrentLinkedQueue[Node]
+    readsByNode: ConcurrentLinkedQueue[Node],
+    readBatches: ConcurrentLinkedQueue[(Node, Int)],
+    readFailure: AtomicReference[Option[(Node, Frame)]]
   )
 
   private def build(
     readFrom: ReadFrom,
     scheduler: Scheduler = Scheduler.real,
-    readFailure: Option[(Node, Frame)] = None
+    readFailure: Option[(Node, Frame)] = None,
+    disconnectOnRead: Option[Node] = None,
+    includeSecondReplica: Boolean = false
   ): Fixture = {
     val completions                                             = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
     val readsByNode                                             = new ConcurrentLinkedQueue[Node]()
+    val readBatches                                             = new ConcurrentLinkedQueue[(Node, Int)]()
+    val readFailureRef                                          = new AtomicReference(readFailure)
+    val replicas                                                = if (includeSecondReplica) Vector(replica, replica2) else Vector(replica)
+    val role                                                    = Replies.masterRole(replicas*)
     val latch                                                   = new CountDownLatch(2)
     val listener                                                = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
@@ -91,7 +107,16 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     }
     val tracer                                                  = new RoutingTracer
     val factory: Node => MultiplexedConnection.TransportFactory =
-      node => (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, respondFor(node, readFailure, readsByNode))
+      node =>
+        (onFrame, onClosed) => {
+          var transport: FakeTransport = null
+          transport = new FakeTransport(
+            onFrame,
+            onClosed,
+            respondFor(node, role, readFailureRef, readsByNode, readBatches, disconnectOnRead, () => transport.close())
+          )
+          transport
+        }
     val live                                                    =
       new MasterReplicaLive(
         factory,
@@ -103,7 +128,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         Events(Vector(listener), Some(tracer))
       )
     live.bootstrapRoles()
-    Fixture(live, completions, tracer, latch, readsByNode)
+    Fixture(live, completions, tracer, latch, readsByNode, readBatches, readFailureRef)
   }
 
   test("a command to the established master dispatches inline, with no zero-delay scheduler hop") {
@@ -173,6 +198,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       .map { _ =>
         assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
         assertEquals(f.readsByNode.asScala.toVector, Vector(replica, replica, master, master))
+        assertEquals(f.readBatches.asScala.toVector, Vector(replica -> 2, master -> 2))
         assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(master), Some(master)))
         f.live.close.unsafeRun
       }
@@ -195,6 +221,20 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       }
   }
 
+  test("a terminal pipeline error settles without a scheduler hop") {
+    val counting = new CountingScheduler
+    val f        = build(ReadFrom.ReplicaPreferred, scheduler = counting)
+    f.live.pipeline(Seq(readCmd, readCmd)).unsafeRun.flatMap { _ =>
+      f.readFailure.set(Some(replica -> Frame.SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value")))
+      val before = counting.zeroDelays.get()
+      f.live.pipelineAttempt(Seq(readCmd, readCmd)).unsafeRun.map { results =>
+        assert(results.forall(_.isLeft), s"expected terminal command errors, got $results")
+        assertEquals(counting.zeroDelays.get(), before, "a terminal server reply must settle without a scheduler hop")
+        f.live.close.unsafeRun
+      }
+    }
+  }
+
   test("a MasterPreferred read-only pipeline falls back when the master cannot serve reads") {
     val f = build(
       ReadFrom.MasterPreferred,
@@ -206,7 +246,40 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       .map { _ =>
         assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
         assertEquals(f.readsByNode.asScala.toVector, Vector(master, master, replica, replica))
+        assertEquals(f.readBatches.asScala.toVector, Vector(master -> 2, replica -> 2))
         assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(replica), Some(replica)))
+        f.live.close.unsafeRun
+      }
+  }
+
+  test("a ReplicaPreferred read-only pipeline falls back when the replica disconnects after submission") {
+    val f = build(ReadFrom.ReplicaPreferred, disconnectOnRead = Some(replica))
+    f.live
+      .pipeline(Seq(readCmd, readCmd))
+      .unsafeRun
+      .map { _ =>
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        assertEquals(f.readsByNode.asScala.toVector, Vector(replica, replica, master, master))
+        assertEquals(f.readBatches.asScala.toVector, Vector(replica -> 2, master -> 2))
+        assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(master), Some(master)))
+        f.live.close.unsafeRun
+      }
+  }
+
+  test("a strict Replica read-only pipeline falls through to the next replica as one batch") {
+    val f = build(
+      ReadFrom.Replica,
+      readFailure = Some(replica -> Frame.SimpleError("MASTERDOWN Link with MASTER is down")),
+      includeSecondReplica = true
+    )
+    f.live
+      .pipeline(Seq(readCmd, readCmd))
+      .unsafeRun
+      .map { _ =>
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        assertEquals(f.readsByNode.asScala.toVector, Vector(replica, replica, replica2, replica2))
+        assertEquals(f.readBatches.asScala.toVector, Vector(replica -> 2, replica2 -> 2))
+        assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(replica2), Some(replica2)))
         f.live.close.unsafeRun
       }
   }

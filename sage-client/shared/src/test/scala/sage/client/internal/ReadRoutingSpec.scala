@@ -5,6 +5,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 import scala.util.{Success, Try}
 
 import sage.Bytes
@@ -75,7 +76,11 @@ class ReadRoutingSpec extends munit.FunSuite {
     private def respond(node: Node)(payload: Bytes): Seq[Frame]         =
       if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello)
       else if (refusing(node)) Seq(Frame.SimpleError("LOADING the dataset is loading"))
-      else Seq(Frame.SimpleString("PONG"))
+      else {
+        val text  = payload.asUtf8String
+        val pings = text.sliding("PING".length).count(_ == "PING")
+        Seq.fill(math.max(1, pings))(Frame.SimpleString("PONG"))
+      }
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) =>
         if (unreachable(node)) throw new IOException(s"unreachable $node")
@@ -102,6 +107,7 @@ class ReadRoutingSpec extends munit.FunSuite {
     def establish(node: Node): Unit                                     = replicaPool.getOrEstablish(node): Unit
     def kill(node: Node): Unit                                          = transports.get(node).close()
     def wrote(node: Node): Boolean                                      = transports.get(node).written.exists(_.asUtf8String.contains("PING"))
+    def written(node: Node): Vector[String]                             = transports.get(node).written.map(_.asUtf8String)
     def close(): Unit                                                   = {
       masterPool.close()
       replicaPool.close()
@@ -168,9 +174,9 @@ class ReadRoutingSpec extends munit.FunSuite {
   test("pickOne answers the first live candidate, without offloading") {
     val fixture = new Fixture()
     fixture.establish(r1)
-    val picked  = new AtomicReference[Option[(Node, NodeClient)]]()
+    val picked  = new AtomicReference[Option[ReadRouting.Picked]]()
     fixture.reads.pickOne(Vector(r1), m)(picked.set)
-    assertEquals(picked.get(), Some((r1, fixture.replicaPool.existing(r1))))
+    assertEquals(picked.get(), Some(ReadRouting.Picked(r1, fixture.replicaPool.existing(r1), Vector.empty)))
     fixture.close()
   }
 
@@ -178,15 +184,42 @@ class ReadRoutingSpec extends munit.FunSuite {
     val fixture = new Fixture()
     fixture.establish(r1)
     fixture.kill(r1)
-    val picked  = new AtomicReference[Option[(Node, NodeClient)]]()
+    val picked  = new AtomicReference[Option[ReadRouting.Picked]]()
     fixture.reads.pickOne(Vector(r1), m)(picked.set)
     assertEquals(picked.get(), None)
     fixture.close()
   }
 
+  test("pickOne retries an unsent batch on the remaining candidate as one batch") {
+    val fixture   = new Fixture()
+    fixture.establish(r1)
+    fixture.establish(r2)
+    val results   = new java.util.concurrent.ConcurrentLinkedQueue[Try[Any]]()
+    val commands  = Vector(ping, ping)
+    val callbacks = Vector.fill(commands.length)((result: Try[Any]) => results.add(result): Unit)
+
+    def submitOn(picked: Option[ReadRouting.Picked]): Unit =
+      picked match {
+        case Some(ReadRouting.Picked(node, client, remaining)) =>
+          if (node == r1) fixture.kill(r1) // selected while live, disconnected before submitAll reserves the generation
+          if (!client.submitAll(commands, callbacks))
+            fixture.reads.pickOne(remaining, m)(submitOn)
+        case None                                              => fail("the remaining live candidate should accept the batch")
+      }
+
+    fixture.reads.pickOne(Vector(r1, r2), m)(submitOn)
+
+    assertEquals(results.size(), commands.length)
+    assert(results.asScala.forall(_.isSuccess))
+    val fallbackWrites = fixture.written(r2).filter(_.contains("PING"))
+    assertEquals(fallbackWrites.length, 1, "the retry must remain one transport batch")
+    assertEquals(fallbackWrites.head.sliding("PING".length).count(_ == "PING"), commands.length)
+    fixture.close()
+  }
+
   test("pickOne offloads to establish, then answers None when no candidate can be reached") {
     val fixture = new Fixture(unreachable = Set(r1, r2))
-    val picked  = new AtomicReference[Option[(Node, NodeClient)]]()
+    val picked  = new AtomicReference[Option[ReadRouting.Picked]]()
     fixture.reads.pickOne(Vector(r1, r2), m)(picked.set)
     assertEquals(picked.get(), null, "establishing must not run on the caller's thread")
     fixture.scheduler.advance(Duration.Zero)
