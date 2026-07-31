@@ -3,8 +3,14 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class StringsSpec extends munit.FunSuite {
+
+  test("GET decodes a present value as Some and a missing key as None") {
+    assertEquals(Reply.run(Strings.get[String, String]("k"), bulk("v")), Right(Some("v")))
+    assertEquals(Reply.run(Strings.get[String, String]("k"), Frame.Null), Right(None))
+  }
 
   test("SET decodes +OK as true and null as false") {
     assertEquals(Reply.run(Strings.set("k", "v"), Frame.SimpleString("OK")), Right(true))
@@ -21,17 +27,17 @@ class StringsSpec extends munit.FunSuite {
   }
 
   test("setGet decodes the previous value and null when the key was absent") {
-    assertEquals(Reply.run(Strings.setGet("k", "v"), Frame.BulkString(Bytes.utf8("old"))), Right(Some("old")))
+    assertEquals(Reply.run(Strings.setGet("k", "v"), bulk("old")), Right(Some("old")))
     assertEquals(Reply.run(Strings.setGet[String, String]("k", "v"), Frame.Null), Right(None))
   }
 
   test("MGET decodes positionally with None for missing keys") {
-    val reply = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("1")), Frame.Null, Frame.BulkString(Bytes.utf8("3"))))
+    val reply = Frame.Array(Vector(bulk("1"), Frame.Null, bulk("3")))
     assertEquals(Reply.run(Strings.mGet[String, String]("a", "b", "c"), reply), Right(Vector(Some("1"), None, Some("3"))))
   }
 
   test("MGET propagates an element decode failure") {
-    val reply = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("1")), Frame.Integer(2)))
+    val reply = Frame.Array(Vector(bulk("1"), Frame.Integer(2)))
     assert(Reply.run(Strings.mGet[String, String]("a", "b"), reply).isLeft)
   }
 
@@ -42,8 +48,8 @@ class StringsSpec extends munit.FunSuite {
   }
 
   test("INCRBYFLOAT decodes the float bulk string reply") {
-    assertEquals(Reply.run(Strings.incrByFloat("k", 0.1), Frame.BulkString(Bytes.utf8("3.0e3"))), Right(3000.0))
-    Reply.run(Strings.incrByFloat("k", 0.1), Frame.BulkString(Bytes.utf8("abc"))) match {
+    assertEquals(Reply.run(Strings.incrByFloat("k", 0.1), bulk("3.0e3")), Right(3000.0))
+    Reply.run(Strings.incrByFloat("k", 0.1), bulk("abc")) match {
       case Left(error: DecodeError) => assertEquals(error.actual, "bulk string 'abc'")
       case other                    => fail(s"expected a DecodeError, got $other")
     }

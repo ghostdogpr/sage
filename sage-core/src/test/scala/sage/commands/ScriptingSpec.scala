@@ -1,19 +1,14 @@
 package sage.commands
 
-import sage.Bytes
 import sage.SageException.DecodeError
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
-class ScriptingSpec extends munit.FunSuite {
-
-  private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
+class ScriptingSpec extends munit.FunSuite with BroadcastFolds {
 
   private def flags(bits: Long*): Frame = Frame.Array(bits.iterator.map(Frame.Integer(_)).toVector)
 
-  private val existsFold: (Frame, Frame) => Frame = {
-    val BroadcastReduce.Fold(combine) = Scripting.scriptExists("x").broadcast: @unchecked
-    combine
-  }
+  private def existsFold: (Frame, Frame) => Frame = fold(Scripting.scriptExists("x"))
 
   test("EVAL returns the raw RESP3 frame untouched") {
     assertEquals(Reply.run(Scripting.eval("return 1"), Frame.Integer(1L)), Right(Frame.Integer(1L)))

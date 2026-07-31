@@ -12,7 +12,7 @@ import sage.SageException.DecodeError
 import sage.client.{Endpoint, MasterReplicaConfig, ReadFrom, SageConfig, Topology}
 import sage.client.internal.Client
 import sage.commands.{Command, Commands}
-import sage.integration.{ContainerClient, Images}
+import sage.integration.{ContainerClient, Eventually, Images}
 import sage.protocol.Frame
 
 /**
@@ -328,11 +328,9 @@ abstract class MasterReplicaStaleReplicaSuite(image: String, serverBinary: Strin
     } yield ()
 
   private def awaitLinkDown(replica: Client[CIO, String], attempts: Int): CIO[Unit] =
-    replica.run(infoReplication).flatMap { info =>
-      if (info.contains("master_link_status:down")) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException(s"replica link never went down: $info"))
-      else CIO.sleep(100.millis).flatMap(_ => awaitLinkDown(replica, attempts - 1))
-    }
+    Eventually.converges(attempts)(() => replica.run(infoReplication))(_.contains("master_link_status:down"))(info =>
+      s"replica link never went down: $info"
+    )
 
   test("a replica answering MASTERDOWN falls through to the master under ReplicaPreferred, and fails a strict Replica read") {
     withContainers { server =>

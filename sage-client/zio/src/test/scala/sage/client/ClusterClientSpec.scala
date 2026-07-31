@@ -8,7 +8,8 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, UnsupportedServer}
-import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, ManualScheduler, MultiplexedConnection, Scheduler}
+import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, ManualScheduler, MultiplexedConnection, Replies, Scheduler}
+import sage.client.internal.Replies.bulk
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
 import sage.protocol.Frame
@@ -21,26 +22,8 @@ class ClusterClientSpec extends munit.FunSuite {
   private val nodeB    = Node("b", 6379)
   private val nodeDead = Node("dead", 6379)
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
-  private def nodeFrame(node: Node): Frame =
-    Frame.Array(Vector(Frame.BulkString(Bytes.utf8(node.host)), Frame.Integer(node.port.toLong), Frame.BulkString(Bytes.utf8(s"${node.host}-id"))))
-
-  private def slotsFrame(ranges: (Node, Int, Int)*): Frame =
-    Frame.Array(ranges.toVector.map { case (node, start, end) =>
-      Frame.Array(Vector(Frame.Integer(start.toLong), Frame.Integer(end.toLong), nodeFrame(node)))
-    })
-
   private def subscribed(kind: String, channel: String): Frame =
-    Frame.Push(Vector(Frame.BulkString(Bytes.utf8(kind)), Frame.BulkString(Bytes.utf8(channel)), Frame.Integer(1)))
+    Frame.Push(Vector(bulk(kind), bulk(channel), Frame.Integer(1)))
 
   /**
     * A cluster of fake per-node transports. `behaviour` scripts each node's reply to a written command (HELLO and CLUSTER SLOTS are
@@ -75,7 +58,7 @@ class ClusterClientSpec extends munit.FunSuite {
         val respond: Bytes => Seq[Frame] = payload => {
           val text = payload.asUtf8String
           if (text.contains("HELLO"))
-            if (unreachable(node) || flakyHello.remove(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(helloReply)
+            if (unreachable(node) || flakyHello.remove(node)) Seq(Frame.SimpleError("ERR node is down")) else Seq(Replies.hello)
           else if (text.contains("TRACKING")) Seq(Frame.SimpleString("OK"))
           else behaviour(node, text)
         }
@@ -139,7 +122,12 @@ class ClusterClientSpec extends munit.FunSuite {
   private def awaitAtLeast(counter: java.util.concurrent.atomic.AtomicInteger, target: Int, clue: String): Unit =
     await(s"$clue (saw ${counter.get()}, wanted $target)")(counter.get() >= target)
 
-  private def wholeClusterOn(node: Node): Frame = slotsFrame((node, 0, Slot.Count - 1))
+  private def wholeClusterOn(node: Node): Frame = Replies.clusterSlots((node, 0, Slot.Count - 1))
+
+  // nodeA owns the lower half of the slot space, nodeB the upper half
+  private val mid: Int = Slot.Count / 2
+
+  private val splitCluster: Frame = Replies.clusterSlots((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))
 
   test("a seed that owns no slots fails the bootstrap rather than adopting an empty topology") {
     val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(Frame.Array(Vector.empty)) else Seq(Frame.Null)
@@ -162,7 +150,7 @@ class ClusterClientSpec extends munit.FunSuite {
       if (text.contains("CLUSTER")) if (emptySlotsAfterRedirect.get) Seq(Frame.Array(Vector.empty)) else Seq(wholeClusterOn(nodeA))
       else if (node == nodeA && emptySlotsAfterRedirect.compareAndSet(false, true))
         Seq(Frame.SimpleError(s"MOVED ${Slot.of(Bytes.utf8("foo")).value} a:6379"))
-      else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      else Seq(bulk(node.host))
     val fixture                 = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.flatMap { result =>
@@ -172,11 +160,9 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("routes a single-key command to the slot's owner") {
-    // nodeA owns the lower half, nodeB the upper half
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
-      else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
+      else Seq(bulk(node.host))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     val key   = "foo"
@@ -193,7 +179,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a cached read routes to the slot's master as [CLIENT CACHING YES, read] and serves a repeat locally") {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8(node.host))) // [CACHING, GET] batch → two replies
+      else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), bulk(node.host)) // [CACHING, GET] batch → two replies
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
 
@@ -213,7 +199,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       // the ASK target receives [ASKING, GET foo] (one payload, two replies); it must not receive CLIENT CACHING YES
-      else if (node == nodeB && text.contains("ASKING")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("v")))
+      else if (node == nodeB && text.contains("ASKING")) Seq(Frame.SimpleString("OK"), bulk("v"))
       else if (text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"ASK $slot b:6379"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
@@ -234,10 +220,10 @@ class ClusterClientSpec extends munit.FunSuite {
     val moved     = new java.util.concurrent.atomic.AtomicBoolean(false)
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) // topology never changes, so only a flush keeps reads fresh
-      else if (node == nodeB && text.contains("GET")) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("fresh")))
+      else if (node == nodeB && text.contains("GET")) Seq(Frame.SimpleString("OK"), bulk("fresh"))
       else if (node == nodeA && text.contains("GET"))
         if (moved.get) Seq(Frame.SimpleString("OK"), Frame.SimpleError("MOVED 0 b:6379"))
-        else Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("stale")))
+        else Seq(Frame.SimpleString("OK"), bulk("stale"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), caching = true)
 
@@ -258,7 +244,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a command to an established node dispatches inline, with no zero-delay scheduler hop") {
     val counting  = new CountingScheduler
     val behaviour =
-      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(bulk(node.host))
     val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
 
     val before = counting.zeroDelays.get()
@@ -272,7 +258,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val counting  = new CountingScheduler
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
+      else Seq(bulk("v1"), bulk("v2"))
     val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
 
     val before = counting.zeroDelays.get()
@@ -284,9 +270,8 @@ class ClusterClientSpec extends munit.FunSuite {
 
   test("a broadcast to established masters dispatches inline, with no zero-delay scheduler hop") {
     val counting  = new CountingScheduler
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("DBSIZE")) Seq(Frame.Integer(if (node == nodeA) 2L else 3L))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
@@ -304,11 +289,11 @@ class ClusterClientSpec extends munit.FunSuite {
     val counting  = new CountingScheduler
     val nodeR     = Node("r", 6379)
     def slots     =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slots)
       else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
-      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
+      else Seq(bulk("v1"), bulk("v2"))
     val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica, scheduler = counting)
 
     val pipe = fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2")))
@@ -322,16 +307,14 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("KEYS broadcasts to every slot-owning master and concatenates the per-node slices") {
-    // nodeA owns the lower half, nodeB the upper half; KEYS is node-local, so each returns only its own keys
-    val mid             = Slot.Count / 2
-    val aKeys           = Vector("a1", "a2")
-    val bKeys           = Vector("b1")
-    def bulk(s: String) = Frame.BulkString(Bytes.utf8(s))
-    val behaviour       = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+    // KEYS is node-local, so each master returns only its own keys
+    val aKeys     = Vector("a1", "a2")
+    val bKeys     = Vector("b1")
+    val behaviour = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("KEYS")) Seq(Frame.Array((if (node == nodeA) aKeys else bKeys).map(bulk)))
       else Seq(Frame.Null)
-    val fixture         = new Fixture(behaviour, Vector(nodeA))
+    val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Keys.keys[String]("*")).unsafeRun.map { result =>
       assertEquals(result.toSet, (aKeys ++ bKeys).toSet)
@@ -341,9 +324,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAIT broadcasts to every slot-owning master and returns the weakest shard's count") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("WAIT")) Seq(Frame.Integer(if (node == nodeA) 2L else 1L))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
@@ -356,9 +338,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAIT fails when any master fails, rather than reporting a partial durability signal") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("WAIT")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.SimpleError("ERR replication offset unavailable"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
@@ -369,10 +350,9 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAIT surfaces a malformed master reply rather than hiding it behind a valid one") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
-      else if (text.contains("WAIT")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.BulkString(Bytes.utf8("nonsense")))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
+      else if (text.contains("WAIT")) Seq(if (node == nodeA) Frame.Integer(2L) else bulk("nonsense"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -382,9 +362,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAIT fails when a master's connection cannot be established, not only on a server error") {
-    val mid       = Slot.Count / 2
     val behaviour = (_: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("WAIT")) Seq(Frame.Integer(2L))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB))
@@ -395,10 +374,9 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast retries a master whose establish failed transiently instead of failing the whole command") {
-    val mid       = Slot.Count / 2
     val behaviour = (_: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
-      else if (text.contains("SCRIPT")) Seq(Frame.BulkString(Bytes.utf8("digest")))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
+      else if (text.contains("SCRIPT")) Seq(bulk("digest"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -410,12 +388,11 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast fails fast rather than chasing a master a refresh no longer lists") {
-    val mid       = Slot.Count / 2
     val owned     = new java.util.concurrent.atomic.AtomicBoolean(true)
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER"))
-        Seq(if (owned.get()) slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)) else wholeClusterOn(nodeA))
-      else if (text.contains("SCRIPT")) Seq(Frame.BulkString(Bytes.utf8("digest")))
+        Seq(if (owned.get()) splitCluster else wholeClusterOn(nodeA))
+      else if (text.contains("SCRIPT")) Seq(bulk("digest"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB))
 
@@ -428,9 +405,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast refreshes the topology when a master answers READONLY") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("FLUSHALL"))
         Seq(if (node == nodeA) Frame.SimpleString("OK") else Frame.SimpleError("READONLY You can't write against a read only replica"))
       else Seq(Frame.Null)
@@ -443,12 +419,11 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("maxRedirects = 0 refuses to retry a broadcast but still adopts a topology, so the next one succeeds") {
-    val mid        = Slot.Count / 2
     val departed   = new java.util.concurrent.atomic.AtomicBoolean(false)
     val behaviour  = (_: Node, text: String) =>
       if (text.contains("CLUSTER"))
-        Seq(if (departed.get()) wholeClusterOn(nodeA) else slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
-      else if (text.contains("SCRIPT")) Seq(Frame.BulkString(Bytes.utf8("digest")))
+        Seq(if (departed.get()) wholeClusterOn(nodeA) else splitCluster)
+      else if (text.contains("SCRIPT")) Seq(bulk("digest"))
       else Seq(Frame.Null)
     val fixture    = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeB), cluster = ClusterConfig(maxRedirects = 0))
     val scriptLoad = Scripting.scriptLoad("return 1")
@@ -470,9 +445,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast fold that throws on a reply arriving after dispatch fails the command rather than hanging the caller") {
-    val mid       = Slot.Count / 2
     val behaviour =
-      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))) else Nil
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitCluster) else Nil
     val fixture   = new Fixture(behaviour, Vector(nodeA))
     val throwing  = Command[Long](
       "WAIT",
@@ -492,9 +466,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAIT fails when a master's connection drops while the barrier is pending, rather than returning partially or hanging") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("WAIT")) if (node == nodeA) Seq(Frame.Integer(2L)) else Nil
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
@@ -506,10 +479,9 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("WAITAOF broadcasts to every slot-owning master and returns component-wise minimums") {
-    val mid                               = Slot.Count / 2
     def pair(local: Long, replicas: Long) = Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas)))
     val behaviour                         = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("WAITAOF")) Seq(if (node == nodeA) pair(2L, 2L) else pair(1L, 3L))
       else Seq(Frame.Null)
     val fixture                           = new Fixture(behaviour, Vector(nodeA))
@@ -522,9 +494,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("DBSIZE broadcasts to every slot-owning master and sums shard counts into the cluster total") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("DBSIZE")) Seq(Frame.Integer(if (node == nodeA) 2L else 3L))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
@@ -537,9 +508,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("DBSIZE fails when any master fails, rather than reporting a partial count") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("DBSIZE")) Seq(if (node == nodeA) Frame.Integer(2L) else Frame.SimpleError("ERR unavailable"))
       else Seq(Frame.Null)
     val fixture   = new Fixture(behaviour, Vector(nodeA))
@@ -550,10 +520,9 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("SCRIPT EXISTS broadcasts to every master and reports a sha present only when every master has it") {
-    val mid                = Slot.Count / 2
     def flags(bits: Long*) = Frame.Array(bits.map(Frame.Integer(_)).toVector)
     val behaviour          = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("SCRIPT")) Seq(if (node == nodeA) flags(1L, 1L) else flags(1L, 0L))
       else Seq(Frame.Null)
     val fixture            = new Fixture(behaviour, Vector(nodeA))
@@ -566,9 +535,8 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("SCRIPT EXISTS fails when any master fails, rather than reporting a partial answer") {
-    val mid       = Slot.Count / 2
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("SCRIPT"))
         Seq(if (node == nodeA) Frame.Array(Vector(Frame.Integer(1L))) else Frame.SimpleError("ERR unavailable"))
       else Seq(Frame.Null)
@@ -580,13 +548,12 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast leg retries a LOADING master on its own node, so one loading node does not fail the command") {
-    val mid       = Slot.Count / 2
     val attempts  = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+      if (text.contains("CLUSTER")) Seq(splitCluster)
       else if (text.contains("SCRIPT"))
         if (node == nodeB && attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
-        else Seq(Frame.BulkString(Bytes.utf8("sha1")))
+        else Seq(bulk("sha1"))
       else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -597,14 +564,13 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a broadcast leg surfaces a CLUSTERDOWN instead of retrying the node that may no longer be a master") {
-    val mid          = Slot.Count / 2
     val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour    = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) {
         clusterCalls.incrementAndGet()
-        Seq(slotsFrame((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1)))
+        Seq(splitCluster)
       } else if (text.contains("SCRIPT"))
-        Seq(if (node == nodeB) Frame.SimpleError("CLUSTERDOWN The cluster is down") else Frame.BulkString(Bytes.utf8("sha1")))
+        Seq(if (node == nodeB) Frame.SimpleError("CLUSTERDOWN The cluster is down") else bulk("sha1"))
       else Seq(Frame.SimpleString("OK"))
     val fixture      = new Fixture(behaviour, Vector(nodeA))
 
@@ -621,12 +587,12 @@ class ClusterClientSpec extends munit.FunSuite {
   test("under ReplicaPreferred a replica answering MASTERDOWN falls through to the master") {
     val nodeR                   = Node("r", 6379)
     def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour               = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slotsWithReplica)
       else if (text.contains("GET"))
         if (node == nodeR) Seq(Frame.SimpleError("MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'"))
-        else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+        else Seq(bulk("from-master"))
       else Seq(Frame.SimpleString("OK"))
     val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred)
 
@@ -641,7 +607,7 @@ class ClusterClientSpec extends munit.FunSuite {
     */
   private def replicaDiesMidRead(readFrom: ReadFrom, replica: Node): Fixture = {
     val slots            =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(replica)))))
+      Replies.clusterShard(nodeA, replica)
     var fixture: Fixture = null
     val behaviour        = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slots)
@@ -649,7 +615,7 @@ class ClusterClientSpec extends munit.FunSuite {
         if (node == replica) {
           fixture.drop(replica)
           Seq.empty
-        } else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+        } else Seq(bulk("from-master"))
       else Seq(Frame.SimpleString("OK"))
     fixture = new Fixture(behaviour, Vector(nodeA), readFrom = readFrom)
     fixture
@@ -678,12 +644,12 @@ class ClusterClientSpec extends munit.FunSuite {
   test("under a strict Replica policy a replica answering MASTERDOWN fails the read rather than reaching the master") {
     val nodeR                   = Node("r", 6379)
     def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour               = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slotsWithReplica)
       else if (text.contains("GET"))
         if (node == nodeR) Seq(Frame.SimpleError("MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'"))
-        else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+        else Seq(bulk("from-master"))
       else Seq(Frame.SimpleString("OK"))
     val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
 
@@ -697,11 +663,11 @@ class ClusterClientSpec extends munit.FunSuite {
     val nodeR                   = Node("r", 6379)
     // CLUSTER SLOTS lists nodeR as nodeA's replica for the whole keyspace
     def slotsWithReplica: Frame =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour               = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slotsWithReplica)
       else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
-      else Seq(Frame.BulkString(Bytes.utf8(if (node == nodeR) "from-replica" else "from-master")))
+      else Seq(bulk(if (node == nodeR) "from-replica" else "from-master"))
     val fixture                 = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
@@ -716,12 +682,12 @@ class ClusterClientSpec extends munit.FunSuite {
     val nodeR     = Node("r", 6379)
     val moved     = new java.util.concurrent.atomic.AtomicBoolean(true)
     def slots     =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(slots)
       else if (text.contains("READONLY")) Seq(Frame.SimpleString("OK"))
       else if (node == nodeR && moved.get()) Seq(Frame.SimpleError(s"MOVED 12182 ${nodeB.host}:${nodeB.port}"))
-      else Seq(Frame.BulkString(Bytes.utf8("value")))
+      else Seq(bulk("value"))
     val fixture   =
       new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica, cluster = ClusterConfig(maxRedirects = 0))
     val get       = Strings.get[String, String]("foo")
@@ -737,7 +703,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("under a Replica policy a write still goes to the master") {
     val nodeR     = Node("r", 6379)
     def slots     =
-      Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(0L), Frame.Integer((Slot.Count - 1).toLong), nodeFrame(nodeA), nodeFrame(nodeR)))))
+      Replies.clusterShard(nodeA, nodeR)
     val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(slots) else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.Replica)
 
@@ -750,7 +716,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a replica-preferred read with no known replica schedules a topology refresh") {
     val scheduler = new ManualScheduler
     val behaviour =
-      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8("from-master")))
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(bulk("from-master"))
     val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred, scheduler = scheduler)
     val before    = fixture.clusterSlotsCount(nodeA)
 
@@ -764,7 +730,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a keyless replica-preferred read with no known replica schedules a topology refresh") {
     val scheduler = new ManualScheduler
     val behaviour =
-      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8("k")))
+      (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(bulk("k"))
     val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred, scheduler = scheduler)
     val before    = fixture.clusterSlotsCount(nodeA)
 
@@ -808,7 +774,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (node == nodeA) Seq(Frame.SimpleError(s"MOVED ${Slot.of(Bytes.utf8("foo")).value} b:6379"))
-      else Seq(Frame.BulkString(Bytes.utf8("from-b")))
+      else Seq(bulk("from-b"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
@@ -821,7 +787,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (node == nodeA) Seq(Frame.SimpleError(s"ASK ${Slot.of(Bytes.utf8("foo")).value} b:6379"))
-      else Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("asked"))) // ASKING reply, then the command's
+      else Seq(Frame.SimpleString("OK"), bulk("asked")) // ASKING reply, then the command's
     val fixture = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.get[String, String]("foo")).unsafeRun.map { result =>
@@ -837,7 +803,7 @@ class ClusterClientSpec extends munit.FunSuite {
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("GET"))
         if (attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("TRYAGAIN Multiple keys request during rehashing of slot"))
-        else Seq(Frame.BulkString(Bytes.utf8("value")))
+        else Seq(bulk("value"))
       else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -856,7 +822,7 @@ class ClusterClientSpec extends munit.FunSuite {
         Seq(wholeClusterOn(nodeA))
       } else if (text.contains("GET"))
         if (attempts.getAndIncrement() == 0) Seq(Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
-        else Seq(Frame.BulkString(Bytes.utf8("value")))
+        else Seq(bulk("value"))
       else Seq(Frame.SimpleString("OK"))
     val fixture      = new Fixture(behaviour, Vector(nodeA))
 
@@ -873,7 +839,7 @@ class ClusterClientSpec extends munit.FunSuite {
       if (text.contains("CLUSTER")) Seq(if (clusterCalls.incrementAndGet() == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
       // the batch carries both positions; the retries reach nodeB one at a time
       else if (text.contains("GET"))
-        if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(Frame.BulkString(Bytes.utf8("from-b")))
+        if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(bulk("from-b"))
       else Seq(Frame.SimpleString("OK"))
     val fixture      = new Fixture(behaviour, Vector(nodeA))
 
@@ -892,7 +858,7 @@ class ClusterClientSpec extends munit.FunSuite {
         if (call > 1) Thread.sleep(300)
         Seq(if (call == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
       } else if (text.contains("GET"))
-        Seq(if (node == nodeA) Frame.SimpleError("CLUSTERDOWN The cluster is down") else Frame.BulkString(Bytes.utf8("from-b")))
+        Seq(if (node == nodeA) Frame.SimpleError("CLUSTERDOWN The cluster is down") else bulk("from-b"))
       else Seq(Frame.SimpleString("OK"))
     val fixture      = new Fixture(behaviour, Vector(nodeA))
 
@@ -962,9 +928,9 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains(keyA))
-        Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a-value")), Frame.Null)))
+        Seq(Frame.Array(Vector(bulk("a-value"), Frame.Null)))
       else if (text.contains(keyB))
-        Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b-value")), Frame.BulkString(Bytes.utf8("b-value")))))
+        Seq(Frame.Array(Vector(bulk("b-value"), bulk("b-value"))))
       else Seq(Frame.SimpleError("ERR unexpected command"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -982,8 +948,8 @@ class ClusterClientSpec extends munit.FunSuite {
     assert(Slot.of(Bytes.utf8(keyA)) != Slot.of(Bytes.utf8(keyB)), "test keys must hash to different slots")
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else if (text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("[1]")))))
-      else if (text.contains(keyB)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("[2]")))))
+      else if (text.contains(keyA)) Seq(Frame.Array(Vector(bulk("[1]"))))
+      else if (text.contains(keyB)) Seq(Frame.Array(Vector(bulk("[2]"))))
       else Seq(Frame.SimpleError("ERR unexpected command"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -1024,7 +990,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val second    = "{same}two"
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("one")), Frame.BulkString(Bytes.utf8("two")))))
+      else Seq(Frame.Array(Vector(bulk("one"), bulk("two"))))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.mGet[String, String](first, second)).unsafeRun.map { result =>
@@ -1071,7 +1037,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val keyB      = "{b}"
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(splitOn(Slot.of(Bytes.utf8(keyB)).value))
-      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8(node.host)))))
+      else Seq(Frame.Array(Vector(bulk(node.host))))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.map { result =>
@@ -1087,7 +1053,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(splitOn(Slot.of(Bytes.utf8(keyB)).value))
       else if (node == nodeB) Seq(Frame.SimpleError("ERR subgroup unavailable"))
-      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("ok")))))
+      else Seq(Frame.Array(Vector(bulk("ok"))))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.failed.map { error =>
@@ -1103,7 +1069,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains(keyA)) Seq(Frame.Array(Vector.empty))
-      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
+      else Seq(Frame.Array(Vector(bulk("b"))))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.failed.map { error =>
@@ -1118,8 +1084,8 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (node == nodeA && text.contains(keyB)) Seq(Frame.SimpleError(s"MOVED $slotB b:6379"))
-      else if (text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a")))))
-      else Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
+      else if (text.contains(keyA)) Seq(Frame.Array(Vector(bulk("a"))))
+      else Seq(Frame.Array(Vector(bulk("b"))))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.run(Strings.mGet[String, String](keyA, keyB)).unsafeRun.map { result =>
@@ -1206,11 +1172,12 @@ class ClusterClientSpec extends munit.FunSuite {
 
   test("absorbs a failover: an unreachable owner triggers a refresh and the command retries on the new master") {
     val key                  = "foo"
-    val mid                  = Slot.of(Bytes.utf8(key)).value // the upper range starts here, so `key` lands in it
+    val keySlot              = Slot.of(Bytes.utf8(key)).value // the upper range starts here, so `key` lands in it
     @volatile var failedOver = false
     val behaviour            = (node: Node, text: String) =>
-      if (text.contains("CLUSTER")) Seq(slotsFrame((nodeA, 0, mid - 1), (if (failedOver) nodeB else nodeDead, mid, Slot.Count - 1)))
-      else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      if (text.contains("CLUSTER"))
+        Seq(Replies.clusterSlots((nodeA, 0, keySlot - 1), (if (failedOver) nodeB else nodeDead, keySlot, Slot.Count - 1)))
+      else Seq(bulk(node.host))
     val fixture              = new Fixture(behaviour, Vector(nodeA), unreachable = Set(nodeDead))
 
     failedOver = true // the master for `key` has been replaced by nodeB; the stale topology still points at the dead node
@@ -1222,7 +1189,7 @@ class ClusterClientSpec extends munit.FunSuite {
 
   test("close is terminal: a command after close fails rather than reconnecting") {
     val behaviour =
-      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(bulk(node.host))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.close.unsafeRun.flatMap { _ =>
@@ -1238,7 +1205,7 @@ class ClusterClientSpec extends munit.FunSuite {
     if (slot > 0) ranges += ((nodeA, 0, slot - 1))
     ranges += ((nodeB, slot, slot))
     if (slot < Slot.Count - 1) ranges += ((nodeA, slot + 1, Slot.Count - 1))
-    slotsFrame(ranges.toVector*)
+    Replies.clusterSlots(ranges.toVector*)
   }
 
   private val keyA  = "{a}"
@@ -1249,7 +1216,7 @@ class ClusterClientSpec extends munit.FunSuite {
     assert(Slot.of(Bytes.utf8(keyA)).value != slotB, "test keys must hash to different slots")
     // each node answers a GET with its own host, so the merged result reveals which node served which position
     val behaviour =
-      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(Frame.BulkString(Bytes.utf8(node.host)))
+      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(splitOn(slotB)) else Seq(bulk(node.host))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB))).unsafeRun.map { result =>
@@ -1262,9 +1229,9 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a pipeline transparently executes a cross-slot MGET at its logical position") {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else if (text.contains("MGET") && text.contains(keyA)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a")))))
-      else if (text.contains("MGET") && text.contains(keyB)) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("b")))))
-      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+      else if (text.contains("MGET") && text.contains(keyA)) Seq(Frame.Array(Vector(bulk("a"))))
+      else if (text.contains("MGET") && text.contains(keyB)) Seq(Frame.Array(Vector(bulk("b"))))
+      else Seq(bulk("tail"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipeline((Strings.mGet[String, String](keyA, keyB), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
@@ -1276,7 +1243,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("EXISTS")) Seq(Frame.Integer(1L))
-      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+      else Seq(bulk("tail"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipeline((Keys.exists(keyA, keyB), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
@@ -1288,7 +1255,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("MSET")) Seq(Frame.SimpleString("OK"))
-      else Seq(Frame.BulkString(Bytes.utf8("tail")))
+      else Seq(bulk("tail"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipeline((Strings.mSet(keyA -> "a", keyB -> "b"), Strings.get[String, String]("{a}tail"))).unsafeRun.map { result =>
@@ -1300,7 +1267,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(splitOn(slotB))
       else if (node == nodeB) Seq(Frame.SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value"))
-      else Seq(Frame.BulkString(Bytes.utf8("ok")))
+      else Seq(bulk("ok"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipelineAttempt((Strings.get[String, String](keyA), Strings.get[String, String](keyB))).unsafeRun.map { case (first, second) =>
@@ -1312,7 +1279,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a single-slot pipeline routes to one node and returns the typed tuple") {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.BulkString(Bytes.utf8("v2")))
+      else Seq(bulk("v1"), bulk("v2"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live.pipeline((Strings.get[String, String]("{x}1"), Strings.get[String, String]("{x}2"))).unsafeRun.map { result =>
@@ -1338,7 +1305,7 @@ class ClusterClientSpec extends munit.FunSuite {
     // get, ping, get all hash/route to one node; the keyless ping must stay between the two gets on the wire, not be reordered to the end
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else Seq(Frame.BulkString(Bytes.utf8("v1")), Frame.SimpleString("PONG"), Frame.BulkString(Bytes.utf8("v2")))
+      else Seq(bulk("v1"), Frame.SimpleString("PONG"), bulk("v2"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
     fixture.live
@@ -1458,7 +1425,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("MULTI"))
-        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("v")))))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(bulk("v"))))
       else Seq(Frame.SimpleString("OK"))
     // gate the dedicated (second) transport of nodeA so the transaction's first acquire parks mid-connect
     val fixture   = new Fixture(behaviour, Vector(nodeA), connectGate = (node, index) => if (node == nodeA && index == 1) gate.await())
@@ -1483,7 +1450,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("MULTI"))
-        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("v")))))
+        Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(bulk("v"))))
       else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 
@@ -1558,7 +1525,7 @@ class ClusterClientSpec extends munit.FunSuite {
   test("a cluster transaction still accepts KEYS, an existing broadcast command, returning the pinned node's keys") {
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
-      else if (text.contains("KEYS")) Seq(Frame.Array(Vector(Frame.BulkString(Bytes.utf8("k1")))))
+      else if (text.contains("KEYS")) Seq(Frame.Array(Vector(bulk("k1"))))
       else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA))
 

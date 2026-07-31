@@ -6,6 +6,8 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable
 import scala.concurrent.duration.*
 
+import Replies.bulk
+
 import sage.Bytes
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, WatchdogConfig}
@@ -30,7 +32,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   // a SUBSCRIBE/PSUBSCRIBE is a RESP array `*K`; K-1 of those elements are channel names, each acknowledged by one confirmation push
   private def confirmations(kind: String, payload: String): Seq[Frame] = {
     val names = payload.drop(1).takeWhile(_ != '\r').toInt - 1
-    (1 to names).map(i => Frame.Push(Vector(Frame.BulkString(Bytes.utf8(kind)), Frame.BulkString(Bytes.utf8("?")), Frame.Integer(i.toLong))))
+    (1 to names).map(i => Frame.Push(Vector(bulk(kind), bulk("?"), Frame.Integer(i.toLong))))
   }
 
   private def make(
@@ -56,18 +58,18 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     transport.written.exists(_.asUtf8String.contains(s"\r\n$command\r\n"))
 
   private def message(channel: String, payload: String): Frame =
-    Frame.Push(Vector(Frame.BulkString(Bytes.utf8("message")), Frame.BulkString(Bytes.utf8(channel)), Frame.BulkString(Bytes.utf8(payload))))
+    Frame.Push(Vector(bulk("message"), bulk(channel), bulk(payload)))
 
   private def shardMessage(channel: String, payload: String): Frame =
-    Frame.Push(Vector(Frame.BulkString(Bytes.utf8("smessage")), Frame.BulkString(Bytes.utf8(channel)), Frame.BulkString(Bytes.utf8(payload))))
+    Frame.Push(Vector(bulk("smessage"), bulk(channel), bulk(payload)))
 
   private def patternMessage(pattern: String, channel: String, payload: String): Frame =
     Frame.Push(
       Vector(
-        Frame.BulkString(Bytes.utf8("pmessage")),
-        Frame.BulkString(Bytes.utf8(pattern)),
-        Frame.BulkString(Bytes.utf8(channel)),
-        Frame.BulkString(Bytes.utf8(payload))
+        bulk("pmessage"),
+        bulk(pattern),
+        bulk(channel),
+        bulk(payload)
       )
     )
 

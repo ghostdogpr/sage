@@ -1,11 +1,9 @@
 package sage.commands
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.{bulk, map}
 
 class ArraysSpec extends munit.FunSuite {
-
-  private def bulk(s: String): Frame = Frame.BulkString(Bytes.utf8(s))
 
   test("ARGET decodes a value and a null") {
     assertEquals(Reply.run(Arrays.arGet[String, String]("a", 1L), bulk("b")), Right(Some("b")))
@@ -60,14 +58,12 @@ class ArraysSpec extends munit.FunSuite {
   }
 
   test("ARINFO decodes the core fields and leniently fills the structural ones") {
-    val reply = Frame.Map(
-      Vector(
-        bulk("count")             -> Frame.Integer(4L),
-        bulk("len")               -> Frame.Integer(101L),
-        bulk("next-insert-index") -> Frame.Integer(0L),
-        bulk("slices")            -> Frame.Integer(1L),
-        bulk("slice-size")        -> Frame.Integer(4096L)
-      )
+    val reply = map(
+      "count"             -> Frame.Integer(4L),
+      "len"               -> Frame.Integer(101L),
+      "next-insert-index" -> Frame.Integer(0L),
+      "slices"            -> Frame.Integer(1L),
+      "slice-size"        -> Frame.Integer(4096L)
     )
     assertEquals(
       Reply.run(Arrays.arInfo("a"), reply),
@@ -76,14 +72,12 @@ class ArraysSpec extends munit.FunSuite {
   }
 
   test("ARINFO FULL decodes the avg-* fields as doubles") {
-    val reply = Frame.Map(
-      Vector(
-        bulk("count")             -> Frame.Integer(4L),
-        bulk("len")               -> Frame.Integer(101L),
-        bulk("next-insert-index") -> Frame.Integer(0L),
-        bulk("sparse-slices")     -> Frame.Integer(1L),
-        bulk("avg-sparse-size")   -> Frame.Double(4.0)
-      )
+    val reply = map(
+      "count"             -> Frame.Integer(4L),
+      "len"               -> Frame.Integer(101L),
+      "next-insert-index" -> Frame.Integer(0L),
+      "sparse-slices"     -> Frame.Integer(1L),
+      "avg-sparse-size"   -> Frame.Double(4.0)
     )
     Reply.run(Arrays.arInfoFull("a"), reply) match {
       case Right(info) =>
@@ -96,6 +90,6 @@ class ArraysSpec extends munit.FunSuite {
   }
 
   test("ARINFO fails when a core field is absent") {
-    assert(Reply.run(Arrays.arInfo("a"), Frame.Map(Vector(bulk("len") -> Frame.Integer(1L)))).isLeft)
+    assert(Reply.run(Arrays.arInfo("a"), map("len" -> Frame.Integer(1L))).isLeft)
   }
 }

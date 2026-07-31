@@ -13,7 +13,7 @@ import sage.Outcome
 import sage.cluster.Node
 import sage.commands.Command
 
-class OpenTelemetryCommandTracerTest extends munit.FunSuite {
+class OpenTelemetryCommandTracerSpec extends munit.FunSuite {
 
   // a fresh in-memory SDK + tracer per test, so finished spans never leak across tests
   private def fixture: (OpenTelemetrySdk, InMemorySpanExporter) = {

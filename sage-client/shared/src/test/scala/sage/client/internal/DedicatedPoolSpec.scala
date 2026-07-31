@@ -4,6 +4,8 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 
+import Replies.bulk
+
 import sage.Bytes
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
@@ -12,21 +14,11 @@ import sage.protocol.Frame
 
 class DedicatedPoolSpec extends munit.FunSuite {
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
-  private val popReply: Frame = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("k")), Frame.BulkString(Bytes.utf8("v"))))
+  private val popReply: Frame = Frame.Array(Vector(bulk("k"), bulk("v")))
 
   // HELLO always answers so the bootstrap succeeds; the blocking command's reply is the test's to script
   private def replyWith(blocking: Seq[Frame]): Bytes => Seq[Frame] =
-    payload => if (payload.asUtf8String.contains("HELLO")) Seq(helloReply) else blocking
+    payload => if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello) else blocking
 
   private def make(
     respond: Bytes => Seq[Frame],
@@ -193,7 +185,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
           bumped = true
           live = Some(MultiplexedConnection.Generation.initial.next)
         }
-        Seq(helloReply)
+        Seq(Replies.hello)
       } else Seq(popReply)
     val (pool, scheduler, transports)                 = make(respond, liveGeneration = () => live)
     var result: Option[Try[Option[(String, String)]]] = None

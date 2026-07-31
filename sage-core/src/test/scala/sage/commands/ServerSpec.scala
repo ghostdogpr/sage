@@ -4,15 +4,13 @@ import java.time.Instant
 
 import scala.concurrent.duration.*
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.{bulk, map}
 
-class ServerSpec extends munit.FunSuite {
-
-  private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
+class ServerSpec extends munit.FunSuite with BroadcastFolds {
 
   test("CONFIG GET decodes a RESP3 map and the RESP2 flat-array shape alike") {
-    val resp3 = Frame.Map(Vector(bulk("maxmemory") -> bulk("100mb"), bulk("save") -> bulk("3600 1")))
+    val resp3 = map("maxmemory" -> bulk("100mb"), "save" -> bulk("3600 1"))
     assertEquals(Reply.run(Server.configGet("*"), resp3), Right(Map("maxmemory" -> "100mb", "save" -> "3600 1")))
     val resp2 = Frame.Array(Vector(bulk("maxmemory"), bulk("100mb")))
     assertEquals(Reply.run(Server.configGet("*"), resp2), Right(Map("maxmemory" -> "100mb")))
@@ -106,12 +104,6 @@ class ServerSpec extends munit.FunSuite {
     assert(!Server.flushAll().requiresClusterWideTxResult, "FLUSHALL stays legal in a cluster transaction")
     assert(!Server.flushDb().requiresClusterWideTxResult, "FLUSHDB stays legal in a cluster transaction")
   }
-
-  private def fold(command: Command[?]): (Frame, Frame) => Frame =
-    command.broadcast match {
-      case BroadcastReduce.Fold(f) => f
-      case other                   => fail(s"expected a Fold broadcast, got $other")
-    }
 
   test("WAIT/WAITAOF fold differing multi-master replies to the weakest shard") {
     val waitFold = fold(Server.waitReplicas(1L, 1.second))

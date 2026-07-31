@@ -5,8 +5,8 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.SageException.ServerError
-import sage.commands.Ttl
 import sage.integration.{Images, ServerSuite}
+import sage.integration.Ttls.remaining
 import sage.ratelimit.{Decision, RateLimit, RateLimiter}
 
 abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
@@ -269,10 +269,7 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
           case Decision.Denied(_, retryAfter) => assertEquals(retryAfter, 5.seconds)
           case other                          => fail(s"expected Denied, got $other")
         }
-        pttl match {
-          case Ttl.Expires(remaining) => assert(remaining > 2.seconds && remaining <= 5.seconds, s"pttl was $remaining")
-          case other                  => fail(s"expected an expiry, got $other")
-        }
+        assert(remaining(pttl).exists(left => left > 2.seconds && left <= 5.seconds), s"pttl was $pttl")
       }
     }
   }

@@ -12,7 +12,7 @@ import sage.SageException.{DecodeError, ServerError}
 import sage.client.{Endpoint, SageConfig, Topology}
 import sage.client.internal.{Client, ScanTarget}
 import sage.commands.{Command, Commands, FlushMode, ScanCursor}
-import sage.integration.{ContainerClient, Images}
+import sage.integration.{ContainerClient, Eventually, Images}
 import sage.protocol.Frame
 
 /**
@@ -59,17 +59,10 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
     } yield ()
 
   private def awaitClusterOk(admin0: Client[CIO, String], attempts: Int): CIO[Unit] =
-    admin0.run(clusterInfo).flatMap { info =>
-      if (info.contains("cluster_state:ok")) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException(s"cluster did not converge: $info"))
-      else CIO.sleep(100.millis).flatMap(_ => awaitClusterOk(admin0, attempts - 1))
-    }
+    Eventually.converges(attempts)(() => admin0.run(clusterInfo))(_.contains("cluster_state:ok"))(info => s"cluster did not converge: $info")
 
   private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
-    client.cached(Commands.get[String, String](key), 1.minute).flatMap { value =>
-      if (value.contains(expected) || attempts <= 1) CIO.value(value)
-      else CIO.sleep(100.millis).flatMap(_ => awaitCached(client, key, expected, attempts - 1))
-    }
+    Eventually.value(attempts)(() => client.cached(Commands.get[String, String](key), 1.minute))(_.contains(expected))
 
   // one shared container per suite, so the cluster is formed once and all routing exercised in a single test
   test("single-key commands, pipelines, and transactions route against a real cluster") {

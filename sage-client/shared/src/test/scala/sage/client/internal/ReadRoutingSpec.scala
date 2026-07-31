@@ -66,16 +66,6 @@ class ReadRoutingSpec extends munit.FunSuite {
     assert(!ReadRouting.replicaEligible(cmd("HSCAN", isReadOnly = true, cursorBound = true)))
   }
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
   private val ping = Connection.ping(None)
 
   final private class Fixture(readFrom: ReadFrom = ReadFrom.Replica, unreachable: Set[Node] = Set.empty, refusing: Set[Node] = Set.empty) {
@@ -83,7 +73,7 @@ class ReadRoutingSpec extends munit.FunSuite {
     val refreshes                                                       = new AtomicInteger()
     private val transports                                              = new ConcurrentHashMap[Node, FakeTransport]()
     private def respond(node: Node)(payload: Bytes): Seq[Frame]         =
-      if (payload.asUtf8String.contains("HELLO")) Seq(helloReply)
+      if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello)
       else if (refusing(node)) Seq(Frame.SimpleError("LOADING the dataset is loading"))
       else Seq(Frame.SimpleString("PONG"))
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>

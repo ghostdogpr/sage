@@ -4,12 +4,11 @@ import java.util.concurrent.TimeUnit
 
 import scala.concurrent.duration.FiniteDuration
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.{bulk, map}
 
 class StreamsSpec extends munit.FunSuite {
 
-  private def bulk(value: String): Frame                = Frame.BulkString(Bytes.utf8(value))
   private def entry(id: String, fields: String*): Frame = Frame.Array(Vector(bulk(id), Frame.Array(fields.toVector.map(bulk))))
 
   test("XADD decodes the generated id; NOMKSTREAM decodes null as None") {
@@ -18,7 +17,7 @@ class StreamsSpec extends munit.FunSuite {
     assertEquals(Reply.run(Streams.xAddNoMkStream("k")(("f", "v")), bulk("5-0")), Right(Some(StreamId(5L, 0L))))
   }
 
-  test("XRANGE decodes entries, preserving field order and a missing-stream null as empty? (present array)") {
+  test("XRANGE decodes entries, preserving field order") {
     val reply = Frame.Array(Vector(entry("1-0", "a", "1", "b", "2"), entry("2-0", "c", "3")))
     assertEquals(
       Reply.run(Streams.xRange[String, String, String]("k"), reply),
@@ -27,7 +26,7 @@ class StreamsSpec extends munit.FunSuite {
   }
 
   test("XREAD decodes a RESP3 map of stream -> entries, and null/timeout as an empty vector") {
-    val reply = Frame.Map(Vector(bulk("s1") -> Frame.Array(Vector(entry("1-0", "f", "v")))))
+    val reply = map("s1" -> Frame.Array(Vector(entry("1-0", "f", "v"))))
     assertEquals(
       Reply.run(Streams.xRead[String, String, String](("s1", ReadId.New))(), reply),
       Right(Vector("s1" -> Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v")))))
@@ -98,19 +97,17 @@ class StreamsSpec extends munit.FunSuite {
   }
 
   test("XINFO STREAM decodes leniently: 7.0 fields present, and absent as None") {
-    val withNew = Frame.Map(
-      Vector(
-        bulk("length")                  -> Frame.Integer(2L),
-        bulk("radix-tree-keys")         -> Frame.Integer(1L),
-        bulk("radix-tree-nodes")        -> Frame.Integer(2L),
-        bulk("last-generated-id")       -> bulk("5-0"),
-        bulk("max-deleted-entry-id")    -> bulk("3-0"),
-        bulk("entries-added")           -> Frame.Integer(7L),
-        bulk("recorded-first-entry-id") -> bulk("1-0"),
-        bulk("groups")                  -> Frame.Integer(1L),
-        bulk("first-entry")             -> entry("1-0", "f", "v"),
-        bulk("last-entry")              -> entry("5-0", "g", "w")
-      )
+    val withNew = map(
+      "length"                  -> Frame.Integer(2L),
+      "radix-tree-keys"         -> Frame.Integer(1L),
+      "radix-tree-nodes"        -> Frame.Integer(2L),
+      "last-generated-id"       -> bulk("5-0"),
+      "max-deleted-entry-id"    -> bulk("3-0"),
+      "entries-added"           -> Frame.Integer(7L),
+      "recorded-first-entry-id" -> bulk("1-0"),
+      "groups"                  -> Frame.Integer(1L),
+      "first-entry"             -> entry("1-0", "f", "v"),
+      "last-entry"              -> entry("5-0", "g", "w")
     )
     val info    = Reply.run(StreamInfo.xInfoStream[String, String, String]("k"), withNew).toOption.get
     assertEquals(info.length, 2L)
@@ -118,16 +115,14 @@ class StreamsSpec extends munit.FunSuite {
     assertEquals(info.maxDeletedEntryId, Some(StreamId(3L, 0L)))
     assertEquals(info.firstEntry, Some(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v"))))
 
-    val legacy = Frame.Map(
-      Vector(
-        bulk("length")            -> Frame.Integer(0L),
-        bulk("radix-tree-keys")   -> Frame.Integer(0L),
-        bulk("radix-tree-nodes")  -> Frame.Integer(1L),
-        bulk("last-generated-id") -> bulk("0-0"),
-        bulk("groups")            -> Frame.Integer(0L),
-        bulk("first-entry")       -> Frame.Null,
-        bulk("last-entry")        -> Frame.Null
-      )
+    val legacy = map(
+      "length"            -> Frame.Integer(0L),
+      "radix-tree-keys"   -> Frame.Integer(0L),
+      "radix-tree-nodes"  -> Frame.Integer(1L),
+      "last-generated-id" -> bulk("0-0"),
+      "groups"            -> Frame.Integer(0L),
+      "first-entry"       -> Frame.Null,
+      "last-entry"        -> Frame.Null
     )
     val old    = Reply.run(StreamInfo.xInfoStream[String, String, String]("k"), legacy).toOption.get
     assertEquals(old.entriesAdded, None)
@@ -138,15 +133,13 @@ class StreamsSpec extends munit.FunSuite {
   test("XINFO GROUPS decodes entries-read/lag as optional, tolerating a null lag") {
     val reply = Frame.Array(
       Vector(
-        Frame.Map(
-          Vector(
-            bulk("name")              -> bulk("g1"),
-            bulk("consumers")         -> Frame.Integer(2L),
-            bulk("pending")           -> Frame.Integer(3L),
-            bulk("last-delivered-id") -> bulk("5-0"),
-            bulk("entries-read")      -> Frame.Integer(5L),
-            bulk("lag")               -> Frame.Null
-          )
+        map(
+          "name"              -> bulk("g1"),
+          "consumers"         -> Frame.Integer(2L),
+          "pending"           -> Frame.Integer(3L),
+          "last-delivered-id" -> bulk("5-0"),
+          "entries-read"      -> Frame.Integer(5L),
+          "lag"               -> Frame.Null
         )
       )
     )
@@ -159,25 +152,21 @@ class StreamsSpec extends munit.FunSuite {
   test("XINFO STREAM FULL decodes the 4-element group PEL row and the 3-element consumer PEL row") {
     val groupPel    = Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), bulk("c1"), Frame.Integer(1000L), Frame.Integer(2L)))))
     val consumerPel = Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), Frame.Integer(1000L), Frame.Integer(2L)))))
-    val consumer    = Frame.Map(Vector(bulk("name") -> bulk("c1"), bulk("pel-count") -> Frame.Integer(1L), bulk("pending") -> consumerPel))
-    val group       = Frame.Map(
-      Vector(
-        bulk("name")              -> bulk("g1"),
-        bulk("last-delivered-id") -> bulk("1-0"),
-        bulk("pel-count")         -> Frame.Integer(1L),
-        bulk("pending")           -> groupPel,
-        bulk("consumers")         -> Frame.Array(Vector(consumer))
-      )
+    val consumer    = map("name" -> bulk("c1"), "pel-count" -> Frame.Integer(1L), "pending" -> consumerPel)
+    val group       = map(
+      "name"              -> bulk("g1"),
+      "last-delivered-id" -> bulk("1-0"),
+      "pel-count"         -> Frame.Integer(1L),
+      "pending"           -> groupPel,
+      "consumers"         -> Frame.Array(Vector(consumer))
     )
-    val reply       = Frame.Map(
-      Vector(
-        bulk("length")            -> Frame.Integer(1L),
-        bulk("radix-tree-keys")   -> Frame.Integer(1L),
-        bulk("radix-tree-nodes")  -> Frame.Integer(2L),
-        bulk("last-generated-id") -> bulk("1-0"),
-        bulk("entries")           -> Frame.Array(Vector(entry("1-0", "f", "v"))),
-        bulk("groups")            -> Frame.Array(Vector(group))
-      )
+    val reply       = map(
+      "length"            -> Frame.Integer(1L),
+      "radix-tree-keys"   -> Frame.Integer(1L),
+      "radix-tree-nodes"  -> Frame.Integer(2L),
+      "last-generated-id" -> bulk("1-0"),
+      "entries"           -> Frame.Array(Vector(entry("1-0", "f", "v"))),
+      "groups"            -> Frame.Array(Vector(group))
     )
     val full        = Reply.run(StreamInfo.xInfoStreamFull[String, String, String]("k"), reply).toOption.get
     assertEquals(full.entries.map(_.id), Vector(StreamId(1L, 0L)))

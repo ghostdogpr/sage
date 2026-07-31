@@ -9,7 +9,8 @@ import scala.jdk.CollectionConverters.*
 import kyo.compat.*
 
 import sage.{Bytes, CommandSpan, CommandTracer, Outcome, SageEvent, SageListener}
-import sage.client.internal.{CountingScheduler, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
+import sage.client.internal.{CountingScheduler, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Replies, Scheduler}
+import sage.client.internal.Replies.ok
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
 import sage.protocol.Frame
@@ -21,43 +22,16 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
   private val master  = Node("master-host", 7000)
   private val replica = Node("replica-host", 7001)
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
-  private val roleReply: Frame =
-    Frame.Array(
-      Vector(
-        Frame.BulkString(Bytes.utf8("master")),
-        Frame.Integer(0L),
-        Frame.Array(
-          Vector(
-            Frame.Array(
-              Vector(
-                Frame.BulkString(Bytes.utf8(replica.host)),
-                Frame.BulkString(Bytes.utf8(replica.port.toString)),
-                Frame.BulkString(Bytes.utf8("0"))
-              )
-            )
-          )
-        )
-      )
-    )
+  private val roleReply: Frame = Replies.masterRole(replica)
 
   // one reply per command occurrence in a batch; only the master answers ROLE; other bootstrap commands each get a single OK
   private def respondFor(node: Node): Bytes => Seq[Frame] = payload => {
     val s = payload.asUtf8String
-    if (s.contains("HELLO")) Seq(helloReply)
+    if (s.contains("HELLO")) Seq(Replies.hello)
     else if (s.contains("ROLE")) if (node == master) Seq(roleReply) else Nil
     else {
       val batch = occurrences(s, "PREAD") + occurrences(s, "PWRITE")
-      if (batch > 0) Seq.fill(batch)(Frame.SimpleString("OK")) else Seq(Frame.SimpleString("OK"))
+      if (batch > 0) Seq.fill(batch)(ok) else Seq(ok)
     }
   }
 

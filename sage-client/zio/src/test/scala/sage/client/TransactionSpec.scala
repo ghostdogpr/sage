@@ -4,9 +4,9 @@ import scala.concurrent.ExecutionContext
 
 import kyo.compat.*
 
-import sage.Bytes
 import sage.SageException.{InvalidArgument, ServerError, TransactionDiscarded}
-import sage.client.internal.{Client, FakeTransport, MultiplexedConnection}
+import sage.client.internal.{Client, Replies, ScriptedTransport}
+import sage.client.internal.Replies.{bulk, ok, queued}
 import sage.commands.{Command, Commands, Execution}
 import sage.protocol.Frame
 
@@ -14,46 +14,18 @@ class TransactionSpec extends munit.FunSuite {
 
   private given ExecutionContext = munitExecutionContext
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
-  private val ok: Frame     = Frame.SimpleString("OK")
-  private val queued: Frame = Frame.SimpleString("QUEUED")
-
   // Scripts a dedicated connection: HELLO bootstraps, WATCH/UNWATCH answer OK, the pipelined MULTI…EXEC batch (one write) answers with the
   // supplied frame sequence, and a read GET answers a value. The batch carries "MULTI", so it is matched before the bare command names.
-  private def scripted(execReplies: Seq[Frame], getReply: Frame = Frame.BulkString(Bytes.utf8("v"))): MultiplexedConnection.TransportFactory =
-    (onFrame, onClosed) =>
-      new FakeTransport(
-        onFrame,
-        onClosed,
-        respond = payload => {
-          val text = payload.asUtf8String
-          if (text.contains("HELLO")) Seq(helloReply)
-          else if (text.contains("MULTI")) execReplies
-          else if (text.contains("UNWATCH")) Seq(ok)
-          else if (text.contains("WATCH")) Seq(ok)
-          else if (text.contains("GET")) Seq(getReply)
-          else Seq(ok)
-        }
-      )
-
-  // wraps a factory so the most-recently-created transport (the dedicated connection) can be inspected after the run
-  private def capturing(factory: MultiplexedConnection.TransportFactory): (MultiplexedConnection.TransportFactory, () => FakeTransport) = {
-    var last: FakeTransport                             = null
-    val wrapped: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      last = factory(onFrame, onClosed).asInstanceOf[FakeTransport]
-      last
+  private def scripted(execReplies: Seq[Frame], getReply: Frame = bulk("v")): ScriptedTransport.Factory =
+    ScriptedTransport.factory { payload =>
+      val text = payload.asUtf8String
+      if (text.contains("HELLO")) Seq(Replies.hello)
+      else if (text.contains("MULTI")) execReplies
+      else if (text.contains("UNWATCH")) Seq(ok)
+      else if (text.contains("WATCH")) Seq(ok)
+      else if (text.contains("GET")) Seq(getReply)
+      else Seq(ok)
     }
-    (wrapped, () => last)
-  }
 
   private val twoIncrements = (Commands.incr[String]("a"), Commands.incr[String]("b"))
 
@@ -102,7 +74,7 @@ class TransactionSpec extends munit.FunSuite {
   }
 
   test("discard issues UNWATCH and runs no EXEC") {
-    val (factory, transport) = capturing(scripted(Seq(ok)))
+    val (factory, transport) = ScriptedTransport.capturing(scripted(Seq(ok)))
     Client
       .connectWith(factory)
       .flatMap(client => client.transaction(tx => tx.watch("a").flatMap(_ => tx.discard)))
@@ -134,7 +106,7 @@ class TransactionSpec extends munit.FunSuite {
   }
 
   test("an empty transaction with watches still issues MULTI/EXEC so a concurrent change can abort it") {
-    val (factory, transport) = capturing(scripted(Seq(ok, Frame.Null))) // MULTI ok, EXEC null = watched key changed
+    val (factory, transport) = ScriptedTransport.capturing(scripted(Seq(ok, Frame.Null))) // MULTI ok, EXEC null = watched key changed
     Client
       .connectWith(factory)
       .flatMap(client => client.transaction(tx => tx.watch("a").flatMap(_ => tx.exec(noCommands))))
@@ -146,7 +118,7 @@ class TransactionSpec extends munit.FunSuite {
   }
 
   test("an empty transaction with no watch is a no-op that never reaches the socket") {
-    val (factory, transport) = capturing(scripted(Seq(ok)))
+    val (factory, transport) = ScriptedTransport.capturing(scripted(Seq(ok)))
     Client
       .connectWith(factory)
       .flatMap(_.transaction(_.exec(noCommands)))
@@ -166,7 +138,7 @@ class TransactionSpec extends munit.FunSuite {
   }
 
   test("running a blocking command in the read phase fails fast rather than hanging the leased connection") {
-    val (factory, transport) = capturing(scripted(Seq(ok)))
+    val (factory, transport) = ScriptedTransport.capturing(scripted(Seq(ok)))
     val blocking             = Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking)
     Client.connectWith(factory).flatMap(_.transaction(_.run(blocking))).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")

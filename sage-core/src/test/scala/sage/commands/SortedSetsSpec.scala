@@ -1,11 +1,10 @@
 package sage.commands
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class SortedSetsSpec extends munit.FunSuite {
 
-  private def bulk(value: String): Frame                 = Frame.BulkString(Bytes.utf8(value))
   private def pair(member: String, score: Double): Frame = Frame.Array(Vector(bulk(member), Frame.Double(score)))
 
   test("ZSCORE decodes a RESP3 double, null as None, and rejects a bulk string") {

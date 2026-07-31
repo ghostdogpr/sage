@@ -1,20 +1,13 @@
 package sage.cluster
 
 import sage.Bytes
+import sage.cluster.TopologyFixtures.{covering, keyed, keyless}
 import sage.commands.Command
 
 class TopologySpec extends munit.FunSuite {
 
   private val a = Node("a", 6379)
   private val b = Node("b", 6379)
-
-  private def keyed(keys: String*): Command[Long] =
-    Command("X", keys.indices.toVector, keys.toVector.map(Bytes.utf8), _ => Right(0L))
-
-  private val keyless: Command[Long] = Command("PING", Command.NoKeys, Vector.empty, _ => Right(0L))
-
-  private def covering(node: Node, from: Int, to: Int): Shard =
-    Shard(node, Vector.empty, Vector(SlotRange(Slot.unsafe(from), Slot.unsafe(to))))
 
   private val whole = ClusterTopology.from(Vector(covering(a, 0, Slot.Count - 1)))
 

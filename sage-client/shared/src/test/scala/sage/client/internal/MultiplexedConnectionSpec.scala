@@ -4,6 +4,8 @@ import scala.collection.mutable
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 
+import Replies.bulk
+
 import sage.Bytes
 import sage.SageException.{ConnectionLost, DecodeError, NotConnected, ServerError}
 import sage.client.{BackoffConfig, WatchdogConfig}
@@ -41,7 +43,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.submit(Connection.ping(), r => first = Some(r))
     connection.submit(Strings.get[String, String]("key"), r => second = Some(r))
     transports.head.emit(Frame.SimpleString("PONG"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("value")))
+    transports.head.emit(bulk("value"))
     assertEquals(first, Some(Success("PONG")))
     assertEquals(second, Some(Success(Some("value"))))
   }
@@ -599,7 +601,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
   }
 
   private def invalidationOf(redisKey: String): Frame =
-    Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Array(Vector(Frame.BulkString(Bytes.utf8(redisKey))))))
+    Frame.Push(Vector(bulk("invalidate"), Frame.Array(Vector(bulk(redisKey)))))
 
   test("a cached read fetches once, then serves repeats locally until an invalidation push evicts it") {
     val (connection, _, transports) = cachedConnection()
@@ -609,7 +611,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.cachedSubmit(get, 60000L, r => first = Some(r))
     assertEquals(transports.head.written.length, 1) // one batch: [CLIENT CACHING YES, GET foo]
     transports.head.emit(Frame.SimpleString("OK"))  // CLIENT CACHING YES reply, discarded
-    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    transports.head.emit(bulk("bar"))
     assertEquals(first, Some(Success(Some("bar"))))
 
     var second: Option[Try[Option[String]]] = None
@@ -622,7 +624,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.cachedSubmit(get, 60000L, r => third = Some(r))
     assertEquals(transports.head.written.length, 2) // evicted -> refetch
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("baz")))
+    transports.head.emit(bulk("baz"))
     assertEquals(third, Some(Success(Some("baz"))))
   }
 
@@ -632,16 +634,16 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     connection.cachedSubmit(get, 60000L, _ => ())
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    transports.head.emit(bulk("bar"))
     assertEquals(transports.head.written.length, 1)
 
-    transports.head.emit(Frame.Push(Vector(Frame.BulkString(Bytes.utf8("invalidate")), Frame.Null))) // FLUSHALL/tracking-drop form
+    transports.head.emit(Frame.Push(Vector(bulk("invalidate"), Frame.Null))) // FLUSHALL/tracking-drop form
 
     var afterFlush: Option[Try[Option[String]]] = None
     connection.cachedSubmit(get, 60000L, r => afterFlush = Some(r))
     assertEquals(transports.head.written.length, 2) // flushed -> refetch
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("baz")))
+    transports.head.emit(bulk("baz"))
     assertEquals(afterFlush, Some(Success(Some("baz"))))
   }
 
@@ -651,7 +653,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     connection.cachedSubmit(get, 1000L, _ => ())
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    transports.head.emit(bulk("bar"))
     assertEquals(transports.head.written.length, 1)
 
     scheduler.advance(1001.millis)                  // past the TTL
@@ -665,7 +667,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     connection.cachedSubmit(get, 60000L, _ => ())
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    transports.head.emit(bulk("bar"))
 
     transports.head.emit(Frame.SimpleString("stray")) // nothing pending -> discard -> reconnect
     assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
@@ -676,7 +678,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.cachedSubmit(get, 60000L, r => afterReconnect = Some(r))
     assertEquals(transports(1).written.length, 1) // fresh generation, empty cache -> refetch
     transports(1).emit(Frame.SimpleString("OK"))
-    transports(1).emit(Frame.BulkString(Bytes.utf8("baz")))
+    transports(1).emit(bulk("baz"))
     assertEquals(afterReconnect, Some(Success(Some("baz"))))
   }
 
@@ -688,7 +690,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     connection.cachedSubmit(get, 60000L, _ => ()) // miss -> fetch
     transports.head.emit(Frame.SimpleString("OK"))
-    transports.head.emit(Frame.BulkString(Bytes.utf8("bar")))
+    transports.head.emit(bulk("bar"))
     assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded"))
 
     connection.cachedSubmit(get, 60000L, _ => ())                               // served locally
@@ -712,7 +714,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val respond: Bytes => Seq[Frame]                    = payload => {
       val text = payload.asUtf8String
       if (text.contains("TRACKING")) Seq(Frame.SimpleError("ERR unknown subcommand TRACKING"))
-      else if (text.contains("GET")) Seq(Frame.BulkString(Bytes.utf8("bar")))
+      else if (text.contains("GET")) Seq(bulk("bar"))
       else Nil
     }
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {

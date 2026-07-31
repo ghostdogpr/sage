@@ -13,7 +13,8 @@ import kyo.compat.*
 
 import sage.{Bytes, SageEvent}
 import sage.SageException.{ConnectionFailed, NotConnected, TimedOut}
-import sage.client.internal.{ConnectFailureRecorder, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Scheduler}
+import sage.client.internal.{ConnectFailureRecorder, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Replies, Scheduler}
+import sage.client.internal.Replies.{masterRole, replicaRole}
 import sage.cluster.Node
 import sage.commands.{Command, Connection}
 import sage.protocol.Frame
@@ -23,46 +24,6 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
   private val primary           = Node("primary-endpoint", 6379)
   private val reader            = Node("reader-endpoint", 6379)
   private val advertisedReplica = Node("10.0.0.7", 6379)
-
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
-  private def masterRole(replicas: Node*): Frame =
-    Frame.Array(
-      Vector(
-        Frame.BulkString(Bytes.utf8("master")),
-        Frame.Integer(0L),
-        Frame.Array(
-          replicas.toVector.map(replica =>
-            Frame.Array(
-              Vector(
-                Frame.BulkString(Bytes.utf8(replica.host)),
-                Frame.BulkString(Bytes.utf8(replica.port.toString)),
-                Frame.BulkString(Bytes.utf8("0"))
-              )
-            )
-          )
-        )
-      )
-    )
-
-  private def replicaRole(master: Node, state: String = "connected"): Frame =
-    Frame.Array(
-      Vector(
-        Frame.BulkString(Bytes.utf8("slave")),
-        Frame.BulkString(Bytes.utf8(master.host)),
-        Frame.Integer(master.port.toLong),
-        Frame.BulkString(Bytes.utf8(state)),
-        Frame.Integer(0L)
-      )
-    )
 
   private val readCommand: Command[Long] =
     Command("ZSCORE", Command.NoKeys, Vector.empty, (_: Frame) => Right(1L), isReadOnly = true)
@@ -119,7 +80,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
         val respond: Bytes => Seq[Frame] = payload => {
           val text  = payload.asUtf8String
           val reads = text.sliding("ZSCORE".length).count(_ == "ZSCORE")
-          if (text.contains("HELLO")) Seq(helloReply)
+          if (text.contains("HELLO")) Seq(Replies.hello)
           else if (text.contains("ROLE")) roles.get(node).toSeq
           else if (reads > 0 && node == diesOnRead) {
             kill(node)

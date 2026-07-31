@@ -1,17 +1,13 @@
 package sage.cluster
 
 import sage.Bytes
+import sage.cluster.TopologyFixtures.{keyed, keyless}
 import sage.commands.{Command, Pipeline}
 
 class SplitPlanSpec extends munit.FunSuite {
 
   private val a = Node("a", 6379)
   private val b = Node("b", 6379)
-
-  private def keyed(keys: String*): Command[Long] =
-    Command("X", keys.indices.toVector, keys.toVector.map(Bytes.utf8), _ => Right(0L))
-
-  private val keyless: Command[Long] = Command("PING", Command.NoKeys, Vector.empty, _ => Right(0L))
 
   private val sFoo = Slot.of(Bytes.utf8("foo"))
   private val sBar = Slot.of(Bytes.utf8("bar"))

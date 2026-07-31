@@ -16,18 +16,8 @@ import sage.protocol.Frame
 
 class NodePoolSpec extends munit.FunSuite {
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
   private def respond(payload: Bytes): Seq[Frame] =
-    if (payload.asUtf8String.contains("HELLO")) Seq(helloReply) else Nil
+    if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello) else Nil
 
   private def newPool(factory: Node => MultiplexedConnection.TransportFactory, events: Events = Events.disabled): NodePool =
     new NodePool(
