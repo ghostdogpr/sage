@@ -60,9 +60,19 @@ stay pinned to one slot.
 
 ### Commands that run on every master
 
-No node sees the whole keyspace, and a cluster replicates neither the script nor the function cache. So `scriptLoad`, `scriptExists`, `scriptFlush`,
-the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`, `waitReplicas`, and `waitAof` run on every slot-owning master, and their replies
-are folded into one. There is no partial result: if one master fails, the call fails.
+No node sees the whole keyspace, a cluster replicates neither the script nor the function cache, and a node answers pub/sub introspection only for
+the subscribers attached to it. So `scriptLoad`, `scriptExists`, `scriptFlush`, the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`,
+`waitReplicas`, `waitAof`, `memoryPurge`, and the `pubsub*` introspection forms run on every slot-owning master, and their replies are folded into
+one: `keys` returns the whole keyspace, `dbSize` the cluster total, `pubsubChannels` every active channel, `pubsubNumSub` the summed subscriber
+count. There is no partial result: if one master fails, the call fails.
+
+None of them can go in a pipeline, which batches per node — run them on the client directly; `dbSize` is also rejected inside a transaction, which
+pins to one node. Only masters are visited, so a subscriber connected through a replica is not counted by `pubsubNumSub`, and `pubsubNumPat` counts
+a pattern once per master holding it.
+
+The keyless administrative commands — `info`, `configGet`, `configSet`, `slowLog*`, `latency*`, `commandLog*`, `functionDump` — are answered by a
+single master instead. Note that `configSet` sets the parameter on one master, not across the cluster. A keyless *read* such as `randomKey` is also
+answered by one node, but follows the [read routing](#read-routing) policy, so it can be served by a replica.
 
 This is also the one case where Sage does not retry a `-CLUSTERDOWN` for you; see
 [Refusals Sage retries for you](/error-handling#refusals-sage-retries-for-you).

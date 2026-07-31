@@ -43,6 +43,8 @@ Commands mirror the server's documented groups, and the methods are named one-fo
 
 The full surface lives on the client and on `Commands`; the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) list every method with its signature.
 
+A command carrying a key routes to that key's slot. A keyless one has no slot to route by, so in a cluster it either runs on every master or is answered by a single node — see [commands that run on every master](/configuration#commands-that-run-on-every-master).
+
 ## Typed keys and values
 
 Keys and values are typed, and a codec converts each to and from wire bytes. The **key type is fixed on the client**: the default `SageClient` is String-keyed, so a command only ever needs the value type at the call site:

@@ -74,6 +74,8 @@ for {
 
 :::
 
+In a cluster, a pipeline batches per node, so it cannot carry a [command that runs on every master](/configuration#commands-that-run-on-every-master). Those are rejected up front rather than partially applied; run them on the client directly.
+
 ## Transactions
 
 A transaction runs a pipeline atomically via `MULTI`/`EXEC` on a leased dedicated connection. Open one with `transaction { tx => … }`: inside the scope you may `watch` keys, run ordinary reads (`tx.get`, `tx.run`, …), decide, and then `exec` a pipeline (or abandon the scope to discard it).

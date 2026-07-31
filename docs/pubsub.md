@@ -95,4 +95,8 @@ ZIO.scoped {
 
 Sage holds one sharded subscription connection per owning node and re-homes the affected subscriptions automatically when a slot migrates or a node fails over.
 
+## Introspection
+
+`pubsubChannels`, `pubsubShardChannels`, `pubsubNumSub`, `pubsubShardNumSub`, and `pubsubNumPat` report the live subscription state. A server answers only for the subscribers attached to *it*, so in a cluster Sage [runs them on every master](/configuration#commands-that-run-on-every-master) and merges the replies.
+
 See [Configuration](/configuration) for how to connect to a cluster.
