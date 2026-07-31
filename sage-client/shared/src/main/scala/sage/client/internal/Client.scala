@@ -2300,6 +2300,14 @@ object Client {
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
+  // acquire a fresh lease per execution so interruption can release the pool slot; a lease is single-shot (cancel is terminal), so a
+  // captured one would make a re-run of this value hang
+  private[internal] def withLeaseIfBlocking[A](command: Command[?])(body: DedicatedPool.Lease => CIO[A]): CIO[A] =
+    command.execution match {
+      case Execution.Ordinary => body(null)
+      case Execution.Blocking => CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+    }
+
   // attributes the node at the completion site, so a batch that never reaches the wire (a false submit) leaves its callbacks unattributed
   private def attributeOnComplete(cb: Try[Any] => Unit, node: Node): Try[Any] => Unit =
     result => {
@@ -2466,7 +2474,7 @@ object Client {
           () => connection.isLive,
           events = events
         )
-        new Live(connection, pool, subscriptions, cachingEnabled, events)
+        new Live(new NodeClient(connection, pool), subscriptions, cachingEnabled, events)
       }
       .mapError { error =>
         events.close()
@@ -2492,34 +2500,24 @@ object Client {
     }
 
   final private class Live(
-    connection: MultiplexedConnection,
-    pool: DedicatedPool,
+    nodeClient: NodeClient,
     subscriptions: SubscriptionConnection,
     cachingEnabled: Boolean,
     events: Events
   ) extends Client[CIO, String] {
 
     def run[A](command: Command[A]): CIO[A] =
-      command.execution match {
-        case Execution.Ordinary =>
-          CIO.async { callback =>
-            val tracked = Events.trackCommand(events, command, callback)
-            Client.completing(tracked)(connection.submit(command, tracked))
-          }
-        case Execution.Blocking =>
-          // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
-          CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel())) { lease =>
-            CIO.async { callback =>
-              val tracked = Events.trackCommand(events, command, callback)
-              Client.completing(tracked)(pool.use(command, tracked, lease))
-            }
-          }
+      Client.withLeaseIfBlocking(command) { lease =>
+        CIO.async { callback =>
+          val tracked = Events.trackCommand(events, command, callback)
+          Client.completing(tracked)(nodeClient.submit(command, asking = false, tracked, lease))
+        }
       }
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
       if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
       else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
-      else CIO.async(callback => Client.completing(callback)(connection.cachedSubmit(command, ttl.toMillis, callback)))
+      else CIO.async(callback => Client.completing(callback)(nodeClient.cachedSubmit(command, ttl.toMillis, callback)))
 
     def scanTargets: CIO[Vector[ScanTarget]] = CIO.value(Vector(ScanTarget.any))
 
@@ -2542,7 +2540,7 @@ object Client {
 
     private def acquireScope: CIO[TxScope] =
       CIO.blocking {
-        try new TxScope(pool.acquireForTransaction(), events = events)
+        try new TxScope(nodeClient.acquireForTransaction(), events = events)
         catch {
           case e: SageException => throw e
           case NonFatal(_)      => throw ConnectionLost(mayHaveExecuted = false)
@@ -2550,7 +2548,7 @@ object Client {
       }
 
     private def releaseScope(scope: TxScope): CIO[Unit] =
-      CIO.blocking(pool.releaseTransaction(scope.conn, scope.sealAndReusable()))
+      CIO.blocking(nodeClient.releaseTransaction(scope.conn, scope.sealAndReusable()))
 
     private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
       if (p.commands.isEmpty)
@@ -2559,7 +2557,7 @@ object Client {
         CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
         CIO.async { complete =>
-          Client.submitBatchOnOne(events, p.commands, Events.startSpans(events, p.commands), connection.submitAll, complete)
+          Client.submitBatchOnOne(events, p.commands, Events.startSpans(events, p.commands), nodeClient.submitAll, complete)
         }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
@@ -2574,8 +2572,7 @@ object Client {
 
     def close: CIO[Unit] = CIO.blocking {
       subscriptions.close()
-      pool.close()
-      connection.close()
+      nodeClient.close()
       events.close()
     }
   }

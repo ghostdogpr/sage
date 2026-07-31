@@ -131,9 +131,7 @@ final private[client] class ClusterLive(
         val tracked = Events.trackCommand(events, command, complete, span)
         Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, lease = lease))
       }
-    if (!command.isBlocking) body(null)
-    // acquire a fresh lease per execution: a lease is single-shot (cancel is terminal), so a captured one would make a re-run of this value hang
-    else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+    Client.withLeaseIfBlocking(command)(body)
   }
 
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
@@ -176,9 +174,7 @@ final private[client] class ClusterLive(
             val tracked = Events.trackCommand(events, command, complete, span)
             Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked, lease))
           }
-        // mirror run: a blocking command needs a cancelable lease so an interrupt releases the slot instead of leaking it
-        if (!command.isBlocking) body(null)
-        else CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+        Client.withLeaseIfBlocking(command)(body)
       case None       => run(command)
     }
 
@@ -1113,22 +1109,14 @@ final private[client] class ClusterLive(
         topologyRef.get().nodeForSlot(slot)
       }
 
+    // transaction pinning depends on the key slot, not its current owner, so both owned and unowned routes retain the classified slot
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
-      if (command.hasMalformedKeys)
-        Left(malformedKeys(command.name))
-      else if (command.keyIndices.isEmpty)
-        Right(None)
-      else {
-        val keyIndices = command.keyIndices
-        val first      = Slot.of(command.args(keyIndices.head))
-        var i          = 1
-        var crossed    = false
-        while (i < keyIndices.length && !crossed) {
-          if (Slot.of(command.args(keyIndices(i))) != first) crossed = true
-          i += 1
-        }
-        if (crossed) Left(crossSlot(command.name, keyIndices.iterator.map(index => Slot.of(command.args(index))).toSet))
-        else Right(Some(first))
+      topologyRef.get().route(command) match {
+        case Route.Malformed        => Left(malformedKeys(command.name))
+        case Route.Keyless          => Right(None)
+        case Route.ToNode(_, slot)  => Right(Some(slot))
+        case Route.Unowned(slot)    => Right(Some(slot))
+        case Route.CrossSlot(slots) => Left(crossSlot(command.name, slots))
       }
 
     private def pipelineSlot[Out, R](p: Pipeline[Out, R]): Either[Throwable, Option[Slot]] = {
