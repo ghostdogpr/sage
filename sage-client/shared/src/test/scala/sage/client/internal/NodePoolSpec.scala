@@ -52,6 +52,8 @@ class NodePoolSpec extends munit.FunSuite {
     def transport(i: Int): FakeTransport                        = opened.get(i)
   }
 
+  private def existingLive(pool: NodePool, node: Node): Option[NodeClient] = Option(pool.existing(node)).filter(_.isLive)
+
   private def awaitTrue(cond: => Boolean, clue: String): Unit = {
     val deadline = System.nanoTime() + 2.seconds.toNanos
     while (!cond && System.nanoTime() < deadline) Thread.sleep(10)
@@ -73,7 +75,7 @@ class NodePoolSpec extends munit.FunSuite {
     establishing.join(2000)
     val nc = pool.existing(node)
     assert(nc != null, "the published client should be visible")
-    assert(pool.existingLive(node).exists(_ eq nc))
+    assert(existingLive(pool, node).exists(_ eq nc))
 
     pool.retain(_ => false)
     assertEquals(pool.existing(node), null)
@@ -114,7 +116,7 @@ class NodePoolSpec extends munit.FunSuite {
     )
 
     awaitTrue(gated.transport(0).closeCount > 0, "the discarded NodeClient was not closed")
-    assert(pool.existingLive(node).isEmpty, "the rejected node leaked into the pool")
+    assert(existingLive(pool, node).isEmpty, "the rejected node leaked into the pool")
     assert(!pool.candidatesByLiveness.contains(node), "the rejected node leaked into refresh candidates")
     pool.close()
   }
@@ -134,7 +136,7 @@ class NodePoolSpec extends munit.FunSuite {
     gated.release(0)
     establishing.join(2000)
     assert(result.get() != null && result.get().isSuccess, s"expected success, got ${result.get()}")
-    assert(pool.existingLive(node).isDefined, "the accepted node should be live in the pool")
+    assert(existingLive(pool, node).isDefined, "the accepted node should be live in the pool")
     pool.close()
   }
 
@@ -166,7 +168,7 @@ class NodePoolSpec extends munit.FunSuite {
     gated.release(1)
     secondThread.join(2000)
     assert(second.get() != null && second.get().isSuccess, s"attempt 2: ${second.get()}")
-    assert(pool.existingLive(node).isDefined, "attempt 2 did not publish")
+    assert(existingLive(pool, node).isDefined, "attempt 2 did not publish")
     assertEquals(gated.transport(1).closeCount, 0, "attempt 2's published client must not be closed")
     pool.close()
   }

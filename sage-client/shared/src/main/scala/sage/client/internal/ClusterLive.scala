@@ -217,13 +217,9 @@ final private[client] class ClusterLive(
         else scheduler.offload(broadcast(topology, command, redirectsLeft, complete, masterPool.getOrEstablishOrNull))
       else
         topology.route(command) match {
-          case Route.ToNode(node, slot) =>
-            if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
-              sendRead(command, node, slot, redirectsLeft, complete)
-            else sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
+          case Route.ToNode(node, slot) => sendOwned(command, node, slot, redirectsLeft, complete, allowReplica, lease, cacheCtx)
           case Route.Keyless            =>
-            if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
-              sendKeylessRead(topology, command, redirectsLeft, complete)
+            if (servesFromReplica(command, allowReplica)) sendKeylessRead(topology, command, redirectsLeft, complete)
             else sendToAny(topology, command, redirectsLeft, complete, lease, cacheCtx)
           case Route.Unowned(_)         => scheduler.offload(onUnowned(command, redirectsLeft, complete, lease, cacheCtx))
           case Route.CrossSlot(slots)   =>
@@ -235,6 +231,22 @@ final private[client] class ClusterLive(
             complete(Failure(malformedKeys(command.name)))
         }
     }
+
+  private def sendOwned[A](
+    command: Command[A],
+    node: Node,
+    slot: Slot,
+    redirectsLeft: Int,
+    complete: Try[A] => Unit,
+    allowReplica: Boolean,
+    lease: DedicatedPool.Lease,
+    cacheCtx: Cached
+  ): Unit =
+    if (servesFromReplica(command, allowReplica)) sendRead(command, node, slot, redirectsLeft, complete)
+    else sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
+
+  private def servesFromReplica(command: Command[?], allowReplica: Boolean): Boolean =
+    allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)
 
   private enum MultiSlotMerge {
     case Positional, Sum, AllSucceeded
@@ -297,7 +309,7 @@ final private[client] class ClusterLive(
           case Some(error) => complete(Failure(error))
           case None        =>
             val merged = policy.merge match {
-              case MultiSlotMerge.Positional   => Frame.Array(collectFrames(values, command.keyIndices.size))
+              case MultiSlotMerge.Positional   => Frame.Array(Vector.tabulate(command.keyIndices.size)(values.get))
               case MultiSlotMerge.Sum          => Frame.Integer(total.get())
               case MultiSlotMerge.AllSucceeded => Frame.SimpleString("OK")
             }
@@ -474,7 +486,7 @@ final private[client] class ClusterLive(
         if (remaining.decrementAndGet() == 0)
           Option(firstError.get()) match {
             case Some(e) => complete(Failure(e))
-            case None    => complete(Try(combine(collectFrames(frames, masters.size))).flatMap(decodeMerged(command, _)))
+            case None    => complete(Try(combine(Vector.tabulate(masters.size)(frames.get))).flatMap(Reply.decode(command, _)))
           }
       }
       masters.iterator.zipWithIndex.foreach { case (node, index) =>
@@ -531,24 +543,12 @@ final private[client] class ClusterLive(
         else submitBroadcast(node, command, masterPool.getOrEstablishOrNull, attemptsLeft - 1, settle)
       }
 
-  private def collectFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Vector[Frame] = {
-    val out = Vector.newBuilder[Frame]
-    var i   = 0
-    while (i < size) {
-      out += frames.get(i)
-      i += 1
-    }
-    out.result()
-  }
-
   private def concatFrames(frames: Vector[Frame]): Frame =
     Frame.Array(frames.flatMap {
       case Frame.Array(elements) => elements
       case Frame.Set(elements)   => elements
       case other                 => Vector(other)
     })
-
-  private def decodeMerged[A](command: Command[A], merged: Frame): Try[A] = Reply.decode(command, merged)
 
   private def sendToAny[A](
     topology: ClusterTopology,
@@ -694,9 +694,7 @@ final private[client] class ClusterLive(
     topology.route(command) match {
       // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
       case Route.ToNode(node, slot)                                                                  =>
-        if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
-          sendRead(command, node, slot, redirectsLeft, complete)
-        else sendTo(node, command, asking = false, redirectsLeft, complete, lease, cacheCtx)
+        sendOwned(command, node, slot, redirectsLeft, complete, allowReplica, lease, cacheCtx)
       // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
       case _ if allowReplica && readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
         onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
@@ -1069,7 +1067,7 @@ final private[client] class ClusterLive(
         case None              => Left(NotConnected())
         case Some((node, pin)) =>
           try {
-            val nc = getOrEstablish(node)
+            val nc = masterPool.getOrEstablish(node)
             Right((nc, nc.acquireForTransaction(), node, pin))
           } catch {
             case error: SageException => Left(error)
@@ -1130,8 +1128,6 @@ final private[client] class ClusterLive(
     }
   }
 
-  private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
-
   private def flushNode(node: Node): Unit =
     if (cachingEnabled) {
       val nc = masterPool.existing(node)
@@ -1165,7 +1161,7 @@ final private[client] class ClusterLive(
 
   // a node outside a formed cluster answers CLUSTER SLOTS with an empty array: a non-answer, not a topology owning no slots
   private def querySlotsVia(node: Node): Either[Throwable, Vector[Shard]] = {
-    val nc = getOrEstablish(node)
+    val nc = masterPool.getOrEstablish(node)
     Bootstrap.awaitReply[Vector[Shard]](connectTimeout.toMillis)(callback => nc.submit(Cluster.slots, asking = false, callback)) match {
       case None                                     =>
         Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
