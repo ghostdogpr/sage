@@ -760,7 +760,8 @@ final private[client] class ClusterLive(
     plan: SplitPlan
   ): Unit = {
     val n                         = p.commands.length
-    val collector                 = new TxSupport.IndexedCollector[Either[SageException, Any]](n, complete)
+    val collector                 =
+      new TxSupport.IndexedCollector[Either[SageException, Any]](n, results => complete(Success(results)))
     val emits                     = Vector.tabulate(n) { i =>
       val span = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
       Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
@@ -796,8 +797,8 @@ final private[client] class ClusterLive(
     if (useReplica) {
       val replicas = topologyRef.get().shards.collectFirst { case s if s.master == node => s.replicas }.getOrElse(Vector.empty)
       reads.pickOne(reads.candidatesFor(node, replicas), node) {
-        case Some((target, nc)) => submitBatch(target, nc, indices, p, emits, reroute, useReplica)
-        case None               => indices.foreach(reroute)
+        case Some(picked) => submitBatch(picked.node, picked.client, indices, p, emits, reroute, useReplica)
+        case None         => indices.foreach(reroute)
       }
     } else {
       val existing = masterPool.existing(node)

@@ -26,7 +26,7 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
     connection.cachedSubmit(command, ttlMillis, callback, deferred)
 
   // a pipeline's per-node batch: one round-trip on this node's Multiplexed Connection. False when not connected (nothing submitted), so
-  // the caller re-routes each position rather than fabricating per-position errors. Blocking commands never reach here (rejected up front).
+  // the caller can re-route the batch rather than fabricating per-position errors. Blocking commands never reach here (rejected up front).
   def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean =
     connection.submitAll(commands, callbacks)
 

@@ -87,13 +87,13 @@ private[internal] object TxSupport {
     * no done-guard is needed. This is the collect-all shape shared by the standalone and cluster pipelines; the connection's fail-fast
     * RawBatch deliberately keeps its own.
     */
-  final class IndexedCollector[A](n: Int, complete: Try[Vector[A]] => Unit) {
+  final class IndexedCollector[A](n: Int, complete: Vector[A] => Unit) {
     private val slots     = new AtomicReferenceArray[A](n)
     private val remaining = new AtomicInteger(n)
 
     def set(index: Int, value: A): Unit = {
       slots.set(index, value)
-      if (remaining.decrementAndGet() == 0) complete(Success(Vector.tabulate(n)(slots.get)))
+      if (remaining.decrementAndGet() == 0) complete(Vector.tabulate(n)(slots.get))
     }
   }
 }

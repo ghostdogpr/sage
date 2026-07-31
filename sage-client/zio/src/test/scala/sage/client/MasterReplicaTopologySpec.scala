@@ -65,24 +65,29 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     events: Events = Events.disabled,
     minRefreshInterval: FiniteDuration = 50.millis,
     topologyRefreshInterval: Option[FiniteDuration] = None,
-    scheduler: Scheduler = Scheduler.real
+    scheduler: Scheduler = Scheduler.real,
+    failDial: (Node, Int) => Boolean = (_, _) => false
   ) {
 
     val roles                                                           = TrieMap.from(initialRoles)
     @volatile var writesFailReadonly                                    = false
     @volatile var diesOnRead: Node                                      = null
     private val dials                                                   = new ConcurrentLinkedQueue[Node]()
+    private val roleRequests                                            = new ConcurrentLinkedQueue[Node]()
     private val transports                                              = new ConcurrentLinkedQueue[(Node, FakeTransport)]()
     private val factory: Node => MultiplexedConnection.TransportFactory = node =>
       (onFrame, onClosed) => {
+        val attempt                      = dials.asScala.count(_ == node)
         dials.add(node)
-        if (unreachable(node)) throw new IOException(s"cannot reach $node")
+        if (unreachable(node) || failDial(node, attempt)) throw new IOException(s"cannot reach $node")
         val respond: Bytes => Seq[Frame] = payload => {
           val text  = payload.asUtf8String
           val reads = text.sliding("ZSCORE".length).count(_ == "ZSCORE")
           if (text.contains("HELLO")) Seq(Replies.hello)
-          else if (text.contains("ROLE")) roles.get(node).toSeq
-          else if (reads > 0 && node == diesOnRead) {
+          else if (text.contains("ROLE")) {
+            roleRequests.add(node)
+            roles.get(node).toSeq
+          } else if (reads > 0 && node == diesOnRead) {
             kill(node)
             Nil
           } else if (reads > 0) Seq.fill(reads)(Frame.Integer(1L))
@@ -106,7 +111,8 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       events
     )
 
-    def dialled: Vector[Node] = dials.asScala.toVector
+    def dialled: Vector[Node]             = dials.asScala.toVector
+    def roleRequestCount(node: Node): Int = roleRequests.asScala.count(_ == node)
 
     private def kill(node: Node): Unit =
       transports.asScala.toVector.collect { case (`node`, transport) => transport }.foreach(_.close())
@@ -124,6 +130,9 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     def readPipeline(): Unit =
       scala.concurrent.Await.result(live.pipeline(Seq(readCommand, readCommand)).unsafeRun, 10.seconds): Unit
+
+    def writePipeline(): Try[Unit] =
+      Try(scala.concurrent.Await.result(live.pipeline(Seq(writeCommand, writeCommand)).unsafeRun, 10.seconds): Unit)
 
     def awaitTrue(condition: => Boolean, clue: String, timeout: FiniteDuration = 5.seconds): Unit = {
       val deadline = System.nanoTime() + timeout.toNanos
@@ -399,6 +408,23 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       },
       "replica-preferred pipelines did not reconsider the connected replica",
       timeout = 1.second
+    )
+    fixture.close()
+  }
+
+  test("an unsent master pipeline triggers role re-discovery") {
+    val fixture = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map(primary -> masterRole(advertisedReplica)),
+      failDial = (node, attempt) => node == primary && attempt == 1
+    )
+    fixture.live.bootstrapRoles()
+    assertEquals(fixture.roleRequestCount(primary), 1)
+
+    assert(fixture.writePipeline().isFailure, "the master connection establishment should fail")
+    fixture.awaitTrue(
+      fixture.roleRequestCount(primary) >= 2,
+      "an unsent master pipeline did not trigger role re-discovery"
     )
     fixture.close()
   }

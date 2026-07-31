@@ -16,6 +16,8 @@ import sage.commands.Command
   */
 private[client] object ReadRouting {
 
+  final case class Picked(node: Node, client: NodeClient, remaining: Vector[Node])
+
   // an ordinary (non-blocking) read; writes, blocking reads, cursor-bound scans (whose cursor is node-local), and `cached` reads (gated
   // separately) never reach here
   def replicaEligible(command: Command[?]): Boolean = command.isReadOnly && !command.isBlocking && !command.cursorBound
@@ -54,6 +56,18 @@ final private[client] class ReadRouting(
 ) {
 
   private val cursors = new ConcurrentHashMap[Node, AtomicInteger]()
+
+  private enum CandidateState {
+    case Unknown
+    case Unavailable
+    case Connected(client: NodeClient)
+  }
+
+  private enum Selection {
+    case Found(picked: ReadRouting.Picked)
+    case NeedsEstablish
+    case Exhausted
+  }
 
   /**
     * The candidates for `master`'s replicas under the policy, advancing that master's cursor once.
@@ -103,25 +117,22 @@ final private[client] class ReadRouting(
     }
 
   /**
-    * The one Node a batch of reads should land on with its connection, established if need be, or `None` when no candidate can serve the
-    * read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
+    * The one Node a batch of reads should land on with its connection and the candidates after it, established if need be, or `None` when no
+    * candidate can serve the read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
     */
-  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient)] => Unit): Unit = {
-    val it = candidates.iterator
-    while (it.hasNext) {
-      val node = it.next()
-      val nc   = poolFor(node, master).existing(node)
-      if (nc == null) {
-        scheduler.offload(onPick(establishOne(candidates, master)))
-        return
-      }
-      if (nc.isLive) {
-        onPick(Some((node, nc)))
-        return
-      }
+  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit =
+    select(candidates, master, existingCandidate) match {
+      case Selection.Found(picked)  => onPick(Some(picked))
+      case Selection.Exhausted      => onPick(None)
+      case Selection.NeedsEstablish =>
+        scheduler.offload {
+          // restart the full order so a previously dead candidate may reconnect before the first unknown one
+          select(candidates, master, establishCandidate) match {
+            case Selection.Found(picked) => onPick(Some(picked))
+            case _                       => onPick(None)
+          }
+        }
     }
-    onPick(None)
-  }
 
   private def submit[A](nc: NodeClient, node: Node, command: Command[A], rest: Vector[Node], complete: Try[A] => Unit)(
     onFault: (Node, Throwable, Vector[Node]) => Unit
@@ -137,14 +148,30 @@ final private[client] class ReadRouting(
       }
     )
 
-  private def establishOne(candidates: Vector[Node], master: Node): Option[(Node, NodeClient)] = {
-    val it = candidates.iterator
-    while (it.hasNext) {
-      val node = it.next()
-      val nc   = poolFor(node, master).getOrEstablishOrNull(node)
-      if (nc != null && nc.isLive) return Some((node, nc))
+  private def select(candidates: Vector[Node], master: Node, lookup: (NodePool, Node) => CandidateState): Selection = {
+    var remaining = candidates
+    while (remaining.nonEmpty) {
+      val node = remaining.head
+      val pool = poolFor(node, master)
+      lookup(pool, node) match {
+        case CandidateState.Unknown       => return Selection.NeedsEstablish
+        case CandidateState.Unavailable   => ()
+        case CandidateState.Connected(nc) =>
+          if (nc.isLive) return Selection.Found(ReadRouting.Picked(node, nc, remaining.tail))
+      }
+      remaining = remaining.tail
     }
-    None
+    Selection.Exhausted
+  }
+
+  private def existingCandidate(pool: NodePool, node: Node): CandidateState = {
+    val nc = pool.existing(node)
+    if (nc == null) CandidateState.Unknown else CandidateState.Connected(nc)
+  }
+
+  private def establishCandidate(pool: NodePool, node: Node): CandidateState = {
+    val nc = pool.getOrEstablishOrNull(node)
+    if (nc == null) CandidateState.Unavailable else CandidateState.Connected(nc)
   }
 
   private def poolFor(node: Node, master: Node): NodePool = if (node == master) masterPool else replicaPool

@@ -282,31 +282,47 @@ final private[client] class MasterReplicaLive(
   }
 
   private def walkRead[A](command: Command[A], candidates: Vector[Node], master: Node, complete: Try[A] => Unit): Unit =
-    reads.walk(command, candidates, master, complete)((node, error, rest) =>
-      onReadFault(node, node == master, error, command, rest, master, complete)
-    )
+    reads.walk(command, candidates, master, complete)((node, error, rest) => onReadFault(ReadRoute(node, master, rest), error, command, complete))
 
   private def onReadFault[A](
-    node: Node,
-    isMaster: Boolean,
+    route: ReadRoute,
     error: Throwable,
     command: Command[A],
-    rest: Vector[Node],
-    master: Node,
     complete: Try[A] => Unit
-  ): Unit = {
-    if (isMaster && isOwnershipFault(error)) triggerRefresh()
-    def fail(): Unit = {
-      Events.attributeNode(complete, node)
-      complete(Failure(error))
-    }
-    if (servesNoRead(error))
-      if (rest.nonEmpty) walkRead(command, rest, master, complete)
-      else {
-        triggerRefresh()
-        fail()
+  ): Unit =
+    handleReadFaults(route, Vector(error), RetryExecution.Inline)(
+      remaining => walkRead(command, remaining, route.master, complete),
+      () => {
+        Events.attributeNode(complete, route.node)
+        complete(Failure(error))
       }
-    else fail()
+    )
+
+  final private case class ReadRoute(node: Node, master: Node, remaining: Vector[Node])
+
+  private enum RetryExecution {
+    case Inline, Offloaded
+  }
+
+  private def handleReadFaults(route: ReadRoute, errors: Vector[Throwable], retryExecution: RetryExecution)(
+    retry: Vector[Node] => Unit,
+    settle: () => Unit
+  ): Unit = {
+    val ownershipFault = route.node == route.master && errors.exists(isOwnershipFault)
+    if (ownershipFault) triggerRefresh()
+    if (errors.exists(servesNoRead)) {
+      def continue(): Unit =
+        if (route.remaining.nonEmpty) retry(route.remaining)
+        else {
+          // an ownership fault already requested the same throttled refresh above
+          if (!ownershipFault) triggerRefresh()
+          settle()
+        }
+      retryExecution match {
+        case RetryExecution.Inline    => continue()
+        case RetryExecution.Offloaded => scheduler.offload(continue())
+      }
+    } else settle()
   }
 
   private def isOwnershipFault(error: Throwable): Boolean = Fault.categorize(error) match {
@@ -331,22 +347,53 @@ final private[client] class MasterReplicaLive(
       CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
     else
       CIO.async { complete =>
-        val spans                                              = Events.startSpans(events, p.commands)
+        val spans           = Events.startSpans(events, p.commands)
         // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
-        val useReplica                                         = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-        def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
-          // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
-          if (picked.isEmpty) triggerRefresh()
-          val submit = picked match {
-            case Some((_, nc)) => nc.submitAll
-            case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
+        val useReplica      = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
+        val master          = masterNodeRef.get()
+        val refreshOnUnsent = () => triggerRefresh()
+        if (useReplica) {
+          val batch                                              = new Client.TrackedBatch(events, p.commands, spans, complete)
+          def failUnsent(): Unit                                 =
+            // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
+            batch.failUnsent(refreshOnUnsent)
+          def submitOn(picked: Option[ReadRouting.Picked]): Unit =
+            picked match {
+              case Some(ReadRouting.Picked(node, nc, rest)) =>
+                val route     = ReadRoute(node, master, rest)
+                val attempt   = new TxSupport.IndexedCollector[Try[Any]](
+                  p.commands.length,
+                  results =>
+                    handleReadFaults(route, results.collect { case Failure(error) => error }, RetryExecution.Offloaded)(
+                      remaining => reads.pickOne(remaining, master)(submitOn),
+                      () => batch.settleAll(node, results)
+                    )
+                )
+                val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => attempt.set(i, result))
+                // the selected connection died before reserving the batch; retry the whole batch on the remaining candidates
+                if (!nc.submitAll(p.commands, callbacks))
+                  if (rest.nonEmpty) reads.pickOne(rest, master)(submitOn)
+                  else failUnsent()
+              case None                                     => failUnsent()
+            }
+          reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
+        } else {
+          def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
+            val submit = picked match {
+              case Some((_, nc)) => nc.submitAll
+              case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
+            }
+            Client.submitBatchOnOne(
+              events,
+              p.commands,
+              spans,
+              submit,
+              complete,
+              onUnsent = refreshOnUnsent,
+              node = picked.map(_._1)
+            )
           }
-          Client.submitBatchOnOne(events, p.commands, spans, submit, complete, picked.map(_._1))
-        }
-        val master                                             = masterNodeRef.get()
-        if (useReplica) reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
-        else {
-          val existing = masterPool.existing(master)
+          val existing                                           = masterPool.existing(master)
           if (existing != null) submitOn(Some((master, existing)))
           else
             scheduler.offload {
