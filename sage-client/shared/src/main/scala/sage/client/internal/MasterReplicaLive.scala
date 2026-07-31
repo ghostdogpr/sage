@@ -290,7 +290,7 @@ final private[client] class MasterReplicaLive(
     command: Command[A],
     complete: Try[A] => Unit
   ): Unit =
-    disposeReadFaults(route, Vector(error), offload = false)(
+    handleReadFaults(route, Vector(error), RetryExecution.Inline)(
       remaining => walkRead(command, remaining, route.master, complete),
       () => {
         Events.attributeNode(complete, route.node)
@@ -300,7 +300,11 @@ final private[client] class MasterReplicaLive(
 
   final private case class ReadRoute(node: Node, master: Node, remaining: Vector[Node])
 
-  private def disposeReadFaults(route: ReadRoute, errors: Vector[Throwable], offload: Boolean)(
+  private enum RetryExecution {
+    case Inline, Offloaded
+  }
+
+  private def handleReadFaults(route: ReadRoute, errors: Vector[Throwable], retryExecution: RetryExecution)(
     retry: Vector[Node] => Unit,
     settle: () => Unit
   ): Unit = {
@@ -310,10 +314,14 @@ final private[client] class MasterReplicaLive(
       def continue(): Unit =
         if (route.remaining.nonEmpty) retry(route.remaining)
         else {
+          // an ownership fault already requested the same throttled refresh above
           if (!ownershipFault) triggerRefresh()
           settle()
         }
-      if (offload) scheduler.offload(continue()) else continue()
+      retryExecution match {
+        case RetryExecution.Inline    => continue()
+        case RetryExecution.Offloaded => scheduler.offload(continue())
+      }
     } else settle()
   }
 
@@ -356,7 +364,7 @@ final private[client] class MasterReplicaLive(
                 val attempt   = new TxSupport.IndexedCollector[Try[Any]](
                   p.commands.length,
                   results =>
-                    disposeReadFaults(route, results.collect { case Failure(error) => error }, offload = true)(
+                    handleReadFaults(route, results.collect { case Failure(error) => error }, RetryExecution.Offloaded)(
                       remaining => reads.pickOne(remaining, master)(submitOn),
                       () => batch.settleAll(node, results)
                     )
@@ -381,8 +389,8 @@ final private[client] class MasterReplicaLive(
               spans,
               submit,
               complete,
-              picked.map(_._1),
-              refreshOnUnsent
+              onUnsent = refreshOnUnsent,
+              node = picked.map(_._1)
             )
           }
           val existing                                           = masterPool.existing(master)

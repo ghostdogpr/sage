@@ -57,8 +57,10 @@ final private[client] class ReadRouting(
 
   private val cursors = new ConcurrentHashMap[Node, AtomicInteger]()
 
-  private enum Lookup {
-    case Existing, Establish
+  private enum CandidateState {
+    case Unknown
+    case Unavailable
+    case Connected(client: NodeClient)
   }
 
   private enum Selection {
@@ -119,12 +121,13 @@ final private[client] class ReadRouting(
     * candidate can serve the read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
     */
   def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit =
-    select(candidates, master, Lookup.Existing) match {
+    select(candidates, master, existingCandidate) match {
       case Selection.Found(picked)  => onPick(Some(picked))
       case Selection.Exhausted      => onPick(None)
       case Selection.NeedsEstablish =>
         scheduler.offload {
-          select(candidates, master, Lookup.Establish) match {
+          // restart the full order so a previously dead candidate may reconnect before the first unknown one
+          select(candidates, master, establishCandidate) match {
             case Selection.Found(picked) => onPick(Some(picked))
             case _                       => onPick(None)
           }
@@ -145,20 +148,30 @@ final private[client] class ReadRouting(
       }
     )
 
-  private def select(candidates: Vector[Node], master: Node, lookup: Lookup): Selection = {
+  private def select(candidates: Vector[Node], master: Node, lookup: (NodePool, Node) => CandidateState): Selection = {
     var remaining = candidates
     while (remaining.nonEmpty) {
       val node = remaining.head
       val pool = poolFor(node, master)
-      val nc   = lookup match {
-        case Lookup.Existing  => pool.existing(node)
-        case Lookup.Establish => pool.getOrEstablishOrNull(node)
+      lookup(pool, node) match {
+        case CandidateState.Unknown       => return Selection.NeedsEstablish
+        case CandidateState.Unavailable   => ()
+        case CandidateState.Connected(nc) =>
+          if (nc.isLive) return Selection.Found(ReadRouting.Picked(node, nc, remaining.tail))
       }
-      if (nc == null && lookup == Lookup.Existing) return Selection.NeedsEstablish
-      if (nc != null && nc.isLive) return Selection.Found(ReadRouting.Picked(node, nc, remaining.tail))
       remaining = remaining.tail
     }
     Selection.Exhausted
+  }
+
+  private def existingCandidate(pool: NodePool, node: Node): CandidateState = {
+    val nc = pool.existing(node)
+    if (nc == null) CandidateState.Unknown else CandidateState.Connected(nc)
+  }
+
+  private def establishCandidate(pool: NodePool, node: Node): CandidateState = {
+    val nc = pool.getOrEstablishOrNull(node)
+    if (nc == null) CandidateState.Unavailable else CandidateState.Connected(nc)
   }
 
   private def poolFor(node: Node, master: Node): NodePool = if (node == master) masterPool else replicaPool

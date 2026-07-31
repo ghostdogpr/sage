@@ -2340,7 +2340,7 @@ object Client {
         tracked(i)(results(i))
       }
 
-    def failUnsent(onUnsent: () => Unit = () => ()): Unit = {
+    def failUnsent(onUnsent: () => Unit): Unit = {
       val error = NotConnected()
       onUnsent()
       tracked.foreach(Events.abandonSpan(_, error))
@@ -2358,8 +2358,8 @@ object Client {
     spans: Vector[CommandSpan],
     submitAll: (Vector[Command[?]], Vector[Try[Any] => Unit]) => Boolean,
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
-    node: Option[Node] = None,
-    onUnsent: () => Unit = () => ()
+    onUnsent: () => Unit,
+    node: Option[Node] = None
   ): Unit = {
     val batch = new TrackedBatch(events, commands, spans, complete)
     if (!submitAll(commands, batch.callbacks(node))) batch.failUnsent(onUnsent)
@@ -2571,7 +2571,14 @@ object Client {
         CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
       else
         CIO.async { complete =>
-          Client.submitBatchOnOne(events, p.commands, Events.startSpans(events, p.commands), nodeClient.submitAll, complete)
+          Client.submitBatchOnOne(
+            events,
+            p.commands,
+            Events.startSpans(events, p.commands),
+            nodeClient.submitAll,
+            complete,
+            onUnsent = () => ()
+          )
         }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
