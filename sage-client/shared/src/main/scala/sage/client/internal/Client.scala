@@ -2334,13 +2334,20 @@ object Client {
       case Some(n) => tracked.map(attributeOnComplete(_, n))
       case None    => tracked
     }
-    if (!submitAll(commands, callbacks)) {
-      val error = NotConnected()
-      tracked.foreach(Events.abandonSpan(_, error))
-      if (events.emitsEvents)
-        commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
-      complete(Failure(error))
-    }
+    if (!submitAll(commands, callbacks)) failUnsentBatch(events, commands, tracked, complete)
+  }
+
+  private[internal] def failUnsentBatch(
+    events: Events,
+    commands: Vector[Command[?]],
+    tracked: Vector[Try[Any] => Unit],
+    complete: Try[Vector[Either[SageException, Any]]] => Unit
+  ): Unit = {
+    val error = NotConnected()
+    tracked.foreach(Events.abandonSpan(_, error))
+    if (events.emitsEvents)
+      commands.foreach(c => events.emit(SageEvent.CommandCompleted(c.name, None, Duration.Zero, Outcome.Failed(error))))
+    complete(Failure(error))
   }
 
   /**

@@ -349,11 +349,13 @@ abstract class MasterReplicaStaleReplicaSuite(image: String, serverBinary: Strin
                 _             <- connectAndUse(replicaCfg)(refuseStaleReads)
                 _             <- preferred.set("sd:k", "v")
                 fallback      <- preferred.get[String]("sd:k")
+                batchFallback <- preferred.pipeline(Seq.fill(2)(Commands.get[String, String]("sd:k")))
                 strictFailed  <- strict.get[String]("sd:k").fold(_ => CIO.value(false), _ => CIO.value(true))
               } yield {
                 assertEquals(warmStrict, Some("from-replica"))
                 assertEquals(warmPreferred, Some("from-replica"))
                 assertEquals(fallback, Some("v"))
+                assertEquals(batchFallback, Vector(Some("v"), Some("v")))
                 assert(strictFailed, "strict Replica read should fail when the only replica refuses to serve stale data")
               }
             }

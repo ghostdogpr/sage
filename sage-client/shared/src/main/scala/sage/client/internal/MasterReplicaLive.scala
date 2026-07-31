@@ -331,22 +331,50 @@ final private[client] class MasterReplicaLive(
       CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
     else
       CIO.async { complete =>
-        val spans                                              = Events.startSpans(events, p.commands)
+        val spans      = Events.startSpans(events, p.commands)
         // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
-        val useReplica                                         = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-        def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
-          // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
-          if (picked.isEmpty) triggerRefresh()
-          val submit = picked match {
-            case Some((_, nc)) => nc.submitAll
-            case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
+        val useReplica = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
+        val master     = masterNodeRef.get()
+        if (useReplica) {
+          val collector                                                        = new TxSupport.IndexedCollector[Either[SageException, Any]](p.commands.length, complete)
+          val tracked                                                          = Vector.tabulate(p.commands.length) { i =>
+            val span = if (spans.isEmpty) CommandSpan.noop else spans(i)
+            Events.trackCommand[Any](events, p.commands(i), result => collector.set(i, TxSupport.toEither(result)), span)
           }
-          Client.submitBatchOnOne(events, p.commands, spans, submit, complete, picked.map(_._1))
-        }
-        val master                                             = masterNodeRef.get()
-        if (useReplica) reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
-        else {
-          val existing = masterPool.existing(master)
+          def failUnsent(): Unit                                               = {
+            // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
+            triggerRefresh()
+            Client.failUnsentBatch(events, p.commands, tracked, complete)
+          }
+          def submitOn(picked: Option[(Node, NodeClient, Vector[Node])]): Unit =
+            picked match {
+              case Some((node, nc, rest)) =>
+                val callbacks = Vector.tabulate(p.commands.length) { i => (result: Try[Any]) =>
+                  result match {
+                    case Success(_)     =>
+                      Events.attributeNode(tracked(i), node)
+                      tracked(i)(result)
+                    // deciding whether the Node can serve this read may establish the fallback and must stay off the reply thread
+                    case Failure(error) =>
+                      scheduler.offload(onReadFault(node, node == master, error, p.commands(i), rest, master, tracked(i)))
+                  }
+                }
+                // the liveness race lost before anything reached the wire: retain batching while trying the remaining candidates
+                if (!nc.submitAll(p.commands, callbacks))
+                  if (rest.nonEmpty) reads.pickOneWithRest(rest, master)(submitOn)
+                  else failUnsent()
+              case None                   => failUnsent()
+            }
+          reads.pickOneWithRest(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
+        } else {
+          def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
+            val submit = picked match {
+              case Some((_, nc)) => nc.submitAll
+              case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
+            }
+            Client.submitBatchOnOne(events, p.commands, spans, submit, complete, picked.map(_._1))
+          }
+          val existing                                           = masterPool.existing(master)
           if (existing != null) submitOn(Some((master, existing)))
           else
             scheduler.offload {

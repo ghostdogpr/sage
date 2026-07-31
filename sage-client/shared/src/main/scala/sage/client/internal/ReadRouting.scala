@@ -106,19 +106,28 @@ final private[client] class ReadRouting(
     * The one Node a batch of reads should land on with its connection, established if need be, or `None` when no candidate can serve the
     * read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
     */
-  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient)] => Unit): Unit = {
+  def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient)] => Unit): Unit =
+    pickOneWithRest(candidates, master)(picked => onPick(picked.map { case (node, nc, _) => (node, nc) }))
+
+  /**
+    * As [[pickOne]], retaining the candidates after the selected Node so a failed read batch can fall through without reconsidering the Node
+    * that just refused it.
+    */
+  def pickOneWithRest(candidates: Vector[Node], master: Node)(onPick: Option[(Node, NodeClient, Vector[Node])] => Unit): Unit = {
     val it = candidates.iterator
+    var i  = 0
     while (it.hasNext) {
       val node = it.next()
       val nc   = poolFor(node, master).existing(node)
       if (nc == null) {
-        scheduler.offload(onPick(establishOne(candidates, master)))
+        scheduler.offload(onPick(establishOneWithRest(candidates, master)))
         return
       }
       if (nc.isLive) {
-        onPick(Some((node, nc)))
+        onPick(Some((node, nc, candidates.drop(i + 1))))
         return
       }
+      i += 1
     }
     onPick(None)
   }
@@ -137,12 +146,14 @@ final private[client] class ReadRouting(
       }
     )
 
-  private def establishOne(candidates: Vector[Node], master: Node): Option[(Node, NodeClient)] = {
+  private def establishOneWithRest(candidates: Vector[Node], master: Node): Option[(Node, NodeClient, Vector[Node])] = {
     val it = candidates.iterator
+    var i  = 0
     while (it.hasNext) {
       val node = it.next()
       val nc   = poolFor(node, master).getOrEstablishOrNull(node)
-      if (nc != null && nc.isLive) return Some((node, nc))
+      if (nc != null && nc.isLive) return Some((node, nc, candidates.drop(i + 1)))
+      i += 1
     }
     None
   }

@@ -25,13 +25,21 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
   private val roleReply: Frame = Replies.masterRole(replica)
 
   // one reply per command occurrence in a batch; only the master answers ROLE; other bootstrap commands each get a single OK
-  private def respondFor(node: Node): Bytes => Seq[Frame] = payload => {
+  private def respondFor(
+    node: Node,
+    readFailure: Option[(Node, Frame)],
+    readsByNode: ConcurrentLinkedQueue[Node]
+  ): Bytes => Seq[Frame] = payload => {
     val s = payload.asUtf8String
     if (s.contains("HELLO")) Seq(Replies.hello)
     else if (s.contains("ROLE")) if (node == master) Seq(roleReply) else Nil
     else {
-      val batch = occurrences(s, "PREAD") + occurrences(s, "PWRITE")
-      if (batch > 0) Seq.fill(batch)(ok) else Seq(ok)
+      val reads  = occurrences(s, "PREAD")
+      val writes = occurrences(s, "PWRITE")
+      (0 until reads).foreach(_ => readsByNode.add(node))
+      if (reads + writes == 0) Seq(ok)
+      else
+        Seq.fill(reads)(readFailure.collect { case (`node`, failure) => failure }.getOrElse(ok)) ++ Seq.fill(writes)(ok)
     }
   }
 
@@ -61,11 +69,17 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     live: MasterReplicaLive,
     completions: ConcurrentLinkedQueue[SageEvent.CommandCompleted],
     tracer: RoutingTracer,
-    latch: CountDownLatch
+    latch: CountDownLatch,
+    readsByNode: ConcurrentLinkedQueue[Node]
   )
 
-  private def build(readFrom: ReadFrom, scheduler: Scheduler = Scheduler.real): Fixture = {
+  private def build(
+    readFrom: ReadFrom,
+    scheduler: Scheduler = Scheduler.real,
+    readFailure: Option[(Node, Frame)] = None
+  ): Fixture = {
     val completions                                             = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
+    val readsByNode                                             = new ConcurrentLinkedQueue[Node]()
     val latch                                                   = new CountDownLatch(2)
     val listener                                                = new SageListener {
       def onEvent(event: SageEvent): Unit = event match {
@@ -77,7 +91,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     }
     val tracer                                                  = new RoutingTracer
     val factory: Node => MultiplexedConnection.TransportFactory =
-      node => (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, respondFor(node))
+      node => (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, respondFor(node, readFailure, readsByNode))
     val live                                                    =
       new MasterReplicaLive(
         factory,
@@ -89,7 +103,7 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         Events(Vector(listener), Some(tracer))
       )
     live.bootstrapRoles()
-    Fixture(live, completions, tracer, latch)
+    Fixture(live, completions, tracer, latch, readsByNode)
   }
 
   test("a command to the established master dispatches inline, with no zero-delay scheduler hop") {
@@ -144,6 +158,55 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         assertEquals(nodes, Vector(Some(master), Some(master)), s"a write forces the whole batch to the master, got $nodes")
         val routed = f.tracer.routed.asScala.toVector.filter(p => p._1 == "PWRITE" || p._1 == "PREAD")
         assertEquals(routed, Vector("PWRITE" -> master, "PREAD" -> master), s"tracer should route both commands to the master, got $routed")
+        f.live.close.unsafeRun
+      }
+  }
+
+  test("a ReplicaPreferred read-only pipeline falls back when the replica cannot serve reads") {
+    val f = build(
+      ReadFrom.ReplicaPreferred,
+      readFailure = Some(replica -> Frame.SimpleError("MASTERDOWN Link with MASTER is down"))
+    )
+    f.live
+      .pipeline(Seq(readCmd, readCmd))
+      .unsafeRun
+      .map { _ =>
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        assertEquals(f.readsByNode.asScala.toVector, Vector(replica, replica, master, master))
+        assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(master), Some(master)))
+        f.live.close.unsafeRun
+      }
+  }
+
+  test("a ReplicaPreferred read-only pipeline does not fall back after a command error") {
+    val f = build(
+      ReadFrom.ReplicaPreferred,
+      readFailure = Some(replica -> Frame.SimpleError("WRONGTYPE Operation against a key holding the wrong kind of value"))
+    )
+    f.live
+      .pipelineAttempt(Seq(readCmd, readCmd))
+      .unsafeRun
+      .map { results =>
+        assert(results.forall(_.isLeft), s"expected the replica's command errors, got $results")
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        assertEquals(f.readsByNode.asScala.toVector, Vector(replica, replica))
+        assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(replica), Some(replica)))
+        f.live.close.unsafeRun
+      }
+  }
+
+  test("a MasterPreferred read-only pipeline falls back when the master cannot serve reads") {
+    val f = build(
+      ReadFrom.MasterPreferred,
+      readFailure = Some(master -> Frame.SimpleError("LOADING Redis is loading the dataset in memory"))
+    )
+    f.live
+      .pipeline(Seq(readCmd, readCmd))
+      .unsafeRun
+      .map { _ =>
+        assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+        assertEquals(f.readsByNode.asScala.toVector, Vector(master, master, replica, replica))
+        assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(replica), Some(replica)))
         f.live.close.unsafeRun
       }
   }
