@@ -55,8 +55,6 @@ final private[client] class NodePool(
     */
   def existing(node: Node): NodeClient = established.get(node)
 
-  def existingLive(node: Node): Option[NodeClient] = Option(established.get(node)).filter(_.isLive)
-
   def firstLiveNode: Option[Node] = established.asScala.collectFirst { case (node, nc) if nc.isLive => node }
 
   def foreachEstablished(f: NodeClient => Unit): Unit = established.values.forEach(nc => f(nc))
