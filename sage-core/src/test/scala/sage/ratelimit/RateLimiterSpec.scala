@@ -81,14 +81,14 @@ class RateLimiterSpec extends munit.FunSuite {
     assert(RateLimiter.sha.forall(c => c.isDigit || ('a' to 'f').contains(c)))
   }
 
-  test("Decision helpers") {
+  test("a Decision reports whether it admitted and how many tokens are left") {
     assert(Decision.Allowed(5, 1.second).isAllowed)
     assertEquals(Decision.Allowed(5, 1.second).remainingTokens, 5L)
     assert(!Decision.Denied(2, 1.second).isAllowed)
     assertEquals(Decision.Denied(2, 1.second).remainingTokens, 2L)
   }
 
-  test("RateLimit smart constructors") {
+  test("the smart constructors expand a rate and a burst into capacity and refill") {
     assertEquals(RateLimit.perSecond(10), RateLimit(10, 10, 1.second))
     assertEquals(RateLimit(100, 1.minute, burst = 200), RateLimit(200, 100, 1.minute))
   }

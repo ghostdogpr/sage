@@ -1,14 +1,12 @@
 package sage.commands
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.{bulk, map}
 
 class HashesSpec extends munit.FunSuite {
 
-  private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
-
   test("HGETALL decodes a RESP3 map frame into a field-keyed map") {
-    val reply = Frame.Map(Vector((bulk("f1"), bulk("v1")), (bulk("f2"), bulk("v2"))))
+    val reply = map("f1" -> bulk("v1"), "f2" -> bulk("v2"))
     assertEquals(Reply.run(Hashes.hGetAll[String, String, String]("h"), reply), Right(Map("f1" -> "v1", "f2" -> "v2")))
     assertEquals(Reply.run(Hashes.hGetAll[String, String, String]("h"), Frame.Map(Vector.empty)), Right(Map.empty[String, String]))
   }

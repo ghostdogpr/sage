@@ -1,11 +1,9 @@
 package sage.commands
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class ListsSpec extends munit.FunSuite {
-
-  private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
 
   test("LPOP with a count collapses a missing list's null to an empty vector") {
     assertEquals(Reply.run(Lists.lPopCount[String, String]("l", 2L), Frame.Null), Right(Vector.empty[String]))

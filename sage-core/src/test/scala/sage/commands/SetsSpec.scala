@@ -1,11 +1,9 @@
 package sage.commands
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class SetsSpec extends munit.FunSuite {
-
-  private def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))
 
   test("SMEMBERS decodes a RESP3 set frame into a Set, empty included") {
     assertEquals(Reply.run(Sets.sMembers[String, String]("s"), Frame.Set(Vector(bulk("a"), bulk("b")))), Right(Set("a", "b")))

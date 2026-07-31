@@ -1,14 +1,13 @@
 package sage.commands
 
-import sage.Bytes
 import sage.SageException.DecodeError
 import sage.cluster.{Node, Shard, Slot, SlotRange}
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class ClusterSpec extends munit.FunSuite {
 
   private def int(value: Long): Frame                          = Frame.Integer(value)
-  private def bulk(text: String): Frame                        = Frame.BulkString(Bytes.utf8(text))
   private def node(host: String, port: Int, id: String): Frame =
     Frame.Array(Vector(bulk(host), int(port.toLong), bulk(id)))
 

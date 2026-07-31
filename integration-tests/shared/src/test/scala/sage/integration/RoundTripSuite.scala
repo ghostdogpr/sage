@@ -1,7 +1,5 @@
 package sage.integration
 
-import scala.concurrent.duration.*
-
 import kyo.compat.*
 
 import sage.Bytes
@@ -16,31 +14,23 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     withClient(client => client.ping().map(reply => assertEquals(reply, "PONG")))
   }
 
-  test("set then get returns the value") {
+  test("values round-trip per call type, and a missing key is None") {
     withClient { client =>
       for {
-        _     <- client.set("greeting", "hello")
-        value <- client.get[String]("greeting")
-      } yield assertEquals(value, Some("hello"))
-    }
-  }
-
-  test("heterogeneous value types coexist on one client") {
-    withClient { client =>
-      for {
-        _     <- client.set("count", 42)
-        _     <- client.set("flag", true)
-        count <- client.get[Int]("count")
-        flag  <- client.get[Boolean]("flag")
+        _        <- client.set("greeting", "hello")
+        _        <- client.set("count", 42)
+        _        <- client.set("flag", true)
+        greeting <- client.get[String]("greeting")
+        count    <- client.get[Int]("count")
+        flag     <- client.get[Boolean]("flag")
+        missing  <- client.get[String]("missing-key")
       } yield {
+        assertEquals(greeting, Some("hello"))
         assertEquals(count, Some(42))
         assertEquals(flag, Some(true))
+        assertEquals(missing, None)
       }
     }
-  }
-
-  test("get of a missing key is None") {
-    withClient(client => client.get[String]("missing-key").map(value => assertEquals(value, None)))
   }
 
   test("concurrent fibers pipeline onto the Multiplexed Connection and match FIFO") {
@@ -208,11 +198,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
     client.run(clientList).map(_.linesIterator.count(_.nonEmpty))
 
   private def awaitConnectionCount(client: Client[CIO, String], expected: Int, attempts: Int): CIO[Unit] =
-    connectionCount(client).flatMap { count =>
-      if (count == expected) CIO.value(())
-      else if (attempts <= 1) CIO.fail(new AssertionError(s"expected $expected connections, still $count"))
-      else CIO.sleep(100.millis).flatMap(_ => awaitConnectionCount(client, expected, attempts - 1))
-    }
+    Eventually.converges(attempts)(() => connectionCount(client))(_ == expected)(count => s"expected $expected connections, still $count")
 }
 
 class RedisRoundTripSuite extends RoundTripSuite(Images.redis)

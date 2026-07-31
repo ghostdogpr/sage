@@ -8,6 +8,7 @@ import kyo.compat.*
 
 import sage.commands.*
 import sage.integration.{Images, ServerSuite}
+import sage.integration.Ttls.{expires, expiresWithin}
 
 /**
   * Hash field-expiration is a Redis-only family (absent in Valkey 8.1), so it has no cross-server counterpart.
@@ -24,10 +25,7 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
         afterTtl <- client.hTtl("hfe-ttl")("a")
       } yield {
         assertEquals(set, Vector(FieldExpiry.Updated, FieldExpiry.NoField))
-        assert(ttl(0) match {
-          case FieldTtl.Expires(d) => d > Duration.Zero && d <= 100.seconds
-          case _                   => false
-        })
+        assert(expiresWithin(ttl(0), 100.seconds))
         assertEquals(ttl(1), FieldTtl.NoExpiry)
         assertEquals(ttl(2), FieldTtl.NoField)
         assertEquals(persist, Vector(FieldPersist.Persisted, FieldPersist.NoExpiry))
@@ -67,10 +65,7 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
         ttl  <- client.hpTtl("hfe-px")("a", "missing")
         time <- client.hpExpireTime("hfe-px")("a")
       } yield {
-        assert(ttl(0) match {
-          case FieldTtl.Expires(d) => d > Duration.Zero
-          case _                   => false
-        })
+        assert(expires(ttl(0)))
         assertEquals(ttl(1), FieldTtl.NoField)
         assertEquals(time, Vector(FieldExpiryTime.At(at)))
       }
@@ -98,10 +93,7 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
         ttl <- client.hTtl("hfe-getex")("a")
       } yield {
         assertEquals(got, Vector(Some("1")))
-        assert(ttl(0) match {
-          case FieldTtl.Expires(d) => d > Duration.Zero
-          case _                   => false
-        })
+        assert(expires(ttl(0)))
       }
     }
   }
@@ -117,10 +109,7 @@ class RedisHashFieldExpirySuite extends ServerSuite(Images.redis) {
         aNew    <- client.hGet[String, String]("hfe-setex", "a")
       } yield {
         assertEquals(created, true)
-        assert(ttl(0) match {
-          case FieldTtl.Expires(_) => true
-          case _                   => false
-        })
+        assert(expires(ttl(0)))
         assertEquals(blocked, false)
         assertEquals(aStill, Some("1"))
         assertEquals(updated, true)

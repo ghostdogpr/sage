@@ -8,6 +8,7 @@ import kyo.compat.*
 
 import sage.commands.{GetExpiry, LcsMatch, MatchRange, SetCondition, SetExpiry, Ttl}
 import sage.integration.{Images, ServerSuite}
+import sage.integration.Ttls.expiresWithin
 
 abstract class StringsSuite(image: String) extends ServerSuite(image) {
 
@@ -200,12 +201,6 @@ abstract class StringsSuite(image: String) extends ServerSuite(image) {
       }
     }
   }
-
-  private def expiresWithin(ttl: Ttl, bound: FiniteDuration): Boolean =
-    ttl match {
-      case Ttl.Expires(remaining) => remaining > Duration.Zero && remaining <= bound
-      case _                      => false
-    }
 }
 
 class RedisStringsSuite extends StringsSuite(Images.redis)

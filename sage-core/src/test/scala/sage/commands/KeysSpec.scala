@@ -4,8 +4,8 @@ import java.time.Instant
 
 import scala.concurrent.duration.*
 
-import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.bulk
 
 class KeysSpec extends munit.FunSuite {
 
@@ -46,8 +46,8 @@ class KeysSpec extends munit.FunSuite {
   test("SCAN decodes a mid-iteration page with a next cursor") {
     val reply = Frame.Array(
       Vector(
-        Frame.BulkString(Bytes.utf8("17")),
-        Frame.Array(Vector(Frame.BulkString(Bytes.utf8("a")), Frame.BulkString(Bytes.utf8("b"))))
+        bulk("17"),
+        Frame.Array(Vector(bulk("a"), bulk("b")))
       )
     )
     Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
@@ -59,7 +59,7 @@ class KeysSpec extends munit.FunSuite {
   }
 
   test("SCAN decodes a zero cursor as iteration complete, even with keys in the page") {
-    val reply = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("0")), Frame.Array(Vector(Frame.BulkString(Bytes.utf8("last"))))))
+    val reply = Frame.Array(Vector(bulk("0"), Frame.Array(Vector(bulk("last")))))
     Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
       case Right(page) =>
         assertEquals(page.items, Vector("last"))
@@ -69,7 +69,7 @@ class KeysSpec extends munit.FunSuite {
   }
 
   test("a returned cursor feeds the next SCAN call") {
-    val reply = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("17")), Frame.Array(Vector.empty)))
+    val reply = Frame.Array(Vector(bulk("17"), Frame.Array(Vector.empty)))
     Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
       case Right(ScanPage(_, Some(next))) =>
         assertEquals(Keys.scan[String](next).args.head.asUtf8String, "17")
@@ -84,7 +84,7 @@ class KeysSpec extends munit.FunSuite {
 
   test("RANDOMKEY decodes null as None on an empty database") {
     assertEquals(Reply.run(Keys.randomKey[String], Frame.Null), Right(None))
-    assertEquals(Reply.run(Keys.randomKey[String], Frame.BulkString(Bytes.utf8("k"))), Right(Some("k")))
+    assertEquals(Reply.run(Keys.randomKey[String], bulk("k")), Right(Some("k")))
   }
 
   test("multi-key commands mark every position for the slot engine") {
@@ -119,5 +119,11 @@ class KeysSpec extends munit.FunSuite {
     assertEquals(Strings.set("k", "v", expiry = SetExpiry.In(500.micros)).args.last.asUtf8String, "1")
     assertEquals(Strings.getEx[String, String]("k", GetExpiry.In(500.micros)).args.last.asUtf8String, "1")
     assertEquals(Keys.expireAt("k", Instant.ofEpochSecond(2000000000L, 1)).args(1).asUtf8String, "2000000000001")
+  }
+
+  test("an extreme instant saturates instead of throwing while building the command") {
+    val command = Keys.expireAt("k", Instant.MAX)
+    assertEquals(command.name, "PEXPIREAT")
+    assertEquals(command.args(1).asUtf8String, Long.MaxValue.toString)
   }
 }

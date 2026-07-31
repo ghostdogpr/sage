@@ -11,7 +11,7 @@ import kyo.compat.*
 import sage.client.{ClusterConfig, Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
 import sage.commands.Commands
-import sage.integration.{ContainerClient, Images}
+import sage.integration.{ContainerClient, Eventually, Images}
 
 /**
   * Drives cluster failover recovery against a real multi-node cluster: three masters and their replicas in one container. When a master
@@ -76,11 +76,9 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
   // the replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
   // write, so it would not cover writes the cluster client sent on its own routed connections; reading the replica directly proves recovery.
   private def awaitReplicated(container: FixedHostPortGenericContainer, replicaPort: Int, expected: Set[String], attempts: Int): CIO[Unit] =
-    CIO.blocking(parseKeys(cli(container, replicaPort, "keys", "*")).toSet).flatMap { have =>
-      if (expected.subsetOf(have)) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException(s"victim's replica did not catch up; missing ${(expected -- have).take(5)}"))
-      else CIO.sleep(100.millis).flatMap(_ => awaitReplicated(container, replicaPort, expected, attempts - 1))
-    }
+    Eventually.converges(attempts)(() => CIO.blocking(parseKeys(cli(container, replicaPort, "keys", "*")).toSet))(expected.subsetOf)(have =>
+      s"victim's replica did not catch up; missing ${(expected -- have).take(5)}"
+    )
 
   // wait for every node to answer, form the cluster (idempotent across a re-run sharing the container), and wait for it to converge
   private def formCluster(container: FixedHostPortGenericContainer): CIO[Unit] =
@@ -99,18 +97,14 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
     }
 
   private def awaitPortsUp(container: FixedHostPortGenericContainer, attempts: Int): CIO[Unit] =
-    CIO.blocking(ports.forall(p => cli(container, p, "ping").contains("PONG"))).flatMap { up =>
-      if (up) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException("cluster nodes did not start"))
-      else CIO.sleep(300.millis).flatMap(_ => awaitPortsUp(container, attempts - 1))
-    }
+    Eventually.converges(attempts, 300.millis)(() => CIO.blocking(ports.forall(p => cli(container, p, "ping").contains("PONG"))))(identity)(_ =>
+      "cluster nodes did not start"
+    )
 
   private def awaitClusterOk(container: FixedHostPortGenericContainer, attempts: Int): CIO[Unit] =
-    CIO.blocking(cli(container, victim, "cluster", "info").contains("cluster_state:ok")).flatMap { ok =>
-      if (ok) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException("cluster did not converge"))
-      else CIO.sleep(500.millis).flatMap(_ => awaitClusterOk(container, attempts - 1))
-    }
+    Eventually.converges(attempts, 500.millis)(() => CIO.blocking(cli(container, victim, "cluster", "info").contains("cluster_state:ok")))(identity)(
+      _ => "cluster did not converge"
+    )
 
   // `cluster_state:ok` flips before every node will actually serve writes, so a freshly formed cluster can briefly answer CLUSTERDOWN; retry
   // each write across that warm-up window, as a real application would, so the failover the test means to exercise is not masked by a startup race
@@ -148,11 +142,9 @@ abstract class ClusterFailoverSuite(image: String, serverBinary: String) extends
 
   // retries until the node accepts the write (e.g. a replica once it is promoted to master)
   private def writeDirect(container: FixedHostPortGenericContainer, port: Int, key: String, value: String, attempts: Int): CIO[Unit] =
-    CIO.blocking(cli(container, port, "set", key, value)).flatMap { out =>
-      if (out.contains("OK")) CIO.value(())
-      else if (attempts <= 0) CIO.fail(new RuntimeException(s"could not write $key on $port: $out"))
-      else CIO.sleep(200.millis).flatMap(_ => writeDirect(container, port, key, value, attempts - 1))
-    }
+    Eventually.converges(attempts, 200.millis)(() => CIO.blocking(cli(container, port, "set", key, value)))(_.contains("OK"))(out =>
+      s"could not write $key on $port: $out"
+    )
 
   private def masterId(container: FixedHostPortGenericContainer, port: Int): String = cli(container, port, "cluster", "myid").trim
 

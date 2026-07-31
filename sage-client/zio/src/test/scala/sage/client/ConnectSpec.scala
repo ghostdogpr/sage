@@ -10,7 +10,8 @@ import kyo.compat.*
 
 import sage.{Bytes, Outcome, SageEvent, SageListener}
 import sage.SageException.{ConnectionFailed, InvalidArgument, NotConnected, UnsupportedServer}
-import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection}
+import sage.client.internal.{Client, Events, FakeTransport, ManualScheduler, MultiplexedConnection, Replies, ScriptedTransport}
+import sage.client.internal.Replies.{ok, pong}
 import sage.commands.{Command, Execution, Server}
 import sage.protocol.Frame
 
@@ -18,32 +19,13 @@ class ConnectSpec extends munit.FunSuite {
 
   private given ExecutionContext = munitExecutionContext
 
-  private val helloReply: Frame =
-    Frame.Map(
-      Vector(
-        Frame.BulkString(Bytes.utf8("server"))  -> Frame.BulkString(Bytes.utf8("redis")),
-        Frame.BulkString(Bytes.utf8("version")) -> Frame.BulkString(Bytes.utf8("8.0.0")),
-        Frame.BulkString(Bytes.utf8("proto"))   -> Frame.Integer(3),
-        Frame.BulkString(Bytes.utf8("role"))    -> Frame.BulkString(Bytes.utf8("master"))
-      )
-    )
-
   private val helloThenPong: Bytes => Seq[Frame] = payload =>
-    if (payload.asUtf8String.contains("HELLO")) Seq(helloReply)
-    else if (payload.asUtf8String.contains("PING")) Seq(Frame.SimpleString("PONG"))
-    else Seq(Frame.SimpleString("OK")) // CLIENT TRACKING/SETINFO and SELECT bootstrap commands all answer OK
-
-  private def scripted(reply: Bytes => Seq[Frame]): (MultiplexedConnection.TransportFactory, () => FakeTransport) = {
-    var transport: FakeTransport                        = null
-    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      transport = new FakeTransport(onFrame, onClosed, reply)
-      transport
-    }
-    (factory, () => transport)
-  }
+    if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello)
+    else if (payload.asUtf8String.contains("PING")) Seq(pong)
+    else Seq(ok) // CLIENT TRACKING/SETINFO and SELECT bootstrap commands all answer OK
 
   test("connect performs the HELLO 3 handshake and yields a working client") {
-    val (factory, _) = scripted(helloThenPong)
+    val (factory, _) = ScriptedTransport(helloThenPong)
     Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map { result =>
       assertEquals(result, "PONG")
     }
@@ -64,7 +46,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a server without RESP3 is rejected with UnsupportedServer and the connection is released") {
-    val (factory, transport) = scripted(_ => Seq(Frame.SimpleError("ERR unknown command 'HELLO'")))
+    val (factory, transport) = ScriptedTransport(_ => Seq(Frame.SimpleError("ERR unknown command 'HELLO'")))
     Client.connectWith(factory).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
       assertEquals(transport().closeCount, 1)
@@ -72,7 +54,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a NOPROTO rejection maps to UnsupportedServer") {
-    val (factory, _) = scripted(_ => Seq(Frame.SimpleError("NOPROTO unsupported protocol version")))
+    val (factory, _) = ScriptedTransport(_ => Seq(Frame.SimpleError("NOPROTO unsupported protocol version")))
     Client.connectWith(factory).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
     }
@@ -136,7 +118,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("the ZIO artifact lowers to a native ZIO") {
-    val (factory, _)                            = scripted(helloThenPong)
+    val (factory, _)                            = ScriptedTransport(helloThenPong)
     val native: zio.ZIO[Any, Throwable, String] = Client.connectWith(factory).flatMap(client => client.ping()).lower
     CIO.lift(native).unsafeRun.map(result => assertEquals(result, "PONG"))
   }
@@ -144,9 +126,9 @@ class ConnectSpec extends munit.FunSuite {
   private def assertBarrierRidesMux(barrier: Command[?], barrierReply: Frame, token: String): scala.concurrent.Future[Unit] = {
     val transports                                      = new ConcurrentLinkedQueue[FakeTransport]()
     val reply: Bytes => Seq[Frame]                      = payload =>
-      if (payload.asUtf8String.contains("HELLO")) Seq(helloReply)
+      if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello)
       else if (payload.asUtf8String.contains(token)) Seq(barrierReply)
-      else Seq(Frame.SimpleString("OK"))
+      else Seq(ok)
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       val transport = new FakeTransport(onFrame, onClosed, reply)
       transports.add(transport)
@@ -177,7 +159,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a pipeline carrying a blocking command fails fast without reaching the socket") {
-    val (factory, transport) = scripted(helloThenPong)
+    val (factory, transport) = ScriptedTransport(helloThenPong)
     val blocking             = Vector(Command("BLPOP", Command.NoKeys, Vector.empty, _ => Right(()), Execution.Blocking))
     Client.connectWith(factory).flatMap(_.pipeline(blocking)).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")
@@ -186,7 +168,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a pipeline that fails fast while disconnected reports a failed completion per position") {
-    val (factory, transport) = scripted(helloThenPong)
+    val (factory, transport) = ScriptedTransport(helloThenPong)
     val scheduler            = new ManualScheduler // so the post-drop reconnect stays pending and the connection stays not-live
     val completions          = new ConcurrentLinkedQueue[SageEvent.CommandCompleted]()
     val latch                = new CountDownLatch(2)
@@ -225,7 +207,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("an empty pipeline succeeds without a round-trip") {
-    val (factory, transport) = scripted(helloThenPong)
+    val (factory, transport) = ScriptedTransport(helloThenPong)
     val empty                = Vector.empty[Command[Long]]
     Client.connectWith(factory).flatMap(_.pipeline(empty)).unsafeRun.map { result =>
       assertEquals(result, Vector.empty[Long])

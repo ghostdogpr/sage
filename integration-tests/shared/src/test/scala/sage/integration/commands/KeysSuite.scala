@@ -9,6 +9,7 @@ import kyo.compat.*
 import sage.client.internal.Client
 import sage.commands.*
 import sage.integration.{Images, ServerSuite}
+import sage.integration.Ttls.{expiresWithin, remaining}
 
 abstract class KeysSuite(image: String) extends ServerSuite(image) {
 
@@ -58,7 +59,7 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
         missing   <- client.expire("keys-expire-missing", 60.seconds)
       } yield {
         assertEquals(applied, true)
-        assert(remaining(ttl).exists(r => r > Duration.Zero && r <= 60.seconds))
+        assert(expiresWithin(ttl, 60.seconds))
         assertEquals(persisted, true)
         assertEquals(cleared, Ttl.NoExpiry)
         assertEquals(missing, false)
@@ -350,12 +351,6 @@ abstract class KeysSuite(image: String) extends ServerSuite(image) {
       }
     loop(ScanCursor.start, Set.empty)
   }
-
-  private def remaining(ttl: Ttl): Option[FiniteDuration] =
-    ttl match {
-      case Ttl.Expires(value) => Some(value)
-      case _                  => None
-    }
 }
 
 class RedisKeysSuite extends KeysSuite(Images.redis)

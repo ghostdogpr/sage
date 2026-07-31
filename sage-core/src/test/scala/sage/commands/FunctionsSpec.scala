@@ -4,11 +4,9 @@ import scala.concurrent.duration.*
 
 import sage.Bytes
 import sage.protocol.Frame
+import sage.protocol.Frames.{bulk, map}
 
 class FunctionsSpec extends munit.FunSuite {
-
-  private def bulk(value: String): Frame            = Frame.BulkString(Bytes.utf8(value))
-  private def map(entries: (String, Frame)*): Frame = Frame.Map(entries.toVector.map { case (k, v) => bulk(k) -> v })
 
   test("FCALL returns the raw frame and computes key indices") {
     assertEquals(Reply.run(Functions.fCall("f", Seq("k"), Seq("a")), Frame.Integer(7L)), Right(Frame.Integer(7L)))

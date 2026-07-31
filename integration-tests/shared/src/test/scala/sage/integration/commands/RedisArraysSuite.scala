@@ -8,7 +8,7 @@ import sage.integration.{Images, ServerSuite}
 /**
   * The Array (`AR*`) data type is Redis-only (no Valkey counterpart) and shipped as a preview, so it has a single-server suite.
   */
-class ArraysSuite extends ServerSuite(Images.redis) {
+class RedisArraysSuite extends ServerSuite(Images.redis) {
 
   test("ARSET/ARGET/ARLEN/ARCOUNT cover writes, reads, and length") {
     withClient { client =>

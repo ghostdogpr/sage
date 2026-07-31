@@ -6,6 +6,7 @@ import kyo.compat.*
 
 import sage.commands.*
 import sage.integration.{Images, ServerSuite}
+import sage.integration.Ttls.expires
 
 /**
   * DIGEST/DELEX/MSETEX/INCREX are Redis-only string commands (absent in Valkey 8.1), so they have no cross-server counterpart.
@@ -58,10 +59,7 @@ class RedisStringExtrasSuite extends ServerSuite(Images.redis) {
       } yield {
         assertEquals(set, true)
         assertEquals(a, Some("1"))
-        assert(ttl match {
-          case Ttl.Expires(d) => d > Duration.Zero
-          case _              => false
-        })
+        assert(expires(ttl))
         assertEquals(blocked, false)
         assertEquals(aStill, Some("1"))
       }
@@ -78,10 +76,7 @@ class RedisStringExtrasSuite extends ServerSuite(Images.redis) {
         viaFlt <- client.increxByFloat("sx-incr-f", 1.5)
       } yield {
         assertEquals(first, IncrExResult(5L, 5L))
-        assert(ttl match {
-          case Ttl.Expires(d) => d > Duration.Zero
-          case _              => false
-        })
+        assert(expires(ttl))
         assertEquals(capped, IncrExResult(10L, 5L))
         assertEquals(reject, IncrExResult(10L, 0L))
         assertEquals(viaFlt, IncrExResult(1.5, 1.5))
