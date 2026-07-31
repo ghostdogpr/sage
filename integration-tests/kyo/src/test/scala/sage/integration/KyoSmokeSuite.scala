@@ -126,7 +126,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
   }
 
   test("client.rateLimiter admits up to capacity then denies") {
-    withNativeClient { client =>
+    withBoundedClient(15L.seconds) { client =>
       val rl = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = FiniteDuration(1L, TimeUnit.HOURS)))
       for {
         first  <- rl.tryAcquire("smoke")

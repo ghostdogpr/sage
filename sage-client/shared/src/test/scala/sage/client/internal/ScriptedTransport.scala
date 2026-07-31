@@ -1,5 +1,7 @@
 package sage.client.internal
 
+import java.util.concurrent.atomic.AtomicReference
+
 import sage.Bytes
 import sage.protocol.Frame
 
@@ -8,17 +10,25 @@ import sage.protocol.Frame
   */
 object ScriptedTransport {
 
-  def factory(respond: Bytes => Seq[Frame]): MultiplexedConnection.TransportFactory =
+  type Factory = (Frame => Unit, () => Unit) => FakeTransport
+
+  def factory(respond: Bytes => Seq[Frame]): Factory =
     (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, respond)
 
-  def capturing(factory: MultiplexedConnection.TransportFactory): (MultiplexedConnection.TransportFactory, () => FakeTransport) = {
-    var last: FakeTransport                             = null
-    val wrapped: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      last = factory(onFrame, onClosed).asInstanceOf[FakeTransport]
-      last
+  def capturing(factory: Factory): (Factory, () => FakeTransport) = {
+    val created          = new AtomicReference[FakeTransport]()
+    val wrapped: Factory = (onFrame, onClosed) => {
+      val transport = factory(onFrame, onClosed)
+      created.set(transport)
+      transport
     }
-    (wrapped, () => last)
+    def last()           =
+      created.get() match {
+        case null      => throw new IllegalStateException("no transport has been created yet")
+        case transport => transport
+      }
+    (wrapped, last)
   }
 
-  def apply(respond: Bytes => Seq[Frame]): (MultiplexedConnection.TransportFactory, () => FakeTransport) = capturing(factory(respond))
+  def apply(respond: Bytes => Seq[Frame]): (Factory, () => FakeTransport) = capturing(factory(respond))
 }

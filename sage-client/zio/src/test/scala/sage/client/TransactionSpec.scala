@@ -5,7 +5,7 @@ import scala.concurrent.ExecutionContext
 import kyo.compat.*
 
 import sage.SageException.{InvalidArgument, ServerError, TransactionDiscarded}
-import sage.client.internal.{Client, MultiplexedConnection, Replies, ScriptedTransport}
+import sage.client.internal.{Client, Replies, ScriptedTransport}
 import sage.client.internal.Replies.{bulk, ok, queued}
 import sage.commands.{Command, Commands, Execution}
 import sage.protocol.Frame
@@ -16,7 +16,7 @@ class TransactionSpec extends munit.FunSuite {
 
   // Scripts a dedicated connection: HELLO bootstraps, WATCH/UNWATCH answer OK, the pipelined MULTI…EXEC batch (one write) answers with the
   // supplied frame sequence, and a read GET answers a value. The batch carries "MULTI", so it is matched before the bare command names.
-  private def scripted(execReplies: Seq[Frame], getReply: Frame = bulk("v")): MultiplexedConnection.TransportFactory =
+  private def scripted(execReplies: Seq[Frame], getReply: Frame = bulk("v")): ScriptedTransport.Factory =
     ScriptedTransport.factory { payload =>
       val text = payload.asUtf8String
       if (text.contains("HELLO")) Seq(Replies.hello)

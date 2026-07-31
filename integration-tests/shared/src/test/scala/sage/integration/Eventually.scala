@@ -11,7 +11,7 @@ import kyo.compat.*
 object Eventually {
 
   /**
-    * Re-runs `action` until `holds` accepts its result, yielding whatever was seen last once the attempts run out.
+    * Runs `action` up to `attempts` times, `interval` apart, yielding the first result `holds` accepts or the last one seen.
     */
   def value[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: () => CIO[A])(holds: A => Boolean): CIO[A] =
     action().flatMap { seen =>
