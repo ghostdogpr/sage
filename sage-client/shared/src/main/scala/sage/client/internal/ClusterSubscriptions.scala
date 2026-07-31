@@ -3,7 +3,6 @@ package sage.client.internal
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
-import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 import SubscriptionConnection.{Kind, RawSubscription, Sink}
@@ -56,8 +55,6 @@ final private[client] class ClusterSubscriptions(
     finally lock.unlock()
   }
 
-  private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
-
   // single-flight under the outer lock: a mid-pass trigger queues one follow-up rather than racing a pass that could corrupt placement
   final private class CoalescedPass(body: () => Unit) {
     private var running = false
@@ -74,7 +71,7 @@ final private[client] class ClusterSubscriptions(
           true
         }
       }
-      if (go) offload(run())
+      if (go) scheduler.offload(run())
     }
 
     private def run(): Unit =
@@ -89,7 +86,7 @@ final private[client] class ClusterSubscriptions(
             false
           }
         }
-        if (again) offload(run())
+        if (again) scheduler.offload(run())
       }
   }
 
@@ -250,7 +247,7 @@ final private[client] class ClusterSubscriptions(
     locked(shardConns.remove(node))
     // a drop may mean the slot migrated (server sends sunsubscribe then disconnects); force a refresh — stale topology still names the dead
     // owner, which planFor would not see as unowned — then reconcile onto the current owner
-    offload {
+    scheduler.offload {
       refresh()
       shardReconcile.schedule()
     }

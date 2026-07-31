@@ -53,17 +53,13 @@ final private[client] class DedicatedPool(
     * Runs a blocking command on a borrowed Dedicated Connection, releasing it when the reply (or a failure) arrives. Returns immediately;
     * the acquire — which may wait for a slot or open a socket — is offloaded so the calling fiber is never blocked.
     */
-  def use[A](command: Command[A], callback: Try[A] => Unit): Unit = leaseAndSubmit(command, asking = false, callback, new DedicatedPool.Lease)
-
-  def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
+  def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease = new DedicatedPool.Lease): Unit =
     leaseAndSubmit(command, asking = false, callback, lease)
 
   /**
     * Runs a blocking command redirected by `ASK`: `ASKING` then the command, back-to-back on one exclusively-leased connection, so their
     * wire adjacency is automatic. The `ASKING` reply is discarded; the command's reply releases the connection.
     */
-  def useAsking[A](command: Command[A], callback: Try[A] => Unit): Unit = leaseAndSubmit(command, asking = true, callback, new DedicatedPool.Lease)
-
   def useAsking[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
     leaseAndSubmit(command, asking = true, callback, lease)
 

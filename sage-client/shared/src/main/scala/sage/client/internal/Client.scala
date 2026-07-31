@@ -2419,18 +2419,8 @@ object Client {
       connectWith(
         (onFrame, onClosed) => SocketTransport.connect(endpoint.host, endpoint.port, config.connectTimeout, upgrade, onFrame, onClosed),
         Scheduler.real,
-        config.reconnect,
-        config.watchdog,
-        config.connectTimeout,
-        config.closeTimeout,
-        config.dedicatedPool,
-        config.pubsub,
-        config.auth,
-        config.clientCache.maxBytes,
-        config.clientCache.enabled,
-        Events(config.listeners, config.tracer, serverNode = Some(Node(endpoint.host, endpoint.port))),
-        config.database,
-        config.clientName
+        config,
+        Events(config.listeners, config.tracer, serverNode = Some(Node(endpoint.host, endpoint.port)))
       )
     }
 
@@ -2438,39 +2428,41 @@ object Client {
   private[client] def connectWith(
     factory: MultiplexedConnection.TransportFactory,
     scheduler: Scheduler = Scheduler.real,
-    reconnect: BackoffConfig = defaults.reconnect,
-    watchdog: WatchdogConfig = defaults.watchdog,
-    connectTimeout: FiniteDuration = defaults.connectTimeout,
-    closeTimeout: FiniteDuration = defaults.closeTimeout,
-    dedicatedPool: DedicatedPoolConfig = defaults.dedicatedPool,
-    pubsub: PubSubConfig = defaults.pubsub,
-    auth: Option[AuthConfig] = None,
-    cacheMaxBytes: Long = defaults.clientCache.maxBytes,
-    cachingEnabled: Boolean = defaults.clientCache.enabled,
-    events: Events = Events.disabled,
-    database: Int = 0,
-    clientName: Option[String] = None
+    config: SageConfig = defaults,
+    events: Events = Events.disabled
   ): CIO[Client[CIO, String]] = {
-    val bootstrap            = Bootstrap.commands(auth, database, clientName)
+    val cachingEnabled       = config.clientCache.enabled
+    val connectTimeout       = config.connectTimeout
+    val bootstrap            = Bootstrap.commands(config.auth, config.database, config.clientName)
     // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
     // plain bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
     val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
     CIO
       .blocking(
-        MultiplexedConnection
-          .connect(factory, scheduler, multiplexedBootstrap, reconnect, watchdog, connectTimeout, closeTimeout, cacheMaxBytes, None, events)
+        MultiplexedConnection.connect(
+          factory,
+          scheduler,
+          multiplexedBootstrap,
+          config.reconnect,
+          config.watchdog,
+          connectTimeout,
+          config.closeTimeout,
+          config.clientCache.maxBytes,
+          None,
+          events
+        )
       )
       .map { connection =>
-        val pool          = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, dedicatedPool, connectTimeout.toMillis)
+        val pool          = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, config.dedicatedPool, connectTimeout.toMillis)
         // lazy: no socket is opened until the first subscription, and it is gated on the Multiplexed Connection being live
         val subscriptions = new SubscriptionConnection(
           factory,
           bootstrap,
           scheduler,
-          reconnect,
-          watchdog,
+          config.reconnect,
+          config.watchdog,
           connectTimeout.toMillis,
-          pubsub.bufferSize,
+          config.pubsub.bufferSize,
           () => connection.isLive,
           events = events
         )
@@ -2642,15 +2634,6 @@ object Client {
       case success                  => complete(success)
     }
 
-    // an EXEC fault arrives as an error *frame* in a Success, invisible to `faulting`, so scan the top level and the EXEC array
-    private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
-      val nested = frames.lastOption match {
-        case Some(Frame.Array(elems)) => elems.iterator
-        case _                        => Iterator.empty[Frame]
-      }
-      (frames.iterator ++ nested).flatMap(TxSupport.errorOf).foreach(message => onFault(ServerError.of(message)))
-    }
-
     // The lock makes "reject if released, else submit" atomic with the finalizer's seal-and-decide ([[sealAndReusable]]): a command
     // submitted under it is in-flight before the finalizer reads quiescence, so a handle captured past the block and raced against release
     // either submits onto a connection the finalizer then declines to recycle, or is rejected outright — never onto a re-borrowed one.
@@ -2735,7 +2718,7 @@ object Client {
           }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
-            refreshOnExecFault(frames)
+            TxSupport.execErrors(frames).foreach(onFault)
             TxSupport.interpretExec(p.commands, frames)
           }
   }

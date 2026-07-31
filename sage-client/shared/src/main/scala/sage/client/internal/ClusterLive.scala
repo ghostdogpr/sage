@@ -1,7 +1,6 @@
 package sage.client.internal
 
 import java.util.Locale
-import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
@@ -111,7 +110,7 @@ final private[client] class ClusterLive(
     while (candidates.hasNext) {
       val node = candidates.next()
       try
-        querySlotsVia(node, getOrEstablish(node)) match {
+        querySlotsVia(node) match {
           case Right(shards) =>
             adopt(node, shards)
             startRefreshPoll()
@@ -127,8 +126,7 @@ final private[client] class ClusterLive(
   def run[A](command: Command[A]): CIO[A] = {
     def body(lease: DedicatedPool.Lease): CIO[A] =
       CIO.async[A] { complete =>
-        val span    = Events.startSpan(events, command)
-        val tracked = Events.trackCommand(events, command, complete, span)
+        val tracked = Events.trackCommand(events, command, complete)
         Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, lease = lease))
       }
     Client.withLeaseIfBlocking(command)(body)
@@ -138,8 +136,7 @@ final private[client] class ClusterLive(
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)
       CIO.async[A] { complete =>
-        val span    = Events.startSpan(events, command)
-        val tracked = Events.trackCommand(events, command, complete, span)
+        val tracked = Events.trackCommand(events, command, complete)
         Client.completing(tracked)(dispatch(command, cluster.maxRedirects, tracked, allowReplica = false))
       }
     else
@@ -170,8 +167,7 @@ final private[client] class ClusterLive(
       case Some(node) =>
         def body(lease: DedicatedPool.Lease): CIO[A] =
           CIO.async[A] { complete =>
-            val span    = Events.startSpan(events, command)
-            val tracked = Events.trackCommand(events, command, complete, span)
+            val tracked = Events.trackCommand(events, command, complete)
             Client.completing(tracked)(sendTo(node, command, asking = false, redirectsLeft = 0, tracked, lease))
           }
         Client.withLeaseIfBlocking(command)(body)
@@ -218,7 +214,7 @@ final private[client] class ClusterLive(
       if (command.allMasters)
         if (slotOwningMasters(topology).forall(node => masterPool.existing(node) != null))
           broadcast(topology, command, redirectsLeft, complete, masterPool.existing)
-        else offload(broadcast(topology, command, redirectsLeft, complete, establishOrNull))
+        else scheduler.offload(broadcast(topology, command, redirectsLeft, complete, masterPool.getOrEstablishOrNull))
       else
         topology.route(command) match {
           case Route.ToNode(node, slot) =>
@@ -229,7 +225,7 @@ final private[client] class ClusterLive(
             if (allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command))
               sendKeylessRead(topology, command, redirectsLeft, complete)
             else sendToAny(topology, command, redirectsLeft, complete, lease, cacheCtx)
-          case Route.Unowned(_)         => offload(onUnowned(command, redirectsLeft, complete, lease, cacheCtx))
+          case Route.Unowned(_)         => scheduler.offload(onUnowned(command, redirectsLeft, complete, lease, cacheCtx))
           case Route.CrossSlot(slots)   =>
             multiSlotPolicy(command) match {
               case Some(policy) => scatterMultiSlot(command, policy, redirectsLeft, complete, allowReplica, cacheCtx)
@@ -389,7 +385,7 @@ final private[client] class ClusterLive(
             complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
           case RedirectKind.Moved                       =>
             refresh(force = true)
-            offload(dispatch(command, redirectsLeft - 1, complete))
+            scheduler.offload(dispatch(command, redirectsLeft - 1, complete))
         }
       // only a loss that provably never ran may re-dispatch, per onUnreachable's contract
       case Fault.Lost(executed)           =>
@@ -490,14 +486,14 @@ final private[client] class ClusterLive(
   private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
     val nc = resolve(node)
     // the dispatch fast path resolves inline on the caller, which the retry's refresh would block
-    if (nc == null) offload(retryBroadcast(node, command, NotConnected(), refreshFirst = true, attemptsLeft, settle))
+    if (nc == null) scheduler.offload(retryBroadcast(node, command, NotConnected(), refreshFirst = true, attemptsLeft, settle))
     else
       nc.submit[B](
         command,
         asking = false,
         {
           case Success(value) => settle(Success(value))
-          case Failure(error) => offload(onBroadcastFailure(node, command, error, attemptsLeft, settle))
+          case Failure(error) => scheduler.offload(onBroadcastFailure(node, command, error, attemptsLeft, settle))
         }
       )
   }
@@ -532,7 +528,7 @@ final private[client] class ClusterLive(
       afterBackoff(attemptsLeft) {
         if (refreshFirst) refresh(force = true)
         if (closed || !slotOwningMasters(topologyRef.get()).contains(node)) settle(Failure(error))
-        else submitBroadcast(node, command, establishOrNull, attemptsLeft - 1, settle)
+        else submitBroadcast(node, command, masterPool.getOrEstablishOrNull, attemptsLeft - 1, settle)
       }
 
   private def collectFrames(frames: java.util.concurrent.atomic.AtomicReferenceArray[Frame], size: Int): Vector[Frame] = {
@@ -579,10 +575,8 @@ final private[client] class ClusterLive(
     val existing = masterPool.existing(node)
     if (existing != null) submitTo(existing, node, command, asking, redirectsLeft, complete, lease, cacheCtx)
     else
-      offload {
-        val nc =
-          try getOrEstablish(node)
-          catch { case NonFatal(_) => null }
+      scheduler.offload {
+        val nc = masterPool.getOrEstablishOrNull(node)
         if (nc == null) onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
         else submitTo(nc, node, command, asking, redirectsLeft, complete, lease, cacheCtx)
       }
@@ -602,7 +596,7 @@ final private[client] class ClusterLive(
       case Success(value) =>
         Events.attributeNode(complete, node)
         complete(Success(value))
-      case Failure(error) => offload(onFailure(node, command, error, redirectsLeft, complete, lease, cacheCtx))
+      case Failure(error) => scheduler.offload(onFailure(node, command, error, redirectsLeft, complete, lease, cacheCtx))
     }
     if (cacheCtx != null && !asking) nc.cachedSubmit[A](command, cacheCtx.ttlMillis, onReply, cacheCtx.deferred)
     else nc.submit[A](command, asking, onReply, lease)
@@ -664,16 +658,7 @@ final private[client] class ClusterLive(
     complete: Try[A] => Unit,
     lease: DedicatedPool.Lease = null,
     cacheCtx: Cached = null
-  ): Unit =
-    if (redirectsLeft <= 0) {
-      refreshBeforeFailing()
-      complete(Failure(NotConnected()))
-    } else {
-      refresh(force = true)
-      afterBackoff(redirectsLeft)(
-        dispatch(command, redirectsLeft - 1, complete, allowReplica = replicaAllowed(cacheCtx), lease = lease, cacheCtx = cacheCtx)
-      )
-    }
+  ): Unit = onRetryable(command, NotConnected(), refreshFirst = true, redirectsLeft, complete, lease, cacheCtx)
 
   // a self-clearing refusal (-TRYAGAIN, -LOADING, -MASTERDOWN, -CLUSTERDOWN): retry bounded and jittered
   private def onRetryable[A](
@@ -726,8 +711,6 @@ final private[client] class ClusterLive(
   private def pickNode(topology: ClusterTopology): Option[Node] =
     masterPool.firstLiveNode.orElse(topology.shards.headOption.map(_.master))
 
-  private def offload(body: => Unit): Unit = scheduler.after(Duration.Zero)(body)
-
   private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
     CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
 
@@ -735,7 +718,7 @@ final private[client] class ClusterLive(
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
   // a transaction never follows a redirect, so an ownership move must be adopted before the caller can retry: bypass the throttle window
-  private def forceRefresh(): Unit = offload(refresh(force = true))
+  private def forceRefresh(): Unit = scheduler.offload(refresh(force = true))
 
   // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
 
@@ -820,10 +803,8 @@ final private[client] class ClusterLive(
       val existing = masterPool.existing(node)
       if (existing != null) submitBatch(node, existing, indices, p, emits, reroute, useReplica)
       else
-        offload {
-          val nc =
-            try getOrEstablish(node)
-            catch { case NonFatal(_) => null }
+        scheduler.offload {
+          val nc = masterPool.getOrEstablishOrNull(node)
           submitBatch(node, nc, indices, p, emits, reroute, useReplica)
         }
     }
@@ -846,7 +827,7 @@ final private[client] class ClusterLive(
         case Success(_)     => settle(index, result)
         // a fault's disposition can block on CLUSTER SLOTS, whose reply needs this very reader thread
         case Failure(error) =>
-          offload {
+          scheduler.offload {
             Fault.categorize(error) match {
               // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
               // to the importing node with ASKING. MOVED and connection loss re-route normally.
@@ -900,7 +881,7 @@ final private[client] class ClusterLive(
       val command = Connection.watch(key, rest*)
       CIO.async[Unit] { complete =>
         val tracked = Events.trackSpan(events, command, complete)
-        offload(withConn(command, tracked) { c =>
+        scheduler.offload(withConn(command, tracked) { c =>
           armed.set(true)
           c.submit(command, faulting(tracked))
         })
@@ -919,12 +900,12 @@ final private[client] class ClusterLive(
       else
         CIO.async[A] { complete =>
           val tracked = Events.trackSpan(events, command, complete)
-          offload(withConn(command, tracked)(c => c.submit(command, faulting(tracked))))
+          scheduler.offload(withConn(command, tracked)(c => c.submit(command, faulting(tracked))))
         }
 
     def discard: CIO[Unit] =
       CIO.async[Unit] { complete =>
-        offload {
+        scheduler.offload {
           lock.lock()
           try
             if (released) complete(Failure(TxSupport.scopeReleasedError))
@@ -956,15 +937,8 @@ final private[client] class ClusterLive(
       case success                  => complete(success)
     }
 
-    // EXEC replies arrive as a Success carrying raw frames, so an ownership fault is an error *frame*, invisible to `faulting`; scan the top
-    // level and the EXEC array and refresh on any non-terminal one so the caller's retry re-pins
-    private def refreshOnExecFault(frames: Vector[Frame]): Unit = {
-      val nested = frames.lastOption match {
-        case Some(Frame.Array(elems)) => elems.iterator
-        case _                        => Iterator.empty[Frame]
-      }
-      refreshFor((frames.iterator ++ nested).flatMap(TxSupport.errorOf).map(m => Fault.categorize(ServerError.of(m))).toVector)
-    }
+    private def refreshOnExecFault(frames: Vector[Frame]): Unit =
+      refreshFor(TxSupport.execErrors(frames).map(Fault.categorize).toVector)
 
     private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
       runExec(p).flatMap {
@@ -992,7 +966,7 @@ final private[client] class ClusterLive(
         CIO
           .async[Vector[Frame]] { complete =>
             val tracked = Events.trackSpan(events, Connection.multi, complete)
-            offload(submitExec(p, tracked))
+            scheduler.offload(submitExec(p, tracked))
           }
           .flatMap { frames =>
             armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
@@ -1157,10 +1131,6 @@ final private[client] class ClusterLive(
 
   private def getOrEstablish(node: Node): NodeClient = masterPool.getOrEstablish(node)
 
-  private def establishOrNull(node: Node): NodeClient =
-    try getOrEstablish(node)
-    catch { case NonFatal(_) => null }
-
   private def flushNode(node: Node): Unit =
     if (cachingEnabled) {
       val nc = masterPool.existing(node)
@@ -1169,7 +1139,7 @@ final private[client] class ClusterLive(
 
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
-  private def triggerRefresh(): Unit = offload(refresh(force = false))
+  private def triggerRefresh(): Unit = scheduler.offload(refresh(force = false))
 
   private def startRefreshPoll(): Unit = refreshThrottle.startPolling(cluster.topologyRefreshInterval)(triggerRefresh())
 
@@ -1189,34 +1159,24 @@ final private[client] class ClusterLive(
     candidates.iterator.flatMap(trySlots).nextOption()
 
   private def trySlots(node: Node): Option[(Node, Vector[Shard])] =
-    try querySlotsVia(node, getOrEstablish(node)).toOption.map(node -> _)
+    try querySlotsVia(node).toOption.map(node -> _)
     catch { case NonFatal(_) => None }
 
   // a node outside a formed cluster answers CLUSTER SLOTS with an empty array: a non-answer, not a topology owning no slots
-  private def querySlotsVia(node: Node, nc: NodeClient): Either[Throwable, Vector[Shard]] = {
-    val latch   = new CountDownLatch(1)
-    val outcome = new AtomicReference[Try[Vector[Shard]]]()
-    nc.submit[Vector[Shard]](
-      Cluster.slots,
-      asking = false,
-      result => {
-        outcome.set(result)
-        latch.countDown()
-      }
-    )
-    if (!latch.await(connectTimeout.toMillis, TimeUnit.MILLISECONDS))
-      Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
-    else
-      outcome.get() match {
-        case Success(shards) if shards.nonEmpty =>
-          Right(shards)
-        case Success(_)                         =>
-          Left(UnsupportedServer(s"${node.host}:${node.port} owns no slots: it is not part of a formed cluster"))
-        case Failure(error: ServerError)        =>
-          Left(UnsupportedServer(s"${node.host}:${node.port} rejected CLUSTER SLOTS: ${error.getMessage}"))
-        case Failure(error)                     =>
-          Left(error)
-      }
+  private def querySlotsVia(node: Node): Either[Throwable, Vector[Shard]] = {
+    val nc = getOrEstablish(node)
+    Bootstrap.awaitReply[Vector[Shard]](connectTimeout.toMillis)(callback => nc.submit(Cluster.slots, asking = false, callback)) match {
+      case None                                     =>
+        Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
+      case Some(Success(shards)) if shards.nonEmpty =>
+        Right(shards)
+      case Some(Success(_))                         =>
+        Left(UnsupportedServer(s"${node.host}:${node.port} owns no slots: it is not part of a formed cluster"))
+      case Some(Failure(error: ServerError))        =>
+        Left(UnsupportedServer(s"${node.host}:${node.port} rejected CLUSTER SLOTS: ${error.getMessage}"))
+      case Some(Failure(error))                     =>
+        Left(error)
+    }
   }
 
   // prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak; an empty announce-IP from CLUSTER SLOTS
