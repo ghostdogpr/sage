@@ -71,7 +71,10 @@ final private[sage] class RespParser {
             if (highWater > MaxRetainedBuffer) quietDrains = 0
             else {
               quietDrains += 1
-              if (quietDrains >= ShrinkAfterDrains) buf = Array.emptyByteArray
+              if (quietDrains >= ShrinkAfterDrains) {
+                buf = Array.emptyByteArray
+                quietDrains = 0
+              }
             }
           }
           highWater = 0

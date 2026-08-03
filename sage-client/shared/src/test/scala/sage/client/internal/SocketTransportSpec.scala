@@ -137,6 +137,35 @@ class SocketTransportSpec extends munit.FunSuite {
     }
   }
 
+  test("a failing write fires onClosed even though the writer itself tears the transport down") {
+    @volatile var closedCount = 0
+    val inOnFrame             = new CountDownLatch(1)
+    val release               = new CountDownLatch(1)
+    withTransport(
+      onClosed = () => closedCount += 1,
+      onFrame = _ => {
+        inOnFrame.countDown()
+        release.await()
+      }
+    ) { (transport, peer) =>
+      try {
+        peer.getOutputStream.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8))
+        peer.getOutputStream.flush()
+        assert(inOnFrame.await(5, TimeUnit.SECONDS), "reader should reach frame delivery")
+        peer.setSoLinger(true, 0)
+        peer.close()
+        var sent = 0
+        while (transport.writer.isAlive && sent < 200) {
+          transport.send(new RecordingItem(s"PING $sent\r\n"))
+          sent += 1
+          Thread.sleep(5)
+        }
+        awaitUntil(closedCount == 1, "onClosed after a writer-initiated teardown")
+      } finally release.countDown()
+      transport.close()
+    }
+  }
+
   test("a malformed frame poisons the connection") {
     @volatile var closedCount = 0
     withTransport(onClosed = () => closedCount += 1) { (transport, peer) =>
