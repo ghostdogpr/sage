@@ -66,6 +66,17 @@ class ClusterSpec extends munit.FunSuite {
     assert(run(reply).isLeft)
   }
 
+  test("a null endpoint decodes to the empty host the caller substitutes itself into") {
+    val master = Frame.Array(Vector(Frame.Null, int(6379), bulk("m1")))
+    val reply  = Frame.Array(Vector(Frame.Array(Vector(int(0), int(10), master))))
+    assertEquals(run(reply).map(_.map(_.master)), Right(Vector(Node("", 6379))))
+  }
+
+  test("a `?` endpoint stays literal: it means an unknown node, not the queried one") {
+    val reply = Frame.Array(Vector(Frame.Array(Vector(int(0), int(10), node("?", 6379, "m1")))))
+    assertEquals(run(reply).map(_.map(_.master)), Right(Vector(Node("?", 6379))))
+  }
+
   test("a non-array reply fails") {
     assert(run(Frame.SimpleString("OK")).isLeft)
   }

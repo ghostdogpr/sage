@@ -32,7 +32,7 @@ private[sage] object Cluster {
     frame match {
       case Frame.Array(elements) if elements.length >= 2 =>
         for {
-          host <- stringOf(elements(0))
+          host <- endpointOf(elements(0))
           port <- intOf(elements(1))
         } yield Node(host, port)
       case other                                         => Left(DecodeError("node array [ip, port, id, ...]", Frame.describe(other)))
@@ -55,10 +55,12 @@ private[sage] object Cluster {
       case other                => Left(DecodeError("integer", Frame.describe(other)))
     }
 
-  private def stringOf(frame: Frame): Either[DecodeError, String] =
+  // a null endpoint means "the node you queried", which the empty host already denotes downstream
+  private def endpointOf(frame: Frame): Either[DecodeError, String] =
     frame match {
       case Frame.BulkString(bytes)  => Right(bytes.asUtf8String)
       case Frame.SimpleString(text) => Right(text)
-      case other                    => Left(DecodeError("string", Frame.describe(other)))
+      case Frame.Null               => Right("")
+      case other                    => Left(DecodeError("string or null endpoint", Frame.describe(other)))
     }
 }
