@@ -178,8 +178,10 @@ final private[client] class SocketTransport private (
         case _: IOException => ()
       }
       if (locked(threadsStarted)) {
-        writer.interrupt()
-        if (Thread.currentThread() ne writer) writer.join()
+        if (Thread.currentThread() ne writer) {
+          writer.interrupt()
+          writer.join()
+        }
         // fence the reader before onClosed, else an in-flight reply races the consumer's pending drain (#94); interrupt frees a reader
         // parked on backpressure so the join cannot hang
         if (Thread.currentThread() ne reader) {

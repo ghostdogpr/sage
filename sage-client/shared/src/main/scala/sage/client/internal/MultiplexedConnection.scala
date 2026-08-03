@@ -256,19 +256,16 @@ final private[client] class MultiplexedConnection private (
     val lostLiveness = locked {
       if (conn eq current)
         state match {
-          case State.Live         =>
+          case State.Live                        =>
             transition(State.Reconnecting)
             scheduleReconnect(nextReconnectAttempt())
             events.emit(SageEvent.Connection.Disconnected(node))
             true
-          case State.Reconnecting =>
-            scheduleReconnect(0)
-            false
-          case State.Draining     =>
+          case State.Draining                    =>
             transition(State.Closed)
             stopWatchdog()
             false
-          case State.Closed       => false
+          case State.Reconnecting | State.Closed => false
         }
       else false
     }
