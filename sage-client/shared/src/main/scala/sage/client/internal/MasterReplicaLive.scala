@@ -142,45 +142,74 @@ final private[client] class MasterReplicaLive(
       case _: Role.Sentinel               => None
     }
 
-  // a throwaway connection (must not leave a pooled one behind): a connect/handshake failure propagates so bootstrapRoles surfaces it like a
-  // standalone connect; a node that handshakes but doesn't answer ROLE yields None
+  // ROLE rides the node's pooled connection when one is live, else a throwaway one that must not leave a pooled connection behind
   private def probeRole(node: Node): Option[Role] = {
-    val nc =
-      try
-        NodeClient.connect(
-          nodeFactory(node),
-          scheduler,
-          bootstrap,
-          config.reconnect,
-          config.watchdog,
-          config.connectTimeout,
-          config.closeTimeout,
-          config.dedicatedPool,
-          node = node,
-          events = Events.disabled
-        )
-      catch {
-        case NonFatal(error) =>
-          reportProbeFailure(node, error)
-          throw error
-      }
-    try
-      Bootstrap.awaitReply[Role](config.connectTimeout.toMillis)(callback => nc.submit(Server.role, asking = false, callback)) match {
-        case Some(Success(role))  => Some(role)
-        case Some(Failure(error)) =>
-          reportProbeFailure(node, error)
-          None
-        case None                 =>
-          reportProbeFailure(node, TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms"))
-          None
-      }
+    val pooled = pooledFor(node)
+    if (pooled != null) {
+      val reply = askRole(pooled)
+      if (!lostConnection(reply)) return interpretRole(node, reply)
+    }
+    val nc     = connectForProbe(node)
+    try interpretRole(node, askRole(nc))
     finally nc.close()
   }
+
+  private def pooledFor(node: Node): NodeClient = {
+    val master = masterPool.existing(node)
+    val nc     = if (master != null) master else replicaPool.existing(node)
+    if (nc != null && nc.isLive) nc else null
+  }
+
+  private def askRole(nc: NodeClient): Option[Try[Role]] =
+    Bootstrap.awaitReply[Role](config.connectTimeout.toMillis)(callback => nc.submit(Server.role, asking = false, callback))
+
+  private def interpretRole(node: Node, reply: Option[Try[Role]]): Option[Role] =
+    reply match {
+      case Some(Success(role))  => Some(role)
+      case Some(Failure(error)) =>
+        reportProbeFailure(node, error)
+        None
+      case None                 =>
+        reportProbeFailure(node, TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms"))
+        None
+    }
+
+  private def lostConnection(reply: Option[Try[Role]]): Boolean =
+    reply match {
+      case Some(Failure(error)) =>
+        Fault.categorize(error) match {
+          case Fault.Lost(_) => true
+          case _             => false
+        }
+      case _                    => false
+    }
+
+  private def connectForProbe(node: Node): NodeClient =
+    try
+      NodeClient.connect(
+        nodeFactory(node),
+        scheduler,
+        bootstrap,
+        config.reconnect,
+        config.watchdog,
+        config.connectTimeout,
+        config.closeTimeout,
+        config.dedicatedPool,
+        node = node,
+        events = Events.disabled
+      )
+    catch {
+      case NonFatal(error) =>
+        reportProbeFailure(node, error)
+        throw error
+    }
 
   private def reportProbeFailure(node: Node, error: Throwable): Unit =
     events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
-  private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscover())
+  private val rediscoverWork: () => Unit = () => rediscover()
+
+  private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscoverWork)
 
   private def startRefreshPoll(): Unit = refreshThrottle.startPolling(masterReplica.topologyRefreshInterval)(triggerRefresh())
 
