@@ -13,22 +13,25 @@ import scala.concurrent.duration.{Duration, FiniteDuration}
   */
 final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: Long) {
 
-  private val lock          = new ReentrantLock()
-  private val done          = lock.newCondition()
-  private var refreshing    = false
-  private var lastRefreshMs = scheduler.nowMillis - minRefreshMs
-  private var ticker        = null: Scheduler.Cancelable
-  private var stopped       = false
+  private val lock                    = new ReentrantLock()
+  private val done                    = lock.newCondition()
+  // volatile so `throttled` can answer without the lock; every mutation still happens under it
+  @volatile private var refreshing    = false
+  @volatile private var lastRefreshMs = scheduler.nowMillis - minRefreshMs
+  private var ticker                  = null: Scheduler.Cancelable
+  private var stopped                 = false
 
   def apply(force: Boolean)(work: => Unit): Unit =
     if (claim(force, wait = true)) run(work)
 
   /**
     * Schedules a non-forced refresh only when this call claims the throttle. Unlike [[apply]], callers never wait for an in-flight refresh.
+    * Called per read while routing can reach no replica, so the throttled path must stay lock-free and `work` pre-built: a by-name
+    * argument would re-allocate a closure per read even when it never runs.
     */
-  def trigger(work: => Unit): Unit =
+  def trigger(work: () => Unit): Unit =
     if (claim(force = false, wait = false))
-      try scheduler.after(Duration.Zero)(run(work))
+      try scheduler.after(Duration.Zero)(run(work()))
       catch {
         case error: Throwable =>
           finish()
@@ -66,6 +69,7 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
   }
 
   private def claim(force: Boolean, wait: Boolean): Boolean = {
+    if (!force && !wait && throttled) return false
     lock.lock()
     try
       if (refreshing && wait) {
@@ -79,6 +83,8 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
     finally lock.unlock()
   }
 
+  private def throttled: Boolean = refreshing || scheduler.nowMillis - lastRefreshMs < minRefreshMs
+
   private def run(work: => Unit): Unit =
     try work
     finally finish()
@@ -86,8 +92,9 @@ final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: 
   private def finish(): Unit = {
     lock.lock()
     try {
-      refreshing = false
+      // stamp before clearing: by the volatile write ordering, a lock-free `throttled` seeing `refreshing == false` sees this window too
       lastRefreshMs = scheduler.nowMillis
+      refreshing = false
       done.signalAll()
     } finally lock.unlock()
   }

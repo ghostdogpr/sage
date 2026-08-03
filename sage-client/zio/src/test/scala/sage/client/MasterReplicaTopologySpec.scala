@@ -164,6 +164,30 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     assert(!dialled.contains(advertisedReplica), s"advertised address must not be dialled: $dialled")
   }
 
+  test("a role refresh asks ROLE over the established connection instead of opening a second socket") {
+    val fixture = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map(primary -> masterRole()),
+      minRefreshInterval = Duration.Zero
+    )
+    fixture.live.bootstrapRoles()
+
+    assertEquals(fixture.read(), 1L)
+    fixture.awaitTrue(fixture.roleRequestCount(primary) >= 2, "the first read did not trigger a re-discovery")
+    val settledDials = fixture.dialled.size
+    val settledRoles = fixture.roleRequestCount(primary)
+
+    var i = 0
+    while (i < 20) {
+      assertEquals(fixture.read(), 1L)
+      i += 1
+    }
+    fixture.awaitTrue(fixture.roleRequestCount(primary) > settledRoles, "later reads stopped re-discovering")
+    fixture.close()
+
+    assertEquals(fixture.dialled.size, settledDials, s"a refresh dialled a node it was already connected to: ${fixture.dialled}")
+  }
+
   test("a read whose connection dies mid-flight falls through to the next candidate") {
     val fixture = new Fixture(
       seeds = Vector(primary),

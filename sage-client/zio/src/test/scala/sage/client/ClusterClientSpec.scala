@@ -263,6 +263,22 @@ class ClusterClientSpec extends munit.FunSuite {
     }
   }
 
+  test("a replica-preferred read on a shard with no replica offloads no refresh once the window is closed") {
+    val counting  = new CountingScheduler
+    val behaviour =
+      (node: Node, text: String) => if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA)) else Seq(bulk(node.host))
+    val fixture   = new Fixture(behaviour, Vector(nodeA), readFrom = ReadFrom.ReplicaPreferred, scheduler = counting)
+    val get       = fixture.live.run(Strings.get[String, String]("foo"))
+
+    get.unsafeRun.flatMap { _ =>
+      val before = counting.zeroDelays.get()
+      get.unsafeRun.flatMap(_ => get.unsafeRun).map { result =>
+        assertEquals(result, Some(nodeA.host))
+        assertEquals(counting.zeroDelays.get(), before, "a throttled replica-preferred read must not offload a refresh")
+      }
+    }
+  }
+
   test("a pipeline to an established node dispatches inline, with no zero-delay scheduler hop") {
     val counting  = new CountingScheduler
     val behaviour = (_: Node, text: String) =>

@@ -1163,19 +1163,23 @@ final private[client] class ClusterLive(
 
   // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
 
-  private def triggerRefresh(): Unit = scheduler.offload(refresh(force = false))
+  private val refreshWork: () => Unit = () => runRefresh()
+
+  private def triggerRefresh(): Unit = refreshThrottle.trigger(refreshWork)
 
   private def startRefreshPoll(): Unit = refreshThrottle.startPolling(cluster.topologyRefreshInterval)(triggerRefresh())
 
+  // blocks until the topology is adopted: callers read `topologyRef` on the next line
+  private def refresh(force: Boolean): Unit = if (!closed) refreshThrottle(force)(runRefresh())
+
   // a refresh queued before close must not re-establish what the close tore down
-  private def refresh(force: Boolean): Unit =
-    if (!closed) refreshThrottle(force) {
+  private def runRefresh(): Unit =
+    if (!closed)
       querySlots(refreshCandidates()) match {
         case Some((from, shards)) => adopt(from, shards)
         // no candidate answered CLUSTER SLOTS: ownership is unknowable, so retire every cache
         case None                 => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
       }
-    }
 
   private def refreshCandidates(): Vector[Node] = (masterPool.candidatesByLiveness ++ seeds).distinct
 
