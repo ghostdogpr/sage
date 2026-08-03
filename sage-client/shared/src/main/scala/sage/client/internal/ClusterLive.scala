@@ -1,6 +1,7 @@
 package sage.client.internal
 
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.concurrent.locks.ReentrantLock
 
@@ -757,16 +758,31 @@ final private[client] class ClusterLive(
     deferred: Vector[() => CommandSpan],
     plan: SplitPlan
   ): Unit = {
-    val n                         = p.commands.length
-    val collector                 =
+    val n                           = p.commands.length
+    val collector                   =
       new TxSupport.IndexedCollector[Either[SageException, Any]](n, results => complete(Success(results)))
-    val emits                     = Vector.tabulate(n) { i =>
-      val span = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
-      Events.trackCommand[Any](events, p.commands(i), (result: Try[Any]) => collector.set(i, TxSupport.toEither(result)), span)
+    // a position opens its gate as it settles; a retry waits out the gate of the one before it on its slot, so same-key writes cannot invert
+    val gates                       = Vector.fill(n)(new CountDownLatch(1))
+    val slotAt                      = p.commands.map(slotOf)
+    val emits                       = Vector.tabulate(n) { i =>
+      val span                     = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
+      val settle: Try[Any] => Unit = result => {
+        gates(i).countDown()
+        collector.set(i, TxSupport.toEither(result))
+      }
+      Events.trackCommand[Any](events, p.commands(i), settle, span)
+    }
+    def awaitTurn(index: Int): Unit = {
+      val previous = if (slotAt(index) < 0) -1 else slotAt.lastIndexOf(slotAt(index), index - 1)
+      if (previous >= 0) gates(previous).await()
     }
     // all-or-nothing: reroutes honor the same choice so a slot is never split across master and replica
-    val useReplica                = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-    def reroute(index: Int): Unit = dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica)
+    val useReplica                  = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
+    // on the caller thread, so the wait gets a thread of its own; a retry from a reply is already offloaded
+    def reroute(index: Int): Unit   = scheduler.offload {
+      awaitTurn(index)
+      dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica)
+    }
 
     plan.rejected.foreach {
       case (index, Rejected.CrossSlot(slots)) =>
@@ -779,9 +795,17 @@ final private[client] class ClusterLive(
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
     plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
       // sorted: keep each node's batch in submission order even when keyless positions are folded into the first group
-      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute, useReplica)
+      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute, awaitTurn, useReplica)
     }
   }
+
+  // the slot a retry orders on; -1 for a keyless or cross-slot position, which orders against nothing
+  private def slotOf(command: Command[?]): Int =
+    topologyRef.get().route(command) match {
+      case Route.ToNode(_, slot) => slot.value
+      case Route.Unowned(slot)   => slot.value
+      case _                     => -1
+    }
 
   private def sendBatch[Out, R](
     node: Node,
@@ -789,22 +813,23 @@ final private[client] class ClusterLive(
     p: Pipeline[Out, R],
     emits: Vector[Try[Any] => Unit],
     reroute: Int => Unit,
+    awaitTurn: Int => Unit,
     useReplica: Boolean
   ): Unit =
     // the batch attributes to the node it lands on (a replica when useReplica)
     if (useReplica) {
       val replicas = topologyRef.get().shards.collectFirst { case s if s.master == node => s.replicas }.getOrElse(Vector.empty)
       reads.pickOne(reads.candidatesFor(node, replicas), node) {
-        case Some(picked) => submitBatch(picked.node, picked.client, indices, p, emits, reroute, useReplica)
+        case Some(picked) => submitBatch(picked.node, picked.client, indices, p, emits, reroute, awaitTurn, useReplica)
         case None         => indices.foreach(reroute)
       }
     } else {
       val existing = masterPool.existing(node)
-      if (existing != null) submitBatch(node, existing, indices, p, emits, reroute, useReplica)
+      if (existing != null) submitBatch(node, existing, indices, p, emits, reroute, awaitTurn, useReplica)
       else
         scheduler.offload {
           val nc = masterPool.getOrEstablishOrNull(node)
-          submitBatch(node, nc, indices, p, emits, reroute, useReplica)
+          submitBatch(node, nc, indices, p, emits, reroute, awaitTurn, useReplica)
         }
     }
 
@@ -815,6 +840,7 @@ final private[client] class ClusterLive(
     p: Pipeline[Out, R],
     emits: Vector[Try[Any] => Unit],
     reroute: Int => Unit,
+    awaitTurn: Int => Unit,
     useReplica: Boolean
   ): Unit = {
     def settle(index: Int, result: Try[Any]): Unit = {
@@ -827,6 +853,7 @@ final private[client] class ClusterLive(
         // a fault's disposition can block on CLUSTER SLOTS, whose reply needs this very reader thread
         case Failure(error) =>
           scheduler.offload {
+            awaitTurn(index)
             Fault.categorize(error) match {
               // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
               // to the importing node with ASKING. MOVED and connection loss re-route normally.

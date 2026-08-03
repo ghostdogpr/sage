@@ -1,14 +1,23 @@
 package sage.client
 
 import scala.collection.mutable
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Future}
 import scala.concurrent.duration.*
 
 import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, UnsupportedServer}
-import sage.client.internal.{ClusterLive, CountingScheduler, FakeTransport, ManualScheduler, MultiplexedConnection, Replies, Scheduler}
+import sage.client.internal.{
+  ClusterLive,
+  CountingScheduler,
+  FakeTransport,
+  ManualScheduler,
+  MultiplexedConnection,
+  Replies,
+  Scheduler,
+  StaggeringScheduler
+}
 import sage.client.internal.Replies.bulk
 import sage.cluster.{Node, Slot}
 import sage.commands.{BroadcastReduce, Command, Connection, Json, JsonPath, Keys, Scripting, Server, Strings}
@@ -847,6 +856,35 @@ class ClusterClientSpec extends munit.FunSuite {
       assertEquals(result, (Some("from-b"), Some("from-b")))
       assertEquals(fixture.written(nodeA).count(_.contains("GET")), 1, "the refused master must see the batch once, never a retry")
     }
+  }
+
+  private def assertRedirectedWritesStayOrdered(kind: String): Future[Unit] = {
+    val staggering = new StaggeringScheduler(150.millis)
+    val slot       = Slot.of(Bytes.utf8("k")).value
+    val owner      = if (slot < mid) nodeA else nodeB
+    val target     = if (owner == nodeA) nodeB else nodeA
+    val behaviour  = (node: Node, text: String) =>
+      if (text.contains("CLUSTER")) Seq(splitCluster)
+      else if (node == owner) Seq.fill(text.split("\r\nSET\r\n", -1).length - 1)(Frame.SimpleError(s"$kind $slot ${target.host}:${target.port}"))
+      // an ASK follow-up reaches the target as [ASKING, SET]: one reply per command in the payload
+      else Seq.fill(text.split("\r\n(ASKING|SET)\r\n", -1).length - 1)(Frame.SimpleString("OK"))
+    val fixture    = new Fixture(behaviour, Vector(nodeA), scheduler = staggering)
+
+    staggering.arm()
+    fixture.live.pipeline((Strings.set("k", "v1"), Strings.set("k", "v2"))).unsafeRun.map { result =>
+      assertEquals(result, (true, true))
+      val writes = fixture.written(target).filter(_.contains("\r\nSET\r\n"))
+      assertEquals(writes.size, 2)
+      assert(writes.head.contains("v1") && writes.last.contains("v2"), s"the target saw the writes out of order: $writes")
+    }
+  }
+
+  test("two same-slot writes redirected by MOVED are reissued on the new owner in submission order") {
+    assertRedirectedWritesStayOrdered("MOVED")
+  }
+
+  test("two same-slot writes redirected by ASK are followed to the importing node in submission order") {
+    assertRedirectedWritesStayOrdered("ASK")
   }
 
   test("a CLUSTERDOWN retry re-dispatches on the mapping the refresh adopted, not the one that refused") {
