@@ -2,7 +2,7 @@
 
 Sage supports the `JSON.*` commands, which store documents server-side and address them with JSONPath expressions. You need a server that provides them: Redis 8 has JSON built in, and on Valkey they come from the valkey-json module (shipped in the `valkey/valkey-bundle` image, not in the stock `valkey` one).
 
-Sage takes no JSON-library dependency. A document is raw JSON text on the wire, and any structured typing comes from your own codec.
+Sage does not depend on a JSON library. It sends and receives documents as raw JSON text, and you can use your own codec for typed values.
 
 ## Paths
 
@@ -15,7 +15,7 @@ JsonPath("$.items[0]") // an array element
 JsonPath("$..price")   // every price, at any depth
 ```
 
-A JSONPath can match more than one location, so the location commands (`jsonType`, `jsonArrLen`, `jsonStrLen`, `jsonArrAppend`, `jsonToggle`, and the rest) return a `Vector` with one entry per matched location, `None` where a match exists but holds the wrong type for the command. A path that matches nothing returns an empty `Vector`, so prefer `.headOption` over `.head` when you expect a single match.
+A JSONPath can match more than one location. Commands such as `jsonType`, `jsonArrLen`, `jsonStrLen`, `jsonArrAppend`, and `jsonToggle` return a `Vector` with one entry for each match. An entry is `None` when the matched value has the wrong type for the command. A path that matches nothing returns an empty `Vector`; use `.headOption` when you expect a single match.
 
 The legacy dot dialect is not modeled. If you need it, send a raw command.
 
@@ -41,7 +41,7 @@ for {
 
 :::
 
-`jsonGet` returns the value as one JSON text blob. With no path it returns the whole document unwrapped, so a typed codec decodes it directly; a JSONPath wraps its matches in a JSON array (so `$.name` reads back as `["Ada"]`), and several paths merge into one path-keyed object.
+`jsonGet` returns one block of JSON text. Without a path, it returns the complete document for a typed codec to decode. With one JSONPath, it wraps the matches in an array; for example, `$.name` returns `["Ada"]`. With several paths, it returns an object whose keys are the paths.
 
 To decode documents into your own types, bring a `ValueCodec` built from your JSON library. Its encode must emit valid JSON and its decode parses it back. With circe, one codec covers every type circe handles:
 
@@ -110,7 +110,7 @@ client.jsonMGet[String](JsonPath("$.name"))("user:1", "user:2", "user:3")
 client.jsonMSet(("user:1", JsonPath.root, """{"n":"Ada"}"""), ("user:2", JsonPath.root, """{"n":"Lin"}"""))
 ```
 
-In a cluster the two commands differ. `jsonMGet` is transparently split across slots and its results are recombined, so its keys may live anywhere. `jsonMSet` is atomic, so a call whose keys span slots is rejected rather than partially applied. To set several documents atomically, co-locate their keys with a hash tag so they share one slot:
+In a cluster, `jsonMGet` can read keys from different slots. Sage splits the request and combines the results. `jsonMSet` is atomic, so all keys must share one slot. Use a hash tag to place related keys in the same slot:
 
 ```scala
 client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", JsonPath.root, "{}"))
@@ -118,9 +118,7 @@ client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", Js
 
 ## Redis and Valkey differences
 
-The common surface behaves the same on both servers. A few points differ:
+Most commands behave the same on both servers. There are a few differences:
 
 - `jsonMerge` (RFC 7386 merge) works on Redis only. Valkey does not ship `JSON.MERGE` yet.
 - `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but fails with a server error on Valkey.
-
-The two servers also frame a few replies differently on the wire, but Sage decodes both into the same result type, so your code does not see it.

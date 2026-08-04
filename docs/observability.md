@@ -7,11 +7,11 @@ Sage exposes two integration points, for two different jobs:
 
 ## Events
 
-Register one or more `SageListener` on `SageConfig`, and each receives every `SageEvent`: command completions, connection transitions, cache outcomes, and topology changes. This is how you wire Sage into your metrics or logging.
+Register one or more `SageListener` instances on `SageConfig`. Each listener receives every `SageEvent`: command completions, connection transitions, cache outcomes, and topology changes. You can use these events for metrics or logging.
 
 | Event | Reported when |
 | --- | --- |
-| `CommandCompleted(name, node, duration, outcome)` | One logical command settled. `duration` is client-observed (including any cluster redirects/retries); `outcome` is `Succeeded` or `Failed(error)`. A cached read served locally yields no `CommandCompleted`. |
+| `CommandCompleted(name, node, duration, outcome)` | One command completed. `duration` is measured by the client and includes any cluster redirects or retries. `outcome` is `Succeeded` or `Failed(error)`. A cached read served locally does not produce this event. |
 | `Connection.Connected(node)` | The multiplexed connection connected, on the initial connect and on every reconnect. |
 | `Connection.Disconnected(node)` | A live connection was lost and the runtime began reconnecting. Graceful close is not reported. |
 | `Connection.ConnectFailed(node, error)` | A connection could not be established, or the node could not be qualified during topology discovery. Names the address and cause, whether the failure is handled internally or also returned to the caller. |
@@ -19,7 +19,7 @@ Register one or more `SageListener` on `SageConfig`, and each receives every `Sa
 | `Cache.Hit(command)` / `Cache.Miss(command)` | A `cached` read was served locally, or had to fetch from the server. |
 | `TopologyChanged(masters)` | The cluster's slot-owning master set changed (a failover, or scaling a shard in or out). |
 
-Events carry no command arguments or payloads, so secrets such as `AUTH` credentials and user values never reach a listener. Where an event carries `node`, it is `Some` for cluster and master-replica clients and `None` for a standalone client. A node that keeps failing to connect produces one `ConnectFailed`, not one per attempt.
+Events omit command arguments and payloads. This keeps secrets such as `AUTH` credentials and user values out of listeners. Where an event carries `node`, it is `Some` for cluster and master-replica clients and `None` for a standalone client. A node that keeps failing to connect produces one `ConnectFailed` rather than one event per attempt.
 
 ### Registering a listener
 
@@ -47,11 +47,11 @@ val config = SageConfig(
 )
 ```
 
-`SageListener` lives in the core and is the same on every backend, so this snippet is backend-independent.
+This listener example works on every backend.
 
 ### Delivery guarantees
 
-Listeners are invoked off the command path, so a slow or throwing listener cannot block or break command execution. It only delays or loses events.
+Listeners run separately from command execution. A slow or throwing listener may delay or lose events, but it does not affect commands.
 
 ::: warning
 Delivery is best-effort: a thrown exception is swallowed, and events are dropped once the internal dispatch queue fills. Listeners suit metrics, sampling, and operational logging, not anything that must be a complete record.
@@ -59,7 +59,7 @@ Delivery is best-effort: a thrown exception is swallowed, and events are dropped
 
 ## Distributed tracing
 
-Use a `CommandTracer` rather than a listener here: it runs synchronously on the command path, so each Redis span is a child of whatever span is active when the command is issued. A listener runs too late, off that path, and its spans would be orphaned.
+Use a `CommandTracer` rather than a listener for distributed tracing. It runs while Sage processes the command, which makes each Redis span a child of the active span. A listener runs later and cannot preserve this parent-child relationship.
 
 Set one on `SageConfig.tracer`. The `sage-opentelemetry` module provides an OpenTelemetry implementation:
 
@@ -77,15 +77,15 @@ val config = SageConfig(
 )
 ```
 
-It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), carrying `db.system`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component`, and the server address; a failure sets an error status with the exception. Only the command name is recorded, never arguments or keys, so secrets and user values stay out of your traces. Spans follow the ambient sampling decision.
+It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), carrying `db.system`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component`, and the server address; a failure sets an error status with the exception. The tracer records the command name but omits arguments and keys, keeping secrets and user values out of traces. Spans follow the ambient sampling decision.
 
-One span is emitted per command that reaches the server, including each command in a pipeline (cluster redirects fold into the command's own span). A `cached` read served locally reaches no server and produces no span; one that misses is traced like any other command. In a `transaction`, the watch-phase reads are traced individually and the `MULTI`/`EXEC` body gets a single span named `MULTI`, which reflects the round trip rather than whether the transaction committed.
+Sage emits one span for each command sent to the server, including each command in a pipeline (cluster redirects remain part of the command's span). A `cached` read served locally does not produce a span. A cache miss is traced like any other command. In a `transaction`, Sage traces the watch-phase reads individually and creates one span named `MULTI` for the `MULTI`/`EXEC` body. This span represents the round trip, not whether the transaction committed.
 
-The tracer reads the active span from OpenTelemetry's thread-local current context (`Context.current()`) on the fiber that submits the command, and the module depends only on the OpenTelemetry API. So under an APM agent that instruments your runtime and propagates context across its threads, the Redis span nests under the active request span with no further wiring. That is the case for ZIO under the Datadog Java agent; configuring the agent itself is covered by its own documentation.
+The tracer reads the active span from `Context.current()` when a fiber submits a command. If an APM agent propagates that context, the Redis span becomes a child of the active request span without additional configuration. This works for ZIO under the Datadog Java agent; see the agent's documentation for its own setup.
 
 ### Context on a fiber runtime without an agent
 
-Running a bare OpenTelemetry SDK with no agent is the case that needs attention: on a fiber runtime the active span lives in fiber-local state (a ZIO `FiberRef`, a Cats Effect `IOLocal`), which is not the current context the tracer reads, so spans would be orphaned. Configure context storage so that `Context.current()` sees the active span:
+When you use the OpenTelemetry SDK without an agent, you need to configure context storage. On a fiber runtime, the active span lives in fiber-local state (a ZIO `FiberRef` or Cats Effect `IOLocal`), but the tracer reads the current OpenTelemetry context. Configure context storage so that `Context.current()` can see the active span:
 
 - **ZIO**: with `zio-telemetry`, wire OpenTelemetry through the `OpenTelemetry.contextJVM` and `OpenTelemetry.global` layers (rather than `OpenTelemetry.contextZIO` and `OpenTelemetry.custom`), which back tracing with OpenTelemetry's native context so the SDK reads the active span. See zio-telemetry's auto-instrumentation interop documentation.
 - **cats-effect**: with `otel4s` on Cats Effect 3.6+, add the `otel4s-oteljava-context-storage` dependency, enable the `cats.effect.trackFiberContext` system property, and provide `IOLocalContextStorage.localProvider[IO]`. This keeps the Java `Context` and the otel4s fiber context aligned so the SDK reads the active span. Note that the stock OpenTelemetry Java agent does not keep Cats Effect context in sync; otel4s ships a dedicated agent distribution for the agent case.

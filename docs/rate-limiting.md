@@ -1,6 +1,6 @@
 # Rate limiting
 
-A **rate limiter** caps how often something may happen: so many requests per second for an API key, a budget of login attempts per account, a fair-use quota per tenant. Sage ships one built in, so every client has it with no extra dependency.
+A **rate limiter** controls how often something may happen, such as requests per second for an API key, login attempts per account, or a fair-use quota per tenant. Rate limiting is included with every Sage client.
 
 The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server. Each check decides and consumes atomically on the server, in a single round trip.
 
@@ -39,18 +39,18 @@ RateLimit(permits = 100, per = 1.second, burst = 200) // 100/s sustained, bursti
 
 ## Reading the decision
 
-`Decision` is an ordinary returned value, never a thrown error: an admitted or rejected request is a normal outcome, not a failure.
+`Decision` is a return value, not an exception. Both allowed and denied requests are normal results.
 
 - `isAllowed`: whether the request was admitted.
 - `remainingTokens`: tokens left in the bucket. A denial consumes nothing, so it reports the untouched balance. Convenient for an `X-RateLimit-Remaining` header.
 - `Allowed(remaining, resetAfter)`: `resetAfter` is the time until the bucket refills to full.
 - `Denied(remaining, retryAfter)`: `retryAfter` is the time until enough tokens are available. Convenient for a `Retry-After` header.
 
-There is no blocking `acquire`: `tryAcquire` never waits. To retry, sleep for `retryAfter` at the call site and try again.
+`tryAcquire` returns immediately instead of waiting for capacity. To retry, sleep for `retryAfter` at the call site and try again.
 
 ## Peek and reset
 
-- `peek(subject)` reports the current standing without consuming: `Allowed` while at least one token is available, otherwise `Denied` with the wait until one is. The bucket is still refilled by elapsed time, but no tokens are taken.
+- `peek(subject)` checks the current state without consuming a token. Elapsed time still refills the bucket. It returns `Allowed` while at least one token is available. Otherwise, it returns `Denied` with the time until a token becomes available.
 - `reset(subject)` clears a subject's bucket, so its next request starts from full capacity.
 
 ## Cost and subjects
@@ -77,7 +77,7 @@ These are programming errors, not runtime outcomes: `tryAcquire` and `peek` fail
 
 ## When the store is unreachable
 
-A check reaches the server, so it fails like any other command when the server is unreachable, through the effect `F`. Sage applies no fallback of its own: decide at the call site whether an outage should admit the request (availability first) or reject it (protection first).
+Each check contacts the server and fails through the effect `F` if the server is unreachable. Sage does not choose a fallback behavior. Your application must decide whether to allow or reject requests during an outage.
 
 ## Capacity planning
 
@@ -95,4 +95,4 @@ client.run(limiter.command("user:42"))
 
 ## Topology
 
-The limiter works on every topology. A subject's whole state is one key, so it hashes to a single cluster slot with no hash-tag gymnastics and routes correctly on a standalone, master-replica, or cluster client with no change to your code.
+The limiter works with every topology. Each subject's state uses one key and therefore one cluster slot. The same code works with standalone, master-replica, and cluster clients, without requiring hash tags.

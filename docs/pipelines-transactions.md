@@ -1,10 +1,10 @@
 # Pipelines & transactions
 
-Both group several commands together, but they answer different needs. A **pipeline** is about throughput: many commands, one round-trip, no atomicity. A **transaction** is about atomicity: the grouped commands run as a unit, optionally guarded against concurrent change.
+Pipelines and transactions both group several commands, but they serve different purposes. A **pipeline** improves throughput by sending many commands in one round trip, without atomicity. A **transaction** runs the grouped commands as a unit and can protect them from concurrent changes.
 
 ## Pipelines
 
-A pipeline is a composition of `Command` values, sent in one round-trip and decoded into a typed tuple. There is no atomicity: other clients' commands may interleave, and in a cluster the pipeline is split and routed per key, then reassembled in order. [Cross-slot commands](/configuration#supported-cross-slot-commands) work inside a pipeline exactly as they do on their own.
+A pipeline sends several `Command` values in one round trip and returns their results as a typed tuple. The commands are not atomic, so commands from other clients may run between them. In a cluster, Sage routes each command by key and restores the original result order. [Cross-slot commands](/configuration#supported-cross-slot-commands) work the same way inside and outside a pipeline.
 
 ::: code-group
 
@@ -35,14 +35,14 @@ for {
 
 :::
 
-A tuple gives a fixed-arity, heterogeneous result. When the commands are built dynamically and share a result type, pass a `Seq[Command[A]]` instead and get back a `Vector[A]` in the same order (an empty `Seq` is a no-op that never touches the socket):
+A tuple gives a fixed-size result whose elements can have different types. When commands are built dynamically and share a result type, pass a `Seq[Command[A]]` instead and get back a `Vector[A]` in the same order. An empty `Seq` returns an empty result without contacting the server:
 
 ```scala
 val ids = List("a", "b", "c")
 client.pipeline(ids.map(id => Commands.get[String, String](id))) // F[Vector[Option[String]]]
 ```
 
-By default a pipeline fails as a whole if any position fails. Use `pipelineAttempt` to keep each position's outcome separate, so one failing command does not sink the others:
+By default, a pipeline fails as a whole if any command fails. Use `pipelineAttempt` to return each command's result separately:
 
 ::: code-group
 
@@ -74,13 +74,13 @@ for {
 
 :::
 
-In a cluster, a pipeline batches per node, so it cannot carry a [command that runs on every master](/configuration#commands-that-run-on-every-master). Those are rejected up front rather than partially applied; run them on the client directly.
+In a cluster, a pipeline creates a separate batch for each node. It cannot include a [command that runs on every master](/configuration#commands-that-run-on-every-master). Sage rejects these commands before sending the pipeline; run them on the client directly.
 
 ## Transactions
 
-A transaction runs a pipeline atomically via `MULTI`/`EXEC` on a leased dedicated connection. Open one with `transaction { tx => … }`: inside the scope you may `watch` keys, run ordinary reads (`tx.get`, `tx.run`, …), decide, and then `exec` a pipeline (or abandon the scope to discard it).
+A transaction runs a pipeline atomically with `MULTI`/`EXEC` on a temporary dedicated connection. Open one with `transaction { tx => … }`. Inside the scope you can `watch` keys, run ordinary reads (`tx.get`, `tx.run`, …), decide what to do, and then call `exec` with a pipeline. Leaving the scope without calling `exec` discards the transaction.
 
-`exec` returns an `Option`. A `None` means a watched key changed before `EXEC`, so the transaction did not run. That is the normal optimistic-concurrency outcome you retry, not a failure:
+`exec` returns an `Option`. If a watched key changed before `EXEC`, the transaction does not run and returns `None`. This is an expected result that you can retry:
 
 ::: code-group
 
@@ -120,10 +120,10 @@ A few rules follow from how Redis transactions work:
 
 - **Reads inside the scope must be ordinary commands.** A blocking command is rejected rather than parking the lease.
 - **A queueing-phase rejection discards the whole transaction**, so nothing runs.
-- **An execution-phase error leaves the other commands committed.** Redis does not roll back, so those errors surface per position, like a pipeline.
+- **An execution-phase error leaves the other commands committed.** Redis does not roll back. As with a pipeline, the error is reported for the individual command.
 - **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
 - **In a cluster, bound your retries.** A transaction never follows a redirect, since that would break atomicity, so you retry the whole block yourself, exactly as a `WATCH` abort already requires. While a slot is migrating no retry can commit until the migration finalizes, so retry with backoff and a ceiling rather than in a tight loop.
 
 ## Which to use
 
-Reach for a **pipeline** when the commands are independent and you only want fewer round-trips. Reach for a **transaction** when you need read-decide-commit on one connection, or all-or-nothing execution guarded by `WATCH`.
+Use a **pipeline** when the commands are independent and you want fewer round trips. Use a **transaction** when the commands must run as a unit or when you need `WATCH` to protect them from concurrent changes.

@@ -1,8 +1,8 @@
 # Getting started
 
-**Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). There is no Java client wrapped underneath: the RESP3 protocol, the commands, and the codecs are implemented directly in Scala, on a zero-dependency, effect-free core.
+**Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). It implements the RESP3 protocol, commands, and codecs directly in Scala. Its core has no dependencies and is independent of any effect system.
 
-That core is paired with a runtime written once and cross-published for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org), so you use Sage with your ecosystem's native types and no wrapper in sight. It targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
+Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses that ecosystem's native types. Sage targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
 
 ## Installation
 
@@ -32,11 +32,11 @@ Add the artifact for your Scala stack. The core is pulled in transitively, so yo
 
 :::
 
-Two imports cover everything: `import sage.*` for the command vocabulary and connection config, and `import sage.backend.*` for the client. That second import is the same regardless of Scala stack; only the dependency you choose differs.
+Two imports cover everything: `import sage.*` for commands and connection config, and `import sage.backend.*` for the client. The imports are the same for every Scala stack; only the dependency changes.
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using your ecosystem's idiomatic construction form: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `use` block on Pekko that closes the client when your program finishes. The command surface is identical across all five; only this wiring differs.
+A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using the usual pattern for your Scala stack: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `use` block on Pekko that closes the client when your program finishes. The same commands are available in all five integrations; only the client setup differs.
 
 ::: code-group
 
@@ -155,9 +155,9 @@ import sage.backend.*
 :::
 
 ::: tip How it works
-A `SageClient` is not a single connection, and ordinary commands do not borrow from a pool. They are written to one **multiplexed connection** per node, shared by every fiber: Sage **auto-pipelines** them, coalescing concurrent commands into fewer socket writes and matching replies back in FIFO order. This happens without you assembling a pipeline.
+Ordinary commands share one **auto-pipelined connection** per node. Sage can group concurrent commands into fewer network writes and returns each reply to the correct caller. You do not need to build a pipeline yourself.
 
-Two cases step off that connection automatically. Commands that hold per-connection state or block (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) lease a **dedicated connection** from an on-demand pool for the duration. Pub/sub subscriptions share a separate **subscription connection**, created the first time you subscribe, so a slow consumer can never stall command replies.
+Two kinds of work use other connections. Transactions and blocking commands (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) temporarily borrow a **dedicated connection** from a pool. Pub/sub subscriptions use a separate **subscription connection**, created the first time you subscribe. This prevents a slow subscriber from delaying command replies.
 :::
 
 ## A short tour
@@ -166,7 +166,7 @@ The snippets below show the same operations on each backend: pick your tab. In O
 
 ### Commands
 
-Methods are named one-for-one with Redis commands, grouped by family (strings, hashes, lists, sets, sorted sets, and so on). Keys and values are typed: the key type is fixed on the client (String by default), so a read only names its value type. Any type with a `ValueCodec` (here, a `User`) rides over the wire the same way as a `String`.
+Method names match Redis commands and are grouped by family (strings, hashes, lists, sets, sorted sets, and so on). Keys and values are typed. The client uses `String` keys by default. For a read, specify the type of value you expect, as in `get[String]`. You can read and write your own types, such as the `User` below, by defining a `ValueCodec` for them.
 
 ::: code-group
 
@@ -231,7 +231,7 @@ for {
 
 :::
 
-A **transaction** runs a pipeline atomically via `MULTI`/`EXEC`, optionally guarded by `WATCH` for optimistic concurrency. A `None` result means a watched key changed before `EXEC`, the normal signal to retry:
+A **transaction** runs a pipeline atomically via `MULTI`/`EXEC`, optionally guarded by `WATCH` for optimistic concurrency. If a watched key changes before `EXEC`, the transaction returns `None` and can be retried:
 
 ::: code-group
 
@@ -358,7 +358,7 @@ More in [Client-side caching](/client-side-caching).
 
 ## Next steps
 
-- [Commands & codecs](/commands) for the command surface and typing your own values
+- [Commands & codecs](/commands) for available commands and custom value types
 - [Pipelines & transactions](/pipelines-transactions) for batching and atomicity
 - [Pub/Sub](/pubsub) for classic and sharded messaging
 - [Streams](/streams) for append-only logs and consumer groups

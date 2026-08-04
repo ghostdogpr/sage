@@ -1,14 +1,10 @@
 # FAQ
 
-## Why a native protocol implementation rather than wrapping an existing Java client?
-
-Implementing RESP3, the commands, and the codecs directly in Scala keeps the core free of any Java dependency and gives Sage full control over allocation and decoding. It is the difference behind "native Redis protocol": there is no foreign client to adapt, configure, or work around.
-
 ## How does Sage perform?
 
-Fast by design rather than by tuning. Commands from every fiber share one auto-pipelined connection per node, so concurrent commands coalesce into a single socket write and one round trip instead of one each. The I/O runs on virtual threads with plain blocking reads and writes, and replies are matched to in-flight commands without the reader and writer contending. With no Java client underneath, the RESP3 parser and the codecs decode straight to your types.
+Commands from every fiber share one auto-pipelined connection per node. Sage can combine concurrent commands into a single socket write and one round trip instead of sending each one separately. I/O runs on virtual threads with blocking reads and writes. Reading replies does not block new commands from being written, and the RESP3 parser and codecs decode replies directly into your types.
 
-In practice Sage matches or beats the established Scala clients on concurrent workloads. Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) yourself against a real server. No numbers are committed, since results drift with every version, so measure on your own hardware.
+In concurrent workloads, Sage matches or outperforms established Scala clients. You can run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) against a real server. Results vary by version and hardware, so the repository does not publish fixed numbers.
 
 ## Which backend artifact should I use?
 
@@ -24,7 +20,7 @@ One per Scala stack, all sharing the same runtime:
 
 ## Does every command open or borrow a connection?
 
-No. Ordinary commands are auto-pipelined onto one multiplexed connection per node, shared by every fiber, with replies matched in order. Only commands that hold per-connection state or block (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) lease a dedicated connection, and pub/sub uses its own subscription connection. The [Getting started](/getting-started) "how it works" aside covers this.
+No. Ordinary commands are auto-pipelined onto one multiplexed connection per node, shared by every fiber, with replies matched in order. Commands that hold per-connection state or block (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) temporarily use a dedicated connection. Pub/sub uses its own subscription connection. The [Getting started](/getting-started) "how it works" aside covers this.
 
 ## Redis or Valkey? Which versions?
 
@@ -48,4 +44,4 @@ Yes. `client.eval` (with `client.scriptLoad` / `client.evalSha` for cached scrip
 
 ## What happens when the connection drops?
 
-Sage fails fast and reconnects in the background with exponential backoff. There is no offline queue: commands are not buffered while disconnected. A command in flight when the connection drops fails with `ConnectionLost`, whose `mayHaveExecuted` flag tells you whether retrying is safe (see [Error handling](/error-handling)). A watchdog detects connections that have gone silently dead so they are replaced. Reconnect and watchdog behavior are tunable on [`SageConfig`](/configuration).
+Sage fails fast and reconnects in the background with exponential backoff. It does not buffer commands while disconnected. A command in flight when the connection drops fails with `ConnectionLost`, whose `mayHaveExecuted` flag tells you whether retrying is safe (see [Error handling](/error-handling)). A watchdog detects and replaces connections that stop responding. You can configure reconnect and watchdog behavior on [`SageConfig`](/configuration).

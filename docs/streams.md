@@ -68,7 +68,7 @@ for {
 
 :::
 
-Each command position that admits a special ID token carries its own type, so an illegal form cannot be written: `XADD` takes an `XAddId` (`Auto` by default), `XREADGROUP` a `GroupReadId` (`New` or `After(id)`), `XGROUP CREATE` a `GroupStartId` (`Last` or `At(id)`), and the range commands a `StreamRangeId`.
+Each command uses a separate type for the ID values it accepts. `XADD` takes an `XAddId` (`Auto` by default), `XREADGROUP` takes a `GroupReadId` (`New` or `After(id)`), `XGROUP CREATE` takes a `GroupStartId` (`Last` or `At(id)`), and range commands take a `StreamRangeId`. This prevents you from passing an unsupported ID value.
 
 ## Tailing a group
 
@@ -77,7 +77,7 @@ For a long-running worker, `xConsume` tails a group and runs your handler on eac
 On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` returns a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`.
 
 ::: tip At-least-once delivery
-The same entry can be delivered again after a crash or a failed handler, so make your handler idempotent. `xConsume` blocks while tailing: it is the body of a long-running worker, not a one-shot read.
+The same entry can be delivered again after a crash or a failed handler, so make your handler idempotent. `xConsume` blocks while waiting for entries and is intended for a long-running worker rather than a one-time read.
 :::
 
 ::: code-group
@@ -118,4 +118,4 @@ val consumer = client.xConsume[String, String]("workers", "w1", "stream:orders")
 
 :::
 
-Beyond these, the full `X*` surface is available: trimming (`xTrim`), reverse range (`xRevRange`), blocking reads (`xRead`), claim and auto-claim (`xClaim`, `xAutoClaim`), pending inspection (`xPending`), and group management. See the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) for the complete list.
+The remaining `X*` commands are also available: trimming (`xTrim`), reverse range (`xRevRange`), blocking reads (`xRead`), claim and auto-claim (`xClaim`, `xAutoClaim`), pending inspection (`xPending`), and group management. See the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) for the complete list.
