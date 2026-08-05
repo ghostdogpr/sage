@@ -183,7 +183,9 @@ final private[client] class MasterReplicaLive(
       case _                    => false
     }
 
-  private def connectForProbe(node: Node): NodeClient =
+  private def connectForProbe(node: Node): NodeClient = {
+    // a refresh can outlive the start of close, and a closed client must not open a new socket
+    if (closed) throw NotConnected()
     try
       NodeClient.connect(
         nodeFactory(node),
@@ -202,6 +204,7 @@ final private[client] class MasterReplicaLive(
         reportProbeFailure(node, error)
         throw error
     }
+  }
 
   private def reportProbeFailure(node: Node, error: Throwable): Unit =
     events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
