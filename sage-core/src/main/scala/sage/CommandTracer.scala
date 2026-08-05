@@ -4,40 +4,40 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * Produces one tracing span per command, synchronously on the command path. Unlike a [[SageListener]] (asynchronous and lossy, with no access
-  * to the caller's context), a tracer runs on the caller's fiber as the command is submitted, so its spans nest under the active request. It is
-  * effect-agnostic and dependency-free, so it lives in the core and an integration module binds to it. A tracer sees the command's name but
-  * never its arguments, keeping secrets out of traces. sage guards every call, so a throwing tracer cannot break command execution.
+  * Produces one tracing span per command. [[onCommand]] runs while the caller submits commands that are traced immediately. Commands whose
+  * execution is decided later use [[prepare]]; implementations can override it to capture the active parent context before execution moves
+  * to another thread. Unlike [[SageListener]], this interface is part of command execution and does not drop events. The core API is
+  * independent of effect systems and tracing libraries; integration modules provide implementations. Tracers receive the command name but
+  * not its arguments. Sage catches exceptions from tracers to keep command execution unaffected.
   */
 trait CommandTracer {
 
   /**
-    * Called once per command, on the caller's fiber as it is submitted — where the parent context is live. The returned [[CommandSpan]] is
-    * given its routed node (when known) and settled when the command does.
+    * Called once per command on the submitting fiber, where the parent context is available. The returned [[CommandSpan]] receives the routed
+    * node when known and is completed with the command's outcome.
     */
   def onCommand(command: Command[?]): CommandSpan
 
   /**
-    * For a command whose execution — and so whether a span is even needed — is decided later, possibly on another thread: a cached read that
-    * only reaches the server on a miss. Called on the caller's fiber to capture the live parent context; the returned thunk starts the span with
-    * that parent if and when the command actually runs (never, for a local cache hit). The default starts the span lazily via [[onCommand]];
-    * override when the parent context must be captured up front, before the deferred work moves off the caller's fiber.
+    * Prepares tracing for a command whose execution may be decided later or on another thread, such as a cached read that reaches the server only
+    * on a miss. Called on the submitting fiber to capture the parent context. The returned function starts the span if the command runs. The
+    * default delegates lazily to [[onCommand]]; override it when the parent context must be captured before work leaves the submitting fiber.
     */
   def prepare(command: Command[?]): () => CommandSpan = () => onCommand(command)
 }
 
 /**
-  * A single in-flight command span, handed out by [[CommandTracer.onCommand]] and driven to completion by the runtime.
+  * A span for one in-flight command, created by [[CommandTracer.onCommand]] and completed by the runtime.
   */
 trait CommandSpan {
 
   /**
-    * The node this command reached; sets the span's server-address attributes. Called once before [[settled]] (after routing, for a cluster).
+    * Records the node that handled the command. Called once before [[settled]], after cluster routing when applicable.
     */
   def routedTo(node: Node): Unit
 
   /**
-    * Ends the span, recording an error status on a failure. The runtime settles at most once, but an implementation must tolerate a repeat.
+    * Ends the span and records failures. The runtime calls this at most once, but implementations must tolerate repeated calls.
     */
   def settled(outcome: Outcome): Unit
 }
@@ -45,7 +45,7 @@ trait CommandSpan {
 object CommandSpan {
 
   /**
-    * A span that records nothing, returned when no tracer is set so the runtime need not branch on whether a span exists.
+    * A span that records nothing, used when tracing is disabled.
     */
   val noop: CommandSpan = new CommandSpan {
     def routedTo(node: Node): Unit      = ()

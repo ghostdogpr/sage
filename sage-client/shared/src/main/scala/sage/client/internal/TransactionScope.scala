@@ -4,11 +4,12 @@ import sage.codec.KeyCodec
 import sage.commands.{Attempt, Command, Pipeline}
 
 /**
-  * The handle opened by `transaction { tx => … }`: one leased Dedicated Connection, held for the whole block. Reads run immediately on that
-  * connection via the inherited command surface (`tx.get`, `tx.run`, …) — the reads `WATCH` requires — so a caller can read, decide, and only
-  * then `exec` a Pipeline atomically as a `MULTI`/`EXEC`. `exec` returns `None` when a watched key changed before `EXEC` (an aborted
-  * optimistic-concurrency attempt the caller retries, not a failure); `execAttempt` mirrors a Pipeline's per-position results. A queueing-phase
-  * rejection fails the effect with `TransactionDiscarded` (nothing ran), distinct from an execution-phase error, which leaves the others committed.
+  * The handle passed to `transaction { tx => … }`. It uses at most one dedicated connection. Once acquired, the connection is retained until
+  * the block ends. Commands such as `tx.get` run immediately, which allows a caller to read watched values before building a pipeline for
+  * `exec`. `exec` sends the pipeline with
+  * `MULTI`/`EXEC` and returns `None` if a watched key changed. `execAttempt` preserves errors for individual commands. If the server rejects
+  * a command while queuing, the effect fails with `TransactionDiscarded` and nothing runs. Errors returned during execution affect only
+  * their commands; the rest remain committed.
   */
 trait TransactionScope[F[_], K] extends CommandRunner[F, K] {
 
@@ -53,8 +54,8 @@ trait TransactionScope[F[_], K] extends CommandRunner[F, K] {
   def discard: F[Unit]
 
   /**
-    * Re-types the scope's command surface to another key type, keeping the leased connection and the transaction's `watch`/`exec`/`discard`.
-    * Lets a transaction read or write a different key type without leaving the scope (`tx.as[Array[Byte]].get(k)`).
+    * Returns a view that uses another key type while keeping the leased connection and the same `watch`, `exec`, and `discard` operations.
+    * For example, `tx.as[Array[Byte]].get(k)` reads a binary key without leaving the transaction.
     */
   override def as[K2](using KeyCodec[K2]): TransactionScope[F, K2] = {
     val self = this

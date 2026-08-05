@@ -14,15 +14,13 @@ import sage.cluster.{ClusterTopology, Node, Slot}
 import sage.commands.Command
 
 /**
-  * The cluster pub/sub manager: it owns every subscription Sink and routes each to the right [[SubscriptionConnection]]. Classic (channel and
-  * pattern) subscriptions share one connection pinned to an arbitrary master — classic `PUBLISH` broadcasts across the whole cluster bus —
-  * re-homed to another master if that node dies. Shard Channel subscriptions take one [[Sharded Subscription Connection]] per owning Node,
-  * created on demand and evicted when their last subscription ends.
+  * Manages pub/sub subscriptions in a cluster. Classic channel and pattern subscriptions share one connection to an arbitrary master
+  * because `PUBLISH` broadcasts across the cluster. If that node becomes unavailable, the manager chooses another master. Shard channel
+  * subscriptions use one connection per owning node, created when first needed and closed after its last subscription ends.
   *
-  * Connections in cluster mode never self-reconnect: a socket loss fires `onTerminated`, and the manager [[reconcile]]s — it refreshes the
-  * topology and re-attaches the surviving sinks onto the current owner (the new slot owner for shard, a live master for classic). Reconcile
-  * also runs on every topology change ([[onTopologyChanged]]), so a `MOVED` seen on the command path proactively corrects the subscription
-  * side. Each `SSUBSCRIBE` is grouped to a single Slot, so a Node owning several slot ranges never triggers `CROSSSLOT`.
+  * Cluster subscription connections do not reconnect themselves. When one closes, the manager refreshes the topology and assigns its
+  * subscribers to the current owner. It also performs this reconciliation after topology changes discovered by commands. Each
+  * `SSUBSCRIBE` contains channels from one slot to avoid `CROSSSLOT` errors.
   */
 final private[client] class ClusterSubscriptions(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -55,7 +53,7 @@ final private[client] class ClusterSubscriptions(
     finally lock.unlock()
   }
 
-  // single-flight under the outer lock: a mid-pass trigger queues one follow-up rather than racing a pass that could corrupt placement
+  // run one pass at a time while using the outer lock to update its state. If schedule is called during a pass, run one more pass afterward.
   final private class CoalescedPass(body: () => Unit) {
     private var running = false
     private var queued  = false
@@ -90,7 +88,7 @@ final private[client] class ClusterSubscriptions(
       }
   }
 
-  // refresh first: the failed master may be gone, so the re-home target must come from the current topology
+  // refresh first so a replacement for the failed master is chosen from the current topology.
   private val classicRehome  = new CoalescedPass(() => {
     refresh()
     rehomeClassic()
@@ -164,20 +162,21 @@ final private[client] class ClusterSubscriptions(
           classicConn
         }
       }
-      if (conn == null) scheduleRehomeRetry() // no master to re-home onto yet; retry until the topology yields one
+      if (conn == null) scheduleRehomeRetry() // a master is not available yet; retry when the topology may contain one
       else {
-        // attach's establish-failure path resets the connection to Idle and rethrows without firing onTerminated, so a swallowed failure
-        // would otherwise strand every classic sub: drop the dead connection and retry rather than wait for a termination that never comes
+        // When attachment fails during establishment, it resets the connection to Idle and rethrows without calling onTerminated. Ignoring
+        // that failure would leave every classic subscription on the dead connection. Drop the connection and retry here.
         var failed = false
         subs.foreach { sub =>
           try {
             conn.attach(sub.sink, sub.names, sub.kind)
-            // closed during attach: closeClassic couldn't detach a not-yet-attached sub, so detach here or its channels leak on `conn`
+            // if the subscription closed while attach was running, closeClassic could not detach it yet. Detach it here after attach finishes.
             if (!locked(classicSubs.contains(sub))) { conn.detach(sub.sink, sub.names, sub.kind): Unit }
           } catch { case NonFatal(_) => failed = true }
         }
         if (failed) {
-          // conn may be Live with re-attached subs: shut it down or the retry double-delivers and leaks the socket
+          // Attachment may have restored some subscriptions on this connection. Close it before retrying to avoid duplicate delivery and an
+          // unused open socket.
           locked(if (classicConn eq conn) classicConn = null)
           conn.shutdown()
           scheduleRehomeRetry()
@@ -204,7 +203,7 @@ final private[client] class ClusterSubscriptions(
       if (closed) throw NotConnected()
       shardSubs += sub
     }
-    // roll back partial placements on failure: closeShard detaches whatever landed (no orphaned SSUBSCRIBE) and terminates the sink
+    // if placement fails, closeShard detaches any completed subscriptions and terminates the sink
     try place(sub)
     catch {
       case e: Throwable =>
@@ -214,14 +213,15 @@ final private[client] class ClusterSubscriptions(
     new RawSubscription(sink, () => closeShard(sub))
   }
 
-  // fail-fast initial placement: an attach failure rolls the whole subscribe back; an unowned Slot is left unplaced and retried, not dropped
+  // if the initial connection attempt fails, cancel the whole subscription. Keep channels with an unowned slot pending and retry them.
   private def place(sub: ShardSub): Unit = {
     if (hasUnownedSlot(sub.channels)) refresh()
     sub.placement.place(planFor(sub.channels), conns)
     if (!sub.placement.fullyPlaced) scheduleRetry()
   }
 
-  // group channels by owning Node, then by Slot so each group becomes one SSUBSCRIBE; an unowned Slot is dropped (the caller refreshes per pass)
+  // Group channels by owning node and then by slot, with one SSUBSCRIBE for each group. Omit an unowned slot from this attempt; the caller
+  // refreshes the topology before each retry.
   private def planFor(channels: Vector[String]): Placement.Plan = {
     val topo   = topologyOf()
     val byNode = mutable.HashMap.empty[Node, mutable.HashMap[Slot, mutable.ArrayBuffer[String]]]
@@ -245,7 +245,7 @@ final private[client] class ClusterSubscriptions(
 
   private def onShardConnTerminated(node: Node): Unit = {
     locked(shardConns.remove(node))
-    // a drop may mean the slot migrated (server sends sunsubscribe then disconnects); force a refresh — stale topology still names the dead
+    // A drop may mean the slot migrated (server sends sunsubscribe then disconnects); force a refresh — stale topology still names the dead
     // owner, which planFor would not see as unowned — then reconcile onto the current owner
     scheduler.offload {
       refresh()
@@ -255,7 +255,8 @@ final private[client] class ClusterSubscriptions(
 
   def onTopologyChanged(): Unit = shardReconcile.schedule()
 
-  // re-home each sub onto its channels' current owners. One refresh per pass; an incomplete pass retries so a transient failover failure converges.
+  // Assign each subscription to the current owners of its channels. Refresh at most once per pass and retry incomplete work after transient
+  // failover errors.
   private def reconcileShard(): Unit = {
     val subs = locked(if (closed) Vector.empty else shardSubs.toVector)
     if (subs.nonEmpty) {
@@ -263,9 +264,11 @@ final private[client] class ClusterSubscriptions(
       var incomplete = false
       subs.foreach { sub =>
         val failed = sub.placement.reconcile(planFor(sub.channels), conns)
-        // closed during this pass: a racing closeShard may have detached before we re-attached, so reconcile back to empty
+        // If the subscription closed during this pass, closeShard may have detached it before reconcile attached it again. Reconcile with an
+        // empty plan to remove those attachments.
         if (!locked(shardSubs.contains(sub))) { sub.placement.reconcile(Map.empty, conns): Unit }
-        // an unowned slot is dropped from the plan, so reconcile reports no failure though the sub isn't placed; retry until fullyPlaced
+        // The plan omits an unowned slot, and reconcile does not treat that omission as a failure. Check fullyPlaced and retry while a requested
+        // channel remains unattached.
         else if (failed || !sub.placement.fullyPlaced) incomplete = true
       }
       evictEmptyShardConns()
@@ -315,7 +318,7 @@ final private[client] class ClusterSubscriptions(
         classicConn = null
         val s = shardConns.values.toVector
         shardConns.clear()
-        // terminate sinks before closing connections so a reader parked on backpressure is released (else conn.close() deadlocks)
+        // terminate sinks before closing connections. This releases any reader waiting because of backpressure before close waits for it.
         (classicSubs.toVector.map(_.sink) ++ shardSubs.toVector.map(_.sink)).foreach(_.terminate())
         classicSubs.clear()
         shardSubs.clear()

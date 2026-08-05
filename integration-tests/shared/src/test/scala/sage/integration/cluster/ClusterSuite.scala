@@ -137,7 +137,7 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
     }
   }
 
-  // sharded and classic pub/sub against a real (single-node) cluster: SSUBSCRIBE/SPUBLISH route by slot and coexist with classic SUBSCRIBE.
+  // Sharded and classic pub/sub against a real (single-node) cluster: SSUBSCRIBE/SPUBLISH route by slot and coexist with classic SUBSCRIBE.
   // Resubscription on slot migration needs multiple nodes and is covered deterministically by ClusterClientSpec.
   test("sharded and classic pub/sub coexist on a cluster client") {
     withContainers { server =>
@@ -171,8 +171,8 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
       program.unsafeRun
     }
   }
-  // the keyless SCAN walk: scanTargets enumerates the slot-owning masters and runOn pins each page to one node (no rerouting), so the
-  // sweep covers the whole keyspace. A single-node cluster owns every slot, so one target is expected; multi-master coverage rides the same path.
+  // The scanTargets method lists the slot-owning masters, and runOn keeps each page on the node that created its cursor. This fixture has one
+  // master for all slots, so one target is expected.
   test("scanAll sweeps every slot-owning master via node-pinned runOn") {
     withContainers { server =>
       val host       = server.host
@@ -215,8 +215,8 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
     }
   }
 
-  // the All-Masters broadcast path: SCRIPT LOAD and FUNCTION LOAD fan out to every master, so a key-routed EVALSHA/FCALL finds them. One
-  // node owns all slots here, so the broadcast reaches one master; multi-master fan-out rides the same dispatch branch.
+  // SCRIPT LOAD and FUNCTION LOAD run on every master, allowing key-routed EVALSHA and FCALL to find them. This fixture has one master for
+  // all slots, so the broadcast has one target. Multi-master clusters use the same dispatch logic.
   test("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve") {
     withContainers { server =>
       val host       = server.host

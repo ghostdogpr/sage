@@ -7,8 +7,8 @@ import kyo.compat.*
 import sage.commands.{ScanCursor, ScanPage, StreamEntry, StreamId, StreamRangeId, XAutoClaimResult}
 
 /**
-  * Drives each [[Paged]] stepper directly with a scripted `CIO` fetch — the deterministic test surface the extraction unlocks. No server,
-  * no backend stream type: just the cursor-termination, tombstone-skipping and pending-then-tail logic the four backends share.
+  * Tests each [[Paged]] iterator with a scripted `CIO` fetch. This isolates the shared cursor handling, deleted-entry filtering, and consumer
+  * recovery logic from the server and backend stream implementations.
   */
 class PagedSpec extends munit.FunSuite {
 

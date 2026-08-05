@@ -19,9 +19,9 @@ hero:
 
 features:
   - title: Use any Scala stack
-    details: First-class ZIO, Cats Effect, Kyo, Ox, and Pekko artifacts, each with its ecosystem's native types and no wrapper visible.
+    details: First-class ZIO, Cats Effect, Kyo, Ox, and Pekko artifacts that use each ecosystem's native types.
   - title: Fast, native Redis protocol
-    details: RESP3, commands, and codecs implemented directly in Scala 3, with no Java client wrapped underneath and fast by design.
+    details: RESP3, commands, and codecs implemented directly in Scala 3 rather than through a wrapped Java client.
   - title: Modern and feature-rich
     details: "Redis 8+ and Valkey 8+ with auto-pipelining, transactions, cluster, sharded pub/sub, client-side caching, and TLS."
 ---

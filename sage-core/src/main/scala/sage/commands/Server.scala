@@ -9,8 +9,8 @@ import sage.SageException.DecodeError
 import sage.protocol.Frame
 
 /**
-  * The shared flush mode for `SCRIPT FLUSH`, `FUNCTION FLUSH`, `FLUSHALL`, `FLUSHDB`. Omitting it defers to the server's
-  * `lazyfree-lazy-user-flush` default, so builders carry it as an `Option`.
+  * The shared flush mode for `SCRIPT FLUSH`, `FUNCTION FLUSH`, `FLUSHALL`, and `FLUSHDB`. Builders accept an `Option` because omitting the mode
+  * uses the server's `lazyfree-lazy-user-flush` setting.
   */
 enum FlushMode {
   case Async, Sync
@@ -207,8 +207,8 @@ private[sage] object Server {
       case (bad, _)                                                                                                               => bad
     }
 
-  // WAIT/WAITAOF read a wire 0 as block-forever, so only an explicit zero emits 0; any other duration (including a negative) rounds up to at
-  // least 1ms so a sub-millisecond wait never truncates to 0 (mirrors BlockTimeout.millisWire)
+  // WAIT and WAITAOF interpret an encoded timeout of 0 as an unlimited wait. Encode Duration.Zero as 0. Round every other duration, including
+  // a negative one, up to at least 1 ms so a sub-millisecond timeout remains finite. This matches BlockTimeout.millisWire.
   private def waitTimeoutMillis(timeout: FiniteDuration): Long =
     if (timeout == Duration.Zero) 0L else Math.max(1L, Math.ceilDiv(timeout.toNanos, 1000000L))
 

@@ -4,11 +4,11 @@ import sage.codec.{KeyCodec, ValueCodec}
 
 private[sage] object HyperLogLog {
 
-  // elements is variadic, not (first, rest*): PFADD with no elements legally just creates the key
+  // allow an empty elements parameter because PFADD key is valid and creates the key
   def pfAdd[K, V](key: K, elements: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] =
     Command("PFADD", Command.FirstKey, keyCodec.encode(key) +: elements.toVector.map(valueCodec.encode), Decode.flag)
 
-  // cacheable despite PFCOUNT's documented register-cache write: that write preserves the estimate, so it fires no invalidation
+  // PFCOUNT is cacheable. Its documented internal register-cache write does not change the estimate or send an invalidation.
   def pfCount[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] = {
     val keys = (first +: rest).iterator.map(keyCodec.encode).toVector
     Command.read("PFCOUNT", keys.indices.toVector, keys, Decode.long)

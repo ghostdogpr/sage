@@ -7,14 +7,14 @@ import sage.Bytes
 import sage.SageException.ProtocolError
 
 /**
-  * Incremental RESP3 parser: feed it bytes as they arrive, get back every frame completed so far. One instance per connection; not
-  * thread-safe. After a `ProtocolError` the parser is poisoned — RESP3 has no resynchronization point — and the connection must be
-  * discarded. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]; streamed types are not supported (no server sends them).
+  * Incremental RESP3 parser. Each call accepts newly received bytes and returns any frames completed by them. A parser belongs to one
+  * connection and is not thread-safe. RESP3 has no resynchronization point, so a `ProtocolError` makes the parser unusable and the
+  * connection must be closed. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]. Streamed types are not supported because Redis and
+  * Valkey do not send them.
   *
-  * Aggregates parse incrementally against an explicit stack of open frames rather than recursively: a feed that ends mid-aggregate keeps
-  * the partial builders on the stack and resumes from there, so a large reply split across many reads is parsed once, not re-scanned from
-  * the top on every read. Because each completed element advances `readPos`, the input buffer only ever holds the unparsed tail, never the
-  * whole aggregate.
+  * An explicit stack holds partially parsed aggregates between calls. This avoids recursion and avoids scanning the start of a large reply
+  * again when it arrives over several reads. Each completed element advances `readPos`, allowing the input buffer to retain only the
+  * unparsed bytes.
   */
 final private[sage] class RespParser {
 
@@ -33,7 +33,7 @@ final private[sage] class RespParser {
   private var stack      = new Array[Agg](8)
   private var stackDepth = 0
 
-  // shrink hysteresis: the cycle's peak buffering demand, and how many drains in a row stayed under MaxRetainedBuffer
+  // track the largest buffer requirement for the current read and how many completed smaller reads followed an oversized allocation
   private var highWater: Int   = 0
   private var quietDrains: Int = 0
 
@@ -52,8 +52,9 @@ final private[sage] class RespParser {
   }
 
   /**
-    * Parses every frame completed by `array(offset until offset + length)`, passing each to `onFrame` in order. Avoids the input copy and
-    * frame Vector of the [[feed]] overload: the slice is copied straight into the internal buffer (never retained) and frames stream out.
+    * Parses every frame completed by `array(offset until offset + length)` and passes each one to `onFrame` in order. Unlike [[feed]], this
+    * overload does not create an input `Bytes` value or collect the frames in a `Vector`. It copies the slice into the parser's internal
+    * buffer and invokes the callback as frames are completed.
     */
   def feed(array: Array[Byte], offset: Int, length: Int)(onFrame: Frame => Unit): Option[ProtocolError] =
     if (failure != null) Some(failure)
@@ -62,11 +63,11 @@ final private[sage] class RespParser {
       parseLoop(onFrame)
       if (failMessage != null) Some(poison(failMessage))
       else {
-        // the stack carries partial frames independently of the buffer, so the buffer can reset whenever its bytes are spent
+        // partial aggregates remain on the stack, so an empty input buffer can be reset between reads.
         if (readPos == writePos) {
           readPos = 0
           writePos = 0
-          // a buffer grown by a huge element must not stay pinned forever, but consecutive large replies must keep reusing it
+          // release an unusually large buffer after several smaller reads, while reusing it for consecutive large replies.
           if (buf.length > MaxRetainedBuffer) {
             if (highWater > MaxRetainedBuffer) quietDrains = 0
             else {
@@ -93,7 +94,7 @@ final private[sage] class RespParser {
     error
   }
 
-  // compacts in place when the consumed front frees enough room, grows geometrically otherwise; Long arithmetic so capacity
+  // Compacts in place when the consumed front frees enough room, grows geometrically otherwise; Long arithmetic so capacity
   // computations cannot overflow, false when the unconsumed input would exceed the maximum array size
   private def append(incoming: Array[Byte], offset: Int, length: Int): Boolean = {
     val unparsed = writePos - readPos
@@ -180,7 +181,7 @@ final private[sage] class RespParser {
       case _    => Frame.Null // Attr is never built — completed attributes are discarded before this point
     }
 
-  // produces one value at `readPos`: Produced (`produced` set, `readPos` advanced), Opened (header pushed), Incomplete (`readPos` unmoved),
+  // Produces one value at `readPos`: Produced (`produced` set, `readPos` advanced), Opened (header pushed), Incomplete (`readPos` unmoved),
   // or Invalid (`failMessage` set)
   private def produceValue(): Int =
     if (readPos >= writePos) Incomplete
@@ -317,7 +318,7 @@ final private[sage] class RespParser {
     }
   }
 
-  // bounds nesting at open time (not on every value), so a leaf at the deepest allowed level is still accepted
+  // check depth when opening an aggregate. A leaf at the deepest allowed level remains valid.
   private def push(agg: Agg): Int =
     if (stackDepth >= MaxDepth) fail(s"aggregate nesting exceeds $MaxDepth levels")
     else {
@@ -431,13 +432,13 @@ final private[sage] class RespParser {
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8
 
-  // largest buffer kept across feeds once fully drained (see the reset in feed)
+  // largest buffer retained after all input has been parsed
   private inline def MaxRetainedBuffer: Int = 1 << 20
 
-  // consecutive drains under MaxRetainedBuffer before an oversized buffer is released
+  // number of consecutive completed reads below MaxRetainedBuffer before releasing an oversized buffer
   private inline def ShrinkAfterDrains: Int = 8
 
-  // bound on aggregate nesting so a hostile reply poisons cleanly instead of overflowing the JVM stack; real replies are shallow
+  // reject excessive aggregate nesting before it can exhaust memory. Normal server replies are much shallower.
   private inline def MaxDepth: Int = 512
 
   // for Map/Attr `remaining` counts pairs, not elements

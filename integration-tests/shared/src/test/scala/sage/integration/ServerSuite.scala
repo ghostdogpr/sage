@@ -12,7 +12,7 @@ abstract class ServerSuite(image: String) extends munit.FunSuite with TestContai
 
   override val containerDef: GenericContainer.Def[GenericContainer] = GenericContainer.Def(image, exposedPorts = Seq(6379))
 
-  // not private: only the Ox cell's unsafeRun consumes it, and a private given would be flagged unused on the other cells
+  // The Ox cell's unsafeRun uses this value. Keeping it non-private avoids unused-private warnings in the other cells.
   given ExecutionContext = munitExecutionContext
 
   protected def withClient[A](body: Client[CIO, String] => CIO[A]): Future[A] =

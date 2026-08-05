@@ -33,7 +33,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       transports += transport
       transport
     }
-    // mirrors the real MultiplexedConnection: a stamp is current iff the connection is live and the generation matches
+    // mirrors the real MultiplexedConnection: a generation is current when the connection is live and the recorded generation matches
     val isCurrent: MultiplexedConnection.Generation => Boolean = g => liveGeneration().contains(g)
     val pool                                                   =
       new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, liveGeneration, isCurrent, config, 1000L)
@@ -84,7 +84,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
   }
 
   test("interrupting an in-flight blocking command settles the tracked callback and discards the slot") {
-    val (pool, scheduler, transports)                 = make(replyWith(Nil)) // the BLPOP parks, never replying
+    val (pool, scheduler, transports)                 = make(replyWith(Nil)) // the BLPOP waits without receiving a reply
     val lease                                         = new DedicatedPool.Lease
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r), lease)
@@ -129,7 +129,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     }
     val conn                                            = DedicatedConnection.create(factory, 1000L)
     conn.establish(Vector(Connection.hello()))
-    transports.head.autoWrite = false // hold the write so the command stays queued: the path the transport drops on teardown
+    transports.head.autoWrite = false // keep the command in the queue so transport teardown reports it as unsent
 
     var healthyWhenFailed: Option[Boolean] = None
     conn.submit(blPop, _ => healthyWhenFailed = Some(conn.isHealthy))
@@ -139,7 +139,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
 
   test("acquire waits for a slot and fails TimedOut when the pool stays exhausted") {
     val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 50.millis, idleTimeout = Duration.Inf)
-    val (pool, scheduler, transports) = make(replyWith(Nil), config = config) // the first BLPOP parks, holding the only slot
+    val (pool, scheduler, transports) = make(replyWith(Nil), config = config) // the first BLPOP waits while holding the only slot
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
 
@@ -192,7 +192,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     pool.use(blPop, r => result = Some(r))
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Success(Some(("k", "v")))))
-    // commit-time stamping records the new epoch; the connection is born current, so there is no born-stale discard and no retry
+    // recording the generation after establishment makes the connection current. The pool keeps it and does not retry.
     assertEquals(transports.size, 1)
   }
 
@@ -205,8 +205,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1) // established and returned to idle at generation `gen`
 
-    // the lease gate observes Live, then the multiplexed connection drops into a reconnect window before the offloaded acquire runs:
-    // the idle connection is at the same generation but the connection is no longer live, so it must be refused, not reused
+    // The lease check observes Live, but the multiplexed connection starts reconnecting before the offloaded acquire runs. The idle connection
+    // has the same generation but is no longer live, so the pool refuses it.
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r))
     live = false
@@ -221,12 +221,12 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 50.millis, idleTimeout = Duration.Inf)
     val (pool, scheduler, transports) =
       make(replyWith(Nil), isLive = () => live, liveGeneration = () => if (live) Some(gen) else None, config = config)
-    pool.use(blPop, _ => ()) // the only slot is held by a parked BLPOP that never replies
+    pool.use(blPop, _ => ()) // the only slot is held by a BLPOP that is still waiting for a reply
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
 
-    // the lease gate observes Live, then the connection drops before the offloaded acquire runs against the exhausted pool: the waiter
-    // must fail fast rather than park for acquireTimeout — proven by resolving on a zero-delay advance instead of needing the 50ms timeout
+    // The lease check observes Live, but the connection drops before the offloaded acquire runs against the exhausted pool. The waiter fails
+    // immediately, as shown by its completion after a zero-delay advance instead of the 50 ms acquisition timeout.
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r))
     live = false
@@ -314,7 +314,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     @volatile var result: Option[Try[DedicatedConnection]] = None
     val waiter                                             = new Thread(() => result = Some(Try(pool.acquireForTransaction())))
     waiter.start()
-    Thread.sleep(100) // let the second acquire park in awaitNanos
+    Thread.sleep(100) // let the second acquisition wait in awaitNanos
 
     transports.head.emit(Frame.SimpleString("stray"))
     assert(!connection.isLive)

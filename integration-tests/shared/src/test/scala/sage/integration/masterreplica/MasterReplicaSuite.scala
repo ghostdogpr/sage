@@ -23,7 +23,8 @@ import sage.protocol.Frame
   */
 abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
 
-  // the fault that kills the master keeps the replica in the foreground (and vice versa) so the container survives — the exec'd process owns it
+  // Run the process that survives each fault in the foreground so the container remains alive. The fault setup chooses whether that process
+  // is the master or replica.
   protected def masterRunsInForeground: Boolean = false
 
   // --protected-mode no admits the testcontainers-mapped (non-loopback) connection; --save '' / --appendonly no keep the nodes in-memory
@@ -55,7 +56,7 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
       }
     )
 
-  // follow the master and announce the host-mapped port, then write a marker key the master never has, so a read's origin is observable. The
+  // Follow the master and announce the host-mapped port, then write a marker key the master never has, so a read's origin is observable. The
   // marker goes in after the link is up, since REPLICAOF triggers a full resync that would wipe an earlier write. Idempotent across a suite's tests.
   protected def ensureReplicating(replica: Client[CIO, String], announceHost: String, announcePort: Int): CIO[Unit] =
     replica.run(infoReplication).flatMap { info =>
@@ -89,7 +90,8 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
       case _                        => CIO.sleep(100.millis).flatMap(_ => awaitValue(client, key, expected, attempts - 1))
     }
 
-  // run for effect, discarding failure — for commands the server answers by closing the socket (SHUTDOWN), observed by what follows
+  // Ignore the result of commands such as SHUTDOWN, which report a connection failure because the server closes the socket. Later checks
+  // verify their effect.
   protected def ignoreFailure(action: CIO[Unit]): CIO[Unit] =
     action.fold(_ => CIO.value(()), _ => CIO.value(()))
 
@@ -193,17 +195,16 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
 }
 
 /**
-  * Failover recovery: the replica is promoted and the old master taken out of write service, and the client re-discovers and re-homes on its
-  * own. Roles refresh only on events, so the first write meets the old master, fails fast, and trips a re-discovery; the caller's retry then
-  * lands on the promoted node. [[induceFailover]] supplies the fault, so the contract is checked against both the `READONLY` (demotion) and
-  * connection-loss (crash) branches. Its own container, since the promotion permanently rewrites the topology.
+  * Tests recovery after promoting the replica and taking the old master out of write service. The first write to the old master triggers
+  * role discovery, and the caller retries against the promoted node. [[induceFailover]] runs the test once for a `READONLY` demotion and
+  * once for a connection loss. Each test uses its own container because promotion permanently changes the topology.
   */
 abstract class MasterReplicaFailoverSuite(image: String, serverBinary: String, fault: String) extends MasterReplicaSuiteBase(image, serverBinary) {
 
   // promote the replica, then take the old master out of write service in a fault-specific way; the client is told nothing
   protected def induceFailover(replicaCfg: SageConfig, masterCfg: SageConfig): CIO[Unit]
 
-  // retry the write until it succeeds: the first attempt meets the old master and trips re-discovery, a later retry lands on the promoted master
+  // retry the write until it succeeds; the first attempt reaches the old master and starts discovery, and a later attempt reaches the promoted master
   private def writeUntilAccepted(client: Client[CIO, String], key: String, value: String, attempts: Int): CIO[Boolean] =
     client
       .set(key, value)
@@ -258,8 +259,8 @@ abstract class MasterReplicaDemotionFailoverSuite(image: String, serverBinary: S
 }
 
 /**
-  * Failover where the old master crashes outright (`SHUTDOWN`) — the next write meets a refused connection, exercising the connection-loss
-  * branch of the runtime's re-discovery. The master is backgrounded (the suite default), so the foreground replica keeps the container alive.
+  * Failover where the old master stops with `SHUTDOWN`. The next write receives a connection-refused error, exercising role discovery after a
+  * connection loss. The master runs in the background, so the foreground replica keeps the container alive.
   */
 abstract class MasterReplicaConnectionLossFailoverSuite(image: String, serverBinary: String)
   extends MasterReplicaFailoverSuite(image, serverBinary, "master down") {
@@ -314,8 +315,9 @@ abstract class MasterReplicaReplicaDownSuite(image: String, serverBinary: String
 }
 
 /**
-  * A replica that refuses to serve stale data: with `replica-serve-stale-data no` and its link broken, it answers reads `-MASTERDOWN` while staying
-  * reachable, so only a fall-through on the refusal itself saves the read. Both clients connect first, so the stale replica is the candidate they try.
+  * A replica configured with `replica-serve-stale-data no`. When its replication link breaks, it remains reachable but answers reads with
+  * `-MASTERDOWN`. The replica-preferred client must handle that response by retrying the read on the master. Both clients connect before the
+  * link breaks, ensuring that they first try the stale replica.
   */
 abstract class MasterReplicaStaleReplicaSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
 

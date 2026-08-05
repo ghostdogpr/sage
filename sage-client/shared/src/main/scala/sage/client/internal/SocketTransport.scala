@@ -12,11 +12,11 @@ import scala.util.control.NonFatal
 import sage.protocol.{Frame, RespParser}
 
 /**
-  * A plain blocking socket pumped by two virtual threads — a reader feeding the RESP3 parser, a writer draining the send queue.
-  * `start` resolves the hostname, connects, then hands the connected socket to `upgrade` (identity for plaintext, a TLS handshake for
-  * `SSLSocket`); `close` aborts an in-progress connect or handshake by closing the plain socket, and never lets the I/O threads start once
-  * it has run. Caveat: a hung DNS lookup inside `start` cannot be interrupted (a JDK limitation) — it unwinds when the OS resolver times
-  * out; `close` closing the socket then prevents the TCP connect that would have followed.
+  * Uses a blocking socket with two virtual threads. The reader parses RESP3 replies, and the writer sends queued requests. `start` resolves
+  * the hostname, connects, and passes the connected socket to `upgrade`, which either returns it unchanged for plaintext or performs a TLS
+  * handshake. `close` can stop a connection attempt or TLS handshake by closing the plain socket. It also prevents the I/O threads from
+  * starting afterward. The JDK cannot interrupt a DNS lookup inside `start`; it returns when the operating system resolver times out. If
+  * `close` runs during the lookup, the following TCP connection does not start.
   */
 final private[client] class SocketTransport private (
   host: String,
@@ -31,9 +31,8 @@ final private[client] class SocketTransport private (
   private val queue  = new LinkedBlockingQueue[Transport.Item]()
   private val closed = new AtomicBoolean(false)
 
-  // the socket whose streams the I/O threads use: the plain socket for plaintext, the SSLSocket after a TLS handshake. Assigned in `start`
-  // before the threads launch (so a plain `var` is safely published via thread-start); `close` always tears down the plain `socket`, which
-  // closes a layered SSLSocket too (autoClose).
+  // The I/O threads use the plain socket for plaintext or the SSLSocket created by the TLS handshake. start assigns this field before starting
+  // the threads, which safely publishes the value. close closes the plain socket, which also closes the layered SSLSocket through autoClose.
   private var ioSocket: Socket = socket
 
   // serializes the I/O-thread start against termination so threads are either started-and-joined by close() or never started at all
@@ -72,7 +71,7 @@ final private[client] class SocketTransport private (
 
   def send(item: Transport.Item): Unit = {
     queue.put(item)
-    // `terminate` may have drained between the put and this check; draining again closes that window
+    // terminate may empty the queue just before this item is added. Check closed after the add so this item is failed as well.
     if (closed.get()) drainQueue()
   }
 
@@ -182,8 +181,8 @@ final private[client] class SocketTransport private (
           writer.interrupt()
           writer.join()
         }
-        // fence the reader before onClosed, else an in-flight reply races the consumer's pending drain (#94); interrupt frees a reader
-        // parked on backpressure so the join cannot hang
+        // Stop the reader before onClosed; otherwise, an in-flight reply can race cleanup of the consumer's pending commands (#94).
+        // Interrupting releases a reader waiting for backpressure before the join.
         if (Thread.currentThread() ne reader) {
           reader.interrupt()
           reader.join()

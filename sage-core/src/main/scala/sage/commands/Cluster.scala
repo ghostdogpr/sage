@@ -12,8 +12,8 @@ private[sage] object Cluster {
 
   final private case class Range(master: Node, replicas: Vector[Node], slots: SlotRange)
 
-  // each range is `[start, end, master, replica*]`, a node `[ip, port, id, meta?]`, the first node the master. The reply is the topology
-  // authority, so an unparseable entry fails the whole decode rather than routing off a partial map.
+  // Each range has the form [start, end, master, replica*], and each node has the form [ip, port, id, meta?]. The first node is the master. If
+  // any entry cannot be decoded, reject the complete topology reply to avoid routing with incomplete information.
   private def decodeSlots(frame: Frame): Either[DecodeError, Vector[Shard]] =
     Decode.vector(decodeRange)(frame).map(merge)
 

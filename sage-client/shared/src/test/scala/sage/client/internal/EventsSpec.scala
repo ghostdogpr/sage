@@ -19,7 +19,7 @@ class EventsSpec extends munit.FunSuite {
   private val fixedBackoff = BackoffConfig(initialDelay = 1.milli, maxDelay = 1.milli, multiplier = 1.0)
   private val noWatchdog   = WatchdogConfig(enabled = false)
 
-  // a synchronous sink, so wiring assertions are deterministic; the real Dispatcher's async behavior is exercised separately
+  // record events synchronously so tests can compare event and tracing order. Separate tests cover asynchronous dispatch.
   final private class Recording(val tracer: Option[CommandTracer] = None, val serverNode: Option[Node] = None) extends Events {
     private val buf                  = mutable.ArrayBuffer.empty[SageEvent]
     def enabled: Boolean             = true
@@ -330,7 +330,7 @@ class EventsSpec extends munit.FunSuite {
     assertEquals(rec.events, Vector.empty)
 
     val cb: scala.util.Try[String] => Unit = _ => ()
-    assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb) // no tracer, no wrap
+    assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb) // the disabled path returns the original callback
   }
 
   test("abandonSpan settles the span without invoking the callback (the fail-fast path)") {

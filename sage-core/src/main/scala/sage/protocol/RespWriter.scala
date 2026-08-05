@@ -3,13 +3,13 @@ package sage.protocol
 import sage.Bytes
 
 /**
-  * Encodes commands to wire bytes. A client never writes arbitrary frames, so command encoding is the writer's whole surface.
+  * Encodes commands as RESP bytes.
   */
 private[sage] object RespWriter {
 
-  // Sizes the buffer exactly, so a command encodes into one right-sized array: no oversized scratch and result() returns it without a copy.
+  // precomputes the buffer size to encode into one array and return it without copying.
   def writeCommand(name: String, args: Vector[Bytes]): Bytes =
-    if (name.indexOf(' ') < 0) { // single-word fast path: no split allocation
+    if (name.indexOf(' ') < 0) { // encode a single-word command name directly without splitting it
       val nameBytes = Bytes.utf8(name)
       val count     = 1L + args.length
       val sink      = new Sink(headerSize(count) + bulkSize(nameBytes.length) + argsSize(args))
@@ -50,7 +50,7 @@ private[sage] object RespWriter {
     }
   }
 
-  // mirror writeBulk/the array header in RespWriter so the precomputed size matches the bytes actually written
+  // keep this calculation aligned with writeBulk and the array header written above.
   private def headerSize(count: Long): Int = 1 + digitCount(count) + 2
 
   private def bulkSize(length: Int): Int = 1 + digitCount(length.toLong) + 2 + length + 2
@@ -65,7 +65,7 @@ private[sage] object RespWriter {
     total
   }
 
-  // shared with Sink.writeDigits so the precomputed size and the written digit count never disagree
+  // shared with Sink.writeDigits to keep sizing and encoding consistent.
   private def digitCount(value: Long): Int = {
     var digits  = 1
     var ceiling = 10L
@@ -111,7 +111,7 @@ private[sage] object RespWriter {
     // only ever called with non-negative lengths and element counts
     def writeLong(value: Long): Unit = writeDigits(value)
 
-    // zero-copy on the exact-size common path; the copy only covers a growth over-allocation
+    // return the buffer directly when its size is exact. If it grew beyond the encoded length, copy only the used bytes.
     def result(): Bytes =
       if (len == buf.length) Bytes.wrap(IArray.unsafeFromArray(buf))
       else Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOf(buf, len)))
@@ -135,7 +135,7 @@ private[sage] object RespWriter {
       len += array.length
     }
 
-    // Long arithmetic so the doubling cannot overflow to a negative capacity on a multi-GB command; capped at the max array size
+    // use Long arithmetic to prevent capacity overflow for multi-gigabyte commands, then cap at the maximum array size.
     private def ensure(extra: Int): Unit =
       if (buf.length - len < extra) {
         val needed   = len.toLong + extra

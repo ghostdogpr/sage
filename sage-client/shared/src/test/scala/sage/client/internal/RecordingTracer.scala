@@ -6,7 +6,7 @@ import sage.{CommandSpan, CommandTracer, Outcome}
 import sage.cluster.Node
 import sage.commands.Command
 
-// records each span's lifecycle as a flat log, so span wiring can be asserted without OpenTelemetry
+// record each span's start, routed node, and outcome so tests can compare the lifecycle without OpenTelemetry
 final class RecordingTracer extends CommandTracer {
   val log                                         = mutable.ArrayBuffer.empty[String]
   def onCommand(command: Command[?]): CommandSpan = {

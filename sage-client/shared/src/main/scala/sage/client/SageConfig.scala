@@ -19,7 +19,8 @@ final case class BackoffConfig(
 )
 
 /**
-  * Idle-PING liveness check. `pingTimeout` is a death detector, not a latency SLA — size it above the slowest healthy reply.
+  * Connection liveness check. The client reconnects when its oldest pending command has waited for `pingTimeout`. When the connection is idle,
+  * it sends a PING after `pingInterval`, and that PING uses the same timeout. Set `pingTimeout` above the slowest healthy reply time.
   */
 final case class WatchdogConfig(
   pingInterval: FiniteDuration = 60.seconds,
@@ -28,8 +29,8 @@ final case class WatchdogConfig(
 )
 
 /**
-  * The on-demand pool of Dedicated Connections for blocking commands. `acquireTimeout` bounds only the wait for a free slot, never a
-  * command's own block timeout; idle connections are evicted after `idleTimeout` (`Duration.Inf` keeps them forever).
+  * The on-demand pool of dedicated connections for blocking commands. `acquireTimeout` limits how long a command waits for a free pool slot.
+  * The command's own blocking timeout is configured separately. Idle connections are removed after `idleTimeout`; `Duration.Inf` keeps them.
   */
 final case class DedicatedPoolConfig(
   maxConnections: Int = 8,
@@ -54,8 +55,8 @@ object TrustSource {
   case object System extends TrustSource
 
   /**
-    * Server-trust only: the trust store supplies the certificates the client verifies the server against, never client key material. A
-    * server that demands a client certificate (mutual TLS) fails the handshake under this source — use [[Custom]] to supply key managers.
+    * Uses the trust store to verify server certificates. It does not provide a client certificate. For mutual TLS, use [[Custom]] with key
+    * managers.
     */
   final case class TrustStore(path: Path, password: Option[String] = None) extends TrustSource {
     // keep the keystore password out of logs and error messages that print a SageConfig
@@ -63,7 +64,7 @@ object TrustSource {
   }
 
   /**
-    * Server-trust only, like [[TrustStore]]: a PEM of trusted certificates, never client key material. Mutual TLS must go through [[Custom]].
+    * Uses trusted certificates from a PEM file to verify the server. It does not provide a client certificate; use [[Custom]] for mutual TLS.
     */
   final case class Pem(path: Path) extends TrustSource
 
@@ -77,15 +78,16 @@ object TrustSource {
 final case class TlsConfig(trust: TrustSource = TrustSource.System)
 
 /**
-  * Pub/sub tuning. `bufferSize` bounds each subscription's message buffer; when it fills, the reader draining the Subscription Connection
-  * blocks, so TCP backpressures the publisher (lossless). A slow consumer then stalls its peer subscriptions, never command traffic.
+  * Pub/sub tuning. Each subscription buffers up to `bufferSize` messages. When the buffer is full, the connection pauses reading until the
+  * consumer catches up. Sage does not discard messages because this local buffer is full, but messages published while the connection is
+  * down can still be lost. Other subscriptions on that connection also wait. Commands use separate connections and are unaffected.
   */
 final case class PubSubConfig(bufferSize: Int = 128)
 
 /**
   * Client-side caching tuning. When `enabled`, the Multiplexed Connection enables RESP3 opt-in tracking at bootstrap and `cached` reads are
   * served locally; `maxBytes` caps the approximate retained size of each connection generation's cache, evicting least-recently-used
-  * entries so a single large value can never blow the budget. Set `enabled = false` for environments where ACLs or a proxy permit `HELLO`
+  * entries. Values larger than the entire budget are not cached. Set `enabled = false` for environments where ACLs or a proxy permit `HELLO`
   * and ordinary commands but deny `CLIENT TRACKING` — `cached` then runs the read without caching, keeping the call portable.
   */
 final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 1024 * 1024)
@@ -97,12 +99,12 @@ final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 102
 final case class Endpoint(host: String = "localhost", port: Int = 6379)
 
 /**
-  * Cluster tuning. `maxRedirects` bounds how many `MOVED`/`ASK` hops a single command follows before failing (the same default as
-  * lettuce); `minRefreshInterval` limits how often a `MOVED` or an unowned slot triggers `CLUSTER SLOTS`: once per window. A retry that
-  * must see the new topology first, as after a failover, refreshes regardless of the window and is bounded by `maxRedirects` instead.
+  * Cluster tuning. `maxRedirects` limits how many `MOVED` or `ASK` replies a command follows before failing. `minRefreshInterval` limits
+  * refreshes triggered by redirects or unowned slots to once per interval. A retry that requires updated topology, such as one after a
+  * failover, refreshes immediately and is still limited by `maxRedirects`.
   *
-  * `topologyRefreshInterval` polls `CLUSTER SLOTS` on a timer, off by default. Redirects and faults already cover everything a command can
-  * notice; the poll is for what none can, namely a replica added to a shard that is serving reads normally.
+  * `topologyRefreshInterval` polls `CLUSTER SLOTS` on a timer and is off by default. Redirects and faults trigger refreshes for changes that
+  * affect commands. Polling can also discover changes that do not cause a command failure, such as a replica added to a healthy shard.
   */
 final case class ClusterConfig(
   maxRedirects: Int = 5,
@@ -111,9 +113,9 @@ final case class ClusterConfig(
 )
 
 /**
-  * Master-replica tuning. `minRefreshInterval` throttles role re-discovery (`ROLE`/`INFO replication`) so a burst of `READONLY`s, reconnects,
-  * or replica-preferred reads with no known replica triggers at most one discovery per window. `topologyRefreshInterval` re-discovers on a
-  * timer as well, off by default, for what no command reveals: a replica added while the known nodes stay healthy.
+  * Master-replica tuning. `minRefreshInterval` limits role re-discovery (`ROLE`/`INFO replication`) to once per interval during a burst of
+  * `READONLY` replies, reconnects, or replica-preferred reads when no replica is known. `topologyRefreshInterval` also runs discovery on a
+  * timer and is off by default. Polling can find a replica added while the known nodes remain healthy.
   */
 final case class MasterReplicaConfig(
   minRefreshInterval: FiniteDuration = 5.seconds,
@@ -121,21 +123,20 @@ final case class MasterReplicaConfig(
 )
 
 /**
-  * Which Node a read-only command may run on, the same setting for both cluster and master-replica deployments. Only read-only,
-  * non-blocking commands are eligible; writes, blocking reads, transactions, and `cached` reads always go to the master regardless of the
-  * policy. `Master` (the default) is today's behavior — every command to the master. `MasterPreferred` falls back to a replica only when the
-  * master is unreachable; `Replica` reads only from replicas and fails when none is reachable; `ReplicaPreferred` reads from a replica, else
-  * the master. Reads served by a replica may lag the master — that staleness is the policy's accepted contract.
+  * Controls where eligible reads run in cluster and master-replica deployments. Eligible reads are read-only and non-blocking. Writes,
+  * blocking reads, transactions, and cached reads use the master.
+  *
+  * `Master` always uses the master. `MasterPreferred` tries the master first and uses a replica if the master is unavailable. `Replica` uses
+  * replicas and fails if none is available. `ReplicaPreferred` tries replicas first and then the master. A replica may return older data than
+  * the master.
   */
 enum ReadFrom {
   case Master, MasterPreferred, Replica, ReplicaPreferred
 }
 
 /**
-  * Standalone connects to the one server at `endpoint`; cluster discovers its topology from `seeds` and routes every command to the owning
-  * node; master-replica discovers one master and its replicas from `seeds` (by asking each its `ROLE`) and routes reads per the Read Policy.
-  * The address lives here, inside the topology, so there is one place it can come from. The client type is the same in every case — only
-  * this selects the runtime.
+  * Selects the server topology. `Standalone` connects to one endpoint. `Cluster` discovers nodes from its seeds and routes commands by key.
+  * `MasterReplica` discovers node roles from its seeds, sends writes to the master, and applies [[ReadFrom]] to eligible reads.
   */
 enum Topology {
   case Standalone(endpoint: Endpoint = Endpoint())
@@ -144,13 +145,13 @@ enum Topology {
 }
 
 /**
-  * The full client configuration. Sub-tuning lives in the dedicated config types referenced below; the fields here are the top-level
-  * knobs, all with sensible defaults so `SageConfig()` connects to a local standalone server.
+  * The full client configuration. The dedicated configuration sections below contain settings for individual features. The fields here are
+  * the top-level settings, with defaults that let `SageConfig()` connect to a local standalone server.
   *
   * @param connectTimeout how long to wait for a connection (and its `HELLO 3` setup) to complete before failing
   * @param reconnect      exponential reconnect backoff — see [[BackoffConfig]]
-  * @param watchdog       idle-connection liveness checking — see [[WatchdogConfig]]
-  * @param closeTimeout   how long [[sage.client.internal.Client.close]] waits for in-flight commands to drain before forcing the close
+  * @param watchdog       connection liveness checking — see [[WatchdogConfig]]
+  * @param closeTimeout   how long [[sage.client.internal.Client.close]] waits for in-flight commands to finish before forcing the close
   * @param dedicatedPool  the pool backing blocking commands and transactions — see [[DedicatedPoolConfig]]
   * @param pubsub         pub/sub buffering — see [[PubSubConfig]]
   * @param clientCache    client-side caching — see [[CacheConfig]]
@@ -158,10 +159,9 @@ enum Topology {
   * @param tls            TLS settings; `None` connects in plaintext — see [[TlsConfig]]
   * @param topology       standalone, cluster, or master-replica, and where to find the server(s) — see [[Topology]]
   * @param readFrom       which node read-only commands may run on — see [[ReadFrom]]
-  * @param database       the logical keyspace `SELECT`ed once at setup and fixed for the client's lifetime (re-issued on every reconnect and
-  *                       every connection); never changed by a runtime command, since that would move the keyspace under every fiber sharing
-  *                       a connection. Valkey 9+ supports numbered databases in cluster mode; Redis and older Valkey versions reject a
-  *                       non-zero database during connection setup
+  * @param database       the logical keyspace selected during connection setup and selected again for every reconnect and new connection. It
+  *                       remains fixed for the client's lifetime because connections are shared by concurrent operations. Valkey 9+ supports
+  *                       numbered databases in cluster mode; Redis and older Valkey versions reject a non-zero database during setup
   * @param clientName     sets `CLIENT SETNAME`, visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically
   * @param listeners      observers of runtime [[sage.SageEvent]]s — see [[sage.SageListener]]
   * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active

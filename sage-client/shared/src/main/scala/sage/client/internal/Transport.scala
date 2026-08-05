@@ -3,9 +3,9 @@ package sage.client.internal
 import sage.Bytes
 
 /**
-  * The socket layer's boundary: the layer above speaks frames and send items, never bytes or threads. Implementations deliver every parsed
-  * frame to an `onFrame` callback taken at construction, and invoke `onClosed` exactly once when the connection terminates for any reason,
-  * including `close()`; by then every queued-but-unwritten item has been `dropped()`.
+  * Defines the interface between connection logic and socket I/O. The connection submits [[Transport.Item]] values and receives parsed frames
+  * through the `onFrame` callback supplied when the transport is created. The transport calls `onClosed` once when the connection ends,
+  * including after `close()`. Before that callback, it calls `dropped()` for each queued item that was not written.
   */
 private[client] trait Transport {
 
@@ -15,7 +15,8 @@ private[client] trait Transport {
   def start(): Unit
 
   /**
-    * Enqueues an item for writing; never blocks. Exactly one of `writeAttempted`/`dropped` fires; `clearPayload` follows the capture.
+    * Adds an item to the write queue and returns immediately. The transport calls exactly one of `writeAttempted` or `dropped`. On the write
+    * path, it calls `clearPayload` after capturing the bytes to write.
     */
   def send(item: Transport.Item): Unit
 
@@ -32,7 +33,7 @@ private[client] object Transport {
     def payload: Bytes
 
     /**
-      * Invoked after the payload has been captured for the write attempt; it is never read again, so the item may drop it.
+      * Invoked after the payload has been captured for writing. The item can release its reference to the payload at this point.
       */
     def clearPayload(): Unit = ()
 

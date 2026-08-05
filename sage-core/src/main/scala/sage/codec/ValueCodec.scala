@@ -4,10 +4,9 @@ import sage.Bytes
 import sage.SageException.DecodeError
 
 /**
-  * Encodes/decodes a user type at a value (payload) position. Deliberately unrelated to [[KeyCodec]] — see the note there. The built-in
-  * codecs decode strictly: bytes that are not the type's canonical wire form fail with a [[sage.SageException.DecodeError]] rather than
-  * being coerced (`"x"` is not a `Long`, `"2"` is not a `Boolean`). Custom codecs built with [[ValueCodec.from]]/[[imap]]/[[emap]] keep
-  * that contract by returning `Either` rather than throwing.
+  * Encodes and decodes payload values. This type is separate from [[KeyCodec]], as explained there. Built-in codecs reject bytes that are not
+  * in the canonical form for the requested type (`"x"` is not a `Long`, and `"2"` is not a `Boolean`). Custom codecs created with
+  * [[ValueCodec.from]], [[imap]], or [[emap]] report failures with `Either`.
   */
 trait ValueCodec[A] { self =>
 
@@ -22,15 +21,14 @@ trait ValueCodec[A] { self =>
   def decode(bytes: Bytes): Either[DecodeError, A]
 
   /**
-    * Derives a codec for `B` from a total, lossless mapping — the newtype case (`ValueCodec[Long].imap(UserId(_))(_.value)`). Decoding `B`
-    * fails only where decoding `A` already does; use [[emap]] when the mapping into `B` can itself fail.
+    * Derives a codec for `B` from a total, lossless mapping, such as `ValueCodec[Long].imap(UserId(_))(_.value)`. Use [[emap]] when converting
+    * decoded `A` values to `B` can fail.
     */
   final def imap[B](f: A => B)(g: B => A): ValueCodec[B] =
     ValueCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).map(f))
 
   /**
-    * Derives a codec for `B` whose decode may fail — the JSON/structured case, where parsing the underlying `A` into `B` is partial. A
-    * `Left` keeps the strict, no-coercion contract: bad input surfaces as a `DecodeError` rather than a coerced value.
+    * Derives a codec for `B` when converting a decoded `A` can fail, such as parsing structured JSON. Return `Left` for invalid input.
     */
   final def emap[B](f: A => Either[DecodeError, B])(g: B => A): ValueCodec[B] =
     ValueCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).flatMap(f))
@@ -44,8 +42,7 @@ object ValueCodec {
   def apply[A](using codec: ValueCodec[A]): ValueCodec[A] = codec
 
   /**
-    * Builds a codec from an encode/decode pair. The decode returns `Either` so a custom codec rejects bad input the way the built-ins do,
-    * rather than throwing.
+    * Builds a codec from encode and decode functions. The decoder returns `Either` for invalid input.
     */
   def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): ValueCodec[A] = instance(enc, dec)
 

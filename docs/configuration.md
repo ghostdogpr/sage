@@ -1,6 +1,6 @@
 # Configuration
 
-Everything about how a client connects is set on one value, `SageConfig`. The command surface never changes: the same `SageClient` talks to a standalone server, a cluster, or a master-replica deployment, and the only difference is configuration.
+`SageConfig` contains all connection settings. The same `SageClient` and commands work with a standalone server, a cluster, or a master-replica deployment. Only the configuration changes.
 
 ```scala
 val config = SageConfig(
@@ -60,11 +60,10 @@ stay pinned to one slot.
 
 ### Commands that run on every master
 
-No node sees the whole keyspace, a cluster replicates neither the script nor the function cache, and a node answers pub/sub introspection only for
-the subscribers attached to it. So `scriptLoad`, `scriptExists`, `scriptFlush`, the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`,
+Each node sees only part of the keyspace. Script and function caches are also local to a node, as is pub/sub subscription information. For this reason, `scriptLoad`, `scriptExists`, `scriptFlush`, the `function*` mutations, `flushAll`, `flushDb`, `keys`, `dbSize`,
 `waitReplicas`, `waitAof`, `memoryPurge`, and the `pubsub*` introspection forms run on every slot-owning master, and their replies are folded into
 one: `keys` returns the whole keyspace, `dbSize` the cluster total, `pubsubChannels` every active channel, `pubsubNumSub` the summed subscriber
-count. There is no partial result: if one master fails, the call fails.
+count. If any master fails, the whole call fails.
 
 None of them can go in a pipeline, which batches per node — run them on the client directly; `dbSize` is also rejected inside a transaction, which
 pins to one node. Only masters are visited, so a subscriber connected through a replica is not counted by `pubsubNumSub`, and `pubsubNumPat` counts
@@ -82,8 +81,8 @@ This is also the one case where Sage does not retry a `-CLUSTERDOWN` for you; se
 Sage re-reads the slot map whenever a command shows it is out of date: a `MOVED` or `ASK` redirect, a slot no known node covers, a node that is
 unreachable or no longer a master. Reshardings and failovers therefore need no configuration.
 
-Adding a replica breaks nothing, so nothing tells Sage to look again, and reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` keep
-using the replicas already known. Set `topologyRefreshInterval` to check for new ones on a timer:
+Adding a replica does not produce a redirect or connection failure, so Sage has no reason to refresh the topology. Reads under `ReadFrom.Replica` or `ReadFrom.ReplicaPreferred` continue
+using the replicas already known. Set `topologyRefreshInterval` to check for new replicas on a timer:
 
 ```scala
 val config = SageConfig(
@@ -95,7 +94,7 @@ val config = SageConfig(
 )
 ```
 
-There is no timer unless you set one. Each refresh costs one `CLUSTER SLOTS`, and ticks arriving within `minRefreshInterval` of the last refresh are
+Sage refreshes on a timer only when you configure this setting. Each refresh costs one `CLUSTER SLOTS`, and ticks arriving within `minRefreshInterval` of the last refresh are
 skipped, so a short interval cannot flood the cluster. `MasterReplicaConfig` has the same setting.
 
 ## Master-replica
@@ -121,12 +120,12 @@ The number of endpoints decides where Sage may connect:
 Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises.
 
 An endpoint that is unreachable, or a replica that is still synchronizing, is left out at connect time so a partially available deployment still
-connects. Sage picks it up again on its own once traffic reveals the topology has changed, with no polling. Adding a *second* replica is the case
-nothing signals, so set `topologyRefreshInterval` if you scale readers out; see [Topology refresh](#topology-refresh).
+connects. Sage adds it again when a command shows that the topology has changed, without polling. However, adding a *second* replica does not produce
+such a signal. Set `topologyRefreshInterval` if you scale readers out; see [Topology refresh](#topology-refresh).
 
 ## Read routing
 
-`readFrom` governs which node a read-only command may run on, the same setting for both cluster and master-replica deployments:
+`readFrom` controls which node may run a read-only command. The same setting applies to cluster and master-replica deployments:
 
 | `ReadFrom` | Reads go to |
 | --- | --- |
@@ -135,11 +134,11 @@ nothing signals, so set `topologyRefreshInterval` if you scale readers out; see 
 | `Replica` | a replica, failing if none is reachable |
 | `ReplicaPreferred` | a replica, falling back to the master |
 
-Only read-only commands are eligible. Writes, and any command not marked read-only, always go to the master regardless of the policy. Reads served by a replica may lag the master; that staleness is the policy's accepted contract, not a fault.
+Only read-only commands can use this setting. Writes, and any command not marked read-only, always go to the master. A replica may return older data than the master. This is an expected trade-off when reading from replicas.
 
 ## TLS and ACL
 
-Both are configuration on top of the same client. `tls` selects the trust source; `auth` carries the ACL user:
+Both are configured on the same client. `tls` selects the trust source, and `auth` sets the ACL username and password:
 
 ```scala
 val config = SageConfig(
@@ -149,7 +148,7 @@ val config = SageConfig(
 )
 ```
 
-`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA, or `TrustSource.Custom(sslContext)` to supply your own `SSLContext` (the path to mutual TLS). `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
+`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA. Use `TrustSource.Custom(sslContext)` to supply your own `SSLContext`, including for mutual TLS. `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
 
 ::: warning
 `TrustSource.Insecure` is for local development only. It trusts every certificate and skips hostname verification, leaving the connection open to machine-in-the-middle attacks. Never use it in production.
@@ -163,8 +162,8 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | --- | --- | --- |
 | `connectTimeout` | each socket connect, TLS handshake, and connection-setup command | `10.seconds` |
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
-| `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
-| `closeTimeout` | how long `close` waits for in-flight commands to drain (blocking commands and transactions are closed at once) | `5.seconds` |
+| `watchdog` (`WatchdogConfig`) | connection liveness checks for pending commands and idle connections | ping every `60.seconds`, `30.seconds` timeout |
+| `closeTimeout` | how long `close` waits for in-flight commands to finish (blocking commands and transactions are closed at once) | `5.seconds` |
 | `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
@@ -204,6 +203,6 @@ For the common cases you can parse a `redis://` or `rediss://` URI instead of as
 ```scala
 // fromUri returns Either: a Left describes the problem, a Right is the config
 val parsed = SageConfig.fromUri("rediss://app:app-secret@localhost:6380/0")
-// further tuning stays programmatic:
+// Further tuning stays programmatic:
 //   SageConfig.fromUri(uri).map(_.copy(readFrom = ReadFrom.ReplicaPreferred))
 ```

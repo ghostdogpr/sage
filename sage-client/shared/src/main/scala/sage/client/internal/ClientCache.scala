@@ -9,17 +9,18 @@ import sage.Bytes
 import sage.protocol.Frame
 
 /**
-  * The per-[[MultiplexedConnection]] generation's client-side cache: keyed by full command wire bytes, with a reverse index from each
-  * tracked key for invalidation, single-flight on concurrent misses, lazy absolute-TTL expiry, and a bytes-bounded LRU. A reconnect
-  * discards the instance — that is how a reconnect flushes the cache. `now` is passed in so tests drive expiry; callbacks run outside the
-  * lock. An invalidation or flush arriving mid-fetch marks that fetch dirty: its reply still reaches waiters but is not stored.
+  * Stores cached replies for one [[MultiplexedConnection]] generation, indexed by the complete encoded command. A reverse index maps each
+  * tracked key to the entries that invalidation must remove. Concurrent misses share one server request. Entries expire when read after
+  * their TTL, and least-recently-used entries are evicted to stay within the byte limit. Reconnecting creates a new cache. Tests pass `now`
+  * explicitly to control expiry, and callbacks run outside the lock. If invalidation or a flush arrives during a fetch, its reply is returned
+  * to waiting callers but is not cached.
   */
 final private[client] class ClientCache(maxBytes: Long) {
   import ClientCache.*
   import ClientCache.Acquire.*
 
   private val lock                                   = new ReentrantLock()
-  // accessOrder = true: a lookup promotes the entry to most-recently-used, so eviction sheds the genuinely cold entries
+  // accessOrder = true moves a read entry to the end of the map. Eviction then removes the least recently used entry first.
   private val entries                                = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
   private val reverse                                = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
   private val pending                                = mutable.HashMap.empty[Key, InFlight]
@@ -63,8 +64,8 @@ final private[client] class ClientCache(maxBytes: Long) {
       val inFlight = pending.remove(key)
       waiters = inFlight.map(_.waiters).orNull
       val dirty    = inFlight.exists(_.dirty)
-      // reuse the keys the matching acquire already wrapped; re-derive only on the no-in-flight path
-      // an entry larger than the whole cap would evict everything then itself; skip caching it and just deliver the reply
+      // Reuse the Key objects created by the matching acquire. Create them here only when no matching fetch is recorded. An entry larger than
+      // the cache limit cannot be stored, so return its reply without caching it.
       if (!dirty && size <= maxBytes)
         insert(key, new Entry(frame, size, now + ttlMillis, inFlight.map(_.keys).getOrElse(trackedKeys.map(new Key(_)))))
     } finally lock.unlock()
@@ -107,7 +108,7 @@ final private[client] class ClientCache(maxBytes: Long) {
     try {
       clearEntries()
       val retired = epoch.next
-      // publish the watermark before the epoch a reader tests first, so it can never see the new epoch with the stale watermark
+      // publish the watermark before the epoch, which readers check first. This prevents a reader from pairing the new epoch with the old watermark.
       rerouteWatermark = retired
       epoch = retired
     } finally lock.unlock()

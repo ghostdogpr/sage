@@ -6,10 +6,10 @@ import sage.codec.ValueCodec
 import sage.protocol.{Frame, RespWriter}
 
 /**
-  * Pub/sub. `PUBLISH`, `SPUBLISH`, and `PUBSUB` are ordinary request/reply commands; `SPUBLISH` carries its channel as a routing key so a
-  * cluster sends it to the slot's owner, while `PUBLISH` is keyless and broadcasts across the whole cluster bus. `SUBSCRIBE` and its
-  * relatives (including the sharded `SSUBSCRIBE`/`SUNSUBSCRIBE`) are not ordinary commands — they deliver open-ended push frames with no
-  * single typed reply — so only their wire encoders live here, written straight onto a Subscription Connection, never run.
+  * Pub/sub command definitions. `PUBLISH`, `SPUBLISH`, and `PUBSUB` use the usual request/reply flow. In a cluster, `SPUBLISH` uses its
+  * channel as the routing key, while `PUBLISH` broadcasts to the cluster. Subscription commands such as `SUBSCRIBE` and `SSUBSCRIBE`
+  * produce an open-ended sequence of push frames instead of one reply. This object therefore provides their encoders for use by a
+  * subscription connection.
   */
 private[sage] object Pubsub {
 
@@ -35,9 +35,9 @@ private[sage] object Pubsub {
     introspect(Vector(Bytes.utf8("NUMPAT")), Decode.long, Merge.sum)
 
   /**
-    * A `PUBSUB` introspection form. A node answers only for the subscribers attached to it, so one master's reply describes one master, and
-    * a cluster must sweep every slot-owning master and merge. The sweep reaches masters only, so a subscriber attached to a replica is not
-    * counted; Sage pins its own subscription connections to a master, so this shows up only for subscribers created outside Sage.
+    * A `PUBSUB` introspection form. Each node reports only subscribers connected to that node. In a cluster, Sage queries every slot-owning
+    * master and combines their replies. Replicas are not queried. Sage connects its own subscriptions to masters, but subscriptions created
+    * outside Sage and connected to replicas are not counted.
     */
   private def introspect[Out](
     args: Vector[Bytes],
@@ -54,21 +54,21 @@ private[sage] object Pubsub {
   def sunsubscribe(channels: Vector[String]): Bytes = RespWriter.writeCommand("SUNSUBSCRIBE", channels.map(Bytes.utf8))
 
   /**
-    * A classified pub/sub push frame. Confirmations carry the running subscription count; deliveries carry the raw payload bytes, decoded
-    * to the subscriber's value type at the stream boundary, not here.
+    * A classified pub/sub push frame. Confirmations include the current subscription count. Deliveries contain raw payload bytes, which are
+    * decoded to the subscriber's value type at the stream boundary.
     */
   enum Event {
     case Subscribed(channel: String, count: Long)
     case Unsubscribed(channel: String, count: Long)
     case Message(channel: String, payload: Bytes)
-    // a sharded delivery: shape-identical to Message, kept distinct so a connection carrying both classic and shard sinks routes it correctly
+    // kept separate from Message so a connection can route classic and sharded deliveries to different subscribers.
     case ShardMessage(channel: String, payload: Bytes)
     case PatternMessage(pattern: String, channel: String, payload: Bytes)
   }
 
   /**
-    * Classifies a push frame's elements. `None` for kinds the Subscription Connection does not consume (e.g. client-side-cache
-    * invalidations, which ride the Multiplexed Connection) and for malformed frames.
+    * Classifies the elements of a pub/sub push frame. Returns `None` for malformed frames and for other push kinds, such as client-side
+    * cache invalidations handled by the multiplexed connection.
     */
   def decode(elements: Vector[Frame]): Option[Event] =
     elements match {

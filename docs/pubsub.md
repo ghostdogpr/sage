@@ -48,7 +48,7 @@ for {
 ```
 
 ```scala [Pekko]
-// await the confirmation before publishing so the publish can't outrun the subscription
+// Wait for confirmation before publishing, or the message may be missed.
 val (confirmed, collected) =
   client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
 val messages =
@@ -64,23 +64,23 @@ val messages =
 Pattern subscriptions are also available; they deliver a **pattern message** that additionally names the glob that matched.
 
 ::: tip Confirmed subscriptions
-The plain `subscribe` returns the stream immediately and registers the subscription on the first pull, so a `publish` sequenced right after it can outrun the registration and be missed. Each backend has a way to wait for the server's SUBSCRIBE confirmation first (also in `p`/`s` forms):
+The plain `subscribe` returns the stream immediately and registers the subscription when the stream first requests a message. A message published before registration finishes may be missed. Each backend provides a way to wait for the server's SUBSCRIBE confirmation first (also in `p`/`s` forms):
 
 - **ZIO / Kyo**: `subscribeScoped`, a scoped effect.
 - **Cats Effect**: `subscribeResource`, a `Resource`.
 - **Ox**: `subscribeScoped`, bound to the enclosing Ox scope.
 - **Pekko**: plain `subscribe` returns a `Source` whose materialized `Future[Done]` completes once registered; await it before publishing.
 
-Confirmation closes the race on a standalone or master-replica server; in a cluster it is best-effort. With the scoped and resource variants the scope owns the unsubscribe, so the subscription outlives the stream and is released when the scope closes. On Pekko, ending the `Source` unsubscribes.
+On a standalone or master-replica server, confirmation guarantees that the subscription is ready. In a cluster, this guarantee is best-effort. With the scoped and resource variants, the subscription remains active until the scope closes. On Pekko, ending the `Source` unsubscribes.
 :::
 
 ::: tip Connection isolation
-All classic subscriptions share one **subscription connection**, created the first time you subscribe and closed when the last subscription ends. It is separate from the connection that carries your commands, so a slow consumer can backpressure its own subscriptions but can never stall command replies. The subscription connection re-issues every active subscription automatically on reconnect.
+All classic subscriptions share one **subscription connection**, created the first time you subscribe and closed when the last subscription ends. Ordinary commands use a different connection. A slow consumer may delay its own subscriptions, but it does not delay command replies. The subscription connection re-issues every active subscription automatically on reconnect.
 :::
 
 ## Sharded channels (cluster)
 
-In a cluster, a **shard channel** keeps its traffic within the shard that owns the channel's slot: `sSubscribe` and `sPublish` target that owning node rather than broadcasting across the whole cluster. There is no pattern form, and a delivery arrives as an ordinary message.
+In a cluster, a **shard channel** keeps its traffic within the shard that owns the channel's slot. `sSubscribe` and `sPublish` target that node instead of broadcasting across the whole cluster. Shard channels do not support pattern subscriptions, and they deliver ordinary messages.
 
 ```scala
 // ZIO; the shape is the same on every backend
@@ -93,10 +93,10 @@ ZIO.scoped {
 }
 ```
 
-Sage holds one sharded subscription connection per owning node and re-homes the affected subscriptions automatically when a slot migrates or a node fails over.
+Sage holds one sharded subscription connection per owning node. When a slot moves or a node fails over, Sage moves the affected subscriptions to the new node.
 
 ## Introspection
 
-`pubsubChannels`, `pubsubShardChannels`, `pubsubNumSub`, `pubsubShardNumSub`, and `pubsubNumPat` report the live subscription state. A server answers only for the subscribers attached to *it*, so in a cluster Sage [runs them on every master](/configuration#commands-that-run-on-every-master) and merges the replies.
+`pubsubChannels`, `pubsubShardChannels`, `pubsubNumSub`, `pubsubShardNumSub`, and `pubsubNumPat` report the current subscription state. Each server knows only about its own subscribers. In a cluster, Sage [runs these commands on every master](/configuration#commands-that-run-on-every-master) and combines the replies.
 
 See [Configuration](/configuration) for how to connect to a cluster.

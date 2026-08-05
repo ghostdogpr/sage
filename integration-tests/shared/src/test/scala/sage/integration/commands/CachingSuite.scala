@@ -19,7 +19,7 @@ abstract class CachingSuite(image: String) extends ServerSuite(image) {
       connectAndUse(config)(reader => connectAndUse(config)(writer => body(reader, writer))).unsafeRun
     }
 
-  // cached reads served locally never re-contact the server, so an external write only shows up once its invalidation push lands; poll
+  // a cached read does not contact the server again. Poll until the invalidation message from an external write has been processed.
   private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
     Eventually.value(attempts)(() => client.cached(Commands.get[String, String](key), 1.minute))(_.contains(expected))
 

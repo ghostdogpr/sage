@@ -3,18 +3,18 @@ package sage.commands
 import sage.SageException
 
 /**
-  * One pipeline (or transaction) position's outcome: `Right` on success, `Left` carrying the per-position error. This is the element type of
+  * The result for one pipeline or transaction position. `Right` contains a successful value, and `Left` contains that position's error. This is the element type of
   * the `*Attempt` result shapes (`Vector[Attempt[A]]` for a homogeneous batch, a tuple of `Attempt`s for a fixed-arity one).
   */
 type Attempt[A] = Either[SageException, A]
 
 /**
-  * The internal assembler behind the `pipeline`/`exec` command-batch sugar: an applicative composition of Commands sent in one round-trip,
-  * yielding one typed result per command. Not a transaction, so no atomicity. Callers never name this type; they hand `pipeline`/`exec` a tuple
-  * of Commands (fixed arity, heterogeneous results) or a `Seq[Command[A]]` (dynamic arity, homogeneous), and the runtime builds one of these.
-  * `Out` is the all-success shape; `Results` is the per-position shape, each slot an [[Attempt]]. The runtime decodes every position
-  * independently into a `Vector[Either[SageException, Any]]`, then either collapses it to `Out` (strict) or shapes it to `Results` (attempt);
-  * the `Any` is confined to the assemblers below and never reaches a caller.
+  * Assembles the commands passed to `pipeline` and `exec`. The runtime batches commands by target connection. A cluster pipeline normally
+  * sends one batch per target node and routes any command whose target cannot be resolved individually. Each command produces one typed
+  * result. A pipeline does not provide transaction atomicity. The public methods accept either a tuple of commands with different result types or a
+  * `Seq[Command[A]]` with one result type. `Out` contains the all-success result, while `Results` contains an [[Attempt]] for each command.
+  * The runtime decodes positions independently into a `Vector[Either[SageException, Any]]`, then converts it to `Out` or `Results`. The
+  * internal `Any` values do not appear in the public result.
   */
 final private[sage] class Pipeline[Out, Results] private[commands] (
   /**

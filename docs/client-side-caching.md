@@ -1,6 +1,6 @@
 # Client-side caching
 
-A **cached read** opts into client-side caching for one call. The first read fetches from the server and caches the result locally; later reads of the same command are served from that local copy until the server invalidates it or the TTL expires.
+A **cached read** enables client-side caching for one call. The first read fetches the result from the server and caches it locally. Later reads of the same command use that local copy until the server invalidates it or the TTL expires.
 
 Caching is opt-in per call. An ordinary `get` always goes to the server; only `cached` consults the local cache.
 
@@ -29,10 +29,10 @@ Sage uses the server's tracking so that when a key you have cached changes, the 
 
 ## What can be cached
 
-A read is cacheable when its result depends only on the current value of the keys it names, since a server invalidation then covers every way that result can change. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable: nothing would ever fire to invalidate them.
+A read is cacheable when its result depends only on the current value of its keys. The server can then invalidate the result whenever one of those keys changes. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable because a key change cannot reliably invalidate them.
 
 ::: warning
-`cached` rejects a write or a keyless read with `NotCacheable`. A keyless read could only ever be evicted by its TTL, never by an invalidation, so it is refused rather than allowed to go silently stale.
+`cached` rejects writes and keyless reads with `NotCacheable`. The server cannot invalidate a keyless read when data changes, which could leave a stale value in the cache.
 :::
 
 Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configuration).

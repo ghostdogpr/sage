@@ -7,8 +7,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * A WATCH-guarded MULTI/EXEC transaction on one leased Dedicated Connection: read inside the scope, decide, then `exec` a Pipeline
-  * atomically. A `None` result means a watched key changed before EXEC, the normal optimistic-concurrency retry signal, not a failure.
+  * Runs a WATCH-guarded MULTI/EXEC transaction on one leased dedicated connection. It reads inside the transaction scope, decides what to do,
+  * then executes a Pipeline atomically. If a watched key changes before EXEC, the transaction returns `None` and the caller should retry.
   */
 object TransactionsExample {
 

@@ -1,8 +1,8 @@
 package sage.benchmarks
 
 /**
-  * One client under benchmark. Every method runs its effect to completion (lowered/blocked) so JMH measures real round-trip work, and every
-  * method returns a checksum the benchmark consumes — both to report meaningful work and to stop the JIT from eliminating the call.
+  * One client under benchmark. Each method waits for its effect to finish, allowing JMH to measure the full round trip. Each method also
+  * returns a checksum that the benchmark consumes, which gives JMH a result to report and prevents the JIT from eliminating the call.
   */
 trait BenchClient extends AutoCloseable {
 

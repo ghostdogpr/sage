@@ -12,16 +12,15 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * Carries two independent observability integrations. [[emit]] feeds the asynchronous [[SageListener]] path: called from the runtime's hot
-  * paths (the reply thread, routing offloads), it must never block, so it does a single non-blocking enqueue drained by a daemon thread.
-  * [[tracer]] feeds the synchronous [[CommandTracer]] path, whose spans start and settle inline on the command path. With neither registered
-  * the whole thing is a no-op ([[Events.disabled]]) and no thread runs.
+  * Provides event listeners and command tracing. [[emit]] adds listener events to a bounded non-blocking queue. A daemon thread takes events
+  * from that queue and calls the listeners. [[tracer]] runs synchronously with command execution. [[Events.disabled]] avoids allocating the queue and thread when neither
+  * integration is configured.
   */
 private[client] trait Events {
   def enabled: Boolean
   def emitsEvents: Boolean
   def tracer: Option[CommandTracer]
-  // the server a span is routed to when routing resolves no node itself (standalone's endpoint); None for cluster/master-replica
+  // The standalone server associated with a tracing span. Cluster and master-replica routing assign their node later, so they use None here.
   def serverNode: Option[Node]
   def emit(event: SageEvent): Unit
   def close(): Unit
@@ -29,8 +28,7 @@ private[client] trait Events {
 
 private[client] object Events {
 
-  // a healthy listener never fills this; one that does is misbehaving, and dropping (drop-newest) is the only relief that never blocks the
-  // producer. Deliberately not a config knob — promotable backward-compatibly if a real need appears.
+  // drop the newest event if a listener cannot keep up, keeping command processing non-blocking
   final private val QueueDepth = 1024
 
   val disabled: Events = new Events {
@@ -46,9 +44,9 @@ private[client] object Events {
     if (listeners.isEmpty && tracer.isEmpty) disabled else new Live(listeners, tracer, serverNode)
 
   /**
-    * Drives the two integrations. Listeners, when present, are fanned to from one bounded queue drained by a single daemon thread, each call
-    * guarded so a throwing listener cannot kill the loop or affect its peers; a full queue drops the newest event silently. A tracer carries no
-    * thread of its own — it runs inline on the command path. With a tracer but no listener, no queue and no thread exist.
+    * Runs the configured listener and tracer integrations. One daemon thread sends queued events to all listeners. Listener exceptions are
+    * ignored so they do not stop delivery to other listeners. A full queue drops the newest event. Tracing runs inline with commands and
+    * does not require the listener queue or thread.
     */
   final private class Live(listeners: Vector[SageListener], val tracer: Option[CommandTracer], val serverNode: Option[Node]) extends Events {
 
@@ -86,7 +84,8 @@ private[client] object Events {
     }
 
     private def drain(): Unit = {
-      // keep serving while running: a listener may leave the interrupt flag set, and shutdown clears running first, so only it ends the loop
+      // Continue after an interrupt while running because a listener may leave the interrupt flag set. close clears running before it
+      // interrupts the worker, which lets shutdown end the loop.
       while (running)
         try dispatch(queue.take())
         catch { case _: InterruptedException => () }
@@ -101,7 +100,7 @@ private[client] object Events {
     private def dispatch(event: SageEvent): Unit = {
       var i = 0
       while (i < listeners.length) {
-        // InterruptedException too: a shutdown interrupt landing in one listener must not skip its peers or abort the best-effort drain
+        // catch InterruptedException as well as other listener failures. One listener must not prevent delivery to the remaining listeners.
         try listeners(i).onEvent(event)
         catch {
           case _: InterruptedException => ()
@@ -126,7 +125,7 @@ private[client] object Events {
 
   private val noSpanFactory: () => CommandSpan = () => CommandSpan.noop
 
-  // like startSpan but lazy: capture the caller's context now, start the span only when the thunk is invoked (a cache miss), via startDeferred
+  // Capture tracing context now and return a function that starts the span later. Cached reads call it only when a cache miss reaches the server.
   def deferSpan(events: Events, command: Command[?]): () => CommandSpan =
     events.tracer match {
       case Some(t) =>
@@ -160,7 +159,7 @@ private[client] object Events {
     if (events.tracer.isEmpty) callback
     else new CommandEmit[A](command.name, System.nanoTime(), events, callback, startSpan(events, command), emitsEvent = false)
 
-  // set on the tracking callback by the routing layer at the node-known terminal site, just before it completes; a no-op for any other callback
+  // Record the final routed node before the command completes. Ignore callbacks that do not track command events.
   def attributeNode(callback: AnyRef, node: Node): Unit =
     callback match {
       case emit: CommandEmit[?] => emit.at(node)

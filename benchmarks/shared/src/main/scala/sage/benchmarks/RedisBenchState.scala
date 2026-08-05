@@ -3,8 +3,8 @@ package sage.benchmarks
 import org.openjdk.jmh.annotations.{Level, Setup, TearDown}
 
 /**
-  * Shared JMH state for every cell's benchmarks: boots a Redis, builds the cell's clients (sage plus any competitors), seeds the data, and
-  * tears it all down per trial. Concrete per-cell subclasses carry the `@State`, the `@Param` set, and the `@Benchmark` methods.
+  * Shared JMH state for every cell's benchmarks. It starts Redis, builds the cell's clients (Sage and any competitors), seeds the data, and
+  * shuts everything down for each trial. Concrete subclasses define the `@State`, `@Param`, and `@Benchmark` annotations for their cell.
   */
 abstract class RedisBenchState {
 
@@ -13,17 +13,17 @@ abstract class RedisBenchState {
   var keys: Array[String]   = Array.empty
 
   /**
-    * The size of seeded values; subclasses with a `valueSize` param override this so GET reads what they will time.
+    * The size of the seeded values. Subclasses with a `valueSize` parameter override this to match the values used by their GET benchmark.
     */
   protected def seedValueBytes: Int
 
   /**
-    * The client under test this trial — its globally-unique name (e.g. `sage-zio`, `redis4cats`), so merged results self-identify.
+    * The client under test for this trial. Its unique name, such as `sage-zio` or `redis4cats`, identifies it in merged results.
     */
   protected def subjectName: String
 
   /**
-    * The cell builds only the named client, so a trial holds no idle competitor connections/runtimes that could add noise.
+    * Builds only the named client. Other clients and their runtimes remain stopped during the trial and cannot affect the result.
     */
   protected def buildClient(host: String, port: Int, name: String): BenchClient
 

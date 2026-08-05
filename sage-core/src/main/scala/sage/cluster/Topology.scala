@@ -19,14 +19,14 @@ final private[sage] case class SlotRange(start: Slot, end: Slot)
 final private[sage] case class Shard(master: Node, replicas: Vector[Node], slots: Vector[SlotRange])
 
 /**
-  * A pure snapshot of which masters own which slots. Routing and splitting are total classifications over it — they never raise, choose a
-  * connection, or decide a retry.
+  * Records the master and replicas for each slot. Routing and pipeline splitting return a classification for every command. The runtime uses
+  * that result to choose connections and decide whether to retry.
   */
 final private[sage] class ClusterTopology private (val shards: Vector[Shard], private val owners: Array[Node], shardOwners: Array[Shard]) {
 
   def nodeForSlot(slot: Slot): Option[Node] = Option(owners(slot.value))
 
-  // same slot -> owning master mapping; lets a refresh that adopts an unchanged topology skip re-homing shard subscriptions
+  // compares the master for every slot so shard subscriptions stay in place when a refresh finds the same topology
   def sameOwnership(other: ClusterTopology): Boolean =
     java.util.Arrays.equals(owners.asInstanceOf[Array[AnyRef]], other.owners.asInstanceOf[Array[AnyRef]])
 
@@ -97,8 +97,8 @@ final private[sage] class ClusterTopology private (val shards: Vector[Shard], pr
 private[sage] object ClusterTopology {
 
   /**
-    * Total: uncovered slots stay unowned (routed as a refresh) and an overlapping range resolves last-listed-wins — the server is the
-    * authority, the core only represents what it is given.
+    * Builds a topology even when slot ranges are incomplete or overlap. Uncovered slots remain unowned and trigger a refresh when routed.
+    * For overlapping ranges, the last listed shard owns the slot. The core preserves the topology reported by the server.
     */
   def from(shards: Vector[Shard]): ClusterTopology = {
     val owners      = new Array[Node](Slot.Count)

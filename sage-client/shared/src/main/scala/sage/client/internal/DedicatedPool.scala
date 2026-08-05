@@ -14,14 +14,12 @@ import sage.client.DedicatedPoolConfig
 import sage.commands.{Command, Connection}
 
 /**
-  * The on-demand pool of Dedicated Connections that carry blocking commands. A connection is created lazily, used by exactly one blocking
-  * command at a time, and returned to an idle set on release — or discarded outright on any loss. The pool never reconnects a connection
-  * (that lives in the Multiplexed Connection); it simply establishes a fresh one when none is idle.
+  * A pool of dedicated connections for blocking commands. Connections are created when needed, used by one command at a time, and returned
+  * to the pool while healthy. A lost connection is discarded. When no idle connection is available, the pool opens a new one.
   *
-  * Acquisition is gated on the client being live (`isLive`): a blocking command issued while disconnected fails fast `NotConnected`, the
-  * same contract ordinary commands get. When all slots are in use the caller waits up to `acquireTimeout` for one to free, then
-  * fails `TimedOut`. `close` force-closes every connection at once — an in-flight blocking command then fails `ConnectionLost(true)` rather
-  * than stalling shutdown for a reply that may never come.
+  * A request made while the client is disconnected fails immediately with `NotConnected`. When all connections are busy, acquisition
+  * waits up to `acquireTimeout` and then fails with `TimedOut`. Closing the pool also closes connections in use, causing their commands to
+  * fail with `ConnectionLost(true)`.
   */
 final private[client] class DedicatedPool(
   factory: MultiplexedConnection.TransportFactory,
@@ -50,15 +48,15 @@ final private[client] class DedicatedPool(
     }
 
   /**
-    * Runs a blocking command on a borrowed Dedicated Connection, releasing it when the reply (or a failure) arrives. Returns immediately;
-    * the acquire — which may wait for a slot or open a socket — is offloaded so the calling fiber is never blocked.
+    * Runs a blocking command on a borrowed connection and releases it after the reply or failure. Acquisition runs on another thread
+    * because it may wait for a pool slot or open a socket.
     */
   def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease = new DedicatedPool.Lease): Unit =
     leaseAndSubmit(command, asking = false, callback, lease)
 
   /**
-    * Runs a blocking command redirected by `ASK`: `ASKING` then the command, back-to-back on one exclusively-leased connection, so their
-    * wire adjacency is automatic. The `ASKING` reply is discarded; the command's reply releases the connection.
+    * Runs a blocking command after an `ASK` redirect. `ASKING` and the command are written consecutively on the same leased connection.
+    * The `ASKING` reply is discarded, and the command's reply releases the connection.
     */
   def useAsking[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
     leaseAndSubmit(command, asking = true, callback, lease)
@@ -93,8 +91,8 @@ final private[client] class DedicatedPool(
       }
 
   /**
-    * Borrows a connection to lease across a transaction's many commands (rather than the single command [[use]] runs). Blocks the calling
-    * fiber while it waits for a slot or opens a socket, so callers must offload it; gated on liveness like [[use]].
+    * Borrows a connection for the full duration of a transaction. This method can wait for a pool slot or open a socket, so callers must
+    * run it on a blocking thread. It fails with `NotConnected` when the client is not live.
     */
   def acquireForTransaction(): DedicatedConnection = {
     if (!isLive()) throw NotConnected()
@@ -133,7 +131,7 @@ final private[client] class DedicatedPool(
     locked {
       while (true) {
         if (closing) throw NotConnected()
-        // fail fast while not live: never reuse, establish, or park during a reconnect window, re-checked on every wakeup
+        // reject acquisition while the shared connection is reconnecting; repeat the liveness check after each wake-up
         if (!isLive()) throw NotConnected()
         val reused    = takeIdleLocked()
         if (reused != null) return reused
@@ -149,7 +147,7 @@ final private[client] class DedicatedPool(
     }
   }
 
-  // entered holding the lock with `reserved` already incremented; registers the connection, drops the lock for the blocking establish, then
+  // Entered holding the lock with `reserved` already incremented; registers the connection, drops the lock for the blocking establish, then
   // re-accounts under it.
   private def establishOutsideLock(): DedicatedConnection = {
     val connection = DedicatedConnection.create(factory, connectTimeoutMillis)
@@ -169,7 +167,7 @@ final private[client] class DedicatedPool(
     lock.lock()
     establishing -= connection
     reserved -= 1
-    // stamp with the epoch live the moment it joins the pool, so a connection built across a reconnect is born current, never stale
+    // record the current generation only after the connection is ready to join the pool. This handles reconnects during establishment.
     if (closing) {
       available.signal()
       scheduleClose(connection)
@@ -222,7 +220,7 @@ final private[client] class DedicatedPool(
     toClose.foreach(scheduleClose) // never close on the timer thread: close() joins I/O threads
   }
 
-  // a connection from an older generation outlived a reconnect (e.g. DNS failover) and now points at the old server
+  // a connection from an older generation may still point to the previous server after a reconnect or DNS failover.
   private def healthyAndCurrent(connection: DedicatedConnection): Boolean =
     connection.isHealthy && isCurrent(connection.epoch)
 
@@ -238,7 +236,7 @@ final private[client] class DedicatedPool(
     scheduleClose(connection)
   }
 
-  // closing a connection joins its I/O threads, so it must never run under the lock or on the scheduler's timer thread
+  // closing joins the connection's I/O threads. Schedule it outside the pool lock and timer thread.
   private def scheduleClose(connection: DedicatedConnection): Unit =
     scheduler.after(Duration.Zero)(connection.close())
 
@@ -276,10 +274,9 @@ private[client] object DedicatedPool {
   final case class Idle(connection: DedicatedConnection, idleSinceMillis: Long)
 
   /**
-    * Tracks the one Dedicated Connection a single (possibly ASK/MOVED-redirected) blocking command currently holds, so an interrupted caller
-    * can release it. `attach` records a freshly leased connection and the action that settles the caller's tracked callback; `finish` clears it
-    * when the reply lands; `cancel` discards whatever is held, runs that settle action so an interrupted command's span/CommandCompleted still
-    * fire, and, via the terminal state, makes any later `attach` (a redirect leasing again after the interrupt) discard immediately instead of leak.
+    * Tracks the connection held by one blocking command, including after redirects. `attach` records a leased connection and its interruption
+    * callback. `finish` clears the lease after a reply. `cancel` discards the current connection and invokes the callback, which completes
+    * tracing and events for the interrupted command. Once cancelled, any later attachment is discarded immediately.
     */
   final class Lease {
     private val state = new AtomicReference[AnyRef]() // null idle, a Held while leased, Cancelled terminal

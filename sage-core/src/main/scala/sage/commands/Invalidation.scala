@@ -4,9 +4,8 @@ import sage.Bytes
 import sage.protocol.Frame
 
 /**
-  * A classified client-side-cache invalidation push, delivered on the Multiplexed Connection (not the Subscription Connection). `Evict`
-  * names the keys the server says changed; `FlushAll` is the null-payload form the server sends on `FLUSHALL`/`FLUSHDB` or when it drops
-  * tracking state, meaning the whole local cache is now untrustworthy.
+  * A client-side cache invalidation received by the multiplexed connection. `Evict` contains the keys reported as changed. `FlushAll`
+  * means the entire local cache must be cleared; the server sends it after `FLUSHALL`, `FLUSHDB`, or loss of its tracking state.
   */
 private[sage] enum Invalidation {
   case Evict(keys: Vector[Bytes])
@@ -16,8 +15,8 @@ private[sage] enum Invalidation {
 private[sage] object Invalidation {
 
   /**
-    * Classifies a push frame's elements. `None` for any push that is not an `invalidate` message (so it sits beside [[Pubsub.decode]],
-    * which returns `None` for these). A null key list decodes to [[FlushAll]].
+    * Decodes the elements of an invalidation push frame. Returns `None` for malformed frames and other push kinds. A null key list becomes
+    * [[FlushAll]]. Pub/sub push frames are handled separately by [[Pubsub.decode]].
     */
   def decode(elements: Vector[Frame]): Option[Invalidation] =
     elements match {

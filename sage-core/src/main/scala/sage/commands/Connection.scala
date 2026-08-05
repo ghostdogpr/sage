@@ -17,16 +17,16 @@ private[sage] object Connection {
   // prefixes a single command redirected by `ASK`, telling the target node to serve the key it is importing for this one command
   val asking: Command[Unit] = Command("ASKING", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
-  // puts a cluster replica connection into read-only mode so it serves reads for slots its master owns instead of answering MOVED. Issued
+  // Puts a cluster replica connection into read-only mode so it serves reads for slots its master owns instead of answering MOVED. Issued
   // once at connection setup on replica connections only (re-issued on reconnect); a master connection never sends it, staying read-write.
   val readonly: Command[Unit] = Command("READONLY", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
-  // enables RESP3 server-assisted client-side caching in opt-in mode on this connection: no key is tracked until a CLIENT CACHING YES
-  // precedes the read, and invalidation pushes arrive on this same connection. Run once per connection at bootstrap.
+  // Enable RESP3 client-side caching in opt-in mode. The server tracks a read only when CLIENT CACHING YES immediately precedes it and sends
+  // invalidation messages on this connection. Run this once during connection setup.
   val clientTrackingOnOptin: Command[Unit] =
     Command("CLIENT", keyIndices = Command.NoKeys, args = Vector("TRACKING", "ON", "OPTIN").map(Bytes.utf8), decode = Decode.ok)
 
-  // opts the single command that immediately follows it on the wire into tracking; written adjacently before a cached read, reply discarded
+  // enable tracking for the next command. Send this immediately before a cached read and discard its reply.
   val clientCachingYes: Command[Unit] =
     Command("CLIENT", keyIndices = Command.NoKeys, args = Vector("CACHING", "YES").map(Bytes.utf8), decode = Decode.ok)
 
@@ -61,8 +61,8 @@ private[sage] object Connection {
       decode = HelloReply.decode
     )
 
-  // connection-setup commands, issued from configuration during the HELLO bootstrap (and re-issued on reconnect), never as a per-call
-  // command: each mutates per-connection state the shared Multiplexed Connection's fibers all observe.
+  // These commands configure connection state during the HELLO setup and run again after reconnecting. They are not exposed as ordinary
+  // operations because concurrent users of a shared connection would all observe the changed state.
 
   def select(database: Int): Command[Unit] =
     Command("SELECT", Command.NoKeys, Vector(Bytes.utf8(database.toString)), Decode.ok)

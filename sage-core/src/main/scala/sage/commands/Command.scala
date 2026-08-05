@@ -5,19 +5,18 @@ import sage.SageException.DecodeError
 import sage.protocol.{Frame, RespWriter}
 
 /**
-  * How a command must be carried by the runtime. `Ordinary` commands are auto-pipelined onto the Multiplexed Connection; `Blocking` ones
-  * block the connection (`BLPOP`, …) and so run alone on a Dedicated Connection borrowed from the pool. The requirement is intrinsic to
-  * the command, not to any backend, so it lives on the pure value rather than in runtime glue.
+  * Selects how the runtime executes a command. `Ordinary` commands use the auto-pipelined multiplexed connection. Commands that block a
+  * connection, such as `BLPOP`, run alone on a dedicated pooled connection. This requirement belongs to the command value and is shared by
+  * every backend.
   */
 enum Execution {
   case Ordinary, Blocking
 }
 
 /**
-  * How a keyless `allMasters` broadcast folds its per-node replies into one. `First` keeps the first node's reply (identical
-  * acknowledgements like `SCRIPT LOAD`'s SHA); `Concat` appends each node's array slice (`KEYS`); `Fold` reduces pairwise (a durability
-  * barrier down to its weakest shard). A single policy rather than separate flags, so `Concat` and `Fold` cannot both be requested. Inert
-  * unless `allMasters`.
+  * Selects how to combine replies from an `allMasters` command. `First` returns the first reply when every node should return the same value,
+  * such as the SHA from `SCRIPT LOAD`. `Concat` joins the array elements returned by each node, as required by `KEYS`. `Fold` combines replies
+  * two at a time with the supplied function. This setting is used only when `allMasters` is true.
   */
 enum BroadcastReduce {
   case First
@@ -26,32 +25,30 @@ enum BroadcastReduce {
 }
 
 /**
-  * A pure value describing one server command. `keyIndices` marks which `args` positions are keys, for cluster routing. `decode` never
-  * sees top-level error frames — [[Reply.run]] intercepts them.
+  * Stores one server command, including its encoded arguments and reply decoder. `keyIndices` marks the argument positions used as keys for
+  * cluster routing. [[Reply.run]] handles top-level error frames before calling `decode`.
   *
-  * `isReadOnly` marks side-effect-free reads (a future input to replica routing). `cacheable` is the narrower property client-side caching
-  * needs: a read whose result is a pure function of the named keys' current state, so a server invalidation push covers every way it can
-  * change. Time-varying reads (`TTL`, `OBJECT IDLETIME`) and non-deterministic ones (`SRANDMEMBER`) are read-only but **not** cacheable —
-  * they change with no key write, so no invalidation would ever fire. Both are intrinsic metadata set by the builders.
+  * `isReadOnly` marks side-effect-free reads for replica routing. `cacheable` is narrower: the result must depend only on the named keys'
+  * current state, allowing server invalidations to cover every change. Time-varying reads (`TTL`, `OBJECT IDLETIME`) and non-deterministic
+  * reads (`SRANDMEMBER`) are read-only but not cacheable because they can change without a key write. Builders set both properties.
   *
-  * `allMasters` marks a keyless command whose effect or answer is per-node and not shared across shards, so a cluster must run it on every
-  * slot-owning master rather than one (`SCRIPT LOAD`, `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, `FLUSHALL`/`FLUSHDB`,
-  * `MEMORY PURGE`, and the `PUBSUB` introspection forms, which report only the subscribers attached to the node answering). Inert on a
-  * standalone server.
+  * `allMasters` marks a keyless command whose effect or answer is local to a node. A cluster runs it on every slot-owning master (`SCRIPT LOAD`,
+  * `FUNCTION LOAD` and their `FLUSH`/`DELETE`/`RESTORE` mutations, `FLUSHALL`/`FLUSHDB`,
+  * `MEMORY PURGE`, and the `PUBSUB` introspection forms, which report only the subscribers attached to the node answering). Standalone
+  * servers ignore this setting.
   *
-  * `cursorBound` marks a command whose reply carries a continuation cursor valid only on the node that issued it (`SCAN`/`HSCAN`/`SSCAN`/
+  * `cursorBound` marks a command whose reply contains a continuation cursor valid only on the node that issued it (`SCAN`/`HSCAN`/`SSCAN`/
   * `ZSCAN`). Such a read is excluded from replica round-robin routing: iterating its pages across different replicas would feed a cursor to
-  * a node that never minted it, skipping or duplicating entries.
+  * a different node, which could skip or duplicate entries.
   *
-  * `broadcast` chooses how an `allMasters` command's per-node replies fold into one: `First` keeps one node's identical acknowledgement,
-  * `Concat` appends each node's array slice (`KEYS`, since no single node sees the whole keyspace), `Fold` reduces pairwise (a durability
-  * barrier down to its weakest shard, a per-channel subscriber sum, a channel list appended and deduplicated). The broadcast always targets
-  * masters regardless of the `ReadFrom` policy (a single replica would only see one shard's slice). Inert on a standalone server.
+  * `broadcast` selects the [[BroadcastReduce]] strategy for combining replies from an `allMasters` command. This supports identical
+  * acknowledgements, concatenated key or channel lists, subscriber totals, and the lowest durability count reported by a shard. Broadcasts
+  * use masters regardless of the `ReadFrom` policy because a replica contains data for only one shard. Standalone servers ignore this setting.
   *
-  * `requiresClusterWideTxResult` marks a command whose result is correct only when aggregated across every master, so a cluster `MULTI`/
-  * `EXEC` — pinned to a single node — cannot produce it and rejects it before the wire. Only `DBSIZE` sets it: its contract is the cluster-wide
-  * key count, which one shard cannot give. Other broadcasts (`KEYS`, `FLUSHALL`, `SCRIPT LOAD`, `WAIT`) stay transaction-legal with node-local
-  * semantics, matching Redis, which does not flag them `no-multi`. Inert on a standalone server.
+  * `requiresClusterWideTxResult` marks a command whose result requires replies from every master. A cluster transaction uses one node and
+  * rejects such commands before sending them. Only `DBSIZE` sets this property because it promises the cluster-wide key count. Other
+  * broadcasts (`KEYS`, `FLUSHALL`, `SCRIPT LOAD`, `WAIT`) remain valid in a transaction with node-local semantics, matching Redis, which does
+  * not flag them `no-multi`. Standalone servers ignore this setting.
   */
 final case class Command[+Out](
   name: String,
@@ -73,11 +70,11 @@ final case class Command[+Out](
   def map[B](f: Out => B): Command[B] = withDecode(frame => decode(frame).map(f))
 
   /**
-    * Whether this command blocks its connection and so needs a Dedicated Connection.
+    * Whether this command requires a dedicated connection because it blocks the connection it uses.
     */
   def isBlocking: Boolean = execution == Execution.Blocking
 
-  // rebuilds the command with a new (possibly re-typed) decoder, carrying every field by name so a future field can't be dropped or misordered
+  // rebuild by named fields to preserve their order and ensure future fields are copied explicitly.
   private def withDecode[B](decode: Frame => Either[DecodeError, B]): Command[B] =
     Command(
       name = name,
@@ -94,7 +91,7 @@ final case class Command[+Out](
     )
 
   /**
-    * The key bytes the server tracks for this command, in arg order — the keys a cache invalidation evicts by.
+    * The command's key bytes in argument order. Client-side cache invalidations use these bytes to remove affected results.
     */
   def keys: Vector[Bytes] = keyIndices.map(args)
 
@@ -138,8 +135,8 @@ object Command {
   ): Command[Out] = Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = true)
 
   /**
-    * A read-only command whose reply carries a node-local continuation cursor (`SCAN` and its `H`/`S`/`Z` variants): read-only but pinned to
-    * its issuing node, so replica routing must not round-robin its pages. Not cacheable — a cursor page is not a pure function of key state.
+    * A read-only command with a node-local continuation cursor (`SCAN` and its `H`/`S`/`Z` variants). All pages remain pinned to the issuing
+    * node. Cursor pages are not cacheable because they do not depend only on key state.
     */
   def readCursor[Out](
     name: String,
@@ -149,7 +146,7 @@ object Command {
   ): Command[Out] = Command(name, keyIndices, args, decode, Execution.Ordinary, isReadOnly = true, cacheable = false, cursorBound = true)
 
   /**
-    * A read-only command that must not be cached: its result varies with time or is non-deterministic, so no invalidation would evict it.
+    * A read-only command whose time-varying or non-deterministic result cannot be invalidated reliably.
     */
   def readUncacheable[Out](
     name: String,

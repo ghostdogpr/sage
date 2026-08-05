@@ -25,7 +25,7 @@ class ThroughputBench extends RedisBenchState {
   @Benchmark def set(): Long = subject.setAll(keys, Payloads.value(valueSize), concurrency)
 }
 
-// the throughput workload swept over the client topology (sage only): end-to-end overhead, server mode included — see TopologyBenchState
+// Measures the throughput workload across Sage client topologies, including server mode. See TopologyBenchState.
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
 @OutputTimeUnit(TimeUnit.SECONDS)
@@ -48,7 +48,7 @@ class TopologyBench extends TopologyBenchState {
   @Benchmark def set(): Long = subject.setAll(keys, Payloads.value(valueSize), concurrency)
 }
 
-// a single big-reply command per invocation (no concurrency — that's the throughput workload); valueSize sizes the seeded values
+// Run one large-reply command per invocation. The throughput benchmark covers concurrent requests. valueSize controls the seeded value size.
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.Throughput))
 @OutputTimeUnit(TimeUnit.SECONDS)

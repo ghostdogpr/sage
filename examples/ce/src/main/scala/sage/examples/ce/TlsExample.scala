@@ -6,9 +6,9 @@ import sage.*
 import sage.backend.*
 
 /**
-  * TLS + ACL spotlight. Both are pure configuration on top of the same client: `tls` selects the trust source (here the system trust store;
-  * use `TrustSource.Pem`/`TrustStore` for a private CA, never `Insecure` outside development) and `auth` carries the ACL user. This needs a
-  * TLS-enabled, ACL-protected server, so it is not part of the localhost `Tour` — it exists to show the wiring.
+  * Connects to a TLS-enabled server that requires an ACL username and password. This example uses the system trust store. Use
+  * `TrustSource.Pem` or `TrustStore` for a private certificate authority, and use `Insecure` only during development. The example expects the
+  * server to listen on port 6380 with the `app` user configured.
   */
 object TlsExample {
 

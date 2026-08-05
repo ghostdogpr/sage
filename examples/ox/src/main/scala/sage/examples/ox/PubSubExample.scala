@@ -6,13 +6,12 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Classic channel pub/sub surfaced as a native Ox `Flow`; ending the flow unsubscribes. Sharded pub/sub is shown in the cluster spotlight,
-  * where it belongs.
+  * Classic channel pub/sub with an Ox `Flow`. Ending the flow unsubscribes. The cluster example covers sharded pub/sub.
   */
 object PubSubExample {
 
   def run(client: SageClient)(using Ox): Unit = {
-    // subscribeScoped confirms before returning, so the publishes below can't outrun the registration
+    // wait for the subscription to be confirmed before publishing.
     val news     = client.subscribeScoped[String]("news")
     (1 to 3).foreach { i =>
       client.publish("news", s"item-$i")

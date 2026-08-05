@@ -43,17 +43,17 @@ class ClusterClientSpec extends munit.FunSuite {
     seeds: Vector[Node],
     unreachable: Set[Node] = Set.empty,
     readFrom: ReadFrom = ReadFrom.Master,
-    connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport creation, to park an establish mid-flight
+    connectGate: (Node, Int) => Unit = (_, _) => (), // blocks a node's nth transport while it is being opened
     scheduler: Scheduler = Scheduler.real,
     caching: Boolean = false,
     cluster: ClusterConfig = ClusterConfig()
   ) {
 
-    // accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
+    // Accumulate every transport per node (a node has both a Multiplexed and, once a transaction pins, a Dedicated connection) so a refresh
     // issued on one is still observable even after the other is created
     private val transports = mutable.Map.empty[Node, mutable.ArrayBuffer[FakeTransport]]
 
-    // nodes whose *next* HELLO fails and then clears: simulates an establish that fails once mid-recovery, so a re-home must retry to converge
+    // make the next HELLO fail once to verify that subscription reassignment retries after a transient connection error.
     val flakyHello = mutable.Set.empty[Node]
 
     private def transportsOf(node: Node): Vector[FakeTransport] =
@@ -100,12 +100,12 @@ class ClusterClientSpec extends munit.FunSuite {
 
     def clusterSlotsCount(node: Node): Int = written(node).count(_.contains("CLUSTER"))
 
-    // simulate the server dropping a node's Sharded Subscription Connection (the post-migration disconnect): close the transport that
-    // carried the SSUBSCRIBE so its onClosed fires and the manager re-homes
+    // Simulate the disconnect after a slot migration by closing the connection used to send SSUBSCRIBE. The manager must then assign the
+    // subscription again.
     def dropShardConn(node: Node): Unit =
       transportsOf(node).find(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE"))).foreach(_.close())
 
-    // close the master's classic Subscription Connection so its onClosed fires and the manager re-homes
+    // Close the master's classic subscription connection so the manager assigns those subscriptions again.
     def dropClassicConn(): Unit =
       allTransports.find(_.written.exists(_.asUtf8String.contains("\r\nSUBSCRIBE\r\n"))).foreach(_.close())
 
@@ -862,7 +862,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val clusterCalls = new java.util.concurrent.atomic.AtomicInteger(0)
     val behaviour    = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(if (clusterCalls.incrementAndGet() == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
-      // the batch carries both positions; the retries reach nodeB one at a time
+      // The batch contains both positions. Retry each position separately on nodeB.
       else if (text.contains("GET"))
         if (node == nodeA) Seq.fill(2)(Frame.SimpleError("CLUSTERDOWN The cluster is down")) else Seq(bulk("from-b"))
       else Seq(Frame.SimpleString("OK"))
@@ -908,7 +908,7 @@ class ClusterClientSpec extends munit.FunSuite {
     val behaviour    = (node: Node, text: String) =>
       if (text.contains("CLUSTER")) {
         val call = clusterCalls.incrementAndGet()
-        // slow on purpose: a refresh merely fired alongside the retry would leave it on the stale mapping
+        // delay the refresh to prove the retry waits for its updated topology instead of using the previous mapping
         if (call > 1) Thread.sleep(300)
         Seq(if (call == 1) wholeClusterOn(nodeA) else wholeClusterOn(nodeB))
       } else if (text.contains("GET"))
@@ -1226,7 +1226,7 @@ class ClusterClientSpec extends munit.FunSuite {
 
   test("absorbs a failover: an unreachable owner triggers a refresh and the command retries on the new master") {
     val key                  = "foo"
-    val keySlot              = Slot.of(Bytes.utf8(key)).value // the upper range starts here, so `key` lands in it
+    val keySlot              = Slot.of(Bytes.utf8(key)).value // the upper range starts here, which means `key` belongs to it
     @volatile var failedOver = false
     val behaviour            = (node: Node, text: String) =>
       if (text.contains("CLUSTER"))
@@ -1356,7 +1356,7 @@ class ClusterClientSpec extends munit.FunSuite {
   }
 
   test("a keyless command keeps its submission-order position within a node's batch") {
-    // get, ping, get all hash/route to one node; the keyless ping must stay between the two gets on the wire, not be reordered to the end
+    // all three commands use one node. Verify that the keyless PING remains between the two GET commands in the encoded batch.
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else Seq(bulk("v1"), Frame.SimpleString("PONG"), bulk("v2"))
@@ -1375,8 +1375,8 @@ class ClusterClientSpec extends munit.FunSuite {
 
   test("an ownership fault during a transaction refreshes the topology so a retry can re-pin") {
     val slot      = Slot.of(Bytes.utf8("{a}1")).value
-    // the pinned node answers the MULTI/EXEC batch with a MOVED while queuing: the tx fails, but a background refresh must still fire so a
-    // retry routes to the new owner instead of looping on the stale node
+    // The transaction receives MOVED while the server queues its MULTI/EXEC batch. It fails and starts a background refresh. A later retry
+    // then uses the new owner.
     val behaviour = (_: Node, text: String) =>
       if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
       else if (text.contains("MULTI"))
@@ -1404,11 +1404,12 @@ class ClusterClientSpec extends munit.FunSuite {
       else Seq(Frame.SimpleString("OK"))
     val fixture   = new Fixture(behaviour, Vector(nodeA)) // default minRefreshInterval (5s) far exceeds this test's duration
 
-    // two faults within the throttle window: a throttled refresh would run only once (CLUSTER stays at 2), a forced one runs on each
+    // Cause two faults within one throttle interval. A throttled refresh would run once and produce two CLUSTER calls in total. A forced
+    // refresh runs after each fault.
     val tx = fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
     for {
       _ <- tx.unsafeRun.failed
-      _  = Thread.sleep(150) // let the first forced refresh complete and stamp the throttle window
+      _  = Thread.sleep(150) // let the first forced refresh complete and record the start of the throttle interval
       _ <- tx.unsafeRun.failed
     } yield {
       Thread.sleep(150)
@@ -1481,7 +1482,7 @@ class ClusterClientSpec extends munit.FunSuite {
       else if (text.contains("MULTI"))
         Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(bulk("v"))))
       else Seq(Frame.SimpleString("OK"))
-    // gate the dedicated (second) transport of nodeA so the transaction's first acquire parks mid-connect
+    // block the dedicated (second) transport of nodeA while the transaction opens its first connection
     val fixture   = new Fixture(behaviour, Vector(nodeA), connectGate = (node, index) => if (node == nodeA && index == 1) gate.await())
 
     val started = System.nanoTime()
@@ -1490,7 +1491,7 @@ class ClusterClientSpec extends munit.FunSuite {
       assert(result.isEmpty, s"expected the timeout to win, got $result")
       assert(elapsedMs < 3000L, s"the finalizer stalled behind the parked acquire: ${elapsedMs}ms")
       gate.countDown()
-      Thread.sleep(300) // let the orphaned acquire finish and hand its never-used connection back
+      Thread.sleep(300) // let the interrupted acquisition finish and return its unused connection to the pool
       fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1")))).unsafeRun.map { committed =>
         assertEquals(committed, Some(Vector(Some("v"))))
         val hellos = fixture.written(nodeA).count(_.contains("HELLO"))
@@ -1661,8 +1662,8 @@ class ClusterClientSpec extends munit.FunSuite {
 
     fixture.live.subscribeChannels[String]("news").unsafeRun.map { _ =>
       assertEquals(classicSubscribes, 1, "initial classic subscribe did not reach the master")
-      // the master drops the classic connection; the first re-home attempt's HELLO fails, so establish throws without firing onTerminated.
-      // The old code swallowed that and stranded the sub; the manager must instead retry until it re-attaches.
+      // The master drops the classic connection, and HELLO fails during the first replacement attempt.
+      // Earlier behavior ignored this failure and left the subscription inactive. The manager must retry until it attaches again.
       fixture.flakyHello += nodeA
       fixture.dropClassicConn()
       Thread.sleep(300) // the failed establish retries after the 50ms backoff, once HELLO succeeds again

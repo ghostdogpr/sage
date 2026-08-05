@@ -29,13 +29,13 @@ object CommandsExample {
         // hashes
         _        <- client.hSet("user:1", ("name", "Ada"), ("age", "36"))
         profile  <- client.hGetAll[String, String]("user:1")
-        // lists: a blocking pop off a Dedicated Connection (data is pushed first, so it returns at once)
+        // lists: push data before the blocking pop so this example completes immediately
         _        <- client.rPush("queue", "a", "b", "c")
         head     <- client.blPop[String]("queue")(BlockTimeout.Forever)
         // sets and sorted sets
         _        <- client.sAdd("tags", "scala", "redis")
         _        <- client.zAdd("scores")(("ada", 36.0))
-        // a custom-codec round-trip: User rides on the given ValueCodec from the shared module
+        // store and retrieve a custom type using its ValueCodec
         _        <- client.set("user:ada", User("Ada", 36))
         ada      <- client.get[User]("user:ada")
         // a raw Lua eval yields a Frame; decode it with the strict helpers

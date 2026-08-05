@@ -2,9 +2,9 @@ package sage.internal
 
 import scala.quoted.*
 
-// Compile-time guard: every user-visible type in `sage.commands` must be re-exported from package `sage`
-// (the hand-written aggregator in sage-client/shared/.../sage/exports.scala). Forgetting to add a new
-// option/result type there silently shrinks `import sage.*`; this turns that omission into a build error.
+// Checks at compile time that package `sage` re-exports every public type from `sage.commands`.
+// Without this check, a type omitted from the hand-written aggregator in
+// sage-client/shared/.../sage/exports.scala would be missing from `import sage.*`.
 private[sage] object ApiSurface {
   inline def verifyCommandsExported(): Unit = ${ verifyCommandsExportedImpl }
 
@@ -14,10 +14,9 @@ private[sage] object ApiSurface {
     val commands = Symbol.requiredPackage("sage.commands")
     val sage     = Symbol.requiredPackage("sage")
 
-    // Source-level public types of `sage.commands`. Names are grouped because each type carries both a
-    // type symbol and a term (companion/module) symbol; `private[sage]` is recorded as `privateWithin` on
-    // the term, so a name is user-visible only when none of its symbols restrict visibility. `$`-mangled
-    // names are JVM-flattened companions/nested cases and top-level `*$package` holders — never user types.
+    // A source-level type may have both a type symbol and a term symbol for its companion. Scala records
+    // `private[sage]` on the term as `privateWithin`, so all symbols for a name must be public. Names that
+    // contain `$` belong to compiler-generated companions, nested cases, or top-level package holders.
     val publicTypes =
       commands.declarations
         .groupBy(_.name)
@@ -29,8 +28,8 @@ private[sage] object ApiSurface {
         }
         .toList
 
-    // Everything reachable through `import sage.*`: type aliases surface as type members of the package;
-    // term forwarders live in the synthetic per-file `*$package` holder objects.
+    // Type aliases are package members. Term forwarders are stored in the compiler-generated
+    // `*$package` holder for each source file.
     val exported =
       sage.declarations.filter(_.name.endsWith("$package")).flatMap(_.declarations).map(_.name).toSet
 

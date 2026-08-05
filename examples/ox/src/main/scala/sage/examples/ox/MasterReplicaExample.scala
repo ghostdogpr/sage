@@ -6,9 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Master-replica spotlight. The deployment is selected by `Topology.MasterReplica`; the same client discovers the master and its replicas
-  * from the seeds and routes reads per the `ReadFrom` policy while writes always go to the master. This needs a master-replica deployment, so
-  * it is not part of the localhost `Tour` — it exists to show the wiring.
+  * Connects to a master-replica deployment. The client discovers node roles from the configured seeds, sends writes to the master, and routes
+  * reads according to `ReadFrom.ReplicaPreferred`. The example expects servers on ports 6379 and 6380.
   */
 object MasterReplicaExample {
 

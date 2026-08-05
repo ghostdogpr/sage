@@ -1,10 +1,10 @@
 package sage.commands
 
 /**
-  * The public builder facade: every command as a [[Command]] value (`Commands.get`, `Commands.incr`, …), named one-for-one with the
-  * client's per-command methods. This is the path for `run`, pipelines, transactions, and reuse; the client sugar (e.g. `client.get`) is a
-  * thin wrapper over the same values. Each member is re-exported from an internal per-family object, so it appears here as `Exported from …`
-  * with its signature; the prose for what a command does and its contracts lives on the matching client method.
+  * Provides every command as a [[Command]] value, such as `Commands.get` and `Commands.incr`. These values can be passed to `run`, included
+  * in pipelines and transactions, or reused. Methods such as `client.get` build the same commands. Members are re-exported from internal
+  * command-family objects, which is why the generated API documentation marks them as `Exported from …`. Detailed command documentation
+  * appears on the corresponding client method.
   */
 object Commands {
   export Acl.*

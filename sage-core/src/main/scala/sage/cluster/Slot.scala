@@ -47,8 +47,8 @@ private[sage] object Slot {
 }
 
 /**
-  * CRC16-CCITT (XMODEM polynomial 0x1021, zero seed), the function Redis Cluster hashes keys with. The table is derived at load rather
-  * than hard-coded so it is self-evidently the standard polynomial.
+  * CRC16-CCITT with the XMODEM polynomial `0x1021` and a zero seed, as used by Redis Cluster. The lookup table is generated from the
+  * polynomial when this object is initialized.
   */
 private[cluster] object Crc16 {
 

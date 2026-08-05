@@ -7,8 +7,7 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Classic channel pub/sub surfaced as a native fs2 `Stream`; releasing the resource unsubscribes. Sharded pub/sub is shown in the cluster
-  * spotlight, where it belongs.
+  * Classic channel pub/sub with an fs2 `Stream`. Releasing the resource unsubscribes. The cluster example covers sharded pub/sub.
   */
 object PubSubExample {
 

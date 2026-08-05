@@ -6,9 +6,10 @@ import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * A JSONPath expression (`$.a.b`, `$..field`) addressing zero or more locations in a JSON document. Always emitted on the wire, defaulting
-  * to [[JsonPath.root]] (`$`); sage neither validates nor normalizes it, so a malformed expression surfaces as a server error, not a throw.
-  * Only the JSONPath (`$`) dialect is supported: every location-matching command replies one result per match, so its reply is a `Vector`.
+  * A JSONPath expression (`$.a.b`, `$..field`) that selects zero or more locations in a JSON document. Commands always send a path and use
+  * [[JsonPath.root]] (`$`) by default. Sage passes the expression to the server without validating or normalizing it, and the server reports
+  * malformed expressions as errors. Only the JSONPath (`$`) dialect is supported. Commands that can match several locations return a
+  * `Vector` with one result per match.
   */
 opaque type JsonPath = String
 
@@ -29,7 +30,7 @@ enum JsonSetCondition {
 }
 
 /**
-  * The value type `JSON.TYPE` reports at a path. `Other` carries any type name a future server introduces.
+  * The value type reported by `JSON.TYPE` at a path. `Other` contains a type name introduced by a newer server.
   */
 enum JsonType {
   case Object, Array, String, Number, Integer, Boolean, Null
@@ -209,7 +210,7 @@ private[sage] object Json {
   def jsonResp[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Frame] =
     Command.readUncacheable("JSON.RESP", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), Decode.frame)
 
-  // path-multi commands reply an array, one slot per JSONPath match; a legacy (non-$) path replies a scalar, which fails here (JSONPath only)
+  // JSONPath commands return an array with one value for each match. A legacy path without $ returns a single value and is rejected here.
   private def pathMulti[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
     case array @ Frame.Array(_) => Decode.vector(element)(array)
     case other                  => Left(DecodeError("a JSONPath ($) reply array (legacy '.' paths are unsupported)", Frame.describe(other)))

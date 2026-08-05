@@ -4,11 +4,9 @@ import sage.Bytes
 import sage.SageException.DecodeError
 
 /**
-  * Encodes/decodes a user type at a key or hash-field position — an identifier into the keyspace or a hash, never a payload (use
-  * [[ValueCodec]] for those). Deliberately unrelated to [[ValueCodec]] so given resolution stays unambiguous, and float/boolean types
-  * are excluded because their formatting is representation-sensitive — two writers must not silently address different keys or fields.
-  * Cluster-slot hashing is a property of key positions only ([[sage.commands.Command.keyIndices]]); this typeclass does no hashing itself.
-  * Like [[ValueCodec]], the built-in codecs decode strictly — non-canonical bytes fail with a [[sage.SageException.DecodeError]].
+  * Encodes and decodes keys and hash fields. Use [[ValueCodec]] for payloads. Keeping the two codec types separate avoids ambiguous givens.
+  * Floating-point and Boolean key codecs are excluded because their representations can vary between writers. Cluster-slot hashing applies to
+  * key positions ([[sage.commands.Command.keyIndices]]) but is not performed by this typeclass. Built-in codecs reject non-canonical bytes.
   */
 trait KeyCodec[A] { self =>
 
@@ -23,15 +21,14 @@ trait KeyCodec[A] { self =>
   def decode(bytes: Bytes): Either[DecodeError, A]
 
   /**
-    * Derives a key codec for `B` from a total, lossless mapping — typically a newtype over an existing key type. Caution: this is the
-    * escape hatch around the deliberate absence of float/boolean key givens; mapping onto a representation-sensitive type reintroduces the
-    * hazard that two writers silently address different keys, so keep `f`/`g` canonical and total.
+    * Derives a key codec for `B` from a total, lossless mapping, typically for a newtype. Keep both mappings canonical and total. Mapping a
+    * representation-sensitive type, such as a floating-point value, can make different writers address different keys.
     */
   final def imap[B](f: A => B)(g: B => A): KeyCodec[B] =
     KeyCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).map(f))
 
   /**
-    * Derives a key codec for `B` whose decode may fail. A `Left` keeps the strict, no-coercion contract.
+    * Derives a key codec for `B` when converting a decoded value can fail. Return `Left` for invalid input.
     */
   final def emap[B](f: A => Either[DecodeError, B])(g: B => A): KeyCodec[B] =
     KeyCodec.from[B](b => self.encode(g(b)))(bytes => self.decode(bytes).flatMap(f))
@@ -45,7 +42,7 @@ object KeyCodec {
   def apply[A](using codec: KeyCodec[A]): KeyCodec[A] = codec
 
   /**
-    * Builds a key codec from an encode/decode pair. The decode returns `Either` so a custom codec rejects bad input rather than throwing.
+    * Builds a key codec from encode and decode functions. The decoder returns `Either` for invalid input.
     */
   def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): KeyCodec[A] = instance(enc, dec)
 

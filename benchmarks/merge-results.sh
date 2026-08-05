@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Merge the per-cell JMH JSONs written by `sbt benchAll` into one all.json covering every client (5 sage backends + zio-redis + redis4cats +
-# lettuce + rediscala + jedis). Each cell uses identical benchmark class/method names and a globally-unique `client` param, so the merged
-# file is a single directly-comparable run — upload benchmarks/results/all.json to https://jmh.morethan.io.
+# lettuce + rediscala + jedis). Cells use the same benchmark class and method names and a unique `client` parameter. The resulting all.json
+# can be compared as one run or uploaded to https://jmh.morethan.io.
 set -euo pipefail
 cd "$(dirname "$0")/results"
 

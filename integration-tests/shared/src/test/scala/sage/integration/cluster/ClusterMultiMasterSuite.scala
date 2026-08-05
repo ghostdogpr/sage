@@ -100,7 +100,7 @@ abstract class ClusterMultiMasterSuite(val image: String, val serverBinary: Stri
 
   test("PUBSUB SHARDNUMSUB attributes each shard channel's subscribers to it, across all three owners") {
     onCluster { (container, client) =>
-      // one channel per slot range, distinct counts: no single master's reply can satisfy this
+      // Use one channel per slot range and give each a distinct subscriber count. The expected result therefore requires replies from all masters.
       val expected = Map("sn-d" -> 1L, "sn-a" -> 2L, "sn-c" -> 3L)
       expected.foreach { case (channel, subscribers) =>
         val owner = ownerOfChannel(container, channel)

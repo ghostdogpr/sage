@@ -17,13 +17,12 @@ import sage.commands.{Command, Connection, Invalidation, Reply}
 import sage.protocol.Frame
 
 /**
-  * The Multiplexed Connection: one auto-pipelined connection carrying every ordinary command, replies matched FIFO. It owns the
-  * connection lifecycle — auto-reconnect with jittered backoff, the HELLO bootstrap run on each fresh connection, the idle-PING watchdog,
-  * and graceful drain on close. Per-attempt reconnection re-invokes the [[TransportFactory]], which re-resolves the hostname so a DNS
-  * repoint after failover lands on the new master.
+  * Maintains one auto-pipelined connection for ordinary commands and matches replies in order. It reconnects with jittered backoff, runs
+  * `HELLO` on each new connection, sends idle `PING` checks, and waits for accepted commands while closing. Each reconnect invokes the
+  * [[TransportFactory]] again and resolves the hostname again, allowing DNS changes after failover to select the new master.
   *
-  * Each connection generation is a self-contained [[Conn]] owning its own `pending` queue, so a dead generation's late frames can never
-  * misalign the live one. The reconnect loop runs off the reader thread (via the [[Scheduler]]) so backoff never blocks I/O.
+  * A new connection gets a new `pending` queue, which prevents late frames from a closed connection from affecting the current one. The
+  * [[Scheduler]] runs reconnect delays outside the reader thread.
   */
 final private[client] class MultiplexedConnection private (
   factory: MultiplexedConnection.TransportFactory,
@@ -39,19 +38,19 @@ final private[client] class MultiplexedConnection private (
 ) {
   import MultiplexedConnection.{Generation, State}
 
-  // ReentrantLock, not `synchronized`: a parking lock never pins a virtual thread's carrier (a monitor does on JDK < 24).
+  // use ReentrantLock because a waiting virtual thread can unmount. A synchronized monitor can pin its carrier thread on JDK versions before 24.
   private val lock                                 = new ReentrantLock()
   private var state: State                         = State.Reconnecting
   private var current: Conn                        = null
   private var establishing: Conn                   = null
   private var watchdogHandle: Scheduler.Cancelable = null
-  // bumped when a fresh socket becomes live; the dedicated pool stamps borrowed connections with it to detect ones outliving a reconnect
+  // increment when a new socket becomes live; the dedicated pool records this value and rejects connections from an earlier generation
   private var generation: Generation               = Generation.initial
-  // the live epoch (or `notLive`), published so liveness reads are lock-free: the pool reads it under its own lock without crossing into
-  // this lifecycle lock, so there is no pool<->connection lock order to keep
+  // Store the current live generation, or notLive, in an atomic reference. The dedicated pool can read it while holding the pool lock without
+  // also acquiring this connection's lifecycle lock.
   private val liveEpoch                            = new AtomicReference[Generation](Generation.notLive)
   @volatile private var onLivenessLost: () => Unit = () => ()
-  // reconnect cadence, guarded by `lock` and persisted across generations so a flapping peer keeps backing off (see nextReconnectAttempt)
+  // keep the reconnect attempt count across short-lived connections, increasing their backoff until a connection remains stable
   private var reconnectAttempt: Int                = 0
   private var liveSinceMillis: Long                = -1L
   // whether the live generation accepts CLIENT TRACKING; false makes cached reads run uncached
@@ -72,11 +71,11 @@ final private[client] class MultiplexedConnection private (
     if (to == State.Live) liveSinceMillis = scheduler.nowMillis
   }
 
-  // the live connection, or null when not Live so callers fail fast rather than join a dead or reconnecting generation
+  // return the current connection only in the Live state; disconnected or reconnecting callers receive null and fail immediately
   private inline def liveConn(): Conn = locked(if (state == State.Live) current else null)
 
-  // Reserves n drain slots against the live connection under the same lock that admits the command, so close() can never sample
-  // inFlight == 0 for a command that already passed the Live gate but hasn't reached Conn.submit yet (#95). null => not Live.
+  // Add n accepted entries to inFlight while holding the lock that admits the command. This records them before close() reads inFlight, including
+  // commands that have not reached Conn.submit yet (#95). A null result means the connection is not Live.
   private def reserved(n: Int): Conn = locked(if (state == State.Live) {
     current.reserve(n)
     current
@@ -88,8 +87,8 @@ final private[client] class MultiplexedConnection private (
     else conn.submit(command, callback)
   }
 
-  // Captures one generation so the cache lookup and the fetch share a connection; a reconnect mid-flight fails the fetch as a normal loss.
-  // deferred (master-replica) captured the context before offloading; null starts the span inline (standalone). Only a server-bound command is traced.
+  // Use one connection for the cache lookup and server fetch; reconnecting during the fetch reports a connection loss. In master-replica mode,
+  // deferred contains tracing context captured before offloading. A null value starts tracing on this thread. Local cache hits are not traced.
   def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan = null): Unit = {
     // a Fetch sends [CLIENT CACHING YES, read]; a cache hit/wait sends nothing and releases the reservation
     val conn = reserved(2)
@@ -108,8 +107,8 @@ final private[client] class MultiplexedConnection private (
     else conn.submitAll(Vector(Connection.asking, command), Vector(_ => (), callback.asInstanceOf[Try[Any] => Unit]))
   }
 
-  // Enqueues a whole pipeline onto a single generation, captured once, so a reconnect mid-batch can never split it across connections.
-  // Returns false when not connected — nothing was submitted, so the caller fails fast rather than fabricating per-position errors.
+  // Enqueues a whole pipeline onto one captured generation. A reconnect cannot split the batch across connections.
+  // Return false when disconnected. The caller handles the unsent batch by rerouting or failing it as appropriate.
   def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Boolean = {
     val conn = reserved(commands.length)
     if (conn == null) false
@@ -145,23 +144,22 @@ final private[client] class MultiplexedConnection private (
 
   private[internal] def isLive: Boolean = liveEpoch.get() != Generation.notLive
 
-  // the Generation to stamp a fresh Dedicated Connection with, read only while live; None means a borrower must fail fast rather than join
-  // a connection to a dead or reconnecting epoch
+  // return the current generation for a new DedicatedConnection while this connection is Live; None reports that it is unavailable
   private[internal] def liveGeneration(): Option[Generation] = {
     val g = liveEpoch.get()
     if (g == Generation.notLive) None else Some(g)
   }
 
-  // whether a stamped Generation is still the live one; the `notLive` sentinel makes a stamp read stale throughout a reconnect window, even
-  // at the same generation number, since the epoch only bumps on the next live socket
+  // Compare a DedicatedConnection's generation with the current live generation. The `notLive` value rejects every generation while
+  // reconnecting, including the previous number before the next connection increments it.
   private[internal] def isCurrent(g: Generation): Boolean = liveEpoch.get() == g
 
   private def connectInitial(): Unit = {
     val conn     = establish() // the first connect propagates a handshake failure; only reconnects retry
-    // emit under the lock so the enqueue is ordered with the state transition: a socket dropping immediately after cannot deliver
-    // Disconnected before this Connected (the same lock serializes both)
+    // Emit while holding the lock to keep the event ordered with the state transition. If the socket drops immediately afterward,
+    // Disconnected is enqueued after Connected because the same lock serializes both events.
     val teardown = locked {
-      // a close() during establish() wins: tear down rather than publish Live
+      // if close runs during establishment, close the new connection instead of changing the state to Live
       if (state == State.Closed) conn
       else if (conn.isTerminated) {
         scheduleReconnect(0)
@@ -187,8 +185,8 @@ final private[client] class MultiplexedConnection private (
     try {
       conn.start()
       var tracking = true
-      // reserve(1) per command: submit does not self-increment, so this balances the retire() the reply will trigger. A half-open peer can
-      // accept the socket yet never answer HELLO, so the runner bounds each wait and the reconnect loop can't stall on it forever.
+      // Call reserve(1) for each command because submit does not increment the count. The reply later calls retire() to balance it. A
+      // half-open peer can accept the socket without answering HELLO, so the runner limits each wait and lets the reconnect loop continue.
       Bootstrap.run(
         bootstrap,
         connectTimeout.toMillis,
@@ -214,7 +212,7 @@ final private[client] class MultiplexedConnection private (
     scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
   }
 
-  // stable past the backoff ceiling resets the count (a healthy session's loss retries fast); a sooner drop is a flap, so it carries forward
+  // reset the attempt count after a connection remains live for the maximum backoff period; shorter connections keep increasing the delay
   private def nextReconnectAttempt(): Int = {
     val stable = liveSinceMillis >= 0L && scheduler.nowMillis - liveSinceMillis >= backoff.maxDelay.toMillis
     reconnectAttempt = if (stable) 0 else reconnectAttempt + 1
@@ -249,10 +247,9 @@ final private[client] class MultiplexedConnection private (
       }
   }
 
-  // Connections that never became `current` (a failed establish) are ignored here; their caller handles them.
+  // ignore connections that fail before becoming `current`; the establishment caller handles those failures
   private def onConnTerminated(conn: Conn): Unit = {
-    // Disconnected fires only on the Live edge (a fresh loss, not a failed reconnect attempt), under the lock so it is ordered after the
-    // Connected of the connection it ends
+    // emit Disconnected only when the current Live connection ends. Holding the lock orders it after that connection's Connected event.
     val lostLiveness = locked {
       if (conn eq current)
         state match {
@@ -269,7 +266,7 @@ final private[client] class MultiplexedConnection private (
         }
       else false
     }
-    // fired off the lock so the lifecycle lock is not held across the pool's signal
+    // notify the pool after releasing the lifecycle lock
     if (lostLiveness) onLivenessLost()
   }
 
@@ -293,10 +290,10 @@ final private[client] class MultiplexedConnection private (
   final private class Conn {
 
     private val pending                              = new ConcurrentLinkedQueue[Entry[?]]()
-    // counted from submit, not writeAttempted, so the drain also waits for queued-but-unwritten commands (#95)
+    // count entries when they are accepted by submit, including commands still queued for writing, so close waits for all accepted work (#95)
     private val inFlight                             = new AtomicInteger(0)
     private val transportRef                         = new AtomicReference[Transport]()
-    // one cache per generation: a reconnect discards this Conn and with it the cache, which is how a reconnect flushes cached reads
+    // each connection has its own cache. Reconnecting creates a new Conn and discards the previous cached values.
     private val cache                                = new ClientCache(cacheMaxBytes)
     @volatile private var lastReplyAtMillis: Long    = scheduler.nowMillis
     @volatile private var drainLatch: CountDownLatch = null
@@ -305,8 +302,8 @@ final private[client] class MultiplexedConnection private (
 
     def isTerminated: Boolean = terminated
 
-    // transportRef is published before start()'s blocking connect, so a concurrent close() can abort it; `aborted` covers the
-    // narrow gap where close() lands before the transport is published.
+    // Publish transportRef before the blocking connect starts so close can abort it. aborted records a close that happens before transportRef
+    // is published.
     def start(): Unit = {
       val transport = factory(onFrame, onClosed)
       transportRef.set(transport)
@@ -318,19 +315,19 @@ final private[client] class MultiplexedConnection private (
     def submit[A](command: Command[A], callback: Try[A] => Unit): Unit =
       transportRef.get().send(new Entry(command, callback))
 
-    // One Transport.Item, not N: the writer treats a queue element atomically, so concatenating the batch into a single payload is what
-    // guarantees the pipeline is one socket write (one round-trip) rather than racing the writer between sends.
+    // Concatenate the pipeline into one Transport.Item. The writer processes an item atomically, which keeps the pipeline in one socket write
+    // and prevents other sends from being inserted between its commands.
     def submitAll(commands: Vector[Command[?]], callbacks: Vector[Try[Any] => Unit]): Unit = {
       val entries = Vector.tabulate(commands.length)(i => new Entry(commands(i), callbacks(i)))
       transportRef.get().send(new Batch(entries))
     }
 
-    // Reserves drain slots; the matching retire() (per completed entry) or release() (per unsent reservation) balances them.
+    // increment inFlight for accepted entries. retire() decrements it after completion, and release() decrements it for unsent entries.
     def reserve(n: Int): Unit =
       inFlight.addAndGet(n): Unit
 
-    // OPTIN tracking: a cached read writes [CLIENT CACHING YES, <read>] adjacently so only this read is tracked. The read is submitted with
-    // an identity decoder so the raw reply Frame reaches the cache; each waiter decodes it with its own command's decoder.
+    // OPTIN tracking applies CLIENT CACHING YES only to the next command. Submit it together with the cached read to keep them adjacent. An
+    // identity decoder passes the raw reply Frame to the cache, and each waiter then uses its own command decoder.
     def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan): Unit = {
       // tracking off: run uncached, releasing one of the two slots reserved for the (now unsent) caching prefix
       if (!trackingActive) {
@@ -347,7 +344,7 @@ final private[client] class MultiplexedConnection private (
       }
       @tailrec def attempt(): Unit    =
         cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
-          // a Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
+          // A Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
           // and release the two slots reserved for the (now unsent) fetch
           case ClientCache.Acquire.Hit(frame, epoch) =>
             if (cache.isCurrent(epoch)) {
@@ -398,7 +395,7 @@ final private[client] class MultiplexedConnection private (
         )
       )
 
-    // span and CommandCompleted bookkeeping around a server-bound submit; `send` is handed a settle hook to call with the outcome
+    // record tracing and CommandCompleted events around a command sent to the server. send calls the supplied function with the outcome.
     private def traced(command: Command[?], deferred: () => CommandSpan)(send: ((=> Outcome) => Unit) => Unit): Unit = {
       val span    = Events.startOrDefer(events, command, deferred)
       node.foreach(Events.routeSpan(span, _))
@@ -447,12 +444,12 @@ final private[client] class MultiplexedConnection private (
       }
     }
 
-    // Out-of-band frames never consume a pending entry. A READONLY reply fails its command, then poisons the connection: an in-place
-    // failover demotes the old master without dropping the socket, so it looks healthy but rejects writes.
+    // Out-of-band frames do not consume a pending entry. A READONLY reply fails its command and closes the connection because an in-place
+    // failover can leave the old master connected but unable to accept writes
     private def onFrame(frame: Frame): Unit =
       frame match {
         case Frame.Push(elements) =>
-          // not touching lastReplyAtMillis: a push proves only the read path, so push-only traffic must still get the idle keepalive PING
+          // a push confirms only that reads are working. Leave lastReplyAtMillis unchanged so push-only traffic still receives idle PING checks.
           Invalidation.decode(elements) match {
             case Some(Invalidation.Evict(keys)) => keys.foreach(cache.invalidate)
             case Some(Invalidation.FlushAll)    => cache.flush()
@@ -509,8 +506,8 @@ final private[client] class MultiplexedConnection private (
       }
     }
 
-    // A pipeline as one write unit: its payload is the entries concatenated, and its write/drop hooks fan out to every entry so each is
-    // matched and failed individually. A whole batch is therefore written — or dropped — atomically, never split across socket writes.
+    // Concatenate a pipeline into one transport write and notify each entry individually when the write succeeds or fails; the transport
+    // writes or drops the complete batch without splitting it across socket writes
     final private class Batch(entries: Vector[Entry[Any]]) extends Transport.Item {
 
       val payload: Bytes = Bytes.concatBy(entries)(_.payload)
@@ -532,11 +529,11 @@ private[client] object MultiplexedConnection {
     case Live, Reconnecting, Draining, Closed
   }
 
-  // the monotonic epoch of the current socket; a Dedicated Connection is stamped with the live one and discarded once it is no longer current
+  // a monotonic generation for the current socket; the pool records it on each DedicatedConnection and rejects the connection after it changes
   opaque type Generation = Long
   object Generation {
     val initial: Generation                        = 0L
-    // distinct from every real epoch (they start at 0 and only increase), so a stamped generation never reads as current while not Live
+    // distinct from every real generation, making all recorded generations invalid while disconnected
     val notLive: Generation                        = -1L
     extension (g: Generation) def next: Generation = g + 1L
   }

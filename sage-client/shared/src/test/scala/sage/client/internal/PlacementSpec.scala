@@ -115,7 +115,7 @@ class PlacementSpec extends munit.FunSuite {
     val placement = new Placement(sink("a", "b"), Vector("a", "b"))
     pool.byNode.getOrElseUpdate(n1, new FakeConn).failOn = Set("b")
 
-    // first pass: a lands on n1, b is refused
+    // first pass: a is assigned to n1, while b is refused
     assert(placement.reconcile(Map(n1 -> groups(Vector("a"), Vector("b"))), pool))
 
     // before the retry, b migrates to n2; a stays on n1

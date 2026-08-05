@@ -18,16 +18,15 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
 /**
-  * The Pekko-native surface: the same client, with every method returning `scala.concurrent.Future` and the streaming helpers returning a
-  * Pekko Streams `Source`. The Future effect comes from the kyo-compat Future cell; Pekko Streams is layered on top in this cell.
+  * A Sage client for Pekko. Methods return `scala.concurrent.Future`, and streaming methods return a Pekko Streams `Source`.
   */
 type SageClient = Client[Future, String]
 
 extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
 
   /**
-    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once. In cluster
-    * mode it walks every slot-owning master in turn, each with its own node-local cursor, so the sweep covers the whole keyspace.
+    * Scans the full keyspace. An empty page does not end the scan; iteration stops when the server returns a zero cursor. Redis may return
+    * the same key more than once. In cluster mode, each master is scanned with its own cursor.
     */
   def scanAll(
     pattern: Option[String] = None,
@@ -37,7 +36,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     scanSourceAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
 
   /**
-    * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all HSCAN field/value pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def hScanAll[F: KeyCodec, V: ValueCodec](
     key: K,
@@ -47,7 +46,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     scanSource(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
-    * The full SSCAN iteration over set members: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all SSCAN members until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def sScanAll[V: ValueCodec](
     key: K,
@@ -57,7 +56,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     scanSource(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
-    * The full ZSCAN iteration over member/score pairs: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all ZSCAN member/score pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def zScanAll[V: ValueCodec](
     key: K,
@@ -80,8 +79,8 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     )
 
   /**
-    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start.
-    * Tombstone entries are skipped, so every emitted entry carries data.
+    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor until it returns to the start. Entries whose data
+    * has already been deleted are skipped.
     */
   def xAutoClaimAll[F: KeyCodec, V: ValueCodec](
     key: K,
@@ -118,9 +117,9 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     }
 
   /**
-    * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
-    * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds. Since a `Future` cannot be cancelled,
-    * the loop is returned as a [[RunningConsumer]]: call `stop()` to halt it between entries and await its `completion`.
+    * Follows a stream as part of a consumer group. It processes this consumer's pending entries first, then waits for new entries. Each entry
+    * is acknowledged only after `handle` succeeds. A `Future` cannot be cancelled, so this method returns a [[RunningConsumer]]. Call `stop()`
+    * to stop between entries and wait for `completion`.
     */
   def xConsume[F: KeyCodec, V: ValueCodec](
     group: String,
@@ -167,7 +166,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
   private def scanSource[A](fetch: ScanCursor => Future[ScanPage[A]]): Source[A, NotUsed] =
     pagedSource[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
 
-  // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
+  // scan each target with its own node-local cursor. A cluster has one target for every slot-owning master.
   private def scanSourceAll[A](fetch: ScanTarget => ScanCursor => Future[ScanPage[A]]): Source[A, NotUsed] =
     pagedSource[ScanStep, A](ScanStep.Begin)(
       Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor)))
@@ -190,13 +189,14 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
       )
     )
 
-  // drives a shared Paged step machine as a Source, flattening each page into individual elements
+  // convert pages from the shared Paged helper into individual Source elements
   private def pagedSource[S, A](init: S)(step: Paged.Step[S, A]): Source[A, NotUsed] =
     Source
       .unfoldAsync[S, Vector[A]](init)(s => step(s).unsafeRun.map(_.map { case (items, next) => (next, items) })(ExecutionContext.parasitic))
       .mapConcat(identity)
 
-  // opens on materialization, closes on cancel/complete/failure; the materialized Future[Done] resolves when the subscribe is confirmed
+  // Open on materialization and close on cancellation, completion, or failure. Complete Future[Done] after the subscription open call finishes;
+  // cluster confirmation follows the best-effort behavior described above.
   private def subscriptionSource[A](open: => Future[Subscription[Future, A]]): Source[A, Future[Done]] =
     Source
       .fromMaterializer { (_, _) =>
@@ -223,8 +223,8 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
 object SageClient {
 
   /**
-    * A command surface re-typed to a non-String key, as returned by `client.as[K]`. The unqualified [[SageClient]] is String-keyed;
-    * use `as` to reach any other key type over the same connection.
+    * A client that uses `K` for keys, returned by `client.as[K]`. [[SageClient]] uses `String` keys by default. Calling `as` changes only
+    * the key type and continues to use the same connection.
     */
   type Keyed[K] = Client[Future, K]
 
@@ -235,9 +235,9 @@ object SageClient {
     Client.connect(config).unsafeRun.map(new Lowered(_))(ExecutionContext.parasitic)
 
   /**
-    * Connects, runs `f`, then closes the client on every exit path (success, failure, or a failed body), so a connection is never leaked
-    * when the body throws or its `Future` fails. Teardown errors are swallowed, matching the close-on-release policy of the other backends'
-    * `scoped`/`resource` helpers. Prefer this over `connect` + manual `close` unless you need to own the lifecycle yourself.
+    * Connects, runs `f`, and then closes the client whether `f` succeeds, throws, or returns a failed `Future`. Errors raised while closing
+    * are ignored, as they are by the other backends' `scoped` and `resource` helpers. Prefer this to managing `connect` and `close`
+    * yourself unless the client must outlive a single operation.
     */
   def use[A](config: SageConfig)(f: SageClient => Future[A])(using ExecutionContext): Future[A] =
     connect(config).flatMap(client => useConnected(client)(f))
@@ -267,9 +267,8 @@ object SageClient {
 }
 
 /**
-  * A handle to a running [[xConsume]] loop. Since `Future` has no interruption, the loop is stopped cooperatively via a Pekko `KillSwitch`.
-  * `completion` is the loop's terminal signal: it succeeds when the loop drains and fails if a `handle` invocation (or its acknowledgement)
-  * failed, mirroring how the other backends surface a handler error through their terminal effect.
+  * A handle to a running [[xConsume]] loop. Because `Future` cannot be interrupted, a Pekko `KillSwitch` stops the loop between entries.
+  * `completion` succeeds when the loop stops and fails if handling or acknowledging an entry failed.
   */
 final class RunningConsumer private[backend] (killSwitch: Option[UniqueKillSwitch], val completion: Future[Done]) {
 

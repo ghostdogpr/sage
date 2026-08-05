@@ -10,17 +10,12 @@ import SubscriptionConnection.{Kind, Sink}
 import sage.cluster.Node
 
 /**
-  * The shard placement ledger for one subscription: it owns the record of which Node carries which of the subscription's Shard Channels and
-  * is the single place that keeps that record in step with the wire. A Node owning several slot ranges needs one `SSUBSCRIBE` per Slot (a
-  * batched cross-slot subscribe returns `CROSSSLOT`), so a plan groups a Node's channels into the groups that each become one `SSUBSCRIBE`.
+  * Tracks which node handles each shard channel for one subscription. A node that owns several slot ranges needs a separate `SSUBSCRIBE`
+  * for each slot because a cross-slot subscription returns `CROSSSLOT`. Placement plans therefore group channels by node and slot.
   *
-  * Two ways to apply a plan, each applied atomically under the ledger lock so a concurrent unsubscribe/re-home of the same subscription can't
-  * interleave and strand an SSUBSCRIBE on an old owner:
-  *   - [[place]] is the initial subscribe: it records each group as it lands and leaves a failed attach unplaced for the caller to retry
-  *     (see `fullyPlaced`), so a transient owner/connection failure converges instead of surfacing to the subscriber; `placedAt` still
-  *     reflects exactly what landed, so a roll-back ([[reconcile]] to the empty plan) detaches it.
-  *   - [[reconcile]] is best-effort for re-homing — it detaches channels that left the plan, attaches the rest, records only what actually
-  *     lands, and reports whether any attach failed so the caller can retry.
+  * Plan updates are atomic with respect to unsubscribe and reassignment:
+  *   - [[place]] performs the initial subscription. It records successful groups and leaves failed groups for the caller to retry.
+  *   - [[reconcile]] removes obsolete groups, attaches new ones, records successful changes, and reports whether any attachment failed.
   */
 final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
 
@@ -38,7 +33,7 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
       plan.foreach { case (node, groups) =>
         conns.ensure(node).foreach { conn =>
           groups.foreach { group =>
-            // a concurrent eviction can close `conn` before attach; leave it unplaced to retry, don't propagate
+            // a concurrent eviction can close `conn` before attach. Leave the channel pending for a retry instead of failing reconciliation.
             try {
               conn.attach(sink, group, Kind.Shard)
               placedAt = placedAt.updatedWith(node)(prev => Some(prev.getOrElse(Set.empty) ++ group))
@@ -48,7 +43,8 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
       }
     }
 
-  // true when some attach failed (an unowned Slot is dropped from the plan by the caller, not reported here); the caller retries until it converges
+  // Return true when any connection or attachment failed. The caller omits unowned slots from the plan and retries until every requested
+  // channel is attached.
   def reconcile(plan: Placement.Plan, conns: Placement.Conns): Boolean =
     locked {
       val desired    = plan.view.mapValues(_.flatten.toSet).toMap
@@ -74,7 +70,7 @@ final private[internal] class Placement(sink: Sink, requested: Vector[String]) {
       incomplete
     }
 
-  // distinct union, not a sum of per-node sizes: a double-recorded channel must not mask an unplaced one
+  // count distinct attached channels across all nodes. Counting each node separately could hide a missing channel when another is recorded twice.
   def fullyPlaced: Boolean = locked(placedAt.valuesIterator.flatten.toSet.size) >= requested.distinct.size
 }
 

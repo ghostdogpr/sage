@@ -1,6 +1,6 @@
 # Error handling
 
-Every Sage failure is a `SageException`, a single sealed hierarchy you can match exhaustively. On ZIO and Kyo the error channel is that `SageException` itself (`IO[SageException, *]`, `Abort[SageException]`), so the compiler holds you to handling it. On Cats Effect, Ox, and Pekko the same `SageException` arrives through the ecosystem's untyped failure channel: a raised `IO`, a thrown exception, a failed `scala.concurrent.Future`. The runtime value is always a `SageException`; ZIO and Kyo also put it in the type.
+Every Sage failure is a `SageException`, part of a sealed hierarchy that you can match exhaustively. ZIO and Kyo include `SageException` in the error type (`IO[SageException, *]`, `Abort[SageException]`). Cats Effect, Ox, and Pekko report the same exception through their usual untyped error handling: a raised `IO`, a thrown exception, or a failed `scala.concurrent.Future`.
 
 ## The hierarchy
 
@@ -40,7 +40,7 @@ def classify(e: SageException): String = e match {
 
 ## Retrying after a connection loss
 
-`ConnectionLost` carries a `mayHaveExecuted` flag, and it is the key to safe retries:
+The `mayHaveExecuted` flag on `ConnectionLost` tells you whether a retry is safe:
 
 - `false` means the command was never sent, so retrying is always safe.
 - `true` means it was already in flight when the connection dropped, so the server may or may not have applied it. A non-idempotent command (an `INCR`, an `LPUSH`) is then not safe to blindly retry; an idempotent one (a `SET` to a fixed value) is.
@@ -53,8 +53,7 @@ When `mayHaveExecuted` is `true`, do not blindly retry a non-idempotent command:
 
 ## Refusals Sage retries for you
 
-Some replies mean the server turned the command down *before* running it, for a reason that goes away on its own. Sage retries those for you; nothing
-ran, so nothing can run twice.
+Some replies mean the server rejected the command *before* running it for a temporary reason. Sage retries these commands because the first attempt was not executed.
 
 | Reply | What it means |
 | --- | --- |
@@ -64,15 +63,15 @@ ran, so nothing can run twice.
 | `-MASTERDOWN` | A replica cut off from its master, running with `replica-serve-stale-data no`. |
 
 Retries are bounded and spaced by a short random delay, sharing the cluster's `maxRedirects` budget. If the condition outlasts it, the original reply
-reaches you as a `ServerError`, code intact. A read tries its next [`ReadFrom`](/configuration#read-routing) candidate first, so a refusing replica
+is returned as a `ServerError` with its original code. A read tries its next [`ReadFrom`](/configuration#read-routing) candidate first, so a refusing replica
 costs one hop when the master or another replica can serve it.
 
-The exception is [commands that run on every master](/configuration#commands-that-run-on-every-master): a `-CLUSTERDOWN` there reaches you, because
-the failover may have moved the very masters the call fanned out to. Retry it yourself, keeping in mind that the fan-out is not atomic, so masters
+The exception is [commands that run on every master](/configuration#commands-that-run-on-every-master): Sage returns `-CLUSTERDOWN` to you because
+the failover may have changed the set of masters. Retry the command yourself, keeping in mind that it does not run atomically across masters. Masters
 that already ran the command run it again. That is harmless for reads, `SCRIPT LOAD`, and the `FLUSH` family, but the `FUNCTION` mutations refuse a
 second run unless you pass `replace = true` (or `RestorePolicy.Replace` / `RestorePolicy.Flush`).
 
-## How failures surface per backend
+## How each backend reports failures
 
 The same `SageException` is delivered through each ecosystem's normal failure channel. ZIO and Kyo carry it in the type as well, so on those two a non-`SageException` is a defect (a ZIO die, a Kyo `Panic`) rather than a typed failure:
 

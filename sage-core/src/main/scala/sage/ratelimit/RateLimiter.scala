@@ -8,28 +8,28 @@ import sage.codec.KeyCodec
 import sage.commands.*
 
 /**
-  * A distributed token-bucket rate limiter. Each method returns a pure [[sage.commands.Command]] the caller runs through their client, so it
-  * works on every backend. A subject's state is one hash key (a single cluster slot); the check-refill-consume cycle is an atomic Lua script
-  * reading the server clock. While a subject's bucket state exists, changing the policy under the same namespace conservatively carries
-  * forward no more than the existing whole tokens or the new capacity, so overlapping deployments cannot recreate full buckets. An idle
-  * full bucket is expired and therefore starts as a new bucket under a later policy.
+  * A distributed token-bucket rate limiter. Each method returns a [[sage.commands.Command]] that works with every backend. One hash key stores
+  * each subject's state in a single cluster slot. An atomic Lua script reads the server clock, refills the bucket, and applies the request.
+  * When a policy changes under an existing namespace, Sage retains the smaller of the current whole-token balance and the new capacity. This
+  * prevents overlapping deployments from repeatedly creating full buckets. Full, idle buckets expire. The next request creates a bucket
+  * using the current policy.
   */
 final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimiter.defaultNamespace)(using keyCodec: KeyCodec[K]) {
 
   /**
-    * Consume `cost` tokens for `subject` if the bucket holds them, returning [[Decision.Allowed]] with the tokens left, otherwise
-    * [[Decision.Denied]] with the time until `cost` tokens are available. Non-blocking: it never waits.
+    * Attempts to consume `cost` tokens for `subject`. Returns [[Decision.Allowed]] with the remaining balance, or [[Decision.Denied]] with the
+    * time until enough tokens become available. Returns immediately.
     */
   def tryAcquire(subject: K, cost: Long = 1): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost, peek = false)
 
   /**
-    * Report the current standing for `subject` without consuming: [[Decision.Allowed]] while at least one token is available, otherwise
-    * [[Decision.Denied]] with the wait until one is. The bucket is still refilled by elapsed time, but no tokens are taken.
+    * Checks `subject` without consuming a token. Elapsed time still refills the bucket. Returns [[Decision.Allowed]] when a token is available,
+    * or [[Decision.Denied]] with the time until one becomes available.
     */
   def peek(subject: K): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost = 1, peek = true)
 
   /**
-    * Clear `subject`'s bucket, so its next request starts from full capacity.
+    * Clears `subject`'s bucket. Its next request starts with full capacity.
     */
   def reset(subject: K): Command[Unit] =
     Command("DEL", Command.FirstKey, Vector(keyBytes(subject)), _ => Right(()))
@@ -69,21 +69,21 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   private[sage] def evalSha(subject: K, cost: Long, peek: Boolean = false): Command[Decision] =
     eval(RateLimiter.Invocation.EvalSha, subject, cost, peek)
 
-  // test-only: drive the script's clock with an explicit timestamp
+  // test-only entry point that supplies the script clock explicitly.
   private[sage] def tryAcquireAt(subject: K, cost: Long, nowMicros: Long): Command[Decision] =
     eval(RateLimiter.Invocation.Eval, subject, cost, peek = false, Some(nowMicros))
 
-  // the NOSCRIPT recovery for evalSha: sending the body runs the check and caches it on that node, so no cluster-wide SCRIPT LOAD is needed
+  // NOSCRIPT recovery for evalSha. Sending the body runs the check and caches the script on that node.
   private[sage] def evalScript(subject: K, cost: Long, peek: Boolean): Command[Decision] =
     eval(RateLimiter.Invocation.Eval, subject, cost, peek)
 
-  // length-framing keeps namespace `a` + subject `b:c` distinct from namespace `a:b` + subject `c`
+  // length framing distinguishes namespace `a` with subject `b:c` from namespace `a:b` with subject `c`.
   private def keyBytes(subject: K): Bytes = Bytes.concat(Vector(keyPrefix, keyCodec.encode(subject)))
 
   private def eval(invocation: RateLimiter.Invocation, subject: K, cost: Long, peek: Boolean, now: Option[Long] = None): Command[Decision] = {
     val costArgument = if (cost == 1L) RateLimiter.defaultCostArgument else Bytes.utf8(cost.toString)
     val nowArgument  = now match {
-      case None        => Bytes.empty // empty injected time => server TIME
+      case None        => Bytes.empty // an empty injected time uses the server's TIME value
       case Some(value) => Bytes.utf8(value.toString)
     }
     val allArgs      = Vector(
@@ -104,9 +104,9 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
 
 object RateLimiter {
 
-  // Reply: [allowed, remaining, catchupMicros, retryMicros, resetMicros] (catch-up kept separate so Scala sums the parts past Lua's 2^53).
+  // Reply: [allowed, remaining, catchupMicros, retryMicros, resetMicros]. Scala sums the separate catch-up value beyond Lua's 2^53 limit.
   // State hash: `t` tokens, `ts` last-refill micros, `f` sub-token remainder, `v` policy signature. ARGV[6] overrides server TIME for
-  // tests; ARGV[7] = '1' is a peek: decide on `cost`, consume nothing.
+  // tests. ARGV[7] = '1' checks `cost` without consuming tokens.
   val script: String =
     """local capacity = tonumber(ARGV[1])
       |local refill_tokens = tonumber(ARGV[2])
