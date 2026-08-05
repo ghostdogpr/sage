@@ -5,8 +5,8 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 /**
-  * Polling for state a server reaches on its own schedule. The action is a thunk, not by-name: a by-name `CIO` erases to the same shape the
-  * Future and Ox cells give the effect itself, and casts at run time.
+  * Polling for state a server reaches on its own schedule. The action is passed as a thunk. A by-name `CIO` parameter would erase to the same
+  * JVM signature as the effect value used by the Future and Ox cells, leading to runtime casts.
   */
 object Eventually {
 

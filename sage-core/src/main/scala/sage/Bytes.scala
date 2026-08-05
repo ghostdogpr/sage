@@ -4,9 +4,8 @@ import java.nio.charset.StandardCharsets
 import java.util.Arrays
 
 /**
-  * The Core's opaque, immutable byte container, used at every protocol and codec boundary. Content equality is explicit: use `sameBytes`,
-  * never `==`, which compares references and is unreliable by design. Construction is copy-aware — see [[Bytes.wrap]] (zero-copy) versus
-  * [[Bytes.fromArray]] (defensive copy).
+  * The Core's opaque, immutable byte container, used at every protocol and codec boundary. Compare contents with `sameBytes`; `==` compares
+  * references. [[Bytes.wrap]] uses the supplied immutable array directly, while [[Bytes.fromArray]] makes a defensive copy.
   */
 opaque type Bytes = IArray[Byte]
 
@@ -23,7 +22,7 @@ object Bytes {
   def utf8(value: String): Bytes = IArray.unsafeFromArray(value.getBytes(StandardCharsets.UTF_8))
 
   /**
-    * Zero-copy: wraps an already-immutable `IArray`.
+    * Wraps an immutable `IArray` without copying it.
     */
   def wrap(bytes: IArray[Byte]): Bytes = bytes
 
@@ -33,12 +32,12 @@ object Bytes {
   def fromArray(bytes: Array[Byte]): Bytes = IArray.unsafeFromArray(bytes.clone())
 
   /**
-    * One contiguous container from many, so a Pipeline's commands reach the socket as a single write.
+    * Combines several byte containers into one contiguous container. Pipelines use this to send their commands in a single write.
     */
   def concat(parts: Seq[Bytes]): Bytes = concatBy(parts)(identity)
 
   /**
-    * Like [[concat]], but reads each part from `items` via `payload`, sparing the caller a throwaway mapped collection.
+    * Like [[concat]], but obtains each byte container by applying `payload` to an item. This avoids creating an intermediate collection.
     */
   def concatBy[A](items: Seq[A])(payload: A => Bytes): Bytes =
     items match {
@@ -90,7 +89,7 @@ object Bytes {
     def toIArray: IArray[Byte] = self
 
     /**
-      * No copy; callers must never mutate the result.
+      * Returns the underlying mutable array without copying it. Callers must not modify the result.
       */
     private[sage] def unsafeArray: Array[Byte] = arr(self)
   }

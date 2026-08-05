@@ -22,8 +22,8 @@ enum ExpireCondition {
 }
 
 /**
-  * The data type a key holds, as reported by `TYPE`. `Other` carries the wire name of any type this library does not classify as one of the
-  * six classic types — a preview type (Arrays, vector sets) or a module type — so `TYPE` never fails to decode.
+  * The data type reported by `TYPE`. `Other` contains the server name for a type outside the six classic types, including preview and module
+  * types. This allows newer type names to decode successfully.
   */
 enum RedisType {
   case String, List, Set, ZSet, Hash, Stream
@@ -185,7 +185,8 @@ private[sage] object Keys {
   def pExpireTime[K](key: K)(using keyCodec: KeyCodec[K]): Command[ExpiryTime] =
     Command.readUncacheable("PEXPIRETIME", Command.FirstKey, Vector(keyCodec.encode(key)), expiryTimeDecode(Instant.ofEpochMilli))
 
-  // KEYS is node-local; `allMasters` + `Concat` makes a cluster sweep every master and merge the slices. Prefer `scanAll` in production.
+  // KEYS returns data from one node. In a cluster, allMasters runs it on every master and Concat combines the returned keys. Prefer scanAll
+  // in production.
   def keys[K](pattern: String)(using keyCodec: KeyCodec[K]): Command[Vector[K]] =
     Command(
       "KEYS",
@@ -281,8 +282,8 @@ private[sage] object Keys {
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
     val args   = keyCodec.encode(key) +: sortOptionArgs(by, limit, get, order, alpha)
     val decode = Decode.vector(Decode.optionalValue)
-    // BY/GET patterns dereference keys beyond the source key, which the cache's reverse index (built from keyIndices) does
-    // not track, so an invalidation for one would not evict — only the bare form reads the source key alone and is cacheable
+    // BY and GET patterns may read keys besides the source key. Those additional keys are absent from keyIndices and from the cache's reverse
+    // index, so their invalidation would not evict the result. The bare form reads the source key alone and is cacheable.
     if (by.isEmpty && get.isEmpty) Command.read("SORT_RO", Command.FirstKey, args, decode)
     else Command.readUncacheable("SORT_RO", Command.FirstKey, args, decode)
   }

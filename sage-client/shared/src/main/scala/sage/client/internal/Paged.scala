@@ -10,11 +10,11 @@ import sage.BlockTimeout
 import sage.commands.{ScanCursor, ScanPage, StreamEntry, StreamId, StreamRangeId, XAutoClaimResult}
 
 /**
-  * The page-stepping state machines behind the per-backend `…All` streaming helpers (`scanAll`, `xRangeAll`, `xConsume`, …). Each builder
-  * takes a `fetch` that pulls one page in the `CIO` carrier and returns a step `S => CIO[Option[(page, nextState)]]` — the shape both
-  * `CStream.unfold` (zio/ce/ox) and the native `Stream.unfold` (kyo, which needs `chunkSize = 1` for its infinite tails) consume. The
-  * cursor-termination, tombstone-skipping and pending-then-tail logic lives here once; the backend keeps only its own stream construction and
-  * the `s => CIO.lift(client.run(…))` fetch. Pure given its `fetch`, so each step is driven directly in `PagedSpec` with a scripted fetch.
+  * Shared paging logic for streaming helpers such as `scanAll`, `xRangeAll`, and `xConsume`. Each builder accepts a `CIO` function that
+  * fetches one page and returns a step shaped as `S => CIO[Option[(page, nextState)]]`. ZIO, Cats Effect, and Ox use the step with
+  * `CStream.unfold`. Kyo uses its native `Stream.unfold` with `chunkSize = 1`, which lets unbounded streams emit each page immediately. The
+  * shared code handles cursor completion, deleted entries, and consumer recovery; each backend only constructs its stream and lifts the
+  * page fetch. `PagedSpec` tests the steps directly with scripted fetches.
   */
 private[sage] object Paged {
 
@@ -23,13 +23,12 @@ private[sage] object Paged {
     */
   type Step[S, A] = S => CIO[Option[(Vector[A], S)]]
 
-  // the tailing streams' default poll (xTail/xConsume); bounded so the blocking read returns periodically and cancellation stays responsive
+  // a finite poll lets xTail and xConsume check for cancellation between blocking reads.
   val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
   /**
-    * Cursor scan (HSCAN/SSCAN/ZSCAN, and a single SCAN target): page until the server returns no continuation cursor. Termination is on the
-    * zero cursor only, never on an empty page — a `MATCH`-filtered scan routinely returns empty intermediate pages with a non-zero cursor, so
-    * an `isEmpty => None` guard (as [[byRange]] and [[byAutoClaim]] carry) would end the sweep early and drop the rest of the keyspace.
+    * Pages through HSCAN, SSCAN, ZSCAN, or one SCAN target until the server returns a zero cursor. A filtered scan can return an empty page
+    * with a non-zero cursor, so an empty page does not end iteration.
     */
   def byCursor[A](fetch: ScanCursor => CIO[ScanPage[A]]): Step[Option[ScanCursor], A] = {
     case None         => CIO.value(None)
@@ -37,8 +36,8 @@ private[sage] object Paged {
   }
 
   /**
-    * Cluster-wide SCAN: walk every target in turn, scanning each to its node-local zero cursor before moving on, so the sweep never
-    * silently covers a single node. The `Begin` step discovers the targets; an empty set ends the stream immediately.
+    * Scans every cluster target in turn, completing one node-local cursor before moving to the next. `Begin` discovers the targets, and an
+    * empty target list ends the stream immediately.
     */
   def acrossTargets[A](scanTargets: CIO[Vector[ScanTarget]])(fetch: ScanTarget => ScanCursor => CIO[ScanPage[A]]): Step[ScanStep, A] = {
     case ScanStep.Begin                    =>
@@ -66,8 +65,7 @@ private[sage] object Paged {
   }
 
   /**
-    * XAUTOCLAIM paging: advance the cursor each call until it wraps back to the start (`StreamId.Zero`). Tombstone entries — claimed ids
-    * whose data was already deleted, surfaced with no fields — are dropped so every emitted entry carries data.
+    * Pages through XAUTOCLAIM until its cursor returns to `StreamId.Zero`. Entries whose data has already been deleted are omitted.
     */
   def byAutoClaim[F, V](fetch: StreamId => CIO[XAutoClaimResult[F, V]]): Step[Option[StreamId], StreamEntry[F, V]] = {
     case None       => CIO.value(None)
@@ -76,14 +74,16 @@ private[sage] object Paged {
   }
 
   /**
-    * XREAD tail: replay every entry after `from`, then block for new ones forever, advancing past the last id and never advancing on an empty round.
+    * Replays every XREAD entry after `from`, then waits for new entries. After a non-empty read, the next read starts after the last returned
+    * id. An empty read keeps the same id.
     */
   def tail[F, V](fetch: StreamId => CIO[Vector[StreamEntry[F, V]]]): Step[StreamId, StreamEntry[F, V]] =
     last => fetch(last).map(entries => Some((entries, if (entries.isEmpty) last else entries.last.id)))
 
   /**
-    * XREADGROUP consume: first drain this consumer's own pending history (`Left`, at-least-once recovery after a restart), then block for
-    * new entries forever (`Right`). The per-entry acknowledgement is the backend's, layered over the entries this step yields.
+    * Reads this consumer's pending XREADGROUP entries first, which supports at-least-once recovery after a restart. It then waits for new
+    * entries. `Left` stores the pending-entry cursor and `Right` marks the switch to new entries. Each backend acknowledges an entry only
+    * after the user's handler succeeds. If the handler fails, the entry remains pending for later recovery.
     */
   def consume[F, V](
     drainPending: StreamId => CIO[Vector[StreamEntry[F, V]]],

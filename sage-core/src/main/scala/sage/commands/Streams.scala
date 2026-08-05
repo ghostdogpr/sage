@@ -10,9 +10,8 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * A concrete Stream Entry ID: a millisecond timestamp and a per-millisecond sequence. The one type used for replies and for explicit
-  * values; each command position that also admits a special token (`*`, `-`/`+`, `$`, `>`, `(`) carries its own sealed type listing only
-  * the tokens legal there, so an illegal form at a position cannot be written.
+  * A concrete stream-entry ID containing a millisecond timestamp and sequence number. Replies and explicit IDs use this type. Command
+  * positions that accept special tokens (`*`, `-`/`+`, `$`, `>`, `(`) use separate sealed types that list the supported values.
   */
 final case class StreamId(ms: Long, seq: Long) extends Ordered[StreamId] {
   def compare(that: StreamId): Int  = {
@@ -84,8 +83,8 @@ enum TrimThreshold {
 }
 
 /**
-  * How a Stream is trimmed, shared by `XADD` and `XTRIM` (the [[ListSide]] domain-primitive exception). `Approximate` (`~`) is the only
-  * form that admits `LIMIT`, so a `LIMIT` without `~` — which the raw command rejects — cannot be expressed.
+  * Trimming options shared by `XADD` and `XTRIM` (the [[ListSide]] domain-primitive exception). Only `Approximate` (`~`) accepts `LIMIT`,
+  * matching the server command.
   */
 enum Trimming {
   case Exact(threshold: TrimThreshold)

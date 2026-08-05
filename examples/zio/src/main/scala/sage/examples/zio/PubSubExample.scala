@@ -6,8 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Classic channel pub/sub surfaced as a native `ZStream`; closing the surrounding scope unsubscribes. Sharded pub/sub
-  * (`sSubscribe`/`sPublish`) is shown in the cluster spotlight, where it belongs.
+  * Classic channel pub/sub with a `ZStream`. Closing the surrounding scope unsubscribes. The cluster example covers sharded pub/sub with
+  * `sSubscribe` and `sPublish`.
   */
 object PubSubExample {
 

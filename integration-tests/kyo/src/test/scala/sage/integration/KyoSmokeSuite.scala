@@ -115,7 +115,7 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
     }
   }
 
-  // Regression for the 4096-page rechunk that buffered infinite tails; bounded run so a reintroduced regression fails fast, not hangs.
+  // regression for the 4096-page rechunk that buffered unbounded streams; the timeout makes a recurrence fail rather than hang
   test("xTail emits replayed entries immediately instead of buffering them") {
     withBoundedClient(15L.seconds) { client =>
       for {

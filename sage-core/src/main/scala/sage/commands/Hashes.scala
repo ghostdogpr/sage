@@ -58,8 +58,8 @@ enum HSetExCondition {
 }
 
 /**
-  * A hash field is an identifier within the hash, never cluster-routed, so it takes a [[KeyCodec]] (not a [[ValueCodec]]): the same
-  * representation-stability guarantee a key needs.
+  * Hash fields use [[KeyCodec]] because they are identifiers whose byte representation must remain stable. Cluster routing still uses only
+  * the hash key.
   */
 private[sage] object Hashes {
 

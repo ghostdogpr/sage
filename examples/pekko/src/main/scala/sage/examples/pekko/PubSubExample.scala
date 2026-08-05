@@ -11,9 +11,9 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Classic channel pub/sub surfaced as a native Pekko Streams `Source`. The materialized `Future[Done]` resolves once the SUBSCRIBE is
-  * confirmed, so the publishes below cannot race the registration; cancelling the stream (here, after `take(3)`) unsubscribes. Sharded
-  * pub/sub is shown in the cluster spotlight, where it belongs.
+  * Classic channel pub/sub with a Pekko Streams `Source`. The materialized `Future[Done]` completes when the subscription is confirmed.
+  * Waiting for it before publishing avoids missing the first messages. Cancelling the stream unsubscribes. The cluster example covers
+  * sharded pub/sub.
   */
 object PubSubExample {
 

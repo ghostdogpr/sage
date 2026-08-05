@@ -5,10 +5,9 @@ import scala.collection.mutable
 import sage.protocol.Frame
 
 /**
-  * Shape-generic pairwise combiners for [[BroadcastReduce.Fold]], folding two masters' replies into one. Each passes a reply that does not
-  * fit the expected shape straight through, in either operand position, so the command's own decoder reports it rather than this merge
-  * hiding it behind a well-formed sibling. A combiner that needs command-specific validation stays with its command instead, since it can
-  * reject what no downstream decoder would catch (`SCRIPT EXISTS` compares arrays that must describe the same SHAs).
+  * Pairwise reply combiners used by [[BroadcastReduce.Fold]]. If either reply has an unexpected shape, the combiner returns that reply for
+  * the command's decoder to reject. Command-specific validation remains with the command. For example, `SCRIPT EXISTS` must also verify
+  * that both arrays describe the same SHAs, which a general array combiner cannot do.
   */
 private[commands] object Merge {
 
@@ -27,8 +26,8 @@ private[commands] object Merge {
     }
 
   /**
-    * Sums a flat `[channel, count, …]` reply per channel, keeping each channel's first-seen position. Appending instead would emit a channel
-    * once per master, and the `PUBSUB NUMSUB` decoder builds a `Map`, so every count but the last would be dropped.
+    * Sums a flat `[channel, count, …]` reply by channel and preserves the order in which channels first appear. Simply appending replies
+    * would repeat channels, and converting the result to a `Map` would discard all but the last count for each one.
     */
   val sumByChannel: (Frame, Frame) => Frame = (a, b) =>
     (channelCounts(a), channelCounts(b)) match {
@@ -41,8 +40,8 @@ private[commands] object Merge {
     }
 
   /**
-    * The channel/count pairs of a flat `[channel, count, …]` reply, or `None` when it is not that shape. Shared with the `PUBSUB NUMSUB`
-    * decoder so the merge and the decode cannot disagree about the reply's shape.
+    * Extracts channel/count pairs from a flat `[channel, count, …]` reply. Returns `None` for any other shape. The merge and the `PUBSUB
+    * NUMSUB` decoder share this function so they apply the same validation.
     */
   def channelCounts(frame: Frame): Option[Vector[(Frame.BulkString, Long)]] =
     frame match {

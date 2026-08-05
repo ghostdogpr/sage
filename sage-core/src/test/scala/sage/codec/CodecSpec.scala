@@ -146,7 +146,7 @@ class CodecSpec extends munit.FunSuite {
       ValueCodec[Int].emap(n => if (n % 2 == 0) Right(Even(n)) else Left(DecodeError("an even Int", n.toString)))(_.value)
     assertEquals(codec.decode(codec.encode(Even(4))), Right(Even(4)))
     assertEquals(codec.decode(Bytes.utf8("3")), Left(DecodeError("an even Int", "3")))
-    // a failure decoding the underlying Int still surfaces, unchanged
+    // preserve a failure returned by the underlying Int codec.
     assertEquals(codec.decode(Bytes.utf8("abc")), Left(DecodeError("Int", "'abc'")))
   }
 

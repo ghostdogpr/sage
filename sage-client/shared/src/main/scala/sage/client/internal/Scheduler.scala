@@ -32,7 +32,8 @@ private[client] object Scheduler {
   }
 
   /**
-    * Timing on one shared daemon thread; each one-shot body runs on its own virtual thread so a blocking reconnect never stalls the timer.
+    * One shared daemon thread handles timing. Each one-shot body runs on a virtual thread, preventing a blocking reconnect from delaying
+    * other timers.
     */
   val real: Scheduler = new Scheduler {
 

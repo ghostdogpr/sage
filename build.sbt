@@ -8,7 +8,7 @@ val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed t
 val munitVersion          = "1.3.4"
 val testcontainersVersion = "0.44.1"
 val otelVersion           = "1.64.0"
-val circeVersion          = "0.14.16" // test-only: proves the ValueCodec emap seam works with a real JSON library
+val circeVersion          = "0.14.16" // test-only: verifies ValueCodec.emap with a real JSON library
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC5"
@@ -25,8 +25,8 @@ val lettuceVersion    = "7.6.0.RELEASE"
 val rediscalaVersion  = "2.1.0"
 val jedisVersion      = "6.0.0"
 
-// The Pekko backend rides the Future effect cell (kyo-compat-future) plus Pekko Streams. A distinct axis name keeps it separate from the
-// implicit Future anchor (which dedups by name); the nonexistent kyo-compat-pekko dep it makes the plugin inject is stripped in jvmSettings.
+// The Pekko backend uses the Future compatibility cell (kyo-compat-future) with Pekko Streams. A separate axis name prevents it from being
+// deduplicated with the implicit Future anchor. jvmSettings removes the nonexistent kyo-compat-pekko dependency injected by the plugin.
 val PekkoLib = CompatBackendAxis("pekko", "Pekko", "-pekko", Set("jvm"))
 
 inThisBuild(
@@ -79,8 +79,8 @@ addCommandAlias(
 lazy val root = project
   .in(file("."))
   .settings(publish / skip := true)
-  // benchmarks is intentionally NOT aggregated: it is dev-only/on-demand and pulls JMH + testcontainers + competitor clients, which should
-  // not be dragged into ordinary root compile/test/CI. The benchAll alias and benchmarks<Cell>/Jmh/run target its cells directly.
+  // Exclude benchmarks from root aggregation because their JMH, testcontainers, and competitor-client dependencies are needed only for
+  // on-demand benchmark runs. Use benchAll or benchmarks<Cell>/Jmh/run to run them directly.
   .aggregate(core.projectRefs ++ client.projectRefs ++ opentelemetry.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs: _*)
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
@@ -132,7 +132,7 @@ lazy val client = (projectMatrix in file("sage-client"))
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
     publish / skip   := moduleName.value.endsWith("-future"),
-    // surfaces the library version to the CLIENT SETINFO LIB-VER announced at connection setup; version comes from sbt-dynver
+    // provides the sbt-dynver version for CLIENT SETINFO LIB-VER during connection setup.
     buildInfoKeys    := Seq[BuildInfoKey](version),
     buildInfoPackage := "sage.client",
     // pin the backend effect libs per cell rather than inheriting them transitively from kyo-compat-<backend>
@@ -154,10 +154,8 @@ lazy val client = (projectMatrix in file("sage-client"))
   .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .jvmSettings(stripBogusPekkoCompatDep)
 
-// the shared testcontainers suite runs once per backend cell, catching backend-specific lowering bugs against real servers;
-// command-behavior (sage.integration.commands), security (sage.integration.security), cluster (sage.integration.cluster), and master-replica
-// (sage.integration.masterreplica) suites run on one designated cell only — none of per-command behavior, TLS/auth, cluster routing, nor
-// master-replica routing (all in the shared layer) can differ per backend
+// Run the shared testcontainers suite for every backend to test each backend against real servers. Run command behavior, security, cluster,
+// master-replica, and rate-limit suites on one backend because those features use the same shared implementation in every backend.
 lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .dependsOn(client, core % "test->test")
   .settings(name := "integration-tests")
@@ -188,24 +186,24 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .jvmSettings(stripBogusPekkoCompatDep)
 
-// Runnable, never-published usage examples — one cell per backend so each compiles against its own native artifact (ZIO Task, Cats Effect
-// IO, Ox direct style, Kyo). Aggregated by root and compiled in CI via the testUnit alias; the forced future anchor cell carries no example
-// of its own and just compiles examples/shared. Run by hand against a local server, e.g. `sbt examplesZio/run` — see examples/README.md.
+// Build runnable, unpublished examples for ZIO, Cats Effect, Ox, Kyo, and Pekko in separate cells so each uses its native client artifact. The
+// root project compiles them in CI through testUnit. The Future cell compiles examples/shared. Run an example against a local server with a
+// command such as `sbt examplesZio/run`. See examples/README.md.
 lazy val examples = (projectMatrix in file("examples"))
   .dependsOn(client)
   .settings(name := "examples")
   .settings(commonSettings)
   .settings(publish / skip := true)
-  // never-published runnable samples: no API docs to generate, and doc'ing them only surfaces broken links inside third-party sources
-  // (e.g. Cats Effect's IOApp) that an example extends
+  // These runnable samples are not published. Skip API documentation because third-party parent types such as Cats Effect's IOApp contain
+  // links that cannot be resolved here.
   .settings(Compile / doc / sources := Seq.empty)
   .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
   .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .jvmSettings(stripBogusPekkoCompatDep)
 
-// Runtime end-to-end benchmark harness (JMH), dev-only and never published. One cell per backend (the backends are cross-compiled from the
-// same sage.* sources and would collide on one classpath, so they cannot share a module). Competitor baselines are added per cell: zio-redis
-// to the zio cell, redis4cats to the ce cell, raw Lettuce (async) to the ox cell as the JVM ceiling. kyo is sage-only. See benchmarks/README.md.
+// Runtime end-to-end benchmark harness (JMH), used only during development. Each backend has a separate cell. The ZIO cell includes
+// zio-redis, the Cats Effect cell includes redis4cats, and the Ox cell includes Lettuce, Rediscala, and Jedis. The Kyo and Pekko cells include
+// only Sage. See benchmarks/README.md.
 lazy val benchmarks = (projectMatrix in file("benchmarks"))
   .dependsOn(client)
   .enablePlugins(JmhPlugin)
@@ -213,7 +211,7 @@ lazy val benchmarks = (projectMatrix in file("benchmarks"))
   .settings(commonSettings)
   .settings(
     publish / skip                        := true,
-    // matrix cells have a non-existent baseDirectory (e.g. benchmarks/ce/jvm); fork JMH from the repo root so the JVM launches and the
+    // Matrix cells have a non-existent baseDirectory (e.g. benchmarks/ce/jvm); fork JMH from the repo root so the JVM launches and the
     // -rff benchmarks/results/*.json paths resolve there
     Jmh / run / forkOptions               := (Jmh / run / forkOptions).value.withWorkingDirectory((ThisBuild / baseDirectory).value),
     libraryDependencies += "com.dimafeng" %% "testcontainers-scala-core" % testcontainersVersion,
@@ -234,7 +232,7 @@ lazy val benchmarks = (projectMatrix in file("benchmarks"))
   .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .jvmSettings(stripBogusPekkoCompatDep)
 
-// the runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
+// The runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
 // each writing JMH JSON to benchmarks/results/<cell>.json. benchmarks/merge-results.sh merges them into one all.json covering every client
 // (uploadable to https://jmh.morethan.io).
 addCommandAlias(
@@ -263,7 +261,7 @@ lazy val commonSettings = Def.settings(
   Test / fork                            := true
 )
 
-// only for container-free cells: integration suites each boot their own container, so running them in
+// Only for container-free cells: integration suites each boot their own container, so running them in
 // parallel would multiply peak load and invite timing races
 lazy val parallelUnitTests = Def.settings(Test / testForkedParallel := true)
 

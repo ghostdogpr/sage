@@ -6,9 +6,9 @@ import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * ZADD's mutually-exclusive option space, flattened to exactly its legal states: NX/XX never combine, GT/LT never combine, NX forbids
-  * any GT/LT, while XX may pair with either. CH (changed-count return) is a separate boolean; INCR (which changes the reply to the new
-  * score) is the separate [[SortedSets.zAddIncr]] builder.
+  * Conditions supported by `ZADD`. `Always` sends no condition. `IfNotExists` and `IfExists` send `NX` and `XX`. `IfGreater` and `IfLess`
+  * send `GT` and `LT`; the combined cases add `XX`. The `changed` argument to [[SortedSets.zAdd]] controls `CH`. Use
+  * [[SortedSets.zAddIncr]] for `INCR`.
   */
 enum ZAddCondition {
   case Always
@@ -75,9 +75,9 @@ object Limit {
 }
 
 /**
-  * A `ZRANGE` query. The three modes carry exactly their legal options — a by-rank query has no `LIMIT` — and `min`/`max` are always given
-  * low-to-high: under `rev` the encoder emits them in the descending wire order `BYSCORE`/`BYLEX` require, so the bound-swap foot-gun is
-  * unrepresentable. `ByLex` carries the member type; `ByRank`/`ByScore` are `ZRange[Nothing]`.
+  * A `ZRANGE` query. The three modes contain only their supported options; a by-rank query has no `LIMIT`. Callers always provide `min` and
+  * `max` from low to high. With `rev`, the encoder reverses them into the descending order required by `BYSCORE` and `BYLEX`. `ByLex` stores
+  * the member type; `ByRank` and `ByScore` are `ZRange[Nothing]`.
   */
 enum ZRange[+V] {
   case ByRank(start: Long, stop: Long, rev: Boolean = false)

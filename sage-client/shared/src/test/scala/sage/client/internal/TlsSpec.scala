@@ -10,7 +10,8 @@ import sage.client.{TlsConfig, TrustSource}
 
 class TlsSpec extends munit.FunSuite {
 
-  // one self-signed cert whose only SAN is dns:localhost: the server presents it, the client trusts it, so only the connect host varies
+  // Use one self-signed certificate with dns:localhost as its only subject alternative name. The server presents it and the client trusts it;
+  // each test changes only the connection host.
   private lazy val material = certMaterial()
 
   private def certMaterial(): (SSLContext, SSLContext) = {

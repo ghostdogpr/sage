@@ -1,15 +1,14 @@
 package sage
 
 /**
-  * A user-supplied observer of runtime [[SageEvent]]s, registered in configuration. The callback is synchronous and `Unit`-returning so the
-  * SPI is effect-agnostic and lives in the Core, letting an integration module bind to it without depending on any Backend. sage invokes it
-  * off the command path, so a slow or throwing listener can never block or break command execution: a slow one only delays event delivery (and
-  * sheds events once the dispatch queue fills), a throwing one is swallowed.
+  * A user-supplied observer of runtime [[SageEvent]]s, registered in configuration. Listeners do not depend on a particular effect system or
+  * backend. Sage dispatches events separately from command execution. A slow listener delays event delivery and may fill the dispatch queue;
+  * exceptions thrown by a listener are ignored. Neither affects commands.
   */
 trait SageListener {
 
   /**
-    * Called once per runtime [[SageEvent]], synchronously and off the command path. Must not block; thrown exceptions are swallowed.
+    * Called once per runtime [[SageEvent]], synchronously and separately from command execution. The callback must not block. Exceptions are ignored.
     */
   def onEvent(event: SageEvent): Unit
 }

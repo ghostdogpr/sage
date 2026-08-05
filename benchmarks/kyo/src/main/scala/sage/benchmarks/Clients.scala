@@ -7,7 +7,7 @@ import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
 /**
-  * The Kyo cell's benchmark clients: sage only — no native Kyo competitor exists.
+  * The Kyo benchmark cell contains only Sage because the suite has no native Kyo client to compare it with.
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {

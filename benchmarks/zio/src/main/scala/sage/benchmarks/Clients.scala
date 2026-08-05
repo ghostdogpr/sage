@@ -76,8 +76,8 @@ final class SageZioBench(topology: Topology) extends BenchClient {
 
 final class ZioRedisBench(host: String, port: Int) extends BenchClient {
 
-  // the bench only uses String keys/values; use a raw UTF-8 codec to match what sage/redis4cats/lettuce do, rather than zio-redis's
-  // protobuf default which would charge it per-element serialization the others never pay
+  // The benchmark uses String keys and values. Use a raw UTF-8 codec for a fair comparison with Sage, redis4cats, and Lettuce. The zio-redis
+  // Protobuf default would add serialization work for every element.
   private val utf8: BinaryCodec[String] = new BinaryCodec[String] {
     def encode(s: String): Chunk[Byte]                           = Chunk.fromArray(s.getBytes(UTF_8))
     def decode(bytes: Chunk[Byte]): Either[DecodeError, String]  = Right(new String(bytes.toArray, UTF_8))

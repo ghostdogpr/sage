@@ -49,8 +49,8 @@ private[codec] object Primitives {
     else Left(DecodeError("boolean (1 or 0)", preview(bytes)))
 
   def decodeUtf8(bytes: Bytes): Either[DecodeError, String] = {
-    // lenient decoding always marks malformed input with U+FFFD, so its absence proves the bytes well-formed —
-    // keeping the intrinsified String constructor on the hot path; only payloads containing U+FFFD re-validate strictly
+    // Lenient decoding inserts U+FFFD for malformed input. If the decoded text does not contain U+FFFD, the bytes were valid and this method
+    // can use the optimized String constructor. When U+FFFD is present, validate the bytes strictly.
     val text = bytes.asUtf8String
     if (text.indexOf('\uFFFD') < 0) Right(text) else strictDecodeUtf8(bytes)
   }

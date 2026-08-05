@@ -1,8 +1,8 @@
 package sage.cluster
 
 /**
-  * `Moved` is permanent — the slot's owner changed, refresh the topology — while `Ask` is a one-shot hand-off during a live migration:
-  * send the single command (prefixed `ASKING`) to the named node without touching the topology.
+  * The two cluster redirect types. `Moved` means the slot has a new owner and the topology should be refreshed. `Ask` is temporary during
+  * a slot migration: send this command to the named node with an `ASKING` prefix, but do not update the topology.
   */
 private[sage] enum RedirectKind {
   case Moved, Ask

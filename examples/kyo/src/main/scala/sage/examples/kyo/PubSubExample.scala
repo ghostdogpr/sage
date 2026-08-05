@@ -6,7 +6,7 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Classic channel pub/sub surfaced as a native Kyo `Stream`. Sharded pub/sub is shown in the cluster spotlight, where it belongs.
+  * Classic channel pub/sub with a Kyo `Stream`. The cluster example covers sharded pub/sub.
   */
 object PubSubExample {
 

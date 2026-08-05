@@ -5,9 +5,9 @@ import scala.concurrent.duration.FiniteDuration
 import sage.Bytes
 
 /**
-  * How long a blocking command waits server-side. `Forever` is the wire `0` (block until data) — named so it cannot be confused with a
-  * zero duration, which would read as "do not wait". A cross-family primitive shared identically by every blocking command (`BLPOP`,
-  * `BZPOPMIN`, `XREAD BLOCK`, …), like [[ListSide]].
+  * How long a blocking command waits on the server. `Forever` sends `0`, which means to wait until data is available. It is separate from
+  * a zero duration, which would normally mean not to wait. This type is shared by blocking commands such as `BLPOP`, `BZPOPMIN`, and
+  * `XREAD BLOCK`.
   */
 enum BlockTimeout {
   case Forever
@@ -16,9 +16,8 @@ enum BlockTimeout {
 
 object BlockTimeout {
 
-  // sub-second timeouts use the decimal-seconds wire form, rounding up so the wait is never shorter than asked. `After` floors at one
-  // millisecond: a zero or negative duration must never emit "0", which is the wire's "block forever" — only `Forever` may mean infinite.
-  // This is the SECONDS form used by `BLPOP`/`BLMOVE`/`BZPOPMIN`; the stream blocking reads take milliseconds — see [[millisWire]].
+  // Commands such as BLPOP, BLMOVE, and BZPOPMIN express timeouts in seconds. Round sub-second values up to the next millisecond so the
+  // server does not wait for less time than requested. Use at least one millisecond because the wire value 0 means to wait forever.
   private[commands] def wire(timeout: BlockTimeout): Bytes =
     timeout match {
       case Forever         => Zero

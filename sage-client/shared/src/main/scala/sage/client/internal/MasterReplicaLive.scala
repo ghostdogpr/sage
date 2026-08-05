@@ -18,15 +18,15 @@ import sage.commands.{Command, Connection, Pipeline, Role, Server}
 import sage.ratelimit.Decision
 
 /**
-  * The master-replica runtime: a non-cluster deployment of one master and its replicas, discovered from seeds by asking each its `ROLE`.
-  * Writes, blocking reads, transactions, and `cached` reads go to the master; ordinary read-only commands route to replicas per the
-  * [[ReadFrom]] policy (round-robin, with the policy's fallback). The same `Client` type as standalone and cluster; only the topology selects
-  * it.
+  * The runtime for a non-cluster deployment with one master and its replicas. It discovers their roles by sending `ROLE` to the seed nodes.
+  * Writes, blocking reads, transactions, and `cached` reads go to the master. Other read-only commands use replicas according to the
+  * [[ReadFrom]] policy, including its fallback behavior. Standalone, master-replica, and cluster deployments use the same `Client` type; the
+  * configured topology chooses the runtime.
   *
-  * Roles refresh on events (a reconnect-driven command loss, a `READONLY` from the presumed master, a read that can reach no candidate, or a
-  * replica-preferred read/pipeline when no replica is known), throttled by `minRefreshInterval`; a timer only comes into it when
-  * `topologyRefreshInterval` opts into the background poll. A write that meets a demoted master fails fast (kicking off a re-discovery) so the
-  * caller's retry lands on the freshly-discovered master, mirroring the cluster runtime's `READONLY` disposition.
+  * The runtime refreshes roles after a command is lost during reconnection, a presumed master returns `READONLY`, a read cannot reach any
+  * candidate, or a replica-preferred read or pipeline has no known replica. `minRefreshInterval` limits how often these refreshes run.
+  * `topologyRefreshInterval` can also enable periodic refreshes. A write sent to a demoted master fails immediately and starts role discovery.
+  * The caller can then retry against the newly discovered master, as it can after a cluster `READONLY` response.
   */
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -76,8 +76,8 @@ final private[client] class MasterReplicaLive(
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
-  // several supplied endpoints are the topology itself: keep their addresses and discover only their roles; a lone seed retains the original
-  // discovery behavior, following the addresses in ROLE
+  // When several endpoints are supplied, keep those addresses and use discovery only to determine their roles. With one seed, use the
+  // addresses returned by ROLE.
   private val pinnedToSeeds = seeds.sizeIs > 1
 
   private[client] def bootstrapRoles(): Unit =
@@ -94,8 +94,7 @@ final private[client] class MasterReplicaLive(
     if (pinnedToSeeds) resolvePinned()
     else resolveDiscovered(discoveredCandidates)
 
-  // classifies every supplied endpoint by its own ROLE; an endpoint that cannot be opened is omitted, but reported because the successful
-  // topology resolution otherwise hides its failure from the caller
+  // request ROLE from every supplied endpoint. Omit endpoints that cannot be reached, but report their connection failures through events.
   private def resolvePinned(): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
     var lastError: Throwable = NotConnected()
     val roles                = seeds.flatMap { seed =>
@@ -114,7 +113,7 @@ final private[client] class MasterReplicaLive(
     }
   }
 
-  // contacts seeds until one answers ROLE, resolving the master and its advertised replicas; this is the original single-seed discovery path
+  // contact candidates until one answers ROLE, then use its advertised master and replica addresses
   private def resolveDiscovered(candidates: Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
     var lastError: Throwable = NotConnected()
     val it                   = candidates.iterator
@@ -142,7 +141,7 @@ final private[client] class MasterReplicaLive(
       case _: Role.Sentinel               => None
     }
 
-  // ROLE rides the node's pooled connection when one is live, else a throwaway one that must not leave a pooled connection behind
+  // use an existing live connection for ROLE when possible. Otherwise, open a temporary connection and close it after the probe.
   private def probeRole(node: Node): Option[Role] = {
     val pooled = pooledFor(node)
     if (pooled != null) {
@@ -213,7 +212,7 @@ final private[client] class MasterReplicaLive(
 
   private def startRefreshPoll(): Unit = refreshThrottle.startPolling(masterReplica.topologyRefreshInterval)(triggerRefresh())
 
-  // forced, but single-flight may collapse this onto an in-flight refresh, so a stale masterNodeRef self-corrects on the next reconnect
+  // request an immediate refresh. If another refresh is active, wait for it; a later reconnect requests discovery again if the master changed.
   private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
 
   // a re-discovery queued before close must not probe ROLE on a connection the close cannot reach
@@ -259,13 +258,13 @@ final private[client] class MasterReplicaLive(
     onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb, lease))
 
   private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit =
-    // a short-circuit (master down) never reaches cachedSubmit, so settle a Failed span the deferred factory would otherwise never start
+    // if no master is available, cachedSubmit is not called. Complete its deferred span here.
     onMaster(complete, onDown = () => Events.settleSpan(Events.startDeferred(deferred), Outcome.Failed(NotConnected()))) { (nc, _, cb) =>
       nc.cachedSubmit[A](command, ttlMillis, cb, deferred)
     }
 
-  // run `submit` on the master, completing with node attribution; an ownership fault (a demoted master) kicks a re-discovery.
-  // `onDown` fires on any short-circuit that never reaches `submit`.
+  // Submit on the master and add its node to the result. Start role discovery if the server is no longer the master. Call onDown when the
+  // operation ends before submit is called.
   private def onMaster[A](complete: Try[A] => Unit, onDown: () => Unit = () => ())(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {
     if (closed) {
       onDown()
@@ -377,14 +376,14 @@ final private[client] class MasterReplicaLive(
     else
       CIO.async { complete =>
         val spans           = Events.startSpans(events, p.commands)
-        // all-or-nothing: a fully replica-eligible pipeline batches on a replica, else the master, never split
+        // route the whole pipeline to a replica only when every command is eligible. Otherwise, route the whole pipeline to the master.
         val useReplica      = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
         val master          = masterNodeRef.get()
         val refreshOnUnsent = () => triggerRefresh()
         if (useReplica) {
           val batch                                              = new Client.TrackedBatch(events, p.commands, spans, complete)
           def failUnsent(): Unit                                 =
-            // no reachable node fires no wire fault, so re-discover here or a stale replica set / down master strands the pipeline forever
+            // without a submission, a connection error cannot trigger role discovery. Refresh roles before failing the batch.
             batch.failUnsent(refreshOnUnsent)
           def submitOn(picked: Option[ReadRouting.Picked]): Unit =
             picked match {
@@ -474,7 +473,7 @@ final private[client] class MasterReplicaLive(
       subLock.lock()
       try {
         if (subscriptions == null) {
-          // resolves the current master per (re)connect, not once, so onReconnect's refresh re-homes the subscription across a failover
+          // resolve the master for every connection attempt so subscriptions move to the promoted master after failover.
           val rehomingFactory: MultiplexedConnection.TransportFactory =
             (onFrame, onClosed) => nodeFactory(masterNodeRef.get())(onFrame, onClosed)
           subscriptions = new SubscriptionConnection(
@@ -485,7 +484,7 @@ final private[client] class MasterReplicaLive(
             config.watchdog,
             config.connectTimeout.toMillis,
             config.pubsub.bufferSize,
-            // the subscription opens its own socket, so gate on a resolved master, not a live pooled connection a pub/sub-only client never creates
+            // subscriptions use a separate socket. Wait for master discovery before opening it; a pooled connection is not required.
             () => !closed && masterNodeRef.get() != null,
             onReconnect = () => refreshRolesBeforeRehome(),
             events = events
@@ -503,7 +502,7 @@ final private[client] class MasterReplicaLive(
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
     CIO.blocking(Client.patternMessages(subs().subscribePatterns(pattern +: rest.toVector)))
 
-  // a non-cluster server has no slots, so a Shard Channel rides the one Subscription Connection, exactly as standalone treats it
+  // master-replica mode uses one subscription connection for all shard channels, as standalone mode does.
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
     CIO.blocking(Client.channelMessages(subs().subscribeShard(channel +: rest.toVector)))
 

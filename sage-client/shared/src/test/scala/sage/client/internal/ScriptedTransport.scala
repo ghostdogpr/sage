@@ -6,7 +6,7 @@ import sage.Bytes
 import sage.protocol.Frame
 
 /**
-  * Transport factories over a [[FakeTransport]]; `capturing` also hands back the most-recently-created one.
+  * Creates transport factories backed by [[FakeTransport]]. `capturing` also returns a function for reading the most recently created transport.
   */
 object ScriptedTransport {
 

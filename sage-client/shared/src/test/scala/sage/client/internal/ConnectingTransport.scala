@@ -4,7 +4,7 @@ import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch}
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
-  * A transport whose `start()` blocks like a socket connect until `close()` aborts it; `reached` fires when `start()` is entered.
+  * A transport whose `start()` waits like a socket connection until `close()` stops it. `reached` is released when `start()` begins.
   */
 final class ConnectingTransport(onClosed: () => Unit) extends Transport {
   val reached                          = new CountDownLatch(1)

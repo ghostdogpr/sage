@@ -4,7 +4,7 @@ import sage.SageException.{ConnectionLost, NotConnected, ServerError}
 import sage.cluster.{Redirect, RedirectKind}
 
 /**
-  * The shared categorization of a failed command: both runtimes read a [[Throwable]] the same way, so they cannot drift on what a fault is.
+  * The shared classification of a failed command. Both runtimes interpret a [[Throwable]] through this type and therefore use the same rules.
   */
 private[client] enum Fault {
   case Redirected(redirect: Redirect)
@@ -18,12 +18,12 @@ private[client] enum Fault {
     case Fatal | TryAgain                                          => RefreshPolicy.Skip
     // only a cluster-wide refusal implies the mapping moved
     case Unavailable(clusterWide)                                  => if (clusterWide) RefreshPolicy.Forced else RefreshPolicy.Skip
-    // ASK moves no ownership: discovery has nothing to adopt until the migration finalizes
+    // ASK does not change ownership, so discovery cannot find a new owner until the migration finishes
     case Redirected(redirect) if redirect.kind == RedirectKind.Ask => RefreshPolicy.Throttled
     case Redirected(_) | Demoted | Lost(_)                         => RefreshPolicy.Forced
   }
 
-  // refused before running, for a reason that clears on its own: the same command is safe to send again
+  // return true when the server rejected the command before execution and retrying the same command is safe
   def selfClearing: Boolean = this match {
     case TryAgain | Unavailable(_) => true
     case _                         => false
@@ -31,7 +31,8 @@ private[client] enum Fault {
 }
 
 /**
-  * What a [[Fault]] asks of topology discovery, weakest first: no refresh, one inside the `minRefreshInterval` window, or one that bypasses it.
+  * Controls topology refresh after a [[Fault]]. `Skip` does not refresh. `Throttled` respects `minRefreshInterval`, and `Forced` refreshes
+  * immediately.
   */
 private[client] enum RefreshPolicy {
   case Skip, Throttled, Forced

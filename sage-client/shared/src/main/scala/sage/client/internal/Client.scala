@@ -21,21 +21,21 @@ import sage.protocol.Frame
 import sage.ratelimit.{Decision, RateLimit, RateLimiter}
 
 /**
-  * The command surface shared by [[Client]] and [[TransactionScope]]: every command as a concrete method delegating to [[run]], so anything
-  * implementing `run` — a fake, or a backend adapter lowering `F` to its native effect — gets the whole catalogue.
+  * Redis and Valkey command methods shared by [[Client]] and [[TransactionScope]]. Each method delegates to [[run]], allowing the same
+  * definitions to work with the real client, backend adapters, and test implementations.
   */
 trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
-    * Runs a [[sage.commands.Command]] and returns its decoded result. Every method on this trait is sugar over this one call.
+    * Runs a [[sage.commands.Command]] and returns its decoded result. The other command methods delegate to this one.
     */
   def run[A](command: Command[A]): F[A]
 
   /**
-    * Re-types this command surface to another key type, reusing the same connection — no new connection is opened. The runner is
-    * key-agnostic (keys are encoded to bytes in the command builders before `run`), so this is a zero-cost view: `client.as[Array[Byte]]`
-    * yields a command surface over binary keys, and it composes inside a transaction too (`tx.as[Array[Byte]].get(k)`).
-    * [[Client]] and [[TransactionScope]] override this with a narrower return so the re-typed view keeps their full surface.
+    * Returns a view that uses another key type and reuses the same connection. Command builders encode keys before calling `run`, so the
+    * runner itself does not depend on the key type. For example, `client.as[Array[Byte]]` accepts binary keys, including inside a
+    * transaction with `tx.as[Array[Byte]].get(k)`. [[Client]] and [[TransactionScope]] override this method to preserve their additional
+    * operations in the returned view.
     */
   def as[K2](using KeyCodec[K2]): CommandRunner[F, K2] = {
     val self = this
@@ -1080,19 +1080,20 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def sPublish[V: ValueCodec](channel: String, message: V): F[Long] = run(Pubsub.sPublish(channel, message))
 
   /**
-    * Lists currently-active classic channels with at least one subscriber, optionally filtered by glob `pattern`. A server reports only the
-    * subscribers attached to it, so a cluster sweeps every master and appends the lists, dropping repeats.
+    * Lists active classic channels with at least one subscriber, optionally filtered by glob `pattern`. In a cluster, Sage queries every
+    * master, combines the replies, and removes duplicate channel names.
     */
   final def pubsubChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubChannels(pattern))
 
   /**
-    * Lists currently-active Shard Channels, optionally filtered by glob `pattern`. Swept across masters like [[pubsubChannels]].
+    * Lists active shard channels, optionally filtered by glob `pattern`. In a cluster, Sage queries every master as described by
+    * [[pubsubChannels]].
     */
   final def pubsubShardChannels(pattern: Option[String] = None): F[Vector[String]] = run(Pubsub.pubsubShardChannels(pattern))
 
   /**
-    * Returns the subscriber count of each given classic channel, summed across every master in a cluster. The sweep does not reach replicas,
-    * so a subscriber attached to one is not counted.
+    * Returns the subscriber count of each classic channel, summed across every master in a cluster. Replicas are not queried, and subscribers
+    * connected to them are not counted.
     */
   final def pubsubNumSub(channels: String*): F[Map[String, Long]] = run(Pubsub.pubsubNumSub(channels*))
 
@@ -1249,9 +1250,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     run(Json.jsonSet(key, path, value, condition))
 
   /**
-    * Returns the JSON at the given paths in the document at `key` as raw JSON text, or `None` if the key is absent. With no path it returns
-    * the whole document unwrapped, so a typed `ValueCodec` decodes it directly; a JSONPath wraps its matches in a JSON array, and several
-    * paths merge into one path-keyed JSON object.
+    * Returns raw JSON text for the requested paths, or `None` if the key is absent. With no path, the document is returned directly and can
+    * be decoded by a typed `ValueCodec`. One JSONPath returns its matches in a JSON array. Several paths return a JSON object keyed by path.
     */
   final def jsonGet[V: ValueCodec](key: K, paths: JsonPath*): F[Option[V]] = run(Json.jsonGet(key, paths*))
 
@@ -1825,8 +1825,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def memoryUsage(key: K, samples: Option[Long] = None): F[Option[Long]] = run(Server.memoryUsage(key, samples))
 
   /**
-    * Asks the allocator to release memory back to the OS. The effect is per-node, so a cluster asks every slot-owning master; a swept
-    * command cannot ride in a Pipeline.
+    * Asks the allocator to release memory back to the OS. In a cluster, this runs on every slot-owning master and therefore cannot be used
+    * in a pipeline.
     */
   final def memoryPurge: F[Unit] = run(Server.memoryPurge)
 
@@ -2151,20 +2151,15 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def arInfoFull(key: K): F[ArrayInfoFull] = run(Arrays.arInfoFull(key))
 }
 
-/**
-  * The user-facing handle owning all connections to one server: the command surface, plus pipelines and transactions. A batch of
-  * [[sage.commands.Commands]] handed to `pipeline` is sent in one round-trip, yielding a typed result per command.
-  */
-// one independent keyspace a full SCAN sweep visits: a single node standalone, one per slot-owning master in cluster. `node` is None when
-// the backend has no node to pin to (standalone, or a not-yet-discovered cluster topology), in which case the command runs through normal routing.
+// One independent keyspace visited by SCAN: the standalone server or one slot-owning cluster master. A missing node means that normal
+// routing should be used, either for a standalone server or before cluster topology discovery finishes.
 final private[sage] case class ScanTarget(node: Option[Node])
 
 private[sage] object ScanTarget {
   val any: ScanTarget = ScanTarget(None)
 }
 
-// drives the cluster-wide SCAN walk: each target is scanned to its node-local zero cursor before the next, so the sweep never silently
-// covers a single node.
+// tracks a cluster-wide SCAN while each target is scanned to its node-local zero cursor in turn.
 private[sage] enum ScanStep {
   case Begin
   case Visit(cursor: ScanCursor, remaining: Vector[ScanTarget])
@@ -2172,21 +2167,20 @@ private[sage] enum ScanStep {
 }
 
 /**
-  * The user-facing client over an effect `F`, aliased per backend as `sage.backend.SageClient` (e.g. `Client[Task]` in the ZIO build). It owns all
-  * connections to one server or cluster and exposes the whole command catalogue through the inherited [[CommandRunner]] sugar (`get`, `set`,
-  * …), each delegating to [[CommandRunner.run]]. Ordinary commands are auto-pipelined onto the Multiplexed Connection; only [[transaction]],
-  * blocking commands, and pub/sub acquire other connections, transparently. Constructed with a backend's `connect`/`scoped` and released with
-  * [[close]].
+  * The client implementation shared by all backends and exposed as `sage.backend.SageClient`. It owns the connections to one server or
+  * cluster. Ordinary commands share an auto-pipelined multiplexed connection. Transactions and blocking commands borrow connections from a
+  * dedicated pool, while pub/sub uses separate subscription connections. Create a client with the backend's `connect` or scoped helper, and
+  * release it with [[close]].
   */
 trait Client[F[_], K] extends CommandRunner[F, K] {
 
   /**
-    * Runs a read with client-side caching: served from the local cache until a server invalidation push or `ttl` evicts it. Only a
-    * cacheable command with at least one key qualifies — a read whose result is a pure function of its keys' state, so an invalidation
-    * covers every change. A write, a keyless read, or a time-varying/non-deterministic read (`TTL`, `SRANDMEMBER`) fails with
-    * [[sage.SageException.NotCacheable]]. The read is always served from the master (never a replica, whatever the `ReadFrom` policy); in a
-    * cluster each slot-owning master owns an independent cache. Caching is transparent to the call, so it stays topology-portable: with caching
-    * disabled, or against a server that rejects tracking, the same call simply runs uncached.
+    * Runs a read with client-side caching. A cached value remains until the server invalidates it, its `ttl` expires, or the cache evicts it
+    * to stay within `maxBytes`. A command qualifies when it is a cacheable read with at least one key and its result changes only when data
+    * at those keys changes. A write, a keyless read, or a time-varying or non-deterministic read (`TTL`, `SRANDMEMBER`) fails with
+    * [[sage.SageException.NotCacheable]]. Cached reads use the master regardless of the `ReadFrom` policy. In a cluster, each slot-owning
+    * master has an independent cache. The same call works with every topology. When caching is disabled or the server rejects tracking, it
+    * runs uncached.
     */
   def cached[A](command: Command[A], ttl: FiniteDuration): F[A]
 
@@ -2233,7 +2227,7 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   ): RateLimiterClient[F, RK] =
     new RateLimiterClient[F, RK](this, RateLimitExecutor(RateLimiter[RK](limit, namespace)))
 
-  // implementations validate client-side, then run the cached-script EVALSHA path
+  // implementations validate the request, then execute the rate-limit script with EVALSHA and reload it after NOSCRIPT
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision]
 
   /**
@@ -2247,12 +2241,11 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): F[Subscription[F, PatternMessage[V]]]
 
   /**
-    * Subscribes to Shard Channels; in a cluster each is routed to the Node owning its Slot, and a delivery surfaces as an ordinary [[Message]].
+    * Subscribes to shard channels. In a cluster, each channel is routed to the node that owns its slot. Deliveries use [[Message]].
     */
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]]
 
-  // the keyspaces a full SCAN sweep must visit (one per slot-owning master in cluster); runOn pins the keyless SCAN page to a node so a
-  // cursor resumes where it came from
+  // return every keyspace SCAN must visit. runOn sends the next page to the node that issued its cursor.
   private[sage] def scanTargets: F[Vector[ScanTarget]]
 
   private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]
@@ -2263,10 +2256,8 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   def close: F[Unit]
 
   /**
-    * Re-types the whole client surface to another key type over the same connection — no new connection is opened. Everything but the command
-    * sugar is key-independent and simply forwards (`cached`, `pipeline`, `subscribe*`, `runOn`, `close`); `transaction` re-types its scope. This
-    * is what makes `client.as[Array[Byte]]` keep the full surface (and the backend `…All`/`subscribe` helpers, which extend `Client[F, K]`),
-    * not just the command methods.
+    * Returns a client view that uses another key type while reusing the same connection. Key-independent operations such as caching,
+    * pipelines, subscriptions, and close are forwarded unchanged. Transactions receive a view with the new key type as well.
     */
   override def as[K2](using KeyCodec[K2]): Client[F, K2] = {
     val self = this
@@ -2292,27 +2283,26 @@ object Client {
 
   private val defaults = SageConfig()
 
-  // a cacheable read's result is a pure function of its keys' state (Command.cacheable) and it names at least one key — a keyless read
-  // could only ever be evicted by TTL, never by an invalidation push, so it is rejected rather than allowed to silently go stale
+  // Server invalidations can keep a cached read current only when the command names at least one key. Reject keyless reads even if they are
+  // otherwise deterministic.
   private[internal] def cacheable(command: Command[?]): Boolean = command.cacheable && command.keyIndices.nonEmpty
 
   private[internal] def notCacheable(command: Command[?]): NotCacheable =
     NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
 
-  // if the submit throws synchronously (e.g. a closed transport) instead of registering a callback, complete with the error so CIO.async settles
+  // a closed transport may throw before registering its callback. Complete CIO.async with that synchronous failure.
   private[internal] def completing[A](complete: Try[A] => Unit)(submit: => Unit): Unit =
     try submit
     catch { case NonFatal(error) => complete(Failure(error)) }
 
-  // acquire a fresh lease per execution so interruption can release the pool slot; a lease is single-shot (cancel is terminal), so a
-  // captured one would make a re-run of this value hang
+  // create a lease for each execution. Leases cannot be reused after cancellation, and interruption uses the lease to release the pool slot.
   private[internal] def withLeaseIfBlocking[A](command: Command[?])(body: DedicatedPool.Lease => CIO[A]): CIO[A] =
     command.execution match {
       case Execution.Ordinary => body(null)
       case Execution.Blocking => CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
     }
 
-  // attributes the node at the completion site, so a batch that never reaches the wire (a false submit) leaves its callbacks unattributed
+  // attribute the node at completion. A batch that never reaches the wire leaves its callbacks unattributed.
   private def attributeOnComplete(cb: Try[Any] => Unit, node: Node): Try[Any] => Unit =
     result => {
       Events.attributeNode(cb, node)
@@ -2354,7 +2344,7 @@ object Client {
     }
   }
 
-  // a pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
+  // A pipeline batched onto a single connection: scatter each reply into its submission-order slot, and on a disconnect report a failed
   // completion per position before failing the effect once. Shared by standalone/master-replica; the cluster runtime splits per node instead.
   private[internal] def submitBatchOnOne(
     events: Events,
@@ -2385,9 +2375,9 @@ object Client {
         }
     }
 
-  // a misconfigured client is a programmer error, surfaced through the connect effect rather than thrown from a constructor
+  // report invalid configuration through the connect effect instead of throwing during construction.
   private def validate(config: SageConfig): Option[String] = {
-    // pingInterval/pingTimeout are inert when the watchdog is disabled, so don't reject them then
+    // skip ping interval and timeout validation when the watchdog is disabled because those values are not used
     val watchdog =
       if (config.watchdog.enabled)
         Vector(
@@ -2421,8 +2411,8 @@ object Client {
           atLeastOneMilli(masterReplica.minRefreshInterval, "masterReplica.minRefreshInterval"),
           masterReplica.topologyRefreshInterval.flatMap(atLeastOneMilli(_, "masterReplica.topologyRefreshInterval"))
         ) ++ seeds.map(s => port(s.port, s"seed ${s.host}:${s.port} port"))
-      // a Standalone has no replicas, so the strict Replica policy could never serve a read; the *Preferred policies harmlessly degrade to
-      // the one node, so they stay valid (a readFrom can then be shared across environments)
+      // Standalone mode rejects the Replica policy because it has no replicas. MasterPreferred and ReplicaPreferred use its sole node, allowing
+      // the same readFrom setting to be shared across environments.
       case Topology.Standalone(endpoint)                =>
         Vector(
           port(endpoint.port, s"endpoint ${endpoint.host}:${endpoint.port} port"),
@@ -2439,7 +2429,7 @@ object Client {
     cond(value == Duration.Inf || (value.isFinite && value.toMillis >= 1L), s"$label must be at least 1ms (or Inf)")
 
   private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO, String]] =
-    // build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
+    // Build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
     // multiplexed one and each dedicated one — is upgraded identically
     CIO.blocking(Tls.buildUpgrade(config.tls, endpoint.host, endpoint.port)).flatMap { upgrade =>
       connectWith(
@@ -2450,7 +2440,7 @@ object Client {
       )
     }
 
-  // The HELLO 3 handshake is the bootstrap re-run on every (re)connection; the first connect propagates its failure, reconnects retry it.
+  // run the HELLO 3 bootstrap for every connection. The initial connection reports a handshake failure; reconnects retry it.
   private[client] def connectWith(
     factory: MultiplexedConnection.TransportFactory,
     scheduler: Scheduler = Scheduler.real,
@@ -2460,8 +2450,8 @@ object Client {
     val cachingEnabled       = config.clientCache.enabled
     val connectTimeout       = config.connectTimeout
     val bootstrap            = Bootstrap.commands(config.auth, config.database, config.clientName)
-    // only the Multiplexed Connection caches reads, so only it enables tracking; the dedicated pool and subscription connection keep the
-    // plain bootstrap. Tracking is skipped entirely when caching is disabled, so a server that denies CLIENT TRACKING still connects.
+    // Enable tracking on the multiplexed connection, where cached reads run. Dedicated and subscription connections use the plain bootstrap.
+    // When caching is disabled, omit tracking from every connection so servers that deny CLIENT TRACKING can still connect.
     val multiplexedBootstrap = if (cachingEnabled) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
     CIO
       .blocking(
@@ -2480,7 +2470,7 @@ object Client {
       )
       .map { connection =>
         val pool          = DedicatedPool.forConnection(factory, bootstrap, scheduler, connection, config.dedicatedPool, connectTimeout.toMillis)
-        // lazy: no socket is opened until the first subscription, and it is gated on the Multiplexed Connection being live
+        // open the subscription socket on first use, after the Multiplexed Connection becomes live
         val subscriptions = new SubscriptionConnection(
           factory,
           bootstrap,
@@ -2500,9 +2490,8 @@ object Client {
       }
   }
 
-  // pre-6.0 Redis answers HELLO with an unknown-command error; newer servers reject an unsupported protocol version with NOPROTO. A
-  // rejected certificate or hostname mismatch surfaces from the handshake as an SSLException, which would otherwise escape the sealed
-  // hierarchy.
+  // Redis versions before 6.0 report HELLO as an unknown command. Newer servers use NOPROTO for unsupported protocol versions. Convert TLS
+  // certificate and hostname failures to TlsError so all expected connection failures remain SageException values.
   private def translateHandshake(error: Throwable): Throwable =
     error match {
       case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase.contains("unknown command") =>
@@ -2534,7 +2523,7 @@ object Client {
 
     def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
       if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
-      else if (!cachingEnabled) run(command) // tracking was never enabled, so run uncached rather than issue an unbacked CLIENT CACHING YES
+      else if (!cachingEnabled) run(command) // run uncached because connection setup did not enable CLIENT TRACKING
       else CIO.async(callback => Client.completing(callback)(nodeClient.cachedSubmit(command, ttl.toMillis, callback)))
 
     def scanTargets: CIO[Vector[ScanTarget]] = CIO.value(Vector(ScanTarget.any))
@@ -2550,9 +2539,8 @@ object Client {
     private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
       submitPipeline(p).map(p.toResults)
 
-    // The lease is bracketed: release runs on success, failure, and interruption (IO.bracket). A clean exit (exec/discard cleared the
-    // connection's WATCH/MULTI state, no reply outstanding) recycles the connection; a scope left armed or interrupted mid-command is
-    // discarded rather than handed to the next borrower dirty.
+    // Release the transaction connection after success, failure, or interruption. Return it to the pool only after EXEC or UNWATCH has
+    // cleared WATCH/MULTI state and no replies remain pending. Discard it when watched keys or commands may still be active.
     def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
       CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => CIO.unit.flatMap(_ => body(scope)))
 
@@ -2591,7 +2579,7 @@ object Client {
     def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
       CIO.blocking(patternMessages(subscriptions.subscribePatterns(pattern +: rest.toVector)))
 
-    // a standalone server has no slots, so every Shard Channel rides the one Subscription Connection in shard mode
+    // a standalone server uses one subscription connection for all shard channels.
     def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
@@ -2602,14 +2590,14 @@ object Client {
     }
   }
 
-  // wrap a raw subscription as the effect-typed interface each backend lowers into its native stream; `build` returns None to end the stream
+  // Convert a raw subscription to the shared effect-based interface used by each backend stream. build returns None to end the stream.
   private def messages[M](raw: SubscriptionConnection.RawSubscription)(
     build: SubscriptionConnection.Delivery => Option[M]
   ): Subscription[CIO, M] =
     new Subscription[CIO, M] {
-      // async, not blocking: the reader thread completes the callback, so a fiber parks instead of pinning a runtime worker
+      // register an asynchronous callback that the reader thread completes when the next delivery arrives
       def next: CIO[Option[M]] = {
-        // deregister the parked waiter if this next is interrupted, else a stale waiter trips the single-consumer guard
+        // remove the callback if this request is interrupted; leaving it registered would make the next request fail the single-consumer check
         val registered = new AtomicReference[Option[SubscriptionConnection.Delivery] => Unit]()
         val deregister = CIO.defer {
           val cb = registered.getAndSet(null)
@@ -2657,7 +2645,7 @@ object Client {
   final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => (), events: Events = Events.disabled)
     extends TransactionScope[CIO, String] {
 
-    // tracks whether watched keys may still be armed on the connection; set as soon as WATCH is attempted, cleared by EXEC/UNWATCH
+    // true after WATCH is attempted and false after EXEC or UNWATCH; prevents reuse while the server may still track watched keys
     val armed = new AtomicBoolean(false)
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
@@ -2667,9 +2655,9 @@ object Client {
       case success                  => complete(success)
     }
 
-    // The lock makes "reject if released, else submit" atomic with the finalizer's seal-and-decide ([[sealAndReusable]]): a command
-    // submitted under it is in-flight before the finalizer reads quiescence, so a handle captured past the block and raced against release
-    // either submits onto a connection the finalizer then declines to recycle, or is rejected outright — never onto a re-borrowed one.
+    // Coordinate submission with release under one lock. A command accepted before release is recorded as in flight before
+    // [[sealAndReusable]] checks the connection, preventing the finalizer from recycling a busy connection. Commands submitted after release
+    // are rejected, preventing an old transaction handle from using a connection that another transaction has borrowed.
     private val lock     = new ReentrantLock()
     private var released = false
 
@@ -2734,11 +2722,11 @@ object Client {
     private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
       runExec(p).map(_.map(p.toResults))
 
-    // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).
+    // return None when EXEC reports a WATCH abort and Some with one decoded result per command; a queueing error fails the effect before execution
     private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
       if (isReleased)
         CIO.fail(TxSupport.scopeReleasedError)
-      // a truly empty no-op only when nothing is watched; with watches armed we must still MULTI/EXEC so a concurrent change can abort it
+      // skip MULTI/EXEC for an empty pipeline only when WATCH is inactive; watched keys still require EXEC to detect concurrent changes
       else if (p.commands.isEmpty && !armed.get)
         CIO.value(Some(Vector.empty))
       else if (p.commands.exists(_.isBlocking))

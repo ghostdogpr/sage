@@ -6,15 +6,15 @@
 #   benchmarks/run.sh ThroughputBench.get -p concurrency=64 -f 1 -wi 3 -i 3   # scope one workload/params (minutes)
 #
 # All arguments are forwarded verbatim to each cell's `Jmh/run`, so you can pass a benchmark regex, -p params, and -f/-wi/-i settings. A
-# filter that doesn't match a cell (e.g. -p client=zio-redis only exists in the zio cell) leaves that cell out of the merged result; any
-# OTHER failure (compile error, Docker, a benchmark exception) is reported and fails the run so partial results never look complete.
-# per-cell sbt failures are classified by hand below (inside `if`, so they don't trip -e); merge/jq/column failures should still abort
+# filter that does not match a cell, such as `-p client=zio-redis` outside the ZIO cell, omits that cell from the merged result. Compile,
+# Docker, and benchmark failures stop the run and are reported, preventing incomplete results from being presented as complete.
+# Per-cell sbt failures are classified below inside `if`, where they do not trigger `-e`. Failures from merge, jq, or column still stop the run.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 args="$*"
-# the Kyo cell's project id embeds the Next Scala version; read it from build.sbt so bumps need no edit here
+# The Kyo cell's project id includes the Scala Next version. Read it from build.sbt so version changes need no edit here.
 kyoSuffix="$(grep -E '^val scala3NextVersion' build.sbt | sed -E 's/.*"([0-9.]+)".*/\1/' | tr '.' '_')"
 cells=(benchmarksZio:zio benchmarksCe:ce benchmarksOx:ox benchmarksPekko:pekko "benchmarksKyo${kyoSuffix}:kyo")
 failed=0

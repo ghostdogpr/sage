@@ -12,24 +12,24 @@ import sage.commands.{Command, Reply}
 import sage.protocol.Frame
 
 /**
-  * A single connection held exclusively by one borrower at a time, borrowed from the [[DedicatedPool]]. Unlike the Multiplexed
-  * Connection it carries no reconnect loop and no watchdog: on any connection loss it is marked dead and the pool discards it, failing the
-  * in-flight work `ConnectionLost(mayHaveExecuted = true)`. Replies are matched FIFO so the synchronous HELLO bootstrap can
-  * run on it before it is handed out, and so a transaction's `MULTI`/queue/`EXEC` replies line up with the commands that produced them.
+  * A connection borrowed exclusively from the [[DedicatedPool]]. It does not reconnect or run a watchdog. If the connection is lost, the
+  * pool discards it and in-flight work fails with `ConnectionLost(mayHaveExecuted = true)`. Replies are matched in order. This allows the
+  * synchronous `HELLO` setup to finish before the connection is borrowed and keeps a transaction's `MULTI`, queued-command, and `EXEC`
+  * replies aligned with their commands.
   */
 final private[client] class DedicatedConnection private (
   factory: MultiplexedConnection.TransportFactory,
   connectTimeoutMillis: Long
 ) {
 
-  // stamped once, by the pool, with the Generation live the moment this connection joins it (see [[DedicatedPool.establishOutsideLock]])
+  // the generation recorded when this connection joins the pool; see [[DedicatedPool.establishOutsideLock]]
   @volatile private var stampedEpoch: MultiplexedConnection.Generation = MultiplexedConnection.Generation.initial
 
   private val pending                 = new ConcurrentLinkedQueue[DedicatedConnection.Waiter]()
   private val transportRef            = new AtomicReference[Transport]()
   @volatile private var dead: Boolean = false
-  // counts work from submit time, not write time: the transport queues asynchronously, so a command sits here before `writeAttempted`
-  // moves it to `pending`. Recycling on `pending.isEmpty` alone could hand back a connection with a queued-but-unwritten batch.
+  // Count a command when submit accepts it. The asynchronous transport may hold it before writeAttempted adds it to pending. Checking only
+  // pending.isEmpty could therefore return a connection to the pool while it still has a queued batch.
   private val inFlight                = new AtomicInteger(0)
 
   def epoch: MultiplexedConnection.Generation = stampedEpoch
@@ -46,7 +46,7 @@ final private[client] class DedicatedConnection private (
   }
 
   /**
-    * Sends `commands` as a single pipelined write and hands back their raw reply frames in order. Used for a transaction's `MULTI` … `EXEC`
+    * Sends `commands` as a single pipelined write and returns their raw reply frames in order. Used for a transaction's `MULTI` … `EXEC`
     * batch, whose `EXEC` array the caller decodes per-position against the original commands; the frames are returned undecoded.
     */
   def submitRaw(commands: Vector[Command[?]], callback: Try[Vector[Frame]] => Unit): Unit = {
@@ -85,7 +85,7 @@ final private[client] class DedicatedConnection private (
         val waiter = pending.poll()
         if (waiter == null) close() // a reply with nothing pending means the stream desynced; discard
         else {
-          // poison before delivering so release discards it rather than recycling it
+          // close before delivering a READONLY reply, ensuring the pool discards this connection when it is released
           if (Poison.isReadonly(reply)) close()
           waiter.complete(reply)
         }
@@ -109,7 +109,7 @@ final private[client] class DedicatedConnection private (
     def writeAttempted(): Unit =
       pending.add(this): Unit
 
-    // dropped fires only during teardown, ahead of onClosed; mark dead first so the pool can't recycle this connection mid-close
+    // the transport calls dropped during teardown before onClosed. Mark the connection dead first to prevent the pool from reusing it during close.
     def dropped(): Unit = {
       dead = true
       inFlight.decrementAndGet()
@@ -128,8 +128,8 @@ final private[client] class DedicatedConnection private (
     }
   }
 
-  // One write, N waiters: the batch is written (or dropped) atomically, and each reply frame fills its slot. The shared collector fires the
-  // single callback once every frame has arrived, or once on the first failure.
+  // Write the batch as one transport item and store each reply at its matching index. Invoke the callback after all replies arrive, or after
+  // the first failure.
   final private class RawBatch(commands: Vector[Command[?]], callback: Try[Vector[Frame]] => Unit) extends Transport.Item {
 
     private val n         = commands.length

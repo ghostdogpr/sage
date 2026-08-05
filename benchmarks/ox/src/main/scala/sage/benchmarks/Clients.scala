@@ -18,7 +18,7 @@ import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
 /**
-  * The Ox cell's benchmark clients: sage (direct style) and raw Lettuce driven async/auto-pipelined — the JVM ceiling.
+  * Clients included in the Ox benchmark: Sage in direct style and Lettuce using its asynchronous auto-pipelined API.
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {
@@ -31,8 +31,8 @@ object Clients {
 }
 
 /**
-  * Every sage-ox method needs an ambient `Ox`, so the connection is opened on a holder fiber whose `supervised` scope stays alive for the
-  * client's lifetime; each operation runs in its own transient `supervised` scope and shares the long-lived connection.
+  * Sage's Ox API requires an `Ox` scope. A holder fiber keeps the client's scope open for the benchmark lifetime, while each benchmark
+  * operation runs in a short-lived supervised scope and shares the same connection.
   */
 final class SageOxBench(host: String, port: Int) extends BenchClient {
 
@@ -96,8 +96,8 @@ final class SageOxBench(host: String, port: Int) extends BenchClient {
 }
 
 /**
-  * Lettuce driven async/auto-pipelined — the JVM ceiling: up to `concurrency` commands fired before awaiting, so the shared connection
-  * coalesces them into few socket writes (the same multiplexing redis4cats gets for free, with no effect-system layer on top).
+  * Lettuce using its asynchronous auto-pipelined API. Up to `concurrency` commands remain in flight, allowing the shared connection to
+  * combine them into fewer socket writes.
   */
 final class LettuceBench(host: String, port: Int) extends BenchClient {
 
@@ -114,8 +114,8 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
     }
   }
 
-  // sliding window: keep exactly `concurrency` futures in flight at all times — each completion fires the next key — so a slow lane never
-  // barriers the others (a chunk-then-wait-all loop would, under-measuring the ceiling). The completion callbacks run on Lettuce's event loop.
+  // Keep up to concurrency futures in flight, starting the next request whenever one completes. This avoids making all requests wait for
+  // the slowest member of a fixed batch. Completion callbacks run on Lettuce's event loop.
   private def slidingWindow[T](keys: Array[String], concurrency: Int)(submit: String => RedisFuture[T])(score: T => Long): Long = {
     val n                = keys.length
     val width            = math.max(1, math.min(concurrency, n))
@@ -192,7 +192,7 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
     }
   }
 
-  // mirrors LettuceBench.slidingWindow: keep `concurrency` futures in flight, each completion fires the next key so a slow lane never barriers
+  // match LettuceBench.slidingWindow by keeping up to concurrency futures in flight and starting the next request after each completion.
   private def slidingWindow[T](keys: Array[String], concurrency: Int)(submit: String => Future[T])(score: T => Long): Long = {
     val n                = keys.length
     val width            = math.max(1, math.min(concurrency, n))
@@ -242,8 +242,8 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
 }
 
 /**
-  * Jedis is synchronous and blocking, so concurrency comes from running `concurrency` lanes on virtual threads, each borrowing its own
-  * pooled connection (the honest model for a sync client — there is no auto-pipelining). RESP3 is enabled to match the other clients.
+  * Jedis is synchronous and blocking. The benchmark runs `concurrency` lanes on virtual threads, with each lane borrowing its own pooled
+  * connection. Jedis does not pipeline these commands automatically. RESP3 is enabled to match the other clients.
   */
 final class JedisBench(host: String, port: Int) extends BenchClient {
 

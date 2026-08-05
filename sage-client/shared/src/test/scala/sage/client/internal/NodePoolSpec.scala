@@ -32,7 +32,7 @@ class NodePoolSpec extends munit.FunSuite {
       events = events
     )
 
-  // gates the nth connect attempt: it signals `reached(n)`, blocks until `release(n)`, then opens a transport captured at `transport(n)`
+  // for the nth connection attempt, signal `reached(n)` and wait for `release(n)` before opening the transport stored at `transport(n)`
   final private class GatedFactory(count: Int) {
     val reached                                                 = Vector.fill(count)(new CountDownLatch(1))
     private val gate                                            = Vector.fill(count)(new CountDownLatch(1))

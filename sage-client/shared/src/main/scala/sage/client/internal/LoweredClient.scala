@@ -10,10 +10,8 @@ import sage.commands.{Command, Pipeline}
 import sage.ratelimit.Decision
 
 /**
-  * Lowers the runtime's [[Client]] from the kyo-compat carrier `CIO` to a Backend's native effect `F`, written once for every Backend. A
-  * Backend supplies only the two natural transformations [[lower]] (`CIO ~> F`) and [[lift]] (`F ~> CIO`); the whole client surface is
-  * expressed in terms of them. The native streaming sugar (`scanAll`, `subscribe`, …) stays per Backend, since it returns that ecosystem's
-  * own stream type.
+  * Adapts the shared [[Client]] from `CIO` to a backend effect `F`. A backend provides [[lower]] and [[lift]], and this class applies them to
+  * the shared client operations. Streaming helpers remain in each backend because their return types differ.
   */
 abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Client[F, String] {
 

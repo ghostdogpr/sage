@@ -12,9 +12,9 @@ import sage.commands.{Command, Connection}
 private[client] object Bootstrap {
 
   /**
-    * The setup commands every connection runs after `HELLO` and re-runs on reconnection, shared by the standalone, cluster, and
-    * master-replica paths so identification is never applied to one topology and dropped on another. `SELECT` lives here, never as a
-    * runtime command, because it would move the database under every fiber sharing the connection.
+    * The setup commands every connection runs after `HELLO` and re-runs on reconnection. Standalone, cluster, and master-replica clients
+    * share this list, keeping connection identification consistent across topologies. `SELECT` lives here rather than as a runtime command
+    * because it would move the database under every fiber sharing the connection.
     */
   def commands(auth: Option[AuthConfig], database: Int, clientName: Option[String]): Vector[Command[?]] = {
     val identification = Vector(

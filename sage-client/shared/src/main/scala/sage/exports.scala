@@ -1,15 +1,14 @@
 package sage
 
-// `import sage.*` — the one import for everything backend-independent: the command vocabulary (facade, model, options, results, raw-`Frame`
-// decode, codecs) and the connection config. The backend client comes from `import sage.backend.*` (the same import for every effect system).
+// `import sage.*` provides backend-independent commands, models, options, results, raw `Frame` decoding, codecs, and connection configuration.
+// The backend client comes from `import sage.backend.*`, using the same import for every effect system.
 //
-// These top-level `export` clauses live in the shared client module, and it is the ONLY module that contributes top-level members to
-// package `sage`: such members are silently dropped from a wildcard import when a SECOND module also contributes them and a subpackage is
-// wildcard-imported in the same scope (`import sage.*` + `import sage.backend.*`). Core's `package sage` holds only type definitions (direct
-// package members, no synthetic holder), so this file is the sole `sage$package` — vocabulary and config can therefore sit together here.
+// Keep these top-level exports in the shared client module. If another module contributes top-level members to package `sage`, combining
+// `import sage.*` with `import sage.backend.*` can silently omit those members. Core defines only types directly in package `sage`, leaving
+// this file as the only generated `sage$package` holder.
 //
-// A package cannot be wildcard-exported, so the surface is enumerated here — which also makes this the one place the public API is reviewed;
-// a new public option/result type must be added below to appear under `sage.*`.
+// Scala cannot wildcard-export a package, so each public name is listed here. New public option and result types must be added below to
+// become available through `sage.*`.
 
 export sage.client.{
   AuthConfig,

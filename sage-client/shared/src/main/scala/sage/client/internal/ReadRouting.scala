@@ -11,18 +11,19 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * The read policy's pure half, shared by the cluster and master-replica runtimes: which Nodes may serve a read, and in what order. It
-  * decides nothing about connection liveness; the class below walks the order it produces.
+  * Selects the nodes that may serve a read, in order, for cluster and master-replica clients. [[candidates]] does not check connection
+  * liveness. The [[ReadRouting]] class checks each selected node when it handles a read.
   */
 private[client] object ReadRouting {
 
   final case class Picked(node: Node, client: NodeClient, remaining: Vector[Node])
 
-  // an ordinary (non-blocking) read; writes, blocking reads, cursor-bound scans (whose cursor is node-local), and `cached` reads (gated
-  // separately) never reach here
+  // Allow ordinary non-blocking reads. Exclude writes, blocking reads, and cursor-bound scans because their cursors are node-local. Cached
+  // reads apply their own routing rule before calling this method.
   def replicaEligible(command: Command[?]): Boolean = command.isReadOnly && !command.isBlocking && !command.cursorBound
 
-  // the ordered candidates for an eligible read, round-robin-rotated by `rr` across the replicas; an empty result means strict Replica fails
+  // Order replicas in round-robin order using `rr`, then add the master when the policy permits it. An empty result means ReadFrom.Replica has
+  // no available candidate.
   def candidates(readFrom: ReadFrom, master: Node, replicas: Vector[Node], rr: Int): Vector[Node] = {
     val rotated =
       if (replicas.isEmpty) Vector.empty
@@ -40,12 +41,12 @@ private[client] object ReadRouting {
 }
 
 /**
-  * Walks the read policy's ordered candidates, shared by the cluster and master-replica runtimes: it picks each candidate's pool, skips
-  * what cannot serve the read, establishes off the caller's thread when it must, and reports a fault back with the candidates left so the
-  * runtime can apply its own disposition. Exhausting the order refreshes discovery and fails with [[NotConnected]], since nothing reached
-  * the wire and so no fault event will fire.
+  * Tries the read policy's candidates in order for cluster and master-replica clients. It skips candidates that cannot serve the read and
+  * opens connections outside the caller's thread. After a failed attempt, the runtime receives the fault and the remaining candidates and
+  * decides whether to continue. If every candidate is unavailable, this code refreshes discovery and fails with [[NotConnected]]. It must
+  * refresh here because no command was sent and no fault event will be emitted.
   *
-  * It also owns the per-master round-robin cursors, pruned through [[retain]] as the pools are.
+  * It keeps a separate round-robin position for each master and removes positions for masters that [[retain]] removes from the pools.
   */
 final private[client] class ReadRouting(
   masterPool: NodePool,
@@ -76,9 +77,9 @@ final private[client] class ReadRouting(
     candidatesFor(master, replicas, cursors.computeIfAbsent(master, _ => new AtomicInteger()).getAndIncrement())
 
   /**
-    * As [[candidatesFor]], but rotated by a cursor the caller owns, for a read whose rotation belongs to no single master's shard. A
-    * replica-preferred read that finds no replica schedules a refresh either way: it falls back to the master silently and would never look
-    * again, where strict Replica refreshes by exhausting its candidates instead.
+    * Selects candidates using a caller-provided round-robin position. This supports keyless reads that are not associated with one master's
+    * shard. When ReadFrom.ReplicaPreferred has no known replica, schedule a refresh even though the current read can use the master.
+    * ReadFrom.Replica schedules the refresh after it exhausts its candidate list.
     */
   def candidatesFor(master: Node, replicas: Vector[Node], rr: Int): Vector[Node] = {
     if (readFrom == ReadFrom.ReplicaPreferred && replicas.isEmpty) triggerRefresh()
@@ -91,9 +92,9 @@ final private[client] class ReadRouting(
   def retain(keep: Node => Boolean): Unit = cursors.keySet.removeIf(node => !keep(node)): Unit
 
   /**
-    * Submits `command` to the first candidate that can serve it, attributing the Node on success. `onFault` receives the failing Node, its
-    * error, and the candidates left, and runs off the reply thread. An empty `candidates` completes on the caller's thread; anything else
-    * completes on whichever thread answers the submit.
+    * Submits `command` to the first candidate that can serve it and records that node on success. Connection establishment and `onFault` are
+    * offloaded. A successful command completes on the reply thread. If the candidates are exhausted before a command is sent, completion
+    * runs on the thread currently checking them.
     */
   def walk[A](command: Command[A], candidates: Vector[Node], master: Node, complete: Try[A] => Unit)(
     onFault: (Node, Throwable, Vector[Node]) => Unit
@@ -117,8 +118,9 @@ final private[client] class ReadRouting(
     }
 
   /**
-    * The one Node a batch of reads should land on with its connection and the candidates after it, established if need be, or `None` when no
-    * candidate can serve the read. `onPick` runs on the caller's thread while a live candidate is already established, and off it otherwise.
+    * Selects one node and connection for a batch of reads, together with the remaining candidates. Returns `None` when no candidate can
+    * serve the read. `onPick` runs on the caller's thread when a candidate is already connected or none is available. Connection
+    * establishment is offloaded.
     */
   def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit =
     select(candidates, master, existingCandidate) match {
@@ -126,7 +128,7 @@ final private[client] class ReadRouting(
       case Selection.Exhausted      => onPick(None)
       case Selection.NeedsEstablish =>
         scheduler.offload {
-          // restart the full order so a previously dead candidate may reconnect before the first unknown one
+          // retry the full order, allowing a previously disconnected candidate to reconnect before checking the first unknown one
           select(candidates, master, establishCandidate) match {
             case Selection.Found(picked) => onPick(Some(picked))
             case _                       => onPick(None)

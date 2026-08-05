@@ -200,7 +200,7 @@ private[sage] object StreamInfo {
   private val millisInstant: Frame => Either[DecodeError, Instant] =
     frame => Decode.long(frame).map(Instant.ofEpochMilli)
 
-  // a group-level FULL PEL row carries its owning consumer: [id, consumer, delivery-time-ms, delivery-count]
+  // A group-level FULL PEL row includes its owning consumer: [id, consumer, delivery-time-ms, delivery-count].
   private val groupPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
     Decode.array4(Streams.streamId, Decode.utf8String, millisInstant, Decode.long, "group pending [id, consumer, delivery-time, delivery-count]") {
       (id, consumer, delivered, count) => FullPendingEntry(id, Some(consumer), delivered, count)

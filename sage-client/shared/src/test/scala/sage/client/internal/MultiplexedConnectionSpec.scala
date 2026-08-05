@@ -297,7 +297,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
       MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], backoff, noWatchdog, 1.second, Duration.Zero)
     import MultiplexedConnection.State
 
-    // a flap (Live but dropped before the stable window) carries the attempt forward, so the backoff grows instead of resetting every cycle
+    // when a Live connection drops before the stable interval, keep the attempt count and increase the next backoff delay
     assertEquals(connection.currentState, State.Live)
     transports.last.emit(Frame.SimpleString("stray")) // flap 1 -> attempt 1 -> 20ms
     assertEquals(connection.currentState, State.Reconnecting)
@@ -306,13 +306,13 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     scheduler.advance(1.milli)
     assertEquals(connection.currentState, State.Live)
 
-    transports.last.emit(Frame.SimpleString("stray")) // flap 2 -> attempt 2 -> 40ms, not reset to the 10ms initial delay
+    transports.last.emit(Frame.SimpleString("stray")) // the second short-lived connection uses attempt 2 and a 40 ms delay
     scheduler.advance(39.millis)
     assertEquals(connection.currentState, State.Reconnecting, "the backoff doubled to 40ms rather than resetting to 10ms")
     scheduler.advance(1.milli)
     assertEquals(connection.currentState, State.Live)
 
-    // staying Live past the backoff ceiling marks a healthy session, so the next loss resets the cadence to the initial delay
+    // after the connection remains Live longer than the maximum backoff, the next loss uses the initial delay again
     scheduler.advance(11.seconds)
     assertEquals(connection.currentState, State.Live)
     transports.last.emit(Frame.SimpleString("stray")) // stable -> attempt 0 -> 10ms
@@ -388,7 +388,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
       transports += transport
       transport
     }
-    // bootstrap PING stands in for HELLO: it fails while the resolved server is unhealthy, so each retry must re-resolve afresh
+    // use PING as the bootstrap command. It fails while the current endpoint is unhealthy, which makes every retry resolve the endpoint again.
     val connection                                      =
       MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero)
     assertEquals(seen.toList, List("master-1"))
@@ -403,7 +403,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     endpoint = "master-2"      // DNS repoint to the promoted master
     healthy = true
-    scheduler.advance(1.milli) // attempt 2: re-resolves and lands on master-2 -> succeeds
+    scheduler.advance(1.milli) // attempt 2: re-resolves and connects to master-2 -> succeeds
 
     assertEquals(seen.toList, List("master-1", "master-1", "master-1", "master-2"))
     assertEquals(connection.currentState, MultiplexedConnection.State.Live)
@@ -547,7 +547,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
       transports.head.emit(Frame.SimpleString("PONG"))
     })
     emitter.start()
-    connection.close() // blocks draining until the reply lands or closeTimeout
+    connection.close() // waits for the pending reply until it arrives or closeTimeout expires
     emitter.join()
 
     assertEquals(result, Some(Success("PONG")))

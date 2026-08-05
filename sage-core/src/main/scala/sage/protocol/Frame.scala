@@ -3,9 +3,9 @@ package sage.protocol
 import sage.Bytes
 
 /**
-  * A single RESP3 protocol value. Aggregates preserve wire order and duplicate keys; byte-carrying cases define content equality and
-  * `Double` treats NaNs as equal, so `==` is structural on every Frame. A sealed trait rather than an enum because those cases must
-  * override `equals`/`hashCode`.
+  * A single RESP3 protocol value. Aggregates preserve wire order and duplicate keys. Cases containing bytes compare their contents, and
+  * `Double` values treat NaNs as equal, making `==` structural for every Frame. This is a sealed trait because these cases must override
+  * `equals` and `hashCode`.
   */
 sealed trait Frame
 

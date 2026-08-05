@@ -15,10 +15,9 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * A registry of [[NodeClient]] bundles keyed by [[Node]], with single-flight establishment: concurrent callers for the same node block on
-  * one in-flight connect and observe the same success or failure, and a connect that completes after [[close]] is discarded rather than
-  * published. Shared by the cluster runtime (for its replica connections) and the master-replica runtime (for both roles); the cluster
-  * runtime keeps its own master registry, since that one drives the redirect/refresh state machine.
+  * Stores one [[NodeClient]] for each [[Node]]. Concurrent callers for the same node share one connection attempt and receive the same result.
+  * If an attempt finishes after [[close]], its connection is closed. Master-replica clients use these pools for both roles. Cluster clients
+  * use one for replicas and a separate pool for masters because master failures affect redirects and topology refresh.
   *
   * The `bootstrap` is fixed per pool, so a replica pool can append `READONLY` while a master pool stays read-write.
   */
@@ -124,7 +123,7 @@ final private[client] class NodePool(
             if (!closed) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
             throw error
         }
-      // publish only if our token is still current: a retain, close, or newer attempt supersedes us, and the new client is discarded not leaked
+      // Publish the client only while this attempt is current. A retain, close, or newer attempt supersedes it, in which case it is closed below.
       val publish = locked {
         val conn    = connRef.get()
         if (conn != null) establishing -= conn
@@ -153,7 +152,7 @@ final private[client] class NodePool(
     try getOrEstablish(node)
     catch { case NonFatal(_) => null }
 
-  // drops/closes bundles `keep` rejects and invalidates in-flight establishments for rejected nodes, so neither leaks; closes are offloaded
+  // remove and close clients for nodes rejected by keep. Also fail connection attempts for those nodes. Schedule closes outside the pool lock.
   def retain(keep: Node => Boolean): Unit = {
     val (gone, rejected) = locked {
       val absent          = established.keySet.asScala.toVector.filterNot(keep).flatMap(node => Option(established.remove(node)))
@@ -174,8 +173,8 @@ final private[client] class NodePool(
       pendingEstablish.clear()
       (snap, pending, inFlight)
     }
-    // release callers blocked on an in-flight connect now, rather than stranding them for the connect timeout; the establisher still
-    // observes `closed` on return and closes the node it opened
+    // Fail callers waiting for a connection immediately instead of making them wait for the connection timeout; an opening connection
+    // observes `closed` when it finishes and closes the node
     waiters.foreach(_.fail(NotConnected()))
     opening.foreach(_.close())
     all.foreach(_.close())
@@ -184,8 +183,8 @@ final private[client] class NodePool(
 
 private[client] object NodePool {
 
-  // one-shot single-flight cell: the establisher fills it, concurrent callers block on `get` and observe the same success or failure. The
-  // first settle wins, so a `close` that fails the waiters cannot be overwritten by a late establisher.
+  // Share one connection attempt among concurrent callers. One caller opens the connection while the others wait for the same result.
+  // The first result is final; once close has failed the waiters, a late establishment is ignored.
   final private class Establish {
     private val latch                                           = new CountDownLatch(1)
     private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)

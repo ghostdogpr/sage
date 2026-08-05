@@ -19,8 +19,8 @@ import sage.integration.{ContainerClient, Images}
   */
 abstract class TlsAuthSuite(image: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
 
-  // certs are copied in over the Docker API rather than bind-mounted, so the suite works against a remote daemon too (a bind mount would
-  // look for the path on the daemon host, not the test runner)
+  // Copy certificates through the Docker API so the suite also works with a remote daemon. A bind mount would look for the path on the daemon
+  // host instead of the test runner.
   override val containerDef: GenericContainer.Def[GenericContainer] =
     new GenericContainer.Def[GenericContainer]({
       val container = GenericContainer(

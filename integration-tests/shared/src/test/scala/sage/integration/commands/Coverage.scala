@@ -1,10 +1,9 @@
 package sage.integration.commands
 
 /**
-  * The acknowledged command-coverage partition. Every server-reported command is either implemented (via a [[CommandSamples]] sample) or
-  * listed in `skipped` (deliberate-never, with a reason); the coverage spec fails on any unacknowledged drift. Subcommands modeled as
-  * arguments under a bare command are not listed here — the spec drops space-containing server names that sage does not implement as a name
-  * of their own.
+  * The expected command coverage. Every command reported by the server is either implemented with a [[CommandSamples]] sample or listed in
+  * `skipped` with a reason. The coverage test fails when the server reports an unexpected command. Subcommands represented as arguments to a
+  * base command are omitted; the test ignores server command names containing spaces unless Sage implements that full name directly.
   */
 object Coverage {
 

@@ -11,8 +11,7 @@ import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
 /**
-  * The Pekko cell's benchmark clients: sage only. There is no Pekko-based Redis client to use as a competitor baseline, so this cell measures
-  * the sage Future surface on its own, the same way the Kyo cell does.
+  * The Pekko benchmark includes only Sage because there is no comparable Pekko-based Redis client in this benchmark suite.
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {

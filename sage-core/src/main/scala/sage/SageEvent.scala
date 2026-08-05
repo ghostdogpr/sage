@@ -6,27 +6,26 @@ import scala.util.{Failure, Success, Try}
 import sage.cluster.Node
 
 /**
-  * A runtime observability signal reported to a [[SageListener]]: a command completion, a connection lifecycle transition, a cache hit or
-  * miss, or a topology change. A sealed hierarchy so listeners match exhaustively. An Event carries no command arguments or payloads, so
-  * secrets (`HELLO`/`AUTH` credentials, user values) never reach a listener. Distinct from a `Message` (a pub/sub delivery) and a
-  * `StreamEntry` (a record in a Stream) — those are never Events.
+  * A runtime observability signal reported to a [[SageListener]]: a command completion, connection transition, cache result, or topology change.
+  * The sealed hierarchy supports exhaustive matching. Events omit command arguments and payloads, keeping credentials and user values out of
+  * listeners. Pub/sub `Message` values and `StreamEntry` records are separate types.
   */
 sealed trait SageEvent
 
 object SageEvent {
 
   /**
-    * One logical user command settled: its name, the node that produced the final result (`None` on standalone, or for an all-masters
-    * command), the client-observed duration (from acceptance to settlement, folding in any cluster redirects/retries), and its outcome. A
-    * cached read that hits the local cache yields only a [[Cache.Hit]] and no `CommandCompleted` — it touched no server; a cached miss yields
-    * a [[Cache.Miss]] and, when its server fetch settles, a `CommandCompleted`.
+    * Reports a completed user command with its name, final node (`None` for standalone and all-master commands), client-observed duration, and
+    * outcome. The duration includes cluster redirects and retries. A locally served cached read produces only [[Cache.Hit]]. A cache miss
+    * produces [[Cache.Miss]] and a `CommandCompleted` after the server request finishes.
     */
   final case class CommandCompleted(name: String, node: Option[Node], duration: FiniteDuration, outcome: Outcome) extends SageEvent
 
   /**
-    * The Multiplexed Connection's lifecycle. `Connected` fires on the initial connect and on every successful reconnect; `Disconnected`
-    * fires when a live connection is lost unexpectedly and the runtime begins reconnecting. Graceful close and individual reconnect attempts
-    * are not reported. `node` is `Some` for cluster and master-replica clients (the node this connection serves) and `None` for standalone.
+    * The multiplexed connection's lifecycle. `Connected` is reported for the initial connection and every successful reconnect.
+    * `Disconnected` is reported when a live connection is lost unexpectedly and the runtime begins reconnecting. Failed reconnect attempts
+    * report [[Connection.ReconnectFailed]] without reporting another `Disconnected`. Graceful close is not reported. `node` identifies the server for
+    * cluster and master-replica clients and is `None` for standalone.
     */
   sealed trait Connection extends SageEvent {
     def node: Option[Node]
@@ -37,10 +36,8 @@ object SageEvent {
     final case class Disconnected(node: Option[Node]) extends Connection
 
     /**
-      * A reconnect attempt failed to establish, carrying the cause so a permanent failure (a rejected password, an unsupported server, bad
-      * TLS material) is visible rather than looking like an endless generic reconnect. The runtime still backs off and retries — the server
-      * side may recover. The error carries no credentials (a `WRONGPASS` names no password). Not fired for the initial connect, whose failure
-      * the caller already sees.
+      * Reports a failed reconnect attempt and its cause, such as a rejected password, unsupported server, or invalid TLS material. The runtime
+      * continues retrying with backoff. Error values omit credentials. Initial connection failures are reported directly to the caller instead.
       */
     final case class ReconnectFailed(node: Option[Node], error: Throwable) extends Connection
 
@@ -67,7 +64,7 @@ object SageEvent {
 
   /**
     * The cluster's slot-owning master set changed (failover, or scaling a shard in or out). Reported only when that set actually differs,
-    * not on every topology refresh; a reshard that moves slots between the same masters does not fire it.
+    * not on every topology refresh. A reshard that moves slots between the same masters does not report this event.
     */
   final case class TopologyChanged(masters: Vector[Node]) extends SageEvent
 }
@@ -83,7 +80,7 @@ enum Outcome {
 object Outcome {
 
   /**
-    * The outcome of a settled `Try`: [[Outcome.Succeeded]] on success, [[Outcome.Failed]] carrying the error otherwise.
+    * Converts a completed `Try` to [[Outcome.Succeeded]] or to [[Outcome.Failed]] with its error.
     */
   def of(result: Try[?]): Outcome =
     result match {

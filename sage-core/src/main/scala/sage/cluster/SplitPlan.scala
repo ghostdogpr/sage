@@ -9,8 +9,9 @@ private[sage] enum Rejected {
 }
 
 /**
-  * The plan for running a Pipeline across a cluster. `perNode` groups keep their original positions so results merge back in submission
-  * order; `keyless` positions the runtime folds into any group; `rejected` positions fail per-position. Every index appears in one bucket.
+  * Describes how to run a pipeline across a cluster. `perNode` groups commands by target node and keeps their original positions. `keyless`
+  * contains commands that can be added to any node group. `rejected` contains commands that cannot be planned. Each pipeline position appears
+  * in exactly one of these collections.
   */
 final private[sage] case class SplitPlan(
   perNode: Vector[NodeGroup],

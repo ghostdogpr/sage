@@ -9,7 +9,7 @@ import sage.protocol.Frame
   * Server-side Lua scripting. `EVAL`/`EVALSHA` and their `_RO` reads return the raw RESP3 [[Frame]], since a script's reply shape is
   * defined by user code. `SCRIPT LOAD`, `SCRIPT FLUSH` and `SCRIPT EXISTS` run on every master, because a cluster keeps no shared script
   * cache and a later key-routed `EVALSHA` must find the script wherever its keys live. `EXISTS` therefore reports a sha present only when
-  * every master has it (a per-sha AND), so a `true` reply guarantees the key-routed `EVALSHA` cannot hit a master that lacks the script.
+  * every master has it (a per-sha AND). A `true` reply guarantees that key-routed `EVALSHA` calls will find the script on their master.
   */
 private[sage] object Scripting {
 

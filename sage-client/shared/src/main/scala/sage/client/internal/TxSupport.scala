@@ -29,8 +29,7 @@ private[internal] object TxSupport {
     CIO.value(toOut(values.result()))
   }
 
-  // decoders return Either and never throw; a non-SageException here is a decoder bug surfaced as a decode failure rather than allowed
-  // to escape the per-position result model.
+  // decoders should return Either; another exception indicates a decoder bug and becomes DecodeError to preserve per-command results
   def toEither(result: Try[Any]): Either[SageException, Any] =
     result match {
       case Success(value)            => Right(value)
@@ -38,7 +37,8 @@ private[internal] object TxSupport {
       case Failure(other)            => Left(DecodeError.fromThrowable(other))
     }
 
-  // None = WATCH abort; Some = the per-position decoded results. A queueing-phase error fails the effect (nothing ran).
+  // Return None when EXEC reports that a watched key changed. Otherwise, return each command's decoded result. A queueing error fails the
+  // effect before the transaction executes.
   def interpretExec(commands: Vector[Command[?]], frames: Vector[Frame]): CIO[Option[Vector[Either[SageException, Any]]]] = {
     val n          = commands.length
     // frames: MULTI reply, then one queue reply per command, then the EXEC reply
@@ -68,7 +68,7 @@ private[internal] object TxSupport {
       case _                          => None
     }
 
-  // an EXEC fault is an error frame carried in a Success, sitting either at the top level or inside the EXEC array
+  // Return error frames from either the top-level transaction replies or the array returned by EXEC.
   def execErrors(frames: Vector[Frame]): Iterator[ServerError] = {
     val nested = frames.lastOption match {
       case Some(Frame.Array(elems)) => elems.iterator
@@ -77,15 +77,14 @@ private[internal] object TxSupport {
     (frames.iterator ++ nested).flatMap(errorOf).map(ServerError.of)
   }
 
-  // a state error, not an argument, so deliberately outside the sealed hierarchy: a scope captured past its block
+  // using a transaction scope after its block ends is an invalid state and returns IllegalStateException instead of a SageException
   def scopeReleasedError: IllegalStateException =
     new IllegalStateException("transaction scope used after its block returned")
 
   /**
-    * N positions filled by independent callbacks, completing the single supplied callback once every position has landed. Each position is
-    * set exactly once (one reply per command, or one terminal re-route outcome), so the countdown reaching zero fires the completion once —
-    * no done-guard is needed. This is the collect-all shape shared by the standalone and cluster pipelines; the connection's fail-fast
-    * RawBatch deliberately keeps its own.
+    * Collects results from independent callbacks by their original index. Each index is set once, either by its command reply or its final
+    * routing result. When all indices are set, the countdown invokes `complete` once. Standalone and cluster pipelines use this collector
+    * because they wait for every result. `RawBatch` uses separate logic because it completes after the first failure.
     */
   final class IndexedCollector[A](n: Int, complete: Vector[A] => Unit) {
     private val slots     = new AtomicReferenceArray[A](n)

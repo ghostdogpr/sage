@@ -3,7 +3,7 @@ package sage.commands
 import sage.protocol.Frame
 
 /**
-  * Reaches the reducer a broadcast command carries, so a spec can fold multi-master replies without a cluster.
+  * Exposes the reducer stored by a broadcast command so tests can combine multi-master replies without a cluster.
   */
 trait BroadcastFolds { this: munit.FunSuite =>
 

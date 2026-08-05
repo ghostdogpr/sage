@@ -58,7 +58,7 @@ final case class ArrayInfoFull(
 /**
   * The Array data type (`AR*`): a sparse, integer-indexed map of index to value with a write cursor and a ring-buffer mode. Redis-only
   * (no Valkey counterpart) and shipped as a preview. Every command is keyed at the first argument. Indices are `Long`; the type's
-  * documented `2^64` index space above `Long.MaxValue` is not addressable, matching how the rest of the API carries offsets.
+  * documented `2^64` index space above `Long.MaxValue` is not addressable because this API uses `Long` for offsets.
   */
 private[sage] object Arrays {
 

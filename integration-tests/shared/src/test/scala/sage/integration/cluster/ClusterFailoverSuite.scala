@@ -15,9 +15,9 @@ import sage.integration.{ContainerClient, Eventually, Images}
 
 /**
   * Drives cluster failover recovery against a real multi-node cluster: three masters and their replicas in one container. When a master
-  * crashes, the cluster promotes its replica automatically, and the client re-homes on its own — on the connection loss it force-refreshes
-  * `CLUSTER SLOTS` and re-dispatches, bounded by `maxRedirects`. That bound is shorter than an election, so, as with a real application, the
-  * caller retries across the failover window while the client refreshes the topology underneath.
+  * crashes, the cluster promotes its replica automatically, and the client reconnects to the new owner. After losing the connection, the
+  * client refreshes `CLUSTER SLOTS` and retries up to `maxRedirects` times. An election may take longer, so the test retries as an
+  * application would while the client updates its topology.
   *
   * The fixed host ports are 7100-7105; see [[MultiNodeCluster]] for why a multi-node cluster cannot use mapped random ports.
   */
@@ -54,7 +54,7 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
       .getOrElse(throw new RuntimeException(s"no replica found for victim $victim among ${nodes.map(_.port)}"))
   }
 
-  // the replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
+  // The replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
   // write, so it would not cover writes the cluster client sent on its own routed connections; reading the replica directly proves recovery.
   private def awaitReplicated(container: FixedHostPortGenericContainer, replicaPort: Int, expected: Set[String], attempts: Int): CIO[Unit] =
     Eventually.converges(attempts)(() => CIO.blocking(parseKeys(cli(container, replicaPort, "keys", "*")).toSet))(expected.subsetOf)(have =>
@@ -106,7 +106,7 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
   private def masterPortsExcludingVictim(container: FixedHostPortGenericContainer): Vector[Int] =
     clusterNodes(container, victim).filter(_.isMaster).map(_.port).filter(_ != victim)
 
-  // queried on the node itself, so its own line carries the `myself` flag
+  // Query the node directly because its own CLUSTER NODES entry contains the `myself` flag.
   private def ownSlotCount(container: FixedHostPortGenericContainer, port: Int): Int =
     clusterNodes(container, port).collectFirst { case node if node.isMyself => node.ownedSlotCount }.getOrElse(0)
 
@@ -138,7 +138,7 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
           connectAndUse(config) { client =>
             for {
               _           <- writeAll(client, keys)
-              // recovering exactly the victim's keys proves the client re-homed onto the promoted replica
+              // reading the failed node's keys proves that the client connected to the promoted replica.
               onVictim    <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
               replicaPort <- CIO.blocking(victimReplicaPort(container))
               _           <- awaitReplicated(container, replicaPort, onVictim.toSet, 100)

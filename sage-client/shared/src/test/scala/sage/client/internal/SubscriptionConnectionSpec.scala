@@ -96,7 +96,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     box.get()
   }
 
-  // Bytes has no structural `==` (CONTEXT: compare with sameBytes), so destructure and compare the payload as text
+  // Bytes uses reference equality for `==`. Destructure the delivery and compare its payload as text.
   private def assertChannel(delivery: Option[SubscriptionConnection.Delivery], channel: String, payload: String)(using munit.Location): Unit =
     delivery match {
       case Some(SubscriptionConnection.Delivery.Channel(ch, p)) =>
@@ -227,7 +227,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       val s = payload.asUtf8String
       if (s.contains("\r\nSELECT\r\n")) Seq(Frame.SimpleString("OK"))
       else if (s.contains("\r\nSUBSCRIBE\r\n")) confirmations("subscribe", s)
-      else Nil // silent to PING, so a fired keepalive goes unanswered and the watchdog must eventually kill the socket
+      else Nil // do not answer PING; the watchdog eventually closes the connection after the keepalive times out
     }
     val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
     val (connection, scheduler, transports) = make(watchdog = watchdog, respond = silentToPing, bootstrap = Vector(Connection.select(0)))

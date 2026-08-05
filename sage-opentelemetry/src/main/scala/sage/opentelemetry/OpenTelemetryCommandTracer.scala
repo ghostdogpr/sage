@@ -12,11 +12,11 @@ import sage.cluster.Node
 import sage.commands.Command
 
 /**
-  * A [[CommandTracer]] emitting one OpenTelemetry `CLIENT` span per command, attributed to match Datadog's Lettuce instrumentation: the span
-  * name is the command (e.g. `GET`), `db.system` is `redis`, and `peer.service` collapses a cluster's nodes into one Redis dependency. The
-  * span's parent is the context `contextProvider` reads when the command is submitted — by default the thread-local current context, correct
-  * wherever an APM agent propagates context across thread pools; a bare OpenTelemetry SDK on a fiber runtime needs a fiber-native provider
-  * instead. Only the command name is recorded; arguments and keys never reach a span.
+  * A [[CommandTracer]] that creates one OpenTelemetry `CLIENT` span per command. The attributes follow Datadog's Lettuce instrumentation:
+  * the span name is the command, `db.system` is `redis`, and `peer.service` groups all cluster nodes under one dependency. By default, the
+  * span uses the current thread-local context as its parent. This works when an APM agent propagates context across thread pools. A bare
+  * OpenTelemetry SDK on a fiber runtime should provide its fiber-local context instead. Spans contain the command name but not arguments
+  * or keys.
   */
 final class OpenTelemetryCommandTracer private (
   tracer: Tracer,
@@ -26,7 +26,7 @@ final class OpenTelemetryCommandTracer private (
 
   def onCommand(command: Command[?]): CommandSpan = startSpan(command, contextProvider())
 
-  // capture the caller's context now; start the span only when the deferred work runs (a cache miss's fetch), so a local hit starts none
+  // capture the caller's context now, but create the span only if deferred work reaches the server. A local cache hit creates no span.
   override def prepare(command: Command[?]): () => CommandSpan = {
     val parent = contextProvider()
     () => startSpan(command, parent)
@@ -56,8 +56,9 @@ object OpenTelemetryCommandTracer {
   private val ServerPort    = AttributeKey.longKey("server.port")
 
   /**
-    * Builds a tracer from an explicit `OpenTelemetry` (the testable form: inject an in-memory SDK), reading the thread-local current context
-    * as each command's parent. `peerService` is the name every Redis node reports as, so a cluster shows as a single dependency; default `redis`.
+    * Builds a tracer from an `OpenTelemetry` instance and uses the current thread-local context as each command's parent. `peerService`
+    * groups all Redis nodes under one dependency and defaults to `redis`. Passing an explicit instance also supports tests with an
+    * in-memory SDK.
     */
   def apply(openTelemetry: OpenTelemetry, peerService: String = "redis"): CommandTracer =
     new OpenTelemetryCommandTracer(openTelemetry.getTracer("sage"), peerService, () => Context.current())
@@ -78,7 +79,7 @@ object OpenTelemetryCommandTracer {
 
   final private class Span(span: io.opentelemetry.api.trace.Span) extends CommandSpan {
 
-    // the runtime settles a span at most once, but a fail-fast path and a late callback could race; guard so the span ends exactly once
+    // a fast failure can race with a late callback. End the span only for the first outcome.
     private val ended = new AtomicBoolean(false)
 
     def routedTo(node: Node): Unit = {

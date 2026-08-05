@@ -6,8 +6,7 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * Which end of a list to act on. Shared by `LMOVE` (both ends) and `LMPOP`: a list end is one domain primitive, not a per-command option
-  * group, so the per-command-enum rule does not apply.
+  * Selects the end of a list used by commands such as `LMOVE` and `LMPOP`. `Left` means the head, and `Right` means the tail.
   */
 enum ListSide {
   case Left, Right

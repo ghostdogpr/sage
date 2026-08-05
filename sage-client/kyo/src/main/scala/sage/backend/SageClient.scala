@@ -14,13 +14,12 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
 /**
-  * The Kyo-native surface: the same client, with every method returning a pending computation whose `Abort` channel is the sealed
-  * [[SageException]], so failures are matched exhaustively. Anything that is not a `SageException` is a Kyo `Panic` (a defect), never a
-  * typed failure.
+  * A Sage client for Kyo. Each method returns a pending computation whose `Abort` channel contains [[SageException]], allowing callers to
+  * handle every expected failure. Other throwables become Kyo `Panic` defects.
   */
 type SageClient = Client[[A] =>> A < (Abort[SageException] & Async), String]
 
-// Narrow the carrier to the typed channel: a SageException stays a failure, anything else becomes a Panic.
+// keep SageException in the typed failure channel and convert other throwables to Panic.
 private val toSageException: Throwable => Nothing < Abort[SageException] = {
   case e: SageException => Abort.fail(e)
   case e                => Abort.panic(e)
@@ -38,8 +37,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     client.cached(command, FiniteDuration(ttl.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))
 
   /**
-    * The full SCAN iteration: stops on the server's zero cursor, never on an empty page. SCAN may return a key more than once. In cluster
-    * mode it walks every slot-owning master in turn, each with its own node-local cursor, so the sweep covers the whole keyspace.
+    * Scans the full keyspace. An empty page does not end the scan; iteration stops when the server returns a zero cursor. Redis may return
+    * the same key more than once. In cluster mode, each master is scanned with its own cursor.
     */
   def scanAll(
     pattern: Option[String] = None,
@@ -49,7 +48,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     scanStreamAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
 
   /**
-    * The full HSCAN iteration over field/value pairs: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all HSCAN field/value pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def hScanAll[F: KeyCodec, V: ValueCodec](
     key: K,
@@ -59,7 +58,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     scanStream(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
-    * The full SSCAN iteration over set members: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all SSCAN members until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def sScanAll[V: ValueCodec](
     key: K,
@@ -69,7 +68,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     scanStream(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
-    * The full ZSCAN iteration over member/score pairs: stops on the server's zero cursor, never on an empty page.
+    * Iterates over all ZSCAN member/score pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
     */
   def zScanAll[V: ValueCodec](
     key: K,
@@ -78,8 +77,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
   )(using Tag[V]): Stream[(V, Double), Abort[SageException] & Async] =
     scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
-  // chunkSize = 1: emit each page as it arrives — the default rechunks to 4096, withholding an infinite tail (xTail/xConsume) until then.
-  // The page-step logic itself is shared in `Paged`; here we lower its `CIO` to Kyo, refine the channel, and turn the `Option` end-signal into a `Maybe`.
+  // A chunk size of 1 emits each page immediately. Kyo's default chunk size of 4096 would delay an unbounded stream such as xTail or
+  // xConsume. Paged provides the iteration logic; this adapter converts its CIO and Option result to Kyo types.
   private def paged[S, A](start: S)(step: Paged.Step[S, A])(using Tag[A]): Stream[A, Abort[SageException] & Async] =
     Stream
       .unfold[S, Vector[A], Abort[SageException] & Async](start, chunkSize = 1)(s => refine(step(s).lower).map(Maybe.fromOption))
@@ -90,7 +89,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
   ): Stream[A, Abort[SageException] & Async] =
     paged[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
 
-  // walks every scan target in turn, each with its own node-local cursor, so a cluster SCAN sweeps all masters instead of one
+  // scan each target with its own node-local cursor. A cluster has one target for every slot-owning master.
   private def scanStreamAll[A](
     fetch: ScanTarget => ScanCursor => ScanPage[A] < (Abort[SageException] & Async)
   )(using Tag[A]): Stream[A, Abort[SageException] & Async] =
@@ -110,9 +109,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     )
 
   /**
-    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor each call until it wraps back to the start. Tombstone
-    * entries — claimed ids whose data was already deleted, which the decoder surfaces with no fields — are skipped, so every emitted entry
-    * carries data.
+    * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor until it returns to the start. Entries whose data
+    * has already been deleted are skipped.
     */
   def xAutoClaimAll[F: KeyCodec, V: ValueCodec](
     key: K,
@@ -127,9 +125,9 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     )
 
   /**
-    * Follows a stream without a consumer group: replays every entry after `from`, then blocks for new entries forever, advancing past the
-    * last id each round. Blocking on an explicit id (never `$`) leaves no gap for entries arriving mid-loop. No acknowledgement, unlike
-    * [[xConsume]]. `from` defaults to the start; pass a later id to tail from there.
+    * Follows a stream without a consumer group. It first reads every entry after `from`, then waits for new entries. The explicit entry ID
+    * used for each blocking read avoids missing entries that arrive between reads. Unlike [[xConsume]], this method does not acknowledge
+    * entries. `from` defaults to the start of the stream.
     */
   def xTail[F: KeyCodec, V: ValueCodec](
     key: K,
@@ -144,9 +142,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     )
 
   /**
-    * Tails a consumer group: first drains this consumer's own pending history (at-least-once recovery after a restart), then blocks for new
-    * entries forever. `handle` runs per entry; the entry is acknowledged only after `handle` succeeds, so a failure leaves it in the PEL for
-    * recovery.
+    * Follows a stream as part of a consumer group. It processes this consumer's pending entries first, then waits for new entries. Each
+    * entry is acknowledged only after `handle` succeeds. If `handle` fails, the entry remains pending and can be recovered later.
     */
   def xConsume[F: KeyCodec, V: ValueCodec](
     group: String,
@@ -176,8 +173,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     )
 
   /**
-    * Subscribes to one or more channels; closing the enclosing `Scope` unsubscribes. Survives reconnects via auto-resubscribe, dropping
-    * messages published during the reconnect gap.
+    * Subscribes to one or more channels. Closing the enclosing `Scope` unsubscribes. Sage resubscribes after reconnecting, but messages
+    * published while the connection is down are lost.
     */
   def subscribe[V: ValueCodec](channel: String, rest: String*)(
     using Tag[Message[V]],
@@ -205,8 +202,9 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     streamOf(client.subscribeShardChannels[V](channel, rest*))
 
   /**
-    * Like [[subscribe]], but the returned effect settles only once the server has confirmed the SUBSCRIBE, so a publish sequenced after it
-    * cannot race the registration. Closing the enclosing `Scope` unsubscribes.
+    * Like [[subscribe]], but opens the subscription before completing the effect. Standalone and master-replica clients wait for server
+    * confirmation. Cluster clients wait up to the connection timeout and may return before confirmation, which can arrive later. Closing the enclosing
+    * `Scope` unsubscribes.
     */
   def subscribeScoped[V: ValueCodec](channel: String, rest: String*)(
     using Tag[Message[V]],
@@ -215,8 +213,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     scopedStreamOf(client.subscribeChannels[V](channel, rest*))
 
   /**
-    * Like [[pSubscribe]], but the returned effect settles only once the server has confirmed the PSUBSCRIBE. Closing the enclosing `Scope`
-    * unsubscribes.
+    * Like [[pSubscribe]], but opens the subscription before completing the effect. Confirmation follows the same timeout behavior as
+    * [[subscribeScoped]]. Closing the enclosing `Scope` unsubscribes.
     */
   def pSubscribeScoped[V: ValueCodec](pattern: String, rest: String*)(
     using Tag[PatternMessage[V]],
@@ -225,8 +223,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
     scopedStreamOf(client.subscribePatterns[V](pattern, rest*))
 
   /**
-    * Like [[sSubscribe]], but the returned effect settles only once the server has confirmed the SSUBSCRIBE. Closing the enclosing `Scope`
-    * unsubscribes.
+    * Like [[sSubscribe]], but opens the subscription before completing the effect. Confirmation follows the same timeout behavior as
+    * [[subscribeScoped]]. Closing the enclosing `Scope` unsubscribes.
     */
   def sSubscribeScoped[V: ValueCodec](channel: String, rest: String*)(
     using Tag[Message[V]],
@@ -244,7 +242,7 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
   )(using Tag[A], Frame): Stream[A, Abort[SageException] & Async & Scope] < (Abort[SageException] & Async & Scope) =
     Scope.acquireRelease(open)(_.close).map(deliveries)
 
-  // chunkSize = 1: emit each message as it arrives — the default rechunks to 4096, withholding a live stream until that many accumulate
+  // emit each message immediately. Kyo's default chunk size of 4096 would wait for that many messages before delivering them.
   private def deliveries[A](
     sub: Subscription[[B] =>> B < (Abort[SageException] & Async), A]
   )(using Tag[A], Frame): Stream[A, Abort[SageException] & Async & Scope] =
@@ -254,8 +252,8 @@ extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(usi
 object SageClient {
 
   /**
-    * A command surface re-typed to a non-String key, as returned by `client.as[K]`. The unqualified [[SageClient]] is String-keyed;
-    * use `as` to reach any other key type over the same connection.
+    * A client that uses `K` for keys, returned by `client.as[K]`. [[SageClient]] uses `String` keys by default. Calling `as` changes only
+    * the key type and continues to use the same connection.
     */
   type Keyed[K] = Client[[A] =>> A < (Abort[SageException] & Async), K]
   def connect(config: SageConfig): SageClient < (Abort[SageException] & Async) =

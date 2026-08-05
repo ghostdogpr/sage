@@ -37,7 +37,8 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
   }
 
-  // shared TTL/expiry shape (TTL, EXPIRETIME, HTTL, …): `-2` absent, `-1` no expiry, else present
+  // Decode the integer format shared by TTL, EXPIRETIME, HTTL, and related commands. -2 means absent, -1 means no expiry, and a non-negative
+  // value contains the expiry result.
   def expiryInteger[A](absent: A, noExpiry: A, expected: String)(present: Long => A): Frame => Either[DecodeError, A] = {
     case Frame.Integer(-2)                    => Right(absent)
     case Frame.Integer(-1)                    => Right(noExpiry)
@@ -322,11 +323,12 @@ private[commands] object TimeArgs {
 
   def wholeSeconds(timestamp: Instant): Boolean = timestamp.getNano == 0
 
-  // whole seconds keep the second-precision wire form; anything finer rounds up to the next millisecond —
-  // an expiry must never land earlier than asked, and truncation would turn a sub-millisecond expiry into 0 (immediate)
+  // Keep second precision for whole seconds. Round finer durations up to the next millisecond so the encoded expiry is not earlier than the
+  // requested time. Rounding down would encode a sub-millisecond duration as 0, which expires immediately.
   def millis(duration: FiniteDuration): Long = Math.ceilDiv(duration.toNanos, 1000000L)
 
-  // saturate rather than overflow: an extreme Instant must not throw while building a command, and clamping up never lands earlier than asked
+  // Use saturating arithmetic for an Instant outside the millisecond range. This avoids an overflow while building the command and preserves
+  // upward rounding at the maximum value.
   def millis(timestamp: Instant): Long =
     satAdd(satMul(timestamp.getEpochSecond, 1000L), Math.ceilDiv(timestamp.getNano.toLong, 1000000L))
 

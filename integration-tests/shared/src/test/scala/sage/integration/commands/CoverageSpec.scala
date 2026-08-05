@@ -38,8 +38,8 @@ class CoverageSpec extends munit.FunSuite with TestContainersForAll with Coverag
         redisCore  <- coreCommands(configOf(redis))
         valkeyCore <- coreCommands(configOf(valkey))
       } yield {
-        // a subcommand modeled as an argument is covered by its bare command; only space-containing names sage implements as their own
-        // Command name (XINFO/XGROUP) are tracked
+        // Count a subcommand modeled as an argument under its base command. Track a space-separated command name only when Sage implements
+        // that complete name, as it does for XINFO and XGROUP.
         val serverUnion = (redisCore ++ valkeyCore).filterNot(name => name.contains(' ') && !implemented.contains(name))
         assertExactPartition("core", serverUnion, implemented, Coverage.skipped.keySet)
         report("redis", redisCore)

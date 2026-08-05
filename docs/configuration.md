@@ -138,7 +138,7 @@ Only read-only commands can use this setting. Writes, and any command not marked
 
 ## TLS and ACL
 
-Both are configuration on top of the same client. `tls` selects the trust source; `auth` carries the ACL user:
+Both are configured on the same client. `tls` selects the trust source, and `auth` sets the ACL username and password:
 
 ```scala
 val config = SageConfig(
@@ -162,8 +162,8 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | --- | --- | --- |
 | `connectTimeout` | each socket connect, TLS handshake, and connection-setup command | `10.seconds` |
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
-| `watchdog` (`WatchdogConfig`) | idle-connection liveness ping (death detector) | ping every `60.seconds`, `30.seconds` timeout |
-| `closeTimeout` | how long `close` waits for in-flight commands to drain (blocking commands and transactions are closed at once) | `5.seconds` |
+| `watchdog` (`WatchdogConfig`) | connection liveness checks for pending commands and idle connections | ping every `60.seconds`, `30.seconds` timeout |
+| `closeTimeout` | how long `close` waits for in-flight commands to finish (blocking commands and transactions are closed at once) | `5.seconds` |
 | `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
@@ -203,6 +203,6 @@ For the common cases you can parse a `redis://` or `rediss://` URI instead of as
 ```scala
 // fromUri returns Either: a Left describes the problem, a Right is the config
 val parsed = SageConfig.fromUri("rediss://app:app-secret@localhost:6380/0")
-// further tuning stays programmatic:
+// Further tuning stays programmatic:
 //   SageConfig.fromUri(uri).map(_.copy(readFrom = ReadFrom.ReplicaPreferred))
 ```

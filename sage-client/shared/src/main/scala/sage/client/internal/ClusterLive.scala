@@ -22,19 +22,20 @@ import sage.protocol.Frame
 import sage.ratelimit.Decision
 
 /**
-  * The cluster runtime: one [[NodeClient]] bundle per master, a refreshable [[ClusterTopology]], and the routing/redirect/failover state
-  * machine that executes the pure engine's [[Route]] classifications. The same `Client` type as standalone; only configuration selects it.
+  * Implements the cluster client with one [[NodeClient]] per master and a [[ClusterTopology]] that can be refreshed. The topology identifies
+  * the node for each command, and this class handles connections, redirects, and failover. Configuration selects this implementation without
+  * changing the `Client` type.
   *
-  * A Pipeline is split per node (the pure [[ClusterTopology.split]]), each group sent as one batch, and the results scattered back into
-  * submission order; positions a stale topology can't resolve fall back to per-command [[dispatch]]. A Transaction leases one Dedicated
-  * Connection, pinned lazily to the slot of its first key, and rejects any key on another slot with [[CrossSlot]].
+  * A pipeline is grouped by node with [[ClusterTopology.split]]. Each group is sent as one batch, and results are restored to submission
+  * order. Commands whose node is unknown use normal [[dispatch]]. A transaction uses one dedicated connection. Keyed commands select its
+  * slot, and a later command for another slot fails with [[CrossSlot]].
   *
-  * Dispatch to an already-established node runs inline on the caller: the registry lookup and the submit never block, even mid-reconnect,
-  * where the submit fails fast. Only the paths that may establish a connection or refresh the topology hop to an offloaded virtual thread,
-  * and a submit's reply callback re-offloads before any blocking continuation (never on the reply thread).
+  * Dispatch to an existing connection runs on the caller's thread because lookup and submission do not block. When a connection is being
+  * opened or the topology is refreshed, work runs on a separate virtual thread. Reply callbacks also move any blocking continuation off the
+  * reply thread.
   *
-  * The topology refreshes on events (a redirect, an ownership or connection fault, an unowned slot, a subscription drop), throttled by
-  * `minRefreshInterval`; a timer only comes into it when `topologyRefreshInterval` opts into the background poll.
+  * Redirects, ownership or connection failures, unowned slots, and lost subscriptions can refresh the topology. `minRefreshInterval` limits
+  * these refreshes. Set `topologyRefreshInterval` to add periodic background refreshes.
   */
 final private[client] class ClusterLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
@@ -56,8 +57,8 @@ final private[client] class ClusterLive(
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
 
-  // READONLY at setup, so a replica serves reads for its master's slots instead of answering MOVED; separate from the master registry, which
-  // drives redirects
+  // Send READONLY during setup to let replicas serve reads for their master's slots. Replica connections remain separate from the master
+  // registry used for command routing and redirects.
   private val replicaPool   = new NodePool(
     nodeFactory,
     scheduler,
@@ -84,7 +85,8 @@ final private[client] class ClusterLive(
     () => pickNode(topologyRef.get())
   )
 
-  // the master registry, driving redirects/refresh; read-write bootstrap (no READONLY) keeps it distinct from replicaPool
+  // Store master connections separately from replica connections. Master failures affect redirects and topology refresh, and their setup
+  // omits READONLY.
   private val masterPool       = new NodePool(
     nodeFactory,
     scheduler,
@@ -104,7 +106,7 @@ final private[client] class ClusterLive(
 
   private val refreshThrottle = new RefreshThrottle(scheduler, cluster.minRefreshInterval.toMillis)
 
-  // if no seed answers, throws the last failure so the first connect surfaces a handshake/TLS error like a standalone connect, not None
+  // if every seed fails, report the final connection or handshake error to the caller.
   private[client] def bootstrapTopology(): Unit = {
     var lastError: Throwable = NotConnected()
     val candidates           = seeds.iterator
@@ -151,7 +153,7 @@ final private[client] class ClusterLive(
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
     executor.evalSha(this, subject, cost, peek)
 
-  // SCAN cursors are node-local, so a full SCAN must sweep every slot-owning master; a reshard mid-scan can still miss or duplicate keys
+  // SCAN cursors are node-local. A full scan visits every master that owns slots. Resharding during the scan can still miss or duplicate keys.
   def scanTargets: CIO[Vector[ScanTarget]] =
     CIO.blocking {
       val masters = slotOwningMasters(topologyRef.get())
@@ -161,8 +163,8 @@ final private[client] class ClusterLive(
   private def slotOwningMasters(topology: ClusterTopology): Vector[Node] =
     topology.shards.collect { case shard if shard.slots.nonEmpty => shard.master }.distinct
 
-  // a SCAN page must resume on the node its cursor came from, so an unreachable node fails the walk rather than rerouting (redirectsLeft = 0):
-  // resuming a node-local cursor on another master would scan the wrong keyspace
+  // Resume a SCAN page on the node that issued its cursor. If that node is unavailable, fail the scan because another master would interpret
+  // the node-local cursor against a different keyspace. redirectsLeft = 0 disables rerouting.
   def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] =
     target.node match {
       case Some(node) =>
@@ -181,14 +183,14 @@ final private[client] class ClusterLive(
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => CIO.unit.flatMap(_ => body(scope)))
 
-  // classic subscriptions ride one connection pinned to an arbitrary master (classic PUBLISH broadcasts cluster-wide); the manager re-homes it
+  // classic subscriptions share a connection to an arbitrary master because PUBLISH broadcasts across the cluster.
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
     CIO.blocking(Client.channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
 
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
     CIO.blocking(Client.patternMessages(subscriptions.subscribePatterns(pattern +: rest.toVector)))
 
-  // Shard Channels route per Slot to per-Node Sharded Subscription Connections; resubscription follows ownership on migration/failover
+  // route each shard channel to a sharded subscription connection for its slot's node. Update the subscription when ownership changes.
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
     CIO.blocking(Client.channelMessages(subscriptions.subscribeShard(channel +: rest.toVector)))
 
@@ -258,10 +260,9 @@ final private[client] class ClusterLive(
 
   final private case class MultiSlotEntry(resultIndex: Int, argIndex: Int)
 
-  // A supported logical cross-slot command becomes one ordinary command per exact slot, not per owner node. Every subgroup re-enters
-  // dispatch so replica policy, topology refresh, and MOVED/ASK handling stay identical to a normal one-slot call. The merge waits for every
-  // subgroup and decodes once through the original command: MGET scatters positional frames, integer commands sum per-slot counts, and MSET
-  // requires every per-slot reply to succeed with OK.
+  // Split a supported cross-slot command into one command for each slot. Send every group through normal dispatch to apply replica policy,
+  // topology refresh, and MOVED or ASK handling. After every group completes, decode the combined result with the original command. MGET
+  // restores values to their original positions, integer commands add the per-slot counts, and MSET requires an OK reply from every slot.
   private def scatterMultiSlot[A](
     command: Command[A],
     policy: MultiSlotPolicy,
@@ -338,14 +339,15 @@ final private[client] class ClusterLive(
     }
   }
 
-  // Validate each recognized command's complete argument shape before splitting so a custom command that merely shares its name can never
+  // Validate each recognized command's complete argument shape before splitting. A custom command that merely shares its name must not
   // lose or misassociate non-key arguments during subgroup construction.
   private def multiSlotPolicy(command: Command[?]): Option[MultiSlotPolicy] =
     command.name.toUpperCase(Locale.ROOT) match {
       case "MGET" if hasKeyStride(command, 1)                                => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1))
       case "DEL" | "EXISTS" | "TOUCH" | "UNLINK" if hasKeyStride(command, 1) => Some(MultiSlotPolicy(MultiSlotMerge.Sum, 1))
       case "MSET" if hasKeyStride(command, 2)                                => Some(MultiSlotPolicy(MultiSlotMerge.AllSucceeded, 2))
-      // JSON.MSET is not split: unlike MSET, a triplet can fail path validation, so splitting could partially apply before a later group fails
+      // Keep JSON.MSET as one command because any triplet can fail path validation. Splitting it could apply earlier groups before a later
+      // group fails validation.
       case "JSON.MGET" if hasLeadingKeys(command, 1)                         => Some(MultiSlotPolicy(MultiSlotMerge.Positional, 1, suffixArgs = 1))
       case _                                                                 => None
     }
@@ -363,7 +365,8 @@ final private[client] class ClusterLive(
     walkRead(command, reads.candidatesFor(master, replicas), master, redirectsLeft, complete)
   }
 
-  // a keyless eligible read (RANDOMKEY): round-robin over every replica, falling back per policy, so strict Replica never hits a master
+  // RANDOMKEY has no slot. Try replicas across the cluster in round-robin order, then apply the configured fallback policy.
+  // ReadFrom.Replica uses only replica candidates.
   private def sendKeylessRead[A](topology: ClusterTopology, command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit): Unit =
     pickNode(topology) match {
       case Some(master) =>
@@ -389,7 +392,8 @@ final private[client] class ClusterLive(
     Fault.categorize(error) match {
       case Fault.Redirected(redirect)     =>
         redirect.kind match {
-          // strict Replica must not follow ASK onto the importing master (the migrating key is on no replica); MOVED refreshes and re-dispatches
+          // ReadFrom.Replica cannot follow ASK because the importing master holds the key during migration. MOVED refreshes the topology and
+          // re-dispatches the command.
           case RedirectKind.Ask                         =>
             if (readFrom == ReadFrom.Replica) complete(Failure(NotConnected()))
             else onRedirect(node, redirect, command, redirectsLeft, complete)
@@ -400,7 +404,7 @@ final private[client] class ClusterLive(
             refresh(force = true)
             scheduler.offload(dispatch(command, redirectsLeft - 1, complete))
         }
-      // only a loss that provably never ran may re-dispatch, per onUnreachable's contract
+      // re-dispatch only when the failure reports that the command was not executed, as required by onUnreachable
       case Fault.Lost(executed)           =>
         if (rest.nonEmpty) walkRead(command, rest, master, redirectsLeft, complete)
         else if (executed) {
@@ -434,7 +438,7 @@ final private[client] class ClusterLive(
       case BroadcastReduce.Fold(fold) => broadcastCombine(topology, command, _.reduce(fold), redirectsLeft, complete, resolve)
     }
 
-  // a broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
+  // A broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
   // cache; any node failing terminally fails the command
   private def sendToAllMasters[A](
     topology: ClusterTopology,
@@ -461,9 +465,8 @@ final private[client] class ClusterLive(
     }
   }
 
-  // an all-masters broadcast whose per-node replies fold into one: KEYS concatenates each node's node-local slice (no single node sees the
-  // whole keyspace), WAIT/WAITAOF reduce to the weakest shard. Frames are collected raw and combined before a single decode; any node
-  // failing terminally fails the command
+  // Combine replies from an all-masters command before decoding them. KEYS concatenates the keys returned by each node. WAIT and WAITAOF use
+  // the lowest acknowledgement counts returned by any shard. If a node cannot complete the command, fail the combined result.
   private def broadcastCombine[A](
     topology: ClusterTopology,
     command: Command[A],
@@ -498,7 +501,7 @@ final private[client] class ClusterLive(
 
   private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
     val nc = resolve(node)
-    // the dispatch fast path resolves inline on the caller, which the retry's refresh would block
+    // resolve on the caller's thread; when no connection is available, offload the refresh and retry because refresh may block
     if (nc == null) scheduler.offload(retryBroadcast(node, command, NotConnected(), refreshFirst = true, attemptsLeft, settle))
     else
       nc.submit[B](
@@ -511,12 +514,12 @@ final private[client] class ClusterLive(
       )
   }
 
-  // only the node that lost its connection or refused for its own reasons is retried; a WAIT re-serves its own timeout there
+  // retry only the node whose connection was lost or whose request was temporarily refused; retrying WAIT starts its timeout again there
   private def onBroadcastFailure[B](node: Node, command: Command[B], error: Throwable, attemptsLeft: Int, settle: Try[B] => Unit): Unit =
     Fault.categorize(error) match {
       case Fault.Lost(false)                         => retryBroadcast(node, command, error, refreshFirst = true, attemptsLeft, settle)
       case Fault.TryAgain | Fault.Unavailable(false) => retryBroadcast(node, command, error, refreshFirst = false, attemptsLeft, settle)
-      // a cluster-wide refusal may have moved the masters this fan-out captured, so it is not chased
+      // a cluster-wide refusal may mean the selected masters are stale; refresh the topology, then return the error
       case Fault.Unavailable(true)                   =>
         refreshBeforeFailing()
         settle(Failure(error))
@@ -525,7 +528,7 @@ final private[client] class ClusterLive(
         settle(Failure(error))
     }
 
-  // a node the refreshed topology no longer lists as a slot-owning master makes this broadcast's target set stale, so it fails unchased
+  // retry this node only while it remains a slot-owning master
   private def retryBroadcast[B](
     node: Node,
     command: Command[B],
@@ -651,8 +654,8 @@ final private[client] class ClusterLive(
     }
   }
 
-  // the command provably never executed: refresh to adopt the promoted master, then re-route. Jittered backoff paces retries so an in-progress
-  // failover is not hammered; redirectsLeft bounds it.
+  // The command was not sent; refresh the topology before routing it again, delay retries with jitter while failover completes, and use
+  // redirectsLeft to limit the number of attempts
   private def onUnreachable[A](
     command: Command[A],
     redirectsLeft: Int,
@@ -661,7 +664,7 @@ final private[client] class ClusterLive(
     cacheCtx: Cached = null
   ): Unit = onRetryable(command, NotConnected(), refreshFirst = true, redirectsLeft, complete, lease, cacheCtx)
 
-  // a self-clearing refusal (-TRYAGAIN, -LOADING, -MASTERDOWN, -CLUSTERDOWN): retry bounded and jittered
+  // retry temporary refusals such as TRYAGAIN, LOADING, MASTERDOWN, and CLUSTERDOWN with bounded jitter
   private def onRetryable[A](
     command: Command[A],
     error: Throwable,
@@ -681,11 +684,11 @@ final private[client] class ClusterLive(
       )
     }
 
-  // paces a retry, growing with the attempts already spent, so an in-progress failover or migration is not hammered
+  // increase the jittered delay with each attempt to reduce request load during failover or migration
   private def afterBackoff(attemptsLeft: Int)(retry: => Unit): Unit =
     scheduler.after(Backoff.jitteredMillis(reconnect, (cluster.maxRedirects - attemptsLeft).max(0), scheduler).millis)(retry)
 
-  // a path that will not retry must adopt a topology, not schedule one a throttle could drop
+  // refresh immediately before returning an error on paths where no later retry can trigger another refresh
   private def refreshBeforeFailing(): Unit = refresh(force = true)
 
   private def onUnowned[A](command: Command[A], redirectsLeft: Int, complete: Try[A] => Unit, lease: DedicatedPool.Lease, cacheCtx: Cached): Unit = {
@@ -693,13 +696,13 @@ final private[client] class ClusterLive(
     val topology     = topologyRef.get()
     val allowReplica = replicaAllowed(cacheCtx)
     topology.route(command) match {
-      // re-apply the read policy: an eligible read must still go to a replica once the slot resolves, not be pinned to its master
+      // apply the read policy after the slot resolves. Eligible reads still use replica routing.
       case Route.ToNode(node, slot)                                                                  =>
         sendOwned(command, node, slot, redirectsLeft, complete, allowReplica, lease, cacheCtx)
-      // strict Replica must not fall back to a master: refresh and retry (bounded), never sendToAny
+      // ReadFrom.Replica has no master fallback. Refresh and retry within the configured limit.
       case _ if allowReplica && readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
         onUnreachable(command, redirectsLeft, complete, lease, cacheCtx)
-      // still unowned after refresh: any master, trusting its reply (a MOVED to follow, or CLUSTERDOWN)
+      // if the refreshed topology still has no owner, send to any master and handle its MOVED or CLUSTERDOWN reply
       case _                                                                                         => sendToAny(topology, command, redirectsLeft, complete, lease, cacheCtx)
     }
   }
@@ -716,7 +719,7 @@ final private[client] class ClusterLive(
   private def malformedKeys(name: String): InvalidArgument =
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
-  // a transaction never follows a redirect, so an ownership move must be adopted before the caller can retry: bypass the throttle window
+  // transactions do not follow redirects. Refresh without throttling so the caller's retry uses the latest ownership information.
   private def forceRefresh(): Unit = scheduler.offload(refresh(force = true))
 
   // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
@@ -724,11 +727,11 @@ final private[client] class ClusterLive(
   private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
     if (p.commands.isEmpty)
       CIO.value(Vector.empty)
-    // a blocking command is a programmer error: fail the whole effect up front, never a single position
+    // reject the whole pipeline before submission when it contains a blocking command
     else if (p.commands.exists(_.isBlocking))
       CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
-    // a Pipeline batches per node, so an all-masters command (SCRIPT LOAD, FUNCTION LOAD, KEYS, …) would touch one node only and either
-    // break a later key-routed EVALSHA/FCALL or return a partial keyspace; fail up front rather than partially apply it
+    // A pipeline batches commands per node, but all-masters commands must run on every master. Reject them before submission because running
+    // one on a single node could break a later key-routed EVALSHA or FCALL, or return only part of the keyspace.
     else if (p.commands.exists(_.allMasters))
       CIO.fail(
         InvalidArgument("a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD, KEYS); run it individually on the client")
@@ -738,14 +741,14 @@ final private[client] class ClusterLive(
         runPipeline(p, complete, Events.deferSpans(events, p.commands))
       }
 
-  // a position a stale topology can't resolve falls back to per-command dispatch; the collector completes once every position lands terminally
+  // use per-command dispatch for positions that the current topology cannot resolve. Complete after every position has succeeded or failed.
   private def runPipeline[Out, R](
     p: Pipeline[Out, R],
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
     deferred: Vector[() => CommandSpan]
   ): Unit = {
     val plan = topologyRef.get().split(p)
-    // a malformed command is a programmer error: fail the whole effect before any span is started, never as a per-position result
+    // reject a malformed command before starting spans or submitting any part of the pipeline
     plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
       case Some(index) => complete(Failure(malformedKeys(p.commands(index).name)))
       case None        => dispatchPipeline(p, complete, deferred, plan)
@@ -761,7 +764,7 @@ final private[client] class ClusterLive(
     val n                           = p.commands.length
     val collector                   =
       new TxSupport.IndexedCollector[Either[SageException, Any]](n, results => complete(Success(results)))
-    // a position opens its gate as it settles; a retry waits out the gate of the one before it on its slot, so same-key writes cannot invert
+    // settling a command releases its latch; a retry waits for the previous command on the same slot to preserve write order
     val gates                       = Vector.fill(n)(new CountDownLatch(1))
     val slotAt                      = p.commands.map(slotOf)
     val emits                       = Vector.tabulate(n) { i =>
@@ -776,9 +779,9 @@ final private[client] class ClusterLive(
       val previous = if (slotAt(index) < 0) -1 else slotAt.lastIndexOf(slotAt(index), index - 1)
       if (previous >= 0) gates(previous).await()
     }
-    // all-or-nothing: reroutes honor the same choice so a slot is never split across master and replica
+    // reroutes keep the original choice, preventing a slot from being split across a master and replica.
     val useReplica                  = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-    // on the caller thread, so the wait gets a thread of its own; a retry from a reply is already offloaded
+    // run rerouting on the scheduler because awaitTurn may block
     def reroute(index: Int): Unit   = scheduler.offload {
       awaitTurn(index)
       dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica)
@@ -791,10 +794,10 @@ final private[client] class ClusterLive(
       case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
       case (_, Rejected.Malformed)            => ()             // unreachable: the guard above returned
     }
-    // keyless positions ride along on the first node group's batch; with no keyed group, dispatch routes each to any node
+    // add keyless commands to the first node batch. If there is no keyed batch, route each one independently.
     if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
     plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
-      // sorted: keep each node's batch in submission order even when keyless positions are folded into the first group
+      // sort positions to preserve submission order within each node's batch, including keyless commands added to the first group
       sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute, awaitTurn, useReplica)
     }
   }
@@ -816,7 +819,7 @@ final private[client] class ClusterLive(
     awaitTurn: Int => Unit,
     useReplica: Boolean
   ): Unit =
-    // the batch attributes to the node it lands on (a replica when useReplica)
+    // attribute the batch to the node that handles it, which is a replica when useReplica is true
     if (useReplica) {
       val replicas = topologyRef.get().shards.collectFirst { case s if s.master == node => s.replicas }.getOrElse(Vector.empty)
       reads.pickOne(reads.candidatesFor(node, replicas), node) {
@@ -855,11 +858,11 @@ final private[client] class ClusterLive(
           scheduler.offload {
             awaitTurn(index)
             Fault.categorize(error) match {
-              // ASK keeps the slot's owner, so re-routing by topology bounces off the exporting node and burns a redirect; follow it straight
-              // to the importing node with ASKING. MOVED and connection loss re-route normally.
+              // ASK keeps the exporting node as the slot owner in the topology. Send the command directly to the importing node with ASKING
+              // instead of routing it back to the exporter. MOVED and connection loss use normal routing.
               case Fault.Redirected(redirect)       =>
                 redirect.kind match {
-                  // strict Replica must not follow ASK onto the importing master (mirrors the single-read path at onReadFailure)
+                  // ReadFrom.Replica rejects ASK because the importing node is a master, matching the single-read path in onReadFailure.
                   case RedirectKind.Ask if useReplica && readFrom == ReadFrom.Replica => settle(index, Failure(NotConnected()))
                   case RedirectKind.Ask                                               =>
                     onRedirect(target, redirect, p.commands(index), cluster.maxRedirects, emits(index))
@@ -876,11 +879,11 @@ final private[client] class ClusterLive(
           }
       }
     }
-    // node unreachable, or not connected when the batch reached it: nothing was sent, so re-route every position individually
+    // if the node is unavailable before the batch is submitted, route each command in the batch again
     if (nc == null || !nc.submitAll(indices.map(p.commands), callbacks)) indices.foreach(reroute)
   }
 
-  // --- transactions (one leased connection, pinned lazily to the first key's slot) ------------------------------------------------------
+  // --- transactions (one leased connection, optionally pinned to a key's slot) ---------------------------------------------------------
 
   private def acquireScope: CIO[ClusterTxScope] =
     if (closed) CIO.fail(NotConnected()) else CIO.value(new ClusterTxScope)
@@ -888,10 +891,10 @@ final private[client] class ClusterLive(
   private def releaseScope(scope: ClusterTxScope): CIO[Unit] = CIO.blocking(scope.release())
 
   /**
-    * A cluster Transaction scope. It holds no connection until the first key is touched, then leases one Dedicated Connection on that
-    * slot's node and pins to the slot; every later key must hash to the pin or fail [[CrossSlot]]. Keyless commands ride the pinned
-    * connection (or, before any key, an arbitrary master). Redirects and losses are never followed — they surface and refresh the topology
-    * in the background — so the caller retries the whole block, as it already must for a `WATCH` abort.
+    * A cluster transaction scope. It leases a dedicated connection when the first command is submitted. A keyed command pins the transaction
+    * to that key's slot. A keyless first command uses an arbitrary master; the first later key is accepted only if that master owns its slot.
+    * Later keys must use the same slot or fail with [[CrossSlot]]. The transaction does not follow redirects or reconnect after a connection
+    * loss. These failures trigger a background topology refresh, and the caller can retry the full transaction.
     */
   final private class ClusterTxScope extends TransactionScope[CIO, String] {
 
@@ -935,7 +938,7 @@ final private[client] class ClusterLive(
           lock.lock()
           try
             if (released) complete(Failure(TxSupport.scopeReleasedError))
-            else if (conn == null) complete(Success(())) // nothing leased, nothing watched
+            else if (conn == null) complete(Success(())) // the transaction has not leased a connection or sent WATCH
             else
               Client.completing(complete) {
                 armed.set(false)
@@ -945,8 +948,8 @@ final private[client] class ClusterLive(
         }
       }
 
-    // a transaction never follows a redirect (that would break MULTI/EXEC atomicity), but on any ownership/connection fault it refreshes in the
-    // background so the caller's retry re-pins to the new owner instead of looping on the stale node; a data error refreshes nothing
+    // A transaction cannot follow a redirect without breaking MULTI/EXEC atomicity. After an ownership or connection failure, refresh the
+    // topology in the background. A later transaction attempt then selects a connection using the updated topology. Data errors do not refresh.
     private def refreshOnFault(error: Throwable): Unit = refreshFor(Vector(Fault.categorize(error)))
 
     private def refreshFor(faults: Vector[Fault]): Unit =
@@ -1000,14 +1003,15 @@ final private[client] class ClusterLive(
             TxSupport.interpretExec(p.commands, frames)
           }
 
-    // validates the whole pipeline's slots against the pin *before* sending MULTI, so a cross-slot transaction is rejected with nothing on the wire
+    // validate every pipeline slot before sending MULTI. Reject a cross-slot transaction before submitting any commands.
     private def submitExec[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Frame]] => Unit): Unit =
       onConn(pipelineSlot(p), complete)(c => c.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
 
     private def withConn[A](command: Command[?], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit =
       onConn(commandSlot(command), complete)(use)
 
-    // checks and submits stay under `lock` (release-vs-late-submit is atomic); the slow acquire runs outside it so release() never stalls behind it
+    // Check the released state and submit while holding `lock` so release cannot race with a submission. Acquire outside the lock so release()
+    // can finish while a connection is being opened.
     private def onConn[A](slotResult: Either[Throwable, Option[Slot]], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit = {
       var retry = true
       while (retry) {
@@ -1067,7 +1071,7 @@ final private[client] class ClusterLive(
       }
     }
 
-    // must hold `lock`, conn != null; a keyless-acquired pin adopts the first keyed slot only if its node already owns it
+    // must hold `lock` with conn != null. If a keyless command acquired the connection, accept the first keyed slot only when its node owns it.
     private def checkPin(slot: Option[Slot]): Either[Throwable, Unit] =
       slot match {
         case None    => Right(())
@@ -1109,7 +1113,7 @@ final private[client] class ClusterLive(
         topologyRef.get().nodeForSlot(slot)
       }
 
-    // transaction pinning depends on the key slot, not its current owner, so both owned and unowned routes retain the classified slot
+    // select the transaction connection by key slot. Keep the slot even when the topology does not currently identify its owner.
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       topologyRef.get().route(command) match {
         case Route.Malformed        => Left(malformedKeys(command.name))
@@ -1142,8 +1146,8 @@ final private[client] class ClusterLive(
       finally lock.unlock()
     }
 
-    // seal against further ops and release the pinned connection (recycle if clean, discard if armed or mid-command); a scope that never
-    // touched a key leased nothing
+    // Reject further operations, then release the transaction connection. Reuse it only when healthy, with no pending commands or watched
+    // keys. A transaction that did not submit any commands has no connection to release.
     private[internal] def release(): Unit = {
       lock.lock()
       val (nc, c, reusable) =
@@ -1169,15 +1173,15 @@ final private[client] class ClusterLive(
 
   private def startRefreshPoll(): Unit = refreshThrottle.startPolling(cluster.topologyRefreshInterval)(triggerRefresh())
 
-  // blocks until the topology is adopted: callers read `topologyRef` on the next line
+  // wait for any current refresh to finish before callers read `topologyRef`
   private def refresh(force: Boolean): Unit = if (!closed) refreshThrottle(force)(runRefresh())
 
-  // a refresh queued before close must not re-establish what the close tore down
+  // skip a queued refresh after close so it does not open new connections
   private def runRefresh(): Unit =
     if (!closed)
       querySlots(refreshCandidates()) match {
         case Some((from, shards)) => adopt(from, shards)
-        // no candidate answered CLUSTER SLOTS: ownership is unknowable, so retire every cache
+        // if no candidate answers CLUSTER SLOTS, slot ownership is unknown. Clear every client-side cache.
         case None                 => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
       }
 
@@ -1190,7 +1194,7 @@ final private[client] class ClusterLive(
     try querySlotsVia(node).toOption.map(node -> _)
     catch { case NonFatal(_) => None }
 
-  // a node outside a formed cluster answers CLUSTER SLOTS with an empty array: a non-answer, not a topology owning no slots
+  // treat an empty CLUSTER SLOTS reply as unavailable topology information. A node can return it before joining a formed cluster.
   private def querySlotsVia(node: Node): Either[Throwable, Vector[Shard]] = {
     val nc = masterPool.getOrEstablish(node)
     Bootstrap.awaitReply[Vector[Shard]](connectTimeout.toMillis)(callback => nc.submit(Cluster.slots, asking = false, callback)) match {
@@ -1207,7 +1211,7 @@ final private[client] class ClusterLive(
     }
   }
 
-  // prunes bundles for masters it no longer lists, so a vanished node's reconnect loop cannot leak; an empty announce-IP from CLUSTER SLOTS
+  // Prune bundles for masters that are no longer listed. This stops reconnect loops for nodes that have left. An empty announce-IP from CLUSTER SLOTS
   // means "the node I queried", so substitute `from` as redirects do
   private def adopt(from: Node, shards: Vector[Shard]): Unit = {
     val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
@@ -1228,8 +1232,8 @@ final private[client] class ClusterLive(
     val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
     reads.retain(masters.contains)
-    // re-home shard subscriptions only when slot ownership changed; else a forced refresh mid-failover loops (refresh -> adopt -> reconcile ->
-    // refresh) at RTT. A classic subscription follows the cluster bus, so it re-homes only when its pinned master's socket drops, never here.
+    // Reassign shard subscriptions only when slot ownership changes. Doing this for every forced refresh during failover would create a
+    // refresh and reconciliation loop. Classic subscriptions need reassignment only when their connection closes.
     if (!newTopology.sameOwnership(oldTopology)) subscriptions.onTopologyChanged()
   }
 
@@ -1276,7 +1280,7 @@ private[client] object ClusterLive {
         config.clientCache.enabled,
         config.clientCache.maxBytes
       )
-      // translate discovery's handshake/TLS failures here rather than via mapError, which the per-backend CIO alias does not reconcile through
+      // Translate discovery's handshake/TLS failures here rather than via mapError, which the per-backend CIO alias does not reconcile through
       // `Client`'s invariant type parameter
       try {
         live.bootstrapTopology()

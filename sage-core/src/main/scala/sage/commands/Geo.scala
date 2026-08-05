@@ -6,7 +6,7 @@ import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * A longitude/latitude pair, longitude first to match the wire order and named so the two same-typed coordinates cannot be swapped.
+  * A geographic coordinate. Longitude comes first to match the command syntax; the field names help prevent the two values being swapped.
   */
 final case class GeoCoordinates(longitude: Double, latitude: Double)
 
@@ -222,7 +222,7 @@ private[sage] object Geo {
     case other      => coordinates(other).map(Some(_))
   }
 
-  // without any WITH flag GEOSEARCH replies a flat array of member bulk strings; any flag turns each row into [member, dist?, hash?, coord?]
+  // Without any WITH flag GEOSEARCH replies a flat array of member bulk strings; any flag turns each row into [member, dist?, hash?, coord?]
   // in that fixed field order regardless of the order the flags were requested
   private def searchReply[V](withCoord: Boolean, withDist: Boolean, withHash: Boolean)(
     using valueCodec: ValueCodec[V]

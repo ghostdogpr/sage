@@ -1,8 +1,7 @@
 package sage
 
 /**
-  * Every sage failure, in one sealed hierarchy so users can match exhaustively. Not an enum: case types appear standalone in
-  * signatures, and enum case constructors widen to the enum type.
+  * The sealed hierarchy for Sage failures. The standalone case types can appear in signatures and support exhaustive matching.
   */
 sealed abstract class SageException(message: String) extends Exception(message)
 
@@ -30,8 +29,8 @@ object SageException {
 
   /**
     * An error reply from the server. `code` is the leading token Redis/Valkey put on every error (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`,
-    * the generic `ERR`, …), split out so callers can branch on it — `case ServerError("WRONGTYPE", _)` — without parsing the message
-    * themselves. `detail` is the rest; for a single-token error it is empty. Build from a raw wire message with [[ServerError.of]].
+    * the generic `ERR`, …). Callers can match the code directly, as in `case ServerError("WRONGTYPE", _)`. `detail` contains the remaining
+    * text and is empty for single-token errors. Build from a raw server message with [[ServerError.of]].
     */
   final case class ServerError(code: String, detail: String) extends SageException(if (detail.isEmpty) code else s"$code $detail")
 
@@ -51,8 +50,8 @@ object SageException {
   final case class ConnectionFailed(message: String) extends SageException(message)
 
   /**
-    * The connection dropped around this command. `mayHaveExecuted` is true when it was already in flight — the server may or may not have
-    * applied it, so a non-idempotent command is not safe to blindly retry; false means it was never sent and retrying is safe.
+    * The connection dropped around this command. When `mayHaveExecuted` is true, the command was in flight and may have run. Retry
+    * non-idempotent commands only when the value is false.
     */
   final case class ConnectionLost(mayHaveExecuted: Boolean)
     extends SageException(
@@ -85,28 +84,29 @@ object SageException {
   final case class CrossSlot(message: String) extends SageException(message)
 
   /**
-    * A wait ran past its budget: a blocking command or transaction past `dedicatedPool.acquireTimeout` for a free pooled connection, or a
-    * topology probe (`ROLE`, `CLUSTER SLOTS`) past `connectTimeout`. Not a per-command timeout.
+    * A wait exceeded its configured limit. This applies when a blocking command or transaction waits longer than
+    * `dedicatedPool.acquireTimeout` for a pooled connection, or when a topology probe (`ROLE` or `CLUSTER SLOTS`) exceeds `connectTimeout`.
+    * Regular commands do not use this timeout.
     */
   final case class TimedOut(message: String) extends SageException(message)
 
   /**
-    * A transaction was discarded server-side because a command could not be queued (`EXECABORT`): nothing ran. Distinct from an
-    * execution-phase error, which leaves the other commands committed (Redis does not roll back) and surfaces per-position.
+    * The server discarded a transaction because a command could not be queued (`EXECABORT`). The transaction did not run. Execution-phase
+    * errors are different: Redis commits the other commands and reports the error for its individual position.
     */
   final case class TransactionDiscarded(message: String) extends SageException(message)
 
   /**
-    * `cached` was given a command that cannot be safely cached: a write, or a read with no key. A keyless read could never be evicted by
-    * an invalidation push (only by TTL), so it is rejected rather than silently allowed to go stale.
+    * `cached` received a write or a read without a key. The server cannot invalidate a keyless read when data changes, which could leave a
+    * stale cached value.
     */
   final case class NotCacheable(message: String) extends SageException(message)
 
   /**
-    * An argument the API can never accept: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction,
+    * An argument rejected by the API: an invalid configuration or rate-limit policy, a blocking command in a pipeline or transaction,
     * or a command a cluster client cannot serve as routed (an all-masters command in a cluster pipeline, a cluster-wide result in a
-    * single-node transaction, declared key positions falling outside a hand-built command's arguments). A programming error to fix at the
-    * call site, not a runtime outcome to retry.
+    * single-node transaction, declared key positions falling outside a hand-built command's arguments). This indicates a programming error
+    * that the caller should fix.
     */
   final case class InvalidArgument(message: String) extends SageException(message)
 }
