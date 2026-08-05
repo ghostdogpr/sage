@@ -177,15 +177,16 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     val settledDials = fixture.dialled.size
     val settledRoles = fixture.roleRequestCount(primary)
 
-    var i = 0
+    var i       = 0
     while (i < 20) {
       assertEquals(fixture.read(), 1L)
       i += 1
     }
     fixture.awaitTrue(fixture.roleRequestCount(primary) > settledRoles, "later reads stopped re-discovering")
+    val dialled = fixture.dialled
     fixture.close()
 
-    assertEquals(fixture.dialled.size, settledDials, s"a refresh dialled a node it was already connected to: ${fixture.dialled}")
+    assertEquals(dialled.size, settledDials, s"a refresh dialled a node it was already connected to: $dialled")
   }
 
   test("a read whose connection dies mid-flight falls through to the next candidate") {
