@@ -7,7 +7,7 @@ val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed t
 
 val munitVersion          = "1.3.4"
 val testcontainersVersion = "0.44.1"
-val otelVersion           = "1.64.0"
+val otelVersion           = "1.65.0"
 val circeVersion          = "0.14.16" // test-only: verifies ValueCodec.emap with a real JSON library
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
