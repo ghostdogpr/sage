@@ -7,8 +7,8 @@ import scala.concurrent.duration.*
 import sage.Bytes
 
 /**
-  * One constructed Command per builder variant, paired with its expected wire words. The coverage spec derives the implemented-command
-  * set from these, so a builder without a sample reports its command as missing — keep every distinct wire name reachable.
+  * One constructed `Command` for each builder variant, paired with its expected wire words. The coverage spec derives the implemented
+  * command set from these samples. Add a sample for every distinct wire name so coverage does not report the command as missing.
   */
 object CommandSamples {
 

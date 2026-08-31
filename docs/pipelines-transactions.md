@@ -78,7 +78,7 @@ In a cluster, a pipeline creates a separate batch for each node. It cannot inclu
 
 ## Transactions
 
-A transaction runs a pipeline atomically with `MULTI`/`EXEC` on a temporary dedicated connection. Open one with `transaction { tx => … }`. Inside the scope you can `watch` keys, run ordinary reads (`tx.get`, `tx.run`, …), decide what to do, and then call `exec` with a pipeline. Leaving the scope without calling `exec` discards the transaction.
+A transaction runs a pipeline atomically with `MULTI`/`EXEC` on a temporary dedicated connection. Open one with `transaction { tx => ... }`. Inside the scope, you can `watch` keys, run ordinary reads such as `tx.get` or `tx.run`, and call `exec` with a pipeline. Leaving the scope without calling `exec` discards the transaction.
 
 `exec` returns an `Option`. If a watched key changed before `EXEC`, the transaction does not run and returns `None`. This is an expected result that you can retry:
 
@@ -116,13 +116,13 @@ for {
 
 :::
 
-A few rules follow from how Redis transactions work:
+Redis transactions impose these rules:
 
-- **Reads inside the scope must be ordinary commands.** A blocking command is rejected rather than parking the lease.
-- **A queueing-phase rejection discards the whole transaction**, so nothing runs.
-- **An execution-phase error leaves the other commands committed.** Redis does not roll back. As with a pipeline, the error is reported for the individual command.
-- **In a cluster, every key in the transaction must hash to one slot** (use a [hash tag](/configuration#hash-tags) to force that). A pipeline has no such restriction for commands with documented cross-slot support.
-- **In a cluster, bound your retries.** A transaction never follows a redirect, since that would break atomicity, so you retry the whole block yourself, exactly as a `WATCH` abort already requires. While a slot is migrating no retry can commit until the migration finalizes, so retry with backoff and a ceiling rather than in a tight loop.
+- Reads inside the scope must be ordinary commands. Sage rejects a blocking command instead of holding the leased connection.
+- A rejection while Redis queues commands discards the whole transaction. Nothing runs.
+- An execution error does not roll back the other commands. Sage reports the error for that command.
+- In a cluster, every key in the transaction must hash to one slot. Use a [hash tag](/configuration#hash-tags) when related keys need to share a slot. Pipelines can use commands with documented cross-slot support.
+- In a cluster, set a retry limit. A transaction does not follow redirects because doing so would break atomicity. Retry the whole block with backoff. While a slot is migrating, no retry can commit until the migration finishes.
 
 ## Which to use
 

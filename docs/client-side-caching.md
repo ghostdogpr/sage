@@ -25,7 +25,7 @@ for {
 
 ## How entries are kept fresh
 
-Sage uses the server's tracking so that when a key you have cached changes, the server pushes an invalidation and the entry is dropped. The TTL you pass is a second bound: an entry is evicted once it expires even if no invalidation arrives. Between those two, a cached read returns the local value without a round-trip.
+Sage enables server-assisted client tracking. When a cached key changes, the server sends an invalidation and Sage removes the entry. The TTL provides a second limit. Sage evicts an expired entry even if no invalidation arrives. Until either event occurs, a cached read returns the local value without a round trip.
 
 ## What can be cached
 
@@ -39,11 +39,11 @@ Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configur
 
 ## Topology
 
-Caching works on every topology, with no change to your code. A cached read always runs against a master, never a replica whatever the read policy, since that is where the tracking-backed cache lives. In a cluster each slot-owning master keeps its own cache, and the read is routed to the master owning the key's slot.
+Caching works with every topology. A cached read always runs against a master, regardless of the read policy, because the tracked cache belongs to that master. In a cluster, Sage routes the read to the master that owns the key's slot. Each slot-owning master keeps a separate cache.
 
 ## Limitations
 
-- The cache budget is per master, not global: `clientCache.maxBytes` sizes each master's cache, so a cluster's effective ceiling is `maxBytes` times the number of masters.
-- A cache goes cold whenever its connection is replaced or its master stops owning the slot: a reconnect, a cluster failover, or a resharding that moves the slot off its master all start it fresh.
-- During a live slot migration a cached read of a migrating key runs uncached (following the `ASK` redirect once) until the migration completes.
-- A server that speaks RESP3 but rejects `CLIENT TRACKING` (an ACL or proxy restriction) still connects; cached reads there run uncached, exactly as when caching is disabled.
+- The cache budget applies to each master. `clientCache.maxBytes` sets the size of every master's cache, so the cluster-wide limit is `maxBytes` multiplied by the number of masters.
+- Replacing a connection clears its cache. A reconnect, a cluster failover, or a resharding that moves the slot to another master starts with an empty cache.
+- During a live slot migration, a cached read of a migrating key runs uncached and follows the `ASK` redirect once. Caching resumes after the migration.
+- A server can support RESP3 but reject `CLIENT TRACKING` because of an ACL or proxy restriction. The client still connects, but cached reads run uncached as if caching were disabled.

@@ -6,8 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Runnable ZIO tour. The client is wired as a `ZLayer` and shared across every snippet, the idiomatic ZIO construction form. Start a server
-  * on localhost:6379 first (see examples/README.md), then `sbt examplesZio/run`.
+  * Runnable ZIO tour. It provides the client as a `ZLayer` and shares the client across the examples. Start a server on localhost:6379 as
+  * described in examples/README.md, then run `sbt examplesZio/run`.
   */
 object Tour extends ZIOAppDefault {
 

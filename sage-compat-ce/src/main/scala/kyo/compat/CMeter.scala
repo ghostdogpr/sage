@@ -4,9 +4,9 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 
 /**
-  * Underlying carrier is `cats.effect.std.Semaphore[IO]`, a counting semaphore. Cats Effect has no `Frame` / `Trace` to propagate. `lift`
-  * and `lower` are identity since the carrier is already a native CE semaphore. Permit counts are `Long` on the CE side; the compat surface
-  * converts to/from `Int` on `init` and `availablePermits`. `tryRun` uses `tryPermit` (`Resource[IO, Boolean]`).
+  * Uses `cats.effect.std.Semaphore[IO]`. Cats Effect has no `Frame` or `Trace` to propagate. `lift` and `lower` return the existing semaphore.
+  * Cats Effect stores permit counts as `Long`, while `init` and `availablePermits` convert them to and from `Int`. `tryRun` uses
+  * `tryPermit`, which returns `Resource[IO, Boolean]`.
   */
 opaque type CMeter = Semaphore[IO]
 

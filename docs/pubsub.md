@@ -1,6 +1,6 @@
 # Pub/Sub
 
-Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Each message carries the channel it arrived on and a payload decoded with a `ValueCodec`. Ending the stream, or closing its scope, unsubscribes.
+Subscribing returns the backend's native stream type. Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, and Pekko returns `Source`. Each message contains its channel and a payload decoded by a `ValueCodec`. Ending the stream or closing its scope unsubscribes.
 
 ## Classic channels
 
@@ -61,7 +61,7 @@ val messages =
 
 :::
 
-Pattern subscriptions are also available; they deliver a **pattern message** that additionally names the glob that matched.
+Pattern subscriptions return a pattern message that includes the matching glob.
 
 ::: tip Confirmed subscriptions
 The plain `subscribe` returns the stream immediately and registers the subscription when the stream first requests a message. A message published before registration finishes may be missed. Each backend provides a way to wait for the server's SUBSCRIBE confirmation first (also in `p`/`s` forms):

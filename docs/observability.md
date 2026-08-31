@@ -1,9 +1,9 @@
 # Observability
 
-Sage exposes two integration points, for two different jobs:
+Sage has separate integrations for runtime events and distributed tracing:
 
-- **`SageListener`** is an asynchronous observer of `SageEvent`s (command completions, connection transitions, cache outcomes, topology changes), called off the command path. Use it for metrics and operational logging.
-- **`CommandTracer`** produces distributed-tracing spans synchronously on the command path, so each Redis command appears as a client span nested under the surrounding request in an APM such as Datadog or Jaeger. Use it for distributed tracing: see [Distributed tracing](#distributed-tracing).
+- `SageListener` receives `SageEvent` values asynchronously, outside the command path. Events cover command completions, connection changes, cache outcomes, and topology changes. Use listeners for metrics and operational logs.
+- `CommandTracer` creates spans on the command path. An APM such as Datadog or Jaeger can then nest each Redis client span under the surrounding request. See [Distributed tracing](#distributed-tracing).
 
 ## Events
 
@@ -54,7 +54,7 @@ This listener example works on every backend.
 Listeners run separately from command execution. A slow or throwing listener may delay or lose events, but it does not affect commands.
 
 ::: warning
-Delivery is best-effort: a thrown exception is swallowed, and events are dropped once the internal dispatch queue fills. Listeners suit metrics, sampling, and operational logging, not anything that must be a complete record.
+Delivery is best effort. Sage swallows exceptions thrown by a listener and drops events when the internal queue is full. Use listeners for metrics, sampling, and operational logs. Do not use them for a complete audit record.
 :::
 
 ## Distributed tracing
@@ -77,7 +77,7 @@ val config = SageConfig(
 )
 ```
 
-It emits one `CLIENT` span per command, named for the command (`GET`, `SET`, ...), carrying `db.system`, `db.operation.name`, `peer.service` (default `redis`, configurable), `component`, and the server address; a failure sets an error status with the exception. The tracer records the command name but omits arguments and keys, keeping secrets and user values out of traces. Spans follow the ambient sampling decision.
+The tracer emits one `CLIENT` span per command and names it after the command, such as `GET` or `SET`. Each span records `db.system`, `db.operation.name`, `peer.service`, `component`, and the server address. `peer.service` defaults to `redis` and is configurable. A failure sets the error status and records the exception. The tracer omits arguments and keys so secrets and user values do not enter traces. Spans follow the active sampling decision.
 
 Sage emits one span for each command sent to the server, including each command in a pipeline (cluster redirects remain part of the command's span). A `cached` read served locally does not produce a span. A cache miss is traced like any other command. In a `transaction`, Sage traces the watch-phase reads individually and creates one span named `MULTI` for the `MULTI`/`EXEC` body. This span represents the round trip, not whether the transaction committed.
 
@@ -87,7 +87,7 @@ The tracer reads the active span from `Context.current()` when a fiber submits a
 
 When you use the OpenTelemetry SDK without an agent, you need to configure context storage. On a fiber runtime, the active span lives in fiber-local state (a ZIO `FiberRef` or Cats Effect `IOLocal`), but the tracer reads the current OpenTelemetry context. Configure context storage so that `Context.current()` can see the active span:
 
-- **ZIO**: with `zio-telemetry`, wire OpenTelemetry through the `OpenTelemetry.contextJVM` and `OpenTelemetry.global` layers (rather than `OpenTelemetry.contextZIO` and `OpenTelemetry.custom`), which back tracing with OpenTelemetry's native context so the SDK reads the active span. See zio-telemetry's auto-instrumentation interop documentation.
-- **cats-effect**: with `otel4s` on Cats Effect 3.6+, add the `otel4s-oteljava-context-storage` dependency, enable the `cats.effect.trackFiberContext` system property, and provide `IOLocalContextStorage.localProvider[IO]`. This keeps the Java `Context` and the otel4s fiber context aligned so the SDK reads the active span. Note that the stock OpenTelemetry Java agent does not keep Cats Effect context in sync; otel4s ships a dedicated agent distribution for the agent case.
+- With ZIO and `zio-telemetry`, use the `OpenTelemetry.contextJVM` and `OpenTelemetry.global` layers. These layers store tracing state in the native OpenTelemetry context, which lets the SDK read the active span. Do not use `OpenTelemetry.contextZIO` and `OpenTelemetry.custom` for this integration. See the zio-telemetry documentation for auto-instrumentation interoperation.
+- With `otel4s` on Cats Effect 3.6 or later, add the `otel4s-oteljava-context-storage` dependency. Enable the `cats.effect.trackFiberContext` system property and provide `IOLocalContextStorage.localProvider[IO]`. This configuration keeps the Java `Context` and the otel4s fiber context synchronized. The standard OpenTelemetry Java agent does not synchronize Cats Effect context. For agent-based tracing, use the agent distribution from otel4s.
 
 `OpenTelemetryCommandTracer.withContextProvider` lets you supply a custom `() => Context` for a context source that is thread-local but non-default.

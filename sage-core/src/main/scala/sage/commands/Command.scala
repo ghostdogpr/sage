@@ -96,7 +96,7 @@ final case class Command[+Out](
   def keys: Vector[Bytes] = keyIndices.map(args)
 
   /**
-    * Whether any declared key index falls outside `args` — a builder bug, never expected at runtime.
+    * Reports whether a declared key index falls outside `args`. Such an index indicates a command-builder bug.
     */
   def hasMalformedKeys: Boolean = keyIndices.exists(index => index < 0 || index >= args.length)
 

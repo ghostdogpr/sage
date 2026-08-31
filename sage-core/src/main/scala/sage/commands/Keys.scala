@@ -74,7 +74,7 @@ enum ExpiryTime {
 }
 
 /**
-  * A server-issued SCAN position. Only `start` and cursors returned in a [[ScanPage]] are valid — there is nothing else to construct.
+  * A `SCAN` position issued by the server. Valid values are `start` and cursors returned in a [[ScanPage]].
   */
 opaque type ScanCursor = Bytes
 

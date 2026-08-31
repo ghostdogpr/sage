@@ -4,9 +4,9 @@ import cats.effect.IO
 import cats.effect.kernel.Ref
 
 /**
-  * Underlying carrier is `cats.effect.kernel.Ref[IO, Long]`. Cats Effect has no `Frame` / `Trace` to propagate. `lift` and `lower` are
-  * identity since the carrier is already a native CE ref. CE has no specialised atomic-long; arithmetic operations compose via `Ref[Long]`
-  * updates, and `compareAndSet` is composed via `Ref.modify` since CE has no native CAS primitive.
+  * Uses `cats.effect.kernel.Ref[IO, Long]`. Cats Effect has no `Frame` or `Trace` to propagate. `lift` and `lower` return the existing Cats
+  * Effect ref. Cats Effect does not provide a specialized atomic long. Arithmetic uses `Ref[Long]` updates, and `compareAndSet` uses
+  * `Ref.modify`.
   */
 opaque type CAtomicLong = Ref[IO, Long]
 

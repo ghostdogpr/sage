@@ -344,8 +344,8 @@ final private[client] class MultiplexedConnection private (
       }
       @tailrec def attempt(): Unit    =
         cache.acquire(commandBytes, keys, scheduler.nowMillis, waiter) match {
-          // A Hit serves locally; a Wait coalesces onto an in-flight fetch — both avoid a server round trip, so both are reported as a hit
-          // and release the two slots reserved for the (now unsent) fetch
+          // Hit returns a local value. Wait joins an in-flight fetch. Neither case sends another server request, so report a cache hit and
+          // release the two slots reserved for the unsent fetch.
           case ClientCache.Acquire.Hit(frame, epoch) =>
             if (cache.isCurrent(epoch)) {
               release(2)

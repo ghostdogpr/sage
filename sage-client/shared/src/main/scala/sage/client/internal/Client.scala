@@ -253,7 +253,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   final def pExpireTime(key: K): F[ExpiryTime] = run(Keys.pExpireTime(key))
 
   /**
-    * Returns all keys matching the glob `pattern`. O(n) over the keyspace — prefer [[scan]] on large databases.
+    * Returns all keys matching the glob `pattern`. This is O(n) over the keyspace. Prefer [[scan]] for a large database.
     */
   final def keys(pattern: String): F[Vector[K]] = run(Keys.keys(pattern))
 
@@ -2429,8 +2429,8 @@ object Client {
     cond(value == Duration.Inf || (value.isFinite && value.toMillis >= 1L), s"$label must be at least 1ms (or Inf)")
 
   private def connectStandalone(config: SageConfig, endpoint: Endpoint): CIO[Client[CIO, String]] =
-    // Build the TLS context once (eager failure on bad trust material), then capture it in the reconnect factory so every connection — the
-    // multiplexed one and each dedicated one — is upgraded identically
+    // Build the TLS context once so invalid trust material fails during client creation. Capture it in the reconnect factory to apply the
+    // same upgrade to the multiplexed connection and every dedicated connection.
     CIO.blocking(Tls.buildUpgrade(config.tls, endpoint.host, endpoint.port)).flatMap { upgrade =>
       connectWith(
         (onFrame, onClosed) => SocketTransport.connect(endpoint.host, endpoint.port, config.connectTimeout, upgrade, onFrame, onClosed),

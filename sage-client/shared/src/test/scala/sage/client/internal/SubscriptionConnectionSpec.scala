@@ -53,7 +53,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     (connection, scheduler, transports)
   }
 
-  // a SUBSCRIBE token is "\r\nSUBSCRIBE\r\n" on the wire — never a substring of UN/PSUBSCRIBE, which are preceded by UN/P
+  // A SUBSCRIBE token is "\r\nSUBSCRIBE\r\n" on the wire. It cannot match UN/PSUBSCRIBE because those tokens start with UN/P.
   private def wrote(transport: FakeTransport, command: String): Boolean =
     transport.written.exists(_.asUtf8String.contains(s"\r\n$command\r\n"))
 

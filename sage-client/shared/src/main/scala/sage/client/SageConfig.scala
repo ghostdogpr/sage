@@ -85,10 +85,10 @@ final case class TlsConfig(trust: TrustSource = TrustSource.System)
 final case class PubSubConfig(bufferSize: Int = 128)
 
 /**
-  * Client-side caching tuning. When `enabled`, the Multiplexed Connection enables RESP3 opt-in tracking at bootstrap and `cached` reads are
-  * served locally; `maxBytes` caps the approximate retained size of each connection generation's cache, evicting least-recently-used
-  * entries. Values larger than the entire budget are not cached. Set `enabled = false` for environments where ACLs or a proxy permit `HELLO`
-  * and ordinary commands but deny `CLIENT TRACKING` — `cached` then runs the read without caching, keeping the call portable.
+  * Settings for client-side caching. When `enabled` is true, the multiplexed connection enables RESP3 opt-in tracking during bootstrap.
+  * A `cached` read can then return a local value. `maxBytes` limits the estimated retained size of each connection generation's cache.
+  * The cache evicts least-recently-used entries and skips values larger than the whole limit. Set `enabled = false` when an ACL or proxy
+  * permits `HELLO` and ordinary commands but denies `CLIENT TRACKING`. A `cached` call then reads from the server without caching.
   */
 final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 1024 * 1024)
 
@@ -145,27 +145,27 @@ enum Topology {
 }
 
 /**
-  * The full client configuration. The dedicated configuration sections below contain settings for individual features. The fields here are
-  * the top-level settings, with defaults that let `SageConfig()` connect to a local standalone server.
+  * The client configuration. The fields default to a local standalone server. Nested configuration types group settings for individual
+  * client behavior.
   *
   * @param connectTimeout how long to wait for a connection (and its `HELLO 3` setup) to complete before failing
-  * @param reconnect      exponential reconnect backoff — see [[BackoffConfig]]
-  * @param watchdog       connection liveness checking — see [[WatchdogConfig]]
+  * @param reconnect      exponential reconnect backoff. See [[BackoffConfig]]
+  * @param watchdog       connection liveness checks. See [[WatchdogConfig]]
   * @param closeTimeout   how long [[sage.client.internal.Client.close]] waits for in-flight commands to finish before forcing the close
-  * @param dedicatedPool  the pool backing blocking commands and transactions — see [[DedicatedPoolConfig]]
-  * @param pubsub         pub/sub buffering — see [[PubSubConfig]]
-  * @param clientCache    client-side caching — see [[CacheConfig]]
-  * @param auth           credentials for `HELLO 3 AUTH`; `None` connects unauthenticated — see [[AuthConfig]]
-  * @param tls            TLS settings; `None` connects in plaintext — see [[TlsConfig]]
-  * @param topology       standalone, cluster, or master-replica, and where to find the server(s) — see [[Topology]]
-  * @param readFrom       which node read-only commands may run on — see [[ReadFrom]]
+  * @param dedicatedPool  the pool for blocking commands and transactions. See [[DedicatedPoolConfig]]
+  * @param pubsub         pub/sub buffering. See [[PubSubConfig]]
+  * @param clientCache    client-side caching. See [[CacheConfig]]
+  * @param auth           credentials for `HELLO 3 AUTH`. `None` connects without authentication. See [[AuthConfig]]
+  * @param tls            TLS settings. `None` connects in plaintext. See [[TlsConfig]]
+  * @param topology       standalone, cluster, or master-replica configuration and server locations. See [[Topology]]
+  * @param readFrom       which node can run read-only commands. See [[ReadFrom]]
   * @param database       the logical keyspace selected during connection setup and selected again for every reconnect and new connection. It
   *                       remains fixed for the client's lifetime because connections are shared by concurrent operations. Valkey 9+ supports
   *                       numbered databases in cluster mode; Redis and older Valkey versions reject a non-zero database during setup
   * @param clientName     sets `CLIENT SETNAME`, visible in `CLIENT LIST`/`CLIENT INFO`; the library name and version are announced automatically
-  * @param listeners      observers of runtime [[sage.SageEvent]]s — see [[sage.SageListener]]
+  * @param listeners      observers of runtime [[sage.SageEvent]] values. See [[sage.SageListener]]
   * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active
-  *                       span — see [[sage.CommandTracer]]. `None` (the default) emits no spans
+  *                       span. See [[sage.CommandTracer]]. `None`, the default, emits no spans
   */
 final case class SageConfig(
   connectTimeout: FiniteDuration = 10.seconds,
@@ -254,8 +254,8 @@ object SageConfig {
         } yield Some(AuthConfig(password = pw, username = if (user.isEmpty) "default" else user))
     }
 
-  // RFC 3986 percent-decoding of a single URI component: decode %XX byte by byte, pass everything else (including '+') through literally —
-  // '+' is form-encoding's space, not a URI component's, so java.net.URLDecoder is wrong here. %XX bytes are reassembled and read as UTF-8.
+  // Decode one RFC 3986 URI component. Decode each %XX byte, and preserve every other character, including '+'. Form encoding uses '+'
+  // for a space, but URI components do not. java.net.URLDecoder would therefore decode this value incorrectly. Read the joined %XX bytes as UTF-8.
   private def percentDecode(uri: String, label: String, component: String): Either[String, String] =
     if (component.indexOf('%') < 0) Right(component)
     else {

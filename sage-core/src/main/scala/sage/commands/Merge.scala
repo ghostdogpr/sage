@@ -26,7 +26,7 @@ private[commands] object Merge {
     }
 
   /**
-    * Sums a flat `[channel, count, …]` reply by channel and preserves the order in which channels first appear. Simply appending replies
+    * Sums a flat `[channel, count, …]` reply by channel and preserves the order in which channels first appear. Appending replies
     * would repeat channels, and converting the result to a `Map` would discard all but the last count for each one.
     */
   val sumByChannel: (Frame, Frame) => Frame = (a, b) =>

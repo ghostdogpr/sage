@@ -178,7 +178,7 @@ final private[sage] class RespParser {
       case Set  => Frame.Set(agg.elements.result())
       case Push => Frame.Push(agg.elements.result())
       case Map  => Frame.Map(agg.pairs.result())
-      case _    => Frame.Null // Attr is never built — completed attributes are discarded before this point
+      case _    => Frame.Null // Attr is never built because the parser discards completed attributes before this point.
     }
 
   // Produces one value at `readPos`: Produced (`produced` set, `readPos` advanced), Opened (header pushed), Incomplete (`readPos` unmoved),

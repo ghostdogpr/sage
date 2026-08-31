@@ -1,9 +1,8 @@
 package kyo.compat
 
 /**
-  * Underlying carrier is `Vector[A]`. Cats Effect has no native bulk-collection type, so `CChunk` reuses the standard-library `Vector`.
-  * `lift` and `lower` are identity since the carrier is already a `Vector`. The portable accessor surface (`toSeq`, `toIndexedSeq`,
-  * `apply`, `size`, `iterator`, `isEmpty`) is exposed on every backend.
+  * Uses `Vector[A]` because Cats Effect has no bulk collection type. `lift` and `lower` return the existing `Vector`. Every backend provides
+  * `toSeq`, `toIndexedSeq`, `apply`, `size`, `iterator`, and `isEmpty`.
   */
 opaque type CChunk[+A] = Vector[A]
 

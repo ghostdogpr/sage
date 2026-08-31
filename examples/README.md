@@ -1,10 +1,8 @@
 # Examples
 
-Runnable, idiomatic sage usage from each backend. Every example uses its ecosystem's native types: ZIO `Task`, Cats Effect `IO`, Ox direct
-style, Kyo computations, Pekko `Future` plus Pekko Streams, with no wrapper visible. The module is never published and is compiled in CI as
-part of the normal build.
+These runnable examples cover every Sage backend. They use ZIO `Task`, Cats Effect `IO`, Ox direct style, Kyo computations, or Pekko `Future` and Pekko Streams. The build does not publish this module, but CI compiles it.
 
-Two imports cover everything: `import sage.*` for the command vocabulary and connection config, and `import sage.<backend>.*` for the client.
+Import `sage.*` for commands and connection configuration. Import `sage.<backend>.*` for the client.
 
 ## Layout
 
@@ -17,9 +15,7 @@ kyo/      …Example.scala + Tour   the Kyo tour
 pekko/    …Example.scala + Tour   the Pekko tour (scala.concurrent.Future + Pekko Streams)
 ```
 
-Each backend's `Tour` is a runnable entry point that wires the client with that ecosystem's idiomatic construction form (ZIO `layer`,
-Cats Effect `resource`, Ox/Kyo `scoped`, Pekko `connect` with an explicit `close` and a user-provided typed `ActorSystem`) and runs the common feature set: commands across several families, a Pipeline, a WATCH-guarded
-transaction, classic pub/sub, and a cached read. The `…Example` objects are the individual copy-pasteable snippets the tour stitches together.
+Each backend's `Tour` is a runnable entry point. It constructs the client with a ZIO `layer`, a Cats Effect `resource`, an Ox or Kyo `scoped` value, or Pekko `connect` with an explicit `close` and a typed `ActorSystem`. Each tour runs commands from several families, a pipeline, a `WATCH` transaction, classic pub/sub, and a cached read. The `...Example` objects contain the individual snippets used by the tour.
 
 ## Running the tours
 
@@ -41,12 +37,10 @@ sbt examplesPekko/run
 
 ## Spotlights
 
-The cross-cutting connection features are config-only — the command code is identical to the tours — so each is shown once, on a
-representative backend, rather than repeated four times:
+Connection behavior depends on configuration, while the command code remains the same. Each example below uses one backend to avoid repeating the command code.
 
-- **Cluster + sharded pub/sub** — `zio/ClusterExample.scala`
-- **TLS + ACL** — `ce/TlsExample.scala`
-- **Master-replica + `ReadFrom`** — `ox/MasterReplicaExample.scala`
+- Cluster and sharded pub/sub use `zio/ClusterExample.scala`.
+- TLS and ACL use `ce/TlsExample.scala`.
+- Master-replica routing and `ReadFrom` use `ox/MasterReplicaExample.scala`.
 
-These need a cluster, a TLS-enabled server, or a master-replica deployment respectively, so they are not part of the localhost tours; they
-compile in CI to keep the wiring honest and exist to be read.
+These examples require a cluster, a TLS-enabled server, or a master-replica deployment. They do not run as part of the localhost tours, but CI compiles them.

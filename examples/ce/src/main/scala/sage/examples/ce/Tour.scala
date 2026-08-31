@@ -6,8 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Runnable Cats Effect tour. The client is acquired as a `Resource`, the idiomatic Cats Effect construction form, and shared across every
-  * snippet. Start a server on localhost:6379 first (see examples/README.md), then `sbt examplesCe/run`.
+  * Runnable Cats Effect tour. It acquires the client as a `Resource` and shares the client across the examples. Start a server on
+  * localhost:6379 as described in examples/README.md, then run `sbt examplesCe/run`.
   */
 object Tour extends IOApp.Simple {
 

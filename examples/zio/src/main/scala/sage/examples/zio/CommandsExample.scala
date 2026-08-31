@@ -11,8 +11,7 @@ import sage.backend.*
 import sage.examples.User
 
 /**
-  * Commands across several families, each returning a ZIO `Task`. The client is taken from the environment (`ZIO.serviceWithZIO`), the
-  * idiomatic ZIO way to depend on a service provided by a layer.
+  * Commands from several families. Each command returns a ZIO `Task`. `ZIO.serviceWithZIO` obtains the client service provided by a layer.
   */
 object CommandsExample {
 

@@ -2,7 +2,7 @@
 # Run the JMH harness across every backend cell, merge the per-cell JSONs into one all.json covering all clients, and print a summary.
 # Requires Docker (and jq for the merge). Upload benchmarks/results/all.json to https://jmh.morethan.io for charts.
 #
-#   benchmarks/run.sh                                              # everything (the full cross-product — hours)
+#   benchmarks/run.sh                                              # full cross-product; takes hours
 #   benchmarks/run.sh ThroughputBench.get -p concurrency=64 -f 1 -wi 3 -i 3   # scope one workload/params (minutes)
 #
 # All arguments are forwarded verbatim to each cell's `Jmh/run`, so you can pass a benchmark regex, -p params, and -f/-wi/-i settings. A

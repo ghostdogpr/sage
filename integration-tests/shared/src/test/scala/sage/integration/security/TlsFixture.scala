@@ -12,8 +12,8 @@ import org.testcontainers.DockerClientFactory
   * hostname verification passes whatever host Testcontainers reports (local daemon, Docker Desktop, or a remote `DOCKER_HOST`). keytool
   * ships with every JDK; the PEM forms are extracted from the resulting PKCS12 in pure Java, so there is no openssl dependency.
   *
-  * The cert/key reach the container as bytes over the Docker API (a bind mount would resolve on the daemon host, not the test runner — it
-  * fails against a remote daemon). The client trusts the cert from a local file, which is correct: the client runs on the test runner.
+  * The Docker API copies the certificate and key bytes into the container. A bind mount would resolve on the daemon host and fail with a
+  * remote daemon. The client reads its trusted certificate from a local file because the client runs on the test runner.
   */
 object TlsFixture {
 

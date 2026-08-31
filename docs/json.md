@@ -1,12 +1,12 @@
 # JSON
 
-Sage supports the `JSON.*` commands, which store documents server-side and address them with JSONPath expressions. You need a server that provides them: Redis 8 has JSON built in, and on Valkey they come from the valkey-json module (shipped in the `valkey/valkey-bundle` image, not in the stock `valkey` one).
+Sage supports the `JSON.*` commands, which store documents on the server and address values with JSONPath expressions. Redis 8 includes JSON support. On Valkey, install the valkey-json module or use the `valkey/valkey-bundle` image. The standard `valkey` image does not include the module.
 
 Sage does not depend on a JSON library. It sends and receives documents as raw JSON text, and you can use your own codec for typed values.
 
 ## Paths
 
-Every JSON command locates values with a `JsonPath`, using the JSONPath dialect (expressions beginning with `$`). A path defaults to the document root `$`.
+Every JSON command locates values with a `JsonPath`. Sage supports the JSONPath dialect, whose expressions begin with `$`. The default path is the document root, `$`.
 
 ```scala
 JsonPath.root          // $
@@ -21,7 +21,7 @@ The legacy dot dialect is not modeled. If you need it, send a raw command.
 
 ## Documents are raw JSON
 
-A value you write is raw JSON text. The built-in `String` codec passes it through unchanged, so you supply valid JSON yourself: a scalar string is `"quoted"`, and objects and arrays are their JSON forms.
+A value you write is raw JSON text. The built-in `String` codec passes it through unchanged, so supply valid JSON. A scalar string must include JSON quotes. Objects and arrays use their standard JSON syntax.
 
 ::: code-group
 
@@ -43,7 +43,7 @@ for {
 
 `jsonGet` returns one block of JSON text. Without a path, it returns the complete document for a typed codec to decode. With one JSONPath, it wraps the matches in an array; for example, `$.name` returns `["Ada"]`. With several paths, it returns an object whose keys are the paths.
 
-To decode documents into your own types, bring a `ValueCodec` built from your JSON library. Its encode must emit valid JSON and its decode parses it back. With circe, one codec covers every type circe handles:
+To decode documents into your own types, define a `ValueCodec` with your JSON library. The encoder must emit valid JSON, and the decoder must parse it. The following circe codec works for any type with circe `Decoder` and `Encoder` instances.
 
 ```scala
 import io.circe.generic.auto.*
@@ -61,7 +61,7 @@ client.jsonGet[User]("user:1")                           // Some(User("Ada", 36)
 client.jsonGet[Vector[Int]]("user:1", JsonPath("$.age")) // Some(Vector(36)): a JSONPath wraps matches in an array
 ```
 
-Sage takes no JSON dependency of its own; the codec is entirely yours.
+Sage does not add a JSON-library dependency.
 
 `jsonSet` models the `NX` and `XX` conditions; other server options (the `jsonGet` formatting hints `INDENT`, `NEWLINE`, `SPACE`, and newer `JSON.SET` storage hints) are not modeled. Reach them with a raw command.
 
@@ -118,7 +118,7 @@ client.jsonMSet(("{acct:9}:profile", JsonPath.root, "{}"), ("{acct:9}:prefs", Js
 
 ## Redis and Valkey differences
 
-Most commands behave the same on both servers. There are a few differences:
+Most commands behave the same on Redis and Valkey. The known differences are:
 
 - `jsonMerge` (RFC 7386 merge) works on Redis only. Valkey does not ship `JSON.MERGE` yet.
 - `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but fails with a server error on Valkey.

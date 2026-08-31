@@ -83,8 +83,7 @@ enum TrimThreshold {
 }
 
 /**
-  * Trimming options shared by `XADD` and `XTRIM` (the [[ListSide]] domain-primitive exception). Only `Approximate` (`~`) accepts `LIMIT`,
-  * matching the server command.
+  * Trimming options shared by `XADD` and `XTRIM`. Only `Approximate`, represented by `~`, accepts `LIMIT`.
   */
 enum Trimming {
   case Exact(threshold: TrimThreshold)

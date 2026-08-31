@@ -245,8 +245,8 @@ final private[client] class ClusterSubscriptions(
 
   private def onShardConnTerminated(node: Node): Unit = {
     locked(shardConns.remove(node))
-    // A drop may mean the slot migrated (server sends sunsubscribe then disconnects); force a refresh — stale topology still names the dead
-    // owner, which planFor would not see as unowned — then reconcile onto the current owner
+    // A dropped connection can mean that the slot migrated. The server sends sunsubscribe and then disconnects. Refresh because the stale
+    // topology still names the disconnected owner, which planFor would not consider unowned. Reconcile after the refresh finds the new owner.
     scheduler.offload {
       refresh()
       shardReconcile.schedule()

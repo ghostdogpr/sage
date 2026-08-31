@@ -47,8 +47,8 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
 private[client] object NodeClient {
 
   /**
-    * Connects to the node and runs the bootstrap synchronously, throwing (no retry) if the first handshake fails — exactly like a
-    * standalone client. The caller offloads this blocking establish and treats a failure as the node being unreachable.
+    * Connects to the node and runs bootstrap synchronously. Like a standalone client, this method throws without retrying when the first
+    * handshake fails. The caller moves this blocking connection attempt off its thread and treats a failure as an unreachable node.
     */
   def connect(
     factory: MultiplexedConnection.TransportFactory,

@@ -50,8 +50,8 @@ object SageEvent {
   }
 
   /**
-    * A client-side caching outcome for a `cached` read, by command name. `Hit` is a read served without a server round trip — either from a
-    * stored entry or by coalescing onto an in-flight fetch; `Miss` is a read that issued the server fetch.
+    * The client-side cache outcome for a `cached` read, identified by command name. `Hit` means that the read used a stored entry or joined
+    * an in-flight fetch without another server round trip. `Miss` means that the read fetched from the server.
     */
   sealed trait Cache extends SageEvent {
     def command: String

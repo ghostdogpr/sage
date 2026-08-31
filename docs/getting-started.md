@@ -1,8 +1,8 @@
 # Getting started
 
-**Sage** is a native [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). It implements the RESP3 protocol, commands, and codecs directly in Scala. Its core has no dependencies and is independent of any effect system.
+Sage is a [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). It implements RESP3, commands, and codecs directly in Scala. The core has no dependencies on an effect system.
 
-Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses that ecosystem's native types. Sage targets RESP3 and modern Redis 8+ / Valkey 8+, runs on Scala 3.3.x LTS and later, and requires JDK 21+.
+Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses its ecosystem's native types. Sage targets Redis 8+ and Valkey 8+. It supports Scala 3.3.x LTS and later and requires JDK 21 or later.
 
 ## Installation
 
@@ -32,11 +32,11 @@ Add the artifact for your Scala stack. The core is pulled in transitively, so yo
 
 :::
 
-Two imports cover everything: `import sage.*` for commands and connection config, and `import sage.backend.*` for the client. The imports are the same for every Scala stack; only the dependency changes.
+Import `sage.*` for commands and connection configuration. Import `sage.backend.*` for the client. Every backend uses these imports, but each one has a different dependency.
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. You build it from a `SageConfig` using the usual pattern for your Scala stack: a scoped resource for Ox and Kyo, a `ZLayer` for ZIO, a `Resource` for Cats Effect, and a `use` block on Pekko that closes the client when your program finishes. The same commands are available in all five integrations; only the client setup differs.
+A `SageClient` owns all connections to one server or cluster. Build it from a `SageConfig` with the resource type for your backend. Ox and Kyo use a scope, ZIO uses a `ZLayer`, Cats Effect uses a `Resource`, and Pekko uses a `use` block that closes the client when the program finishes. All five integrations provide the same commands.
 
 ::: code-group
 
@@ -157,12 +157,12 @@ import sage.backend.*
 ::: tip How it works
 Ordinary commands share one **auto-pipelined connection** per node. Sage can group concurrent commands into fewer network writes and returns each reply to the correct caller. You do not need to build a pipeline yourself.
 
-Two kinds of work use other connections. Transactions and blocking commands (`WATCH`/`MULTI`/`EXEC`, `BLPOP`, and the like) temporarily borrow a **dedicated connection** from a pool. Pub/sub subscriptions use a separate **subscription connection**, created the first time you subscribe. This prevents a slow subscriber from delaying command replies.
+Transactions and blocking commands such as `WATCH`, `MULTI`, `EXEC`, and `BLPOP` borrow a dedicated connection from a pool. Pub/sub subscriptions use a separate subscription connection, which Sage creates on the first subscription. A slow subscriber therefore does not delay command replies.
 :::
 
 ## A short tour
 
-The snippets below show the same operations on each backend: pick your tab. In Ox they return values directly; on the other backends they are steps in a for-comprehension over that ecosystem's effect type (`Future` on Pekko, which means each `for` needs an `ExecutionContext`). All of them assume a `client` in scope and the usual imports for your effect type.
+Choose your backend tab in the examples below. Ox returns values directly. The other backends use a for-comprehension over their effect type. Pekko uses `Future`, so each `for` needs an `ExecutionContext`. Every example assumes that `client` and the imports for the effect type are in scope.
 
 ### Commands
 
@@ -201,7 +201,7 @@ See [Commands & codecs](/commands) for the full vocabulary and how to write a co
 
 ### Pipelines and transactions
 
-Compose commands into a **pipeline** to send them in one round-trip and get back a typed tuple of results:
+Put commands in a pipeline to send them in one round trip and receive a typed tuple of results.
 
 ::: code-group
 
@@ -231,7 +231,7 @@ for {
 
 :::
 
-A **transaction** runs a pipeline atomically via `MULTI`/`EXEC`, optionally guarded by `WATCH` for optimistic concurrency. If a watched key changes before `EXEC`, the transaction returns `None` and can be retried:
+A transaction runs a pipeline atomically with `MULTI` and `EXEC`. You can use `WATCH` for optimistic concurrency. If a watched key changes before `EXEC`, the transaction returns `None`. You can then retry the transaction.
 
 ::: code-group
 
@@ -270,7 +270,7 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 ### Pub/Sub
 
-Subscribing yields a stream of messages in your ecosystem's native stream type: an Ox `Flow`, a ZIO `ZStream`, an fs2 `Stream`, a Kyo `Stream`, or a Pekko Streams `Source`. Ending the stream, or closing its scope, unsubscribes.
+Subscribing returns the backend's native stream type. Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, and Pekko returns `Source`. Ending the stream or closing its scope unsubscribes.
 
 These examples publish immediately after subscribing, so they use the variant that waits for the server to confirm the subscription first. [Pub/Sub](/pubsub) explains when you need it.
 
@@ -354,7 +354,7 @@ for {
 
 :::
 
-More in [Client-side caching](/client-side-caching).
+See [Client-side caching](/client-side-caching) for invalidation and cache limits.
 
 ## Next steps
 

@@ -22,7 +22,7 @@ type SageClient = Client[IO[SageException, *], String]
 extension [K](client: Client[IO[SageException, *], K])(using @unused ev: KeyCodec[K]) {
 
   /**
-    * Runs a read with client-side caching and a ZIO `Duration` TTL — the ZIO-native form of [[sage.client.internal.Client.cached]].
+    * Runs a cached read with a ZIO `Duration` TTL. This is the ZIO form of [[sage.client.internal.Client.cached]].
     */
   def cached[A](command: Command[A], ttl: Duration): IO[SageException, A] =
     client.cached(command, ttl.asFiniteDuration)

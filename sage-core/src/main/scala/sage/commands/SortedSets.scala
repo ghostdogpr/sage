@@ -21,7 +21,7 @@ enum ZAddCondition {
 }
 
 /**
-  * Which score extreme a multi-pop acts on. A cross-command domain primitive shared identically by `ZMPOP` and `BZMPOP`, like [[ListSide]].
+  * Selects the score extreme for a multi-pop command. `ZMPOP` and `BZMPOP` use the same values.
   */
 enum MinMax {
   case Min, Max
@@ -35,8 +35,7 @@ enum Aggregate {
 }
 
 /**
-  * A boundary in the score space, shared by every score-ranged command (`ZRANGE BYSCORE`, `ZCOUNT`, `ZREMRANGEBYSCORE`): one domain
-  * primitive with one legal space wherever it appears, the [[ListSide]] exception to per-command enums.
+  * A score boundary shared by `ZRANGE BYSCORE`, `ZCOUNT`, and `ZREMRANGEBYSCORE`.
   */
 enum ScoreBoundary {
   case Inclusive(score: Double)
@@ -88,25 +87,25 @@ enum ZRange[+V] {
 object ZRange {
 
   /**
-    * An inclusive score band `[min, max]`, ascending unless `rev` — the common `BYSCORE` case without naming [[ScoreBoundary]].
+    * Creates an inclusive score range `[min, max]`. Results use ascending order unless `rev` is true.
     */
   def scores(min: Double, max: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
     ByScore(ScoreBoundary.Inclusive(min), ScoreBoundary.Inclusive(max), limit, rev)
 
   /**
-    * Every member holding exactly `value` — the inclusive band `[value, value]`.
+    * Selects every member whose score equals `value`.
     */
   def score(value: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
     scores(value, value, limit, rev)
 
   /**
-    * Scores of at least `min` — the band `[min, +inf]`, ascending unless `rev`.
+    * Selects scores greater than or equal to `min`. Results use ascending order unless `rev` is true.
     */
   def atLeast(min: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
     ByScore(ScoreBoundary.Inclusive(min), ScoreBoundary.PosInf, limit, rev)
 
   /**
-    * Scores of at most `max` — the band `[-inf, max]`, ascending unless `rev`.
+    * Selects scores less than or equal to `max`. Results use ascending order unless `rev` is true.
     */
   def atMost(max: Double, limit: Option[Limit] = None, rev: Boolean = false): ZRange[Nothing] =
     ByScore(ScoreBoundary.NegInf, ScoreBoundary.Inclusive(max), limit, rev)

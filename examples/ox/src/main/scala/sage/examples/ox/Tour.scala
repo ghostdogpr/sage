@@ -6,8 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Runnable Ox tour. The client is opened with `scoped` inside a `supervised` concurrency scope — the idiomatic Ox direct-style construction
-  * form — and shared across every snippet. Start a server on localhost:6379 first (see examples/README.md), then `sbt examplesOx/run`.
+  * Runnable Ox tour. It opens the client with `scoped` inside a `supervised` concurrency scope and shares that client across the examples.
+  * Start a server on localhost:6379 as described in examples/README.md, then run `sbt examplesOx/run`.
   */
 @main def tour(): Unit = {
   val config = SageConfig(topology = Topology.Standalone(Endpoint("localhost", 6379)))

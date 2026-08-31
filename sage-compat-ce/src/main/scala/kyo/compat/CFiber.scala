@@ -35,7 +35,7 @@ object CFiber {
     inline def lower: FiberIO[? <: A] = self
 
     /**
-      * Joins the fiber and returns its result; cancellation surfaces as `CancellationException`.
+      * Joins the fiber and returns its result. Cancellation fails with `CancellationException`.
       */
     inline def get: CIO[A] =
       CIO.lift(

@@ -4,7 +4,7 @@ import sage.client.BackoffConfig
 
 private[internal] object Backoff {
 
-  // exponential backoff capped at maxDelay, then full jitter in [0, base] — the one formula shared by reconnect and cluster-redirect retry
+  // Reconnects and cluster-redirect retries share this formula: exponential backoff capped at maxDelay, then full jitter in [0, base].
   def jitteredMillis(config: BackoffConfig, attempt: Int, scheduler: Scheduler): Long = {
     val capped = config.maxDelay.toMillis
     val raw    = config.initialDelay.toMillis.toDouble * math.pow(config.multiplier, attempt.toDouble)

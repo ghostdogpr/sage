@@ -5,9 +5,9 @@ import sage.codec.ValueCodec
 import sage.protocol.Frame
 
 /**
-  * Decode helpers for a raw [[sage.protocol.Frame]] — the result type of `eval`/`fcall`, whose reply shape is defined by user code.
-  * Imported with `sage.commands.*`, they turn the "caller maps a decoder" contract into one-liners (`run(eval(...)).map(_.asLong)`),
-  * reusing the same strict decoders the typed commands use. Each returns `Either[sage.SageException.DecodeError, _]` and never throws.
+  * Helpers that decode a raw [[sage.protocol.Frame]] returned by `eval` or `fcall`. User code determines the reply shape. The
+  * `sage.commands.*` import provides calls such as `run(eval(...)).map(_.asLong)`. These helpers use the same strict decoders as typed
+  * commands. Each one returns `Either[sage.SageException.DecodeError, _]` and does not throw.
   */
 extension (frame: Frame) {
 

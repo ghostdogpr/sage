@@ -69,7 +69,7 @@ object Bytes {
     def sameBytes(that: Bytes): Boolean = Arrays.equals(arr(self), arr(that))
 
     /**
-      * A content-based hash, consistent with [[sameBytes]] — equal content yields equal hashes.
+      * Returns a content-based hash consistent with [[sameBytes]]. Equal content produces equal hashes.
       */
     def contentHashCode: Int = Arrays.hashCode(arr(self))
 
