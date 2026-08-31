@@ -3,9 +3,9 @@ package sage.benchmarks
 import org.openjdk.jmh.annotations.{Level, Setup, TearDown}
 
 /**
-  * Shared JMH state for the topology benchmarks: the same workload against the standalone, cluster, and master-replica runtimes, each on a
-  * single self-provisioned server. The comparison is end-to-end per-topology overhead — the cluster trial runs a `--cluster-enabled` server
-  * in its own container, so server-mode and instance variance are included, not client dispatch alone.
+  * Shared JMH state for running the same workload against standalone, cluster, and master-replica clients. Each client uses one provisioned
+  * server. The cluster trial runs a `--cluster-enabled` server in a separate container. The result therefore includes server-mode and
+  * instance differences as well as client dispatch.
   */
 abstract class TopologyBenchState {
 

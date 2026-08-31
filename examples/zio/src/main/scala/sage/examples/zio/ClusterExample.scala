@@ -6,9 +6,9 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Cluster spotlight. A cluster is just configuration — the same client type discovers the topology from the seeds and routes every command
-  * to the owning node. This needs a running cluster, so it is not part of the localhost `Tour`; it exists to show the wiring and sharded
-  * pub/sub, which only makes sense in a cluster (`SSUBSCRIBE`/`SPUBLISH` stay within the shard owning the channel's slot).
+  * Cluster example. The same client type discovers the topology from the configured seeds and routes each command to the owning node. This
+  * example requires a running cluster, so the localhost `Tour` does not run it. It also demonstrates sharded pub/sub. `SSUBSCRIBE` and
+  * `SPUBLISH` stay within the shard that owns the channel's slot.
   */
 object ClusterExample {
 

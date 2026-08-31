@@ -164,7 +164,7 @@ abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
         val (a, b) = res.getOrElse(fail("expected a committed transaction"))
         assertEquals(a, Right(1L))
         assert(b.isLeft, s"expected the INCR on a string to fail, got $b")
-        assertEquals(ok, Some(1)) // the first INCR committed despite the second erroring — Redis does not roll back
+        assertEquals(ok, Some(1)) // Redis does not roll back, so the first INCR remains committed after the second one fails.
       }
     }
   }

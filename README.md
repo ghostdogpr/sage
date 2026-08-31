@@ -3,14 +3,12 @@
 [![Maven Central](https://img.shields.io/maven-central/v/com.github.ghostdogpr/sage-core_3)](https://central.sonatype.com/artifact/com.github.ghostdogpr/sage-core_3)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-**Sage** is a **Redis & Valkey client for Scala 3**: one client for any Scala stack, built on a from-scratch native Redis protocol implementation.
+Sage is a Redis and Valkey client for Scala 3. It implements the Redis protocol directly in Scala instead of wrapping a Java client.
 
-**Use any Scala stack.** First-class [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), [Ox](https://ox.softwaremill.com), and [Pekko](https://pekko.apache.org) artifacts, each with its ecosystem's native types and no wrapper visible.
+- Choose the artifact for [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), [Ox](https://ox.softwaremill.com), or [Pekko](https://pekko.apache.org). Each artifact uses its ecosystem's native types.
+- The core implements RESP3, commands, and codecs in Scala 3.
+- Redis 8+ and Valkey 8+ support includes auto-pipelining, transactions, cluster routing, sharded pub/sub, client-side caching, and TLS.
 
-**Fast, native Redis protocol.** RESP3, commands, and codecs implemented directly in Scala 3, with no Java client wrapped underneath and fast by design.
-
-**Modern and feature-rich.** [Redis](https://redis.io) 8+ and [Valkey](https://valkey.io) 8+ with auto-pipelining, transactions, cluster, sharded pub/sub, client-side caching, and TLS.
-
-It is available for Scala 3.3.x LTS and later versions, and requires JDK 21+.
+Sage supports Scala 3.3.x LTS and later and requires JDK 21 or later.
 
 ### Consult the [Documentation](https://ghostdogpr.github.io/sage/) to learn how to use Sage.

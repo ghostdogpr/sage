@@ -6,8 +6,8 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * An `ARGREP` predicate over an Array's textual values: `Exact` whole-value equality, `Match` substring containment, `Glob` a glob
-  * pattern, `Re` a regular expression. Patterns are textual (not value-codec-decoded) — Array grep is a search over the stored strings.
+  * An `ARGREP` predicate over an array's text values. `Exact` compares the whole value, `Match` searches for a substring, `Glob` uses a glob
+  * pattern, and `Re` uses a regular expression. The array grep command searches stored strings and does not decode them with a value codec.
   */
 enum ArMatch {
   case Exact(value: String)

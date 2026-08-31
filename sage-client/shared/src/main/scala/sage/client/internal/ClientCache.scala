@@ -29,9 +29,9 @@ final private[client] class ClientCache(maxBytes: Long) {
   @volatile private var rerouteWatermark: CacheEpoch = CacheEpoch.initial
 
   /**
-    * Tries to serve `commandBytes` from cache. [[Hit]] returns the stored frame (decode it and complete the caller). [[Fetch]] means the
-    * caller is the first to miss and must issue the server read, then call [[store]] (or [[fail]]). [[Wait]] means another fetch is in
-    * flight and `waiter` has been enqueued onto it — do nothing. The `waiter` is enqueued for [[Fetch]] and [[Wait]], not for [[Hit]].
+    * Tries to serve `commandBytes` from the cache. [[Hit]] returns the stored frame. Decode it and complete the caller. [[Fetch]] means that
+    * this caller is the first to miss. Read from the server, then call [[store]] or [[fail]]. [[Wait]] means that another fetch is in flight
+    * and now owns `waiter`. Do nothing for this caller. [[Fetch]] and [[Wait]] enqueue `waiter`; [[Hit]] does not.
     */
   def acquire(commandBytes: Bytes, trackedKeys: Vector[Bytes], now: Long, waiter: Try[Frame] => Unit): Acquire = {
     lock.lock()
@@ -160,7 +160,7 @@ final private[client] class ClientCache(maxBytes: Long) {
 
 private[client] object ClientCache {
 
-  // a content-addressed Bytes key — universal `==`/`hashCode` on Bytes is reference-based by design (see Bytes)
+  // This wrapper compares Bytes by content. Bytes itself uses reference equality for `==` and `hashCode`; see Bytes.
   final class Key(val bytes: Bytes) {
     private val hash                         = bytes.contentHashCode
     override def hashCode(): Int             = hash

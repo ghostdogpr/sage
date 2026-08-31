@@ -8,10 +8,9 @@ import cats.effect.Deferred
 import cats.effect.IO
 
 /**
-  * Underlying carrier is `cats.effect.Deferred[IO, Try[A]]`. Cats Effect has no `Frame` / `Trace` to propagate. `Deferred` is a
-  * single-assignment cell of a plain value — it has no error channel (`complete` takes an `A`, `get` returns an `A`). A `CPromise` must
-  * carry failures, so the cell stores a `Try[A]` and failure is encoded as `Failure(t)`. `succeed` and `fail` return `true` on first
-  * completion and `false` on subsequent attempts (first-wins). `poll` returns the stored `Try` directly.
+  * Uses `cats.effect.Deferred[IO, Try[A]]`. Cats Effect has no `Frame` or `Trace` to propagate. `Deferred` stores one plain value and has no
+  * error channel. `complete` accepts an `A`, and `get` returns an `A`. A `CPromise` must also store failures, so this implementation stores a
+  * `Try[A]`. `succeed` and `fail` return `true` for the first completion and `false` for later attempts. `poll` returns the stored `Try`.
   */
 opaque type CPromise[A] = Deferred[IO, Try[A]]
 

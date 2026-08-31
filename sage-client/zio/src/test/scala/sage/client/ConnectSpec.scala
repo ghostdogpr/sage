@@ -105,7 +105,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("readFrom = ReplicaPreferred on a Standalone topology passes validation (degrades to the one node)") {
-    // it may connect (a local server) or fail to connect (none) — either way it must not be rejected by validation
+    // This can connect to a local server or fail when none is running. Validation must accept both outcomes.
     Client
       .connect(SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 100.millis))
       .flatMap(_.close)

@@ -64,8 +64,8 @@ object OpenTelemetryCommandTracer {
     new OpenTelemetryCommandTracer(openTelemetry.getTracer("sage"), peerService, () => Context.current())
 
   /**
-    * Builds a tracer from the globally-registered `OpenTelemetry` — the zero-configuration form for an APM agent (e.g. the Datadog Java agent
-    * with `dd.trace.otel.enabled=true`) that installs itself as the global instance.
+    * Builds a tracer from the registered global `OpenTelemetry` instance. Use this method with an APM agent that registers itself globally,
+    * such as the Datadog Java agent with `dd.trace.otel.enabled=true`.
     */
   def global(peerService: String = "redis"): CommandTracer =
     apply(GlobalOpenTelemetry.get(), peerService)

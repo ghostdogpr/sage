@@ -3,9 +3,9 @@ package sage.client.internal
 import sage.protocol.Frame
 
 /**
-  * A `-READONLY` reply means the server was demoted from master without dropping the socket, so the connection looks healthy but rejects
-  * writes; it must be discarded and reconnected rather than reused. Scoped to `READONLY` only — `LOADING` resolves on its own and the
-  * cluster codes are a separate concern.
+  * A `-READONLY` reply means that the server became a replica without dropping the socket. The connection still looks healthy but rejects
+  * writes, so the client must replace it. Only `READONLY` poisons a connection here. `LOADING` resolves without a reconnect, and cluster
+  * reply codes have separate handling.
   */
 private[internal] object Poison {
 

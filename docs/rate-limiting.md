@@ -1,8 +1,8 @@
 # Rate limiting
 
-A **rate limiter** controls how often something may happen, such as requests per second for an API key, login attempts per account, or a fair-use quota per tenant. Rate limiting is included with every Sage client.
+A rate limiter controls how often an action may occur. You can limit API requests by key, login attempts by account, or usage by tenant. Every Sage client includes rate limiting.
 
-The limiter is **distributed**. Its state lives on the server, not in process memory, so the limit holds across every process pointed at the same server. Each check decides and consumes atomically on the server, in a single round trip.
+The limiter stores its state on the server rather than in process memory. The limit therefore applies across every process that uses the same server. Each check decides whether to allow the request and consumes tokens atomically in one round trip.
 
 `rateLimiter` binds a policy to the client. Each `tryAcquire` consumes tokens for a subject and returns a `Decision`.
 
@@ -23,9 +23,9 @@ for {
 
 :::
 
-## The algorithm: token bucket
+## Token bucket algorithm
 
-Each subject has a **bucket** that holds up to `capacity` tokens and refills continuously over time. A `tryAcquire` takes `cost` tokens (one by default) when the bucket holds them, and is denied otherwise. `capacity` is the burst ceiling: a subject that has been idle can spend up to a full bucket at once, then is paced by the refill rate.
+Each subject has a bucket that holds up to `capacity` tokens and refills continuously. `tryAcquire` takes `cost` tokens when the bucket has enough. The default cost is one. Otherwise, the request is denied. An idle subject can spend a full bucket at once. After that, the refill rate controls its request rate.
 
 Refill is smooth rather than stepped, so a caller regains its allowance gradually instead of all at once at a window boundary.
 
@@ -42,9 +42,9 @@ RateLimit(permits = 100, per = 1.second, burst = 200) // 100/s sustained, bursti
 `Decision` is a return value, not an exception. Both allowed and denied requests are normal results.
 
 - `isAllowed`: whether the request was admitted.
-- `remainingTokens`: tokens left in the bucket. A denial consumes nothing, so it reports the untouched balance. Convenient for an `X-RateLimit-Remaining` header.
-- `Allowed(remaining, resetAfter)`: `resetAfter` is the time until the bucket refills to full.
-- `Denied(remaining, retryAfter)`: `retryAfter` is the time until enough tokens are available. Convenient for a `Retry-After` header.
+- `remainingTokens` is the number of tokens left in the bucket. A denial consumes nothing and reports the existing balance. You can use it for an `X-RateLimit-Remaining` header.
+- `Allowed(remaining, resetAfter)` reports how long the bucket takes to refill.
+- `Denied(remaining, retryAfter)` reports how long the caller must wait for enough tokens. You can use it for a `Retry-After` header.
 
 `tryAcquire` returns immediately instead of waiting for capacity. To retry, sleep for `retryAfter` at the call site and try again.
 
@@ -67,11 +67,11 @@ A subject can be any type with a `KeyCodec`. It is encoded and prefixed with a n
 client.rateLimiter[String](RateLimit.perSecond(100), namespace = "login")
 ```
 
-Give each policy that is active at the same time its own namespace. Changing the policy on an existing namespace is safe during a rolling deployment: a bucket remembers the policy that created it, and on a change each subject carries over the lesser of its current tokens and the new capacity, so overlapping old and new instances cannot hand out full buckets repeatedly.
+Give each active policy its own namespace. You can change a policy during a rolling deployment without resetting its buckets. Each bucket records the policy that created it. When the policy changes, the bucket keeps the smaller of its current token count and the new capacity. Old and new application instances therefore cannot each issue a full bucket.
 
 ## Invalid policies
 
-A policy needs a positive `capacity` and `refillTokens` and a `refillPeriod` of at least a microsecond, and `cost` must be between `1` and `capacity`. Very large values are also rejected, since the server-side arithmetic has to stay exact.
+A policy requires positive `capacity` and `refillTokens` values. `refillPeriod` must be at least one microsecond, and `cost` must be between `1` and `capacity`. Sage also rejects values that exceed the server's exact arithmetic range.
 
 These are programming errors, not runtime outcomes: `tryAcquire` and `peek` fail with `SageException.InvalidArgument` before any server call.
 
@@ -81,7 +81,7 @@ Each check contacts the server and fails through the effect `F` if the server is
 
 ## Capacity planning
 
-Each check is one script call and one constant-time atomic operation. It writes even on a denial, so a limiter on every application call adds real write throughput. One key exists per subject whose bucket is not full, expiring once that bucket would be full again, so live keys track the distinct subjects seen within one refill window: long windows over many subjects hold the most state.
+Each check makes one script call and performs one constant-time atomic operation. A denied check still writes to the server. Applying a limiter to every application call therefore adds write load. The limiter stores one key for each subject whose bucket is not full. That key expires when the bucket would become full again. Long refill windows with many subjects retain the most keys.
 
 If the limiter would take a material share of an existing store, give it its own deployment or more cluster shards, and keep denied callers from retrying in a tight loop.
 

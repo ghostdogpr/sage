@@ -8,8 +8,8 @@ import kyo.compat.*
 import sage.integration.Eventually
 
 /**
-  * One `CLUSTER NODES` row. The wire format is positional — `<id> <ip:port@cport> <flags> <master-id> …` with the owned slot ranges from
-  * field 8 on — so it is parsed once here rather than indexed at each use site.
+  * One `CLUSTER NODES` row. The wire format is positional: `<id> <ip:port@cport> <flags> <master-id> ...`. Owned slot ranges start at field
+  * 8. Parsing the row here avoids positional indexing at each use site.
   */
 final case class ClusterNode(id: String, port: Int, flags: Set[String], masterId: String, slots: Vector[Range]) {
   def isMaster: Boolean        = flags.contains("master")

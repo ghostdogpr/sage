@@ -22,8 +22,8 @@ enum RestorePolicy {
 final case class FunctionInfo(name: String, description: Option[String], flags: Set[String])
 
 /**
-  * One server-stored function Library: its functions, the engine that runs them, and — only when `FUNCTION LIST … WITHCODE` was used —
-  * its source.
+  * One function library stored on the server. It contains the functions, their engine, and the source code when the caller used
+  * `FUNCTION LIST WITHCODE`.
   */
 final case class LibraryInfo(libraryName: String, engine: String, functions: Vector[FunctionInfo], code: Option[String])
 

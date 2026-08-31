@@ -66,7 +66,8 @@ enum DelexCondition[+V] {
 }
 
 /**
-  * INCREX's reply: the new value, and the amount actually applied — 0 when an out-of-bounds increment was rejected, or the capped delta under SATURATE.
+  * The `INCREX` reply. `value` is the new value. `applied` is zero when the server rejects an out-of-bounds increment, or the capped change
+  * when using `SATURATE`.
   */
 final case class IncrExResult[N](value: N, applied: N)
 

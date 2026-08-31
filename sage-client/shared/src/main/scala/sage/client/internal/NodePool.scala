@@ -50,7 +50,7 @@ final private[client] class NodePool(
   }
 
   /**
-    * The node's established client, or `null` — never blocks.
+    * Returns the established client for the node, or `null`. This method never blocks.
     */
   def existing(node: Node): NodeClient = established.get(node)
 

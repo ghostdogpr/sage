@@ -5,9 +5,8 @@ import scala.collection.mutable
 import sage.commands.{Command, Pipeline}
 
 /**
-  * One server process in a cluster or master-replica deployment, addressed by host and port. The only cluster type users name directly —
-  * it appears on the [[sage.SageEvent]]s a [[sage.SageListener]] observes (which node served a command, the masters after a topology
-  * change). Routing targets the runtime chooses are otherwise internal.
+  * One server process in a cluster or master-replica deployment, addressed by host and port. [[sage.SageEvent]] values expose a `Node` to
+  * identify the server that handled a command or the masters after a topology change. Other routing types remain internal.
   */
 final case class Node(host: String, port: Int)
 

@@ -25,7 +25,7 @@ enum BitPosRange {
 }
 
 /**
-  * A `BITFIELD` integer type: `Signed` `i<bits>` (1–64) or `Unsigned` `u<bits>` (1–63).
+  * A `BITFIELD` integer type. `Signed` represents `i<bits>` from 1 to 64 bits. `Unsigned` represents `u<bits>` from 1 to 63 bits.
   */
 enum BitFieldType {
   case Signed(bits: Int)
@@ -33,7 +33,7 @@ enum BitFieldType {
 }
 
 /**
-  * A `BITFIELD` offset: an `Absolute` bit offset, or `TypeWidth(n)` — the wire's `#n` form, meaning `n × type-width` bits in.
+  * A `BITFIELD` offset. `Absolute` stores a bit offset. `TypeWidth(n)` represents the wire form `#n`, or `n` multiplied by the type width.
   */
 enum BitFieldOffset {
   case Absolute(value: Long)
@@ -48,8 +48,8 @@ enum BitFieldOverflow {
 }
 
 /**
-  * One operation in a `BITFIELD` pipeline. `Overflow` produces no reply element — it sets the mode for the `Set`/`IncrBy` operations that
-  * follow it; `Get` is the only operation the read-only `BITFIELD_RO` accepts.
+  * One operation in a `BITFIELD` command. `Overflow` produces no reply element and sets the mode for the following `Set` and `IncrBy`
+  * operations. The read-only `BITFIELD_RO` command accepts only `Get`.
   */
 enum BitFieldOp {
   case Get(fieldType: BitFieldType, offset: BitFieldOffset)

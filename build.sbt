@@ -18,7 +18,7 @@ val fs2Version        = "3.13.0"
 val oxVersion         = "1.0.6"
 val pekkoVersion      = "1.7.0"
 
-// competitor baselines for the runtime benchmark harness (dev-only, never published) — see benchmarks/README.md
+// These competing clients are development-only baselines for the runtime benchmarks. See benchmarks/README.md.
 val zioRedisVersion   = "1.2.1"
 val redis4catsVersion = "2.0.3"
 val lettuceVersion    = "7.6.0.RELEASE"

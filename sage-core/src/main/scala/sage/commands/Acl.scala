@@ -32,9 +32,8 @@ final case class AclLogEntry(
 )
 
 /**
-  * Access-control introspection. Reads only (`WHOAMI`, `LIST`, `USERS`, `CAT`, `GETUSER`, `LOG`). The mutations — user provisioning
-  * (`SETUSER`/`DELUSER`/`GENPASS`/`DRYRUN`) and the rule-file/ledger operations (`LOAD`/`SAVE`/`LOG RESET`) — are deliberately not exposed,
-  * being deployment-time operator tooling rather than an app-client concern.
+  * Access-control inspection commands: `WHOAMI`, `LIST`, `USERS`, `CAT`, `GETUSER`, and `LOG`. Sage does not provide commands for changing
+  * users or the ACL files because those are deployment operations rather than application client operations.
   */
 private[sage] object Acl {
 

@@ -4,9 +4,8 @@ import cats.effect.IO
 import cats.effect.kernel.Ref
 
 /**
-  * Underlying carrier is `cats.effect.kernel.Ref[IO, A]`. Cats Effect has no `Frame` / `Trace` to propagate. `lift` and `lower` are
-  * identity since the carrier is already a native CE ref. `compareAndSet` is composed via `Ref.modify` since CE has no native CAS
-  * primitive.
+  * Uses `cats.effect.kernel.Ref[IO, A]`. Cats Effect has no `Frame` or `Trace` to propagate. `lift` and `lower` return the existing Cats
+  * Effect ref. `compareAndSet` uses `Ref.modify` because Cats Effect does not provide a native compare-and-set operation.
   */
 opaque type CAtomicRef[A] = Ref[IO, A]
 

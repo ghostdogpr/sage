@@ -1,6 +1,6 @@
 # Streams
 
-A stream is an append-only log. Each entry has an ID (a millisecond timestamp plus a sequence number) and an ordered list of field/value pairs, where a field may repeat. You read a stream by range or by tailing it, and several workers can share one cooperatively through a consumer group.
+A stream is an append-only log. Each entry has an ID made from a millisecond timestamp and a sequence number. It also has an ordered list of field and value pairs, where a field may occur more than once. Read entries by range or tail the stream. A consumer group lets several workers divide the entries.
 
 ## Appending and reading
 
@@ -29,11 +29,11 @@ for {
 
 :::
 
-Field and value types are codec-driven, exactly like [other commands](/commands): the two type parameters above name the field type and the value type.
+Codecs determine the field and value types as they do for [other commands](/commands). The two type parameters above name the field type and the value type.
 
 ## Consumer groups
 
-A consumer group lets several consumers split a stream's entries between them without overlap. The group tracks a last-delivered ID and a pending entries list (PEL) of entries delivered but not yet acknowledged. `xReadGroup` with `GroupReadId.New` (the `>` token) delivers never-seen entries and records them as pending; `xAck` removes them from the PEL once handled.
+A consumer group divides a stream's entries among several consumers without overlap. The group tracks the last delivered ID and a pending entries list, or PEL. The PEL contains entries that a consumer received but has not acknowledged. `xReadGroup` with `GroupReadId.New`, the `>` token, delivers new entries and adds them to the PEL. After handling an entry, call `xAck` to remove it from the PEL.
 
 ::: code-group
 
@@ -72,9 +72,9 @@ Each command uses a separate type for the ID values it accepts. `XADD` takes an 
 
 ## Tailing a group
 
-For a long-running worker, `xConsume` tails a group and runs your handler on each entry. It first replays this consumer's own pending entries (recovering whatever a previous run left unacknowledged), then blocks waiting for new ones. An entry is acknowledged only once the handler succeeds, so a failure leaves it in the PEL for another attempt.
+For a long-running worker, `xConsume` tails a group and runs your handler on each entry. It first replays entries that this consumer left pending during a previous run. It then blocks while waiting for new entries. Sage acknowledges an entry after the handler succeeds. If the handler fails, the entry remains in the PEL for another attempt.
 
-On Pekko, where a `Future` cannot be cancelled, the loop runs in the background and `xConsume` returns a `RunningConsumer`: call `stop()` to halt it between entries and await its `completion`.
+On Pekko, a `Future` cannot be canceled. The loop runs in the background, and `xConsume` returns a `RunningConsumer`. Call `stop()` to halt it between entries, then await `completion`.
 
 ::: tip At-least-once delivery
 The same entry can be delivered again after a crash or a failed handler, so make your handler idempotent. `xConsume` blocks while waiting for entries and is intended for a long-running worker rather than a one-time read.
@@ -118,4 +118,4 @@ val consumer = client.xConsume[String, String]("workers", "w1", "stream:orders")
 
 :::
 
-The remaining `X*` commands are also available: trimming (`xTrim`), reverse range (`xRevRange`), blocking reads (`xRead`), claim and auto-claim (`xClaim`, `xAutoClaim`), pending inspection (`xPending`), and group management. See the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) for the complete list.
+Sage also provides the remaining `X*` commands. These include `xTrim`, `xRevRange`, `xRead`, `xClaim`, `xAutoClaim`, `xPending`, and the group-management commands. See the [API docs](https://javadoc.io/doc/com.github.ghostdogpr/sage-core_3/) for the complete list.

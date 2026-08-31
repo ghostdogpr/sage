@@ -4,9 +4,8 @@ import cats.effect.IO
 import cats.effect.std.Queue
 
 /**
-  * Underlying carrier is `cats.effect.std.Queue[IO, A]`, a bounded FIFO async queue. Cats Effect has no `Frame` / `Trace` to propagate.
-  * `lift` and `lower` are identity since the carrier is already a native CE queue. CE `Queue` has no shutdown semantic, so `close` is not
-  * exposed on the compat surface.
+  * Uses `cats.effect.std.Queue[IO, A]`, a bounded asynchronous FIFO queue. Cats Effect has no `Frame` or `Trace` to propagate. `lift` and
+  * `lower` return the existing Cats Effect queue. Cats Effect `Queue` has no shutdown operation, so this API does not provide `close`.
   */
 opaque type CChannel[A] = Queue[IO, A]
 

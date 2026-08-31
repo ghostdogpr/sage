@@ -31,7 +31,7 @@ private def refine[A](v: A < (Abort[Throwable] & Async))(using Frame): A < (Abor
 extension [K](client: Client[[A] =>> A < (Abort[SageException] & Async), K])(using @unused ev: KeyCodec[K]) {
 
   /**
-    * Runs a read with client-side caching and a Kyo `Duration` TTL — the Kyo-native form of [[sage.client.internal.Client.cached]].
+    * Runs a cached read with a Kyo `Duration` TTL. This is the Kyo form of [[sage.client.internal.Client.cached]].
     */
   def cached[A](command: Command[A], ttl: Duration): A < (Abort[SageException] & Async) =
     client.cached(command, FiniteDuration(ttl.toMillis, java.util.concurrent.TimeUnit.MILLISECONDS))

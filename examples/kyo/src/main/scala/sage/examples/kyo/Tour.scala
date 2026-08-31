@@ -6,8 +6,8 @@ import sage.*
 import sage.backend.*
 
 /**
-  * Runnable Kyo tour. The client is opened with `scoped` and its `Scope` discharged with `Scope.run`, the idiomatic Kyo construction form,
-  * then shared across every snippet. Start a server on localhost:6379 first (see examples/README.md), then `sbt exampleKyo`.
+  * Runnable Kyo tour. It opens the client with `scoped`, handles its `Scope` with `Scope.run`, and shares the client across the examples.
+  * Start a server on localhost:6379 as described in examples/README.md, then run `sbt exampleKyo`.
   */
 object Tour extends KyoApp {
 

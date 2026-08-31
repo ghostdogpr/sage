@@ -1,10 +1,10 @@
 # Commands & codecs
 
-Every Redis command is available two ways: as a method on the client (`client.get`, `client.incr`), and as a value built with `Commands` (`Commands.get`, `Commands.incr`). Client methods are convenient for direct calls. Command values can be stored, reused, or included in pipelines and transactions.
+Call a Redis command as a client method such as `client.get`, or build a command value such as `Commands.get`. Use client methods for direct calls. You can store or reuse a command value and include it in a pipeline or transaction.
 
 ## Commands as values
 
-A `Command[Out]` describes a server command without running it. Client methods use `run` internally, so these two lines do exactly the same thing:
+A `Command[Out]` describes a server command without running it. Client methods call `run` internally, so the following forms are equivalent.
 
 ::: code-group
 
@@ -47,7 +47,7 @@ In a cluster, Sage uses a command's key to choose the correct slot. A command wi
 
 ## Typed keys and values
 
-Keys and values are typed, and a codec converts each to and from bytes. The **key type is fixed on the client**: the default `SageClient` uses `String` keys, so you only need to specify the value type when calling a command:
+Keys and values are typed. A codec converts each value to and from bytes. The client fixes the key type. The default `SageClient` uses `String` keys, so a command call needs only the value type.
 
 ```scala
 client.set("user:1", 42)            // value inferred as Int
@@ -87,11 +87,11 @@ The client returned by `as[K]` uses `K` for keys in commands, pipelines, transac
 
 `Double`, `Float`, and `Boolean` are intentionally missing as key codecs: their formatting is representation-sensitive, and two writers must never silently address different keys or fields.
 
-All built-in codecs **decode strictly**. Bytes that are not the type's canonical form fail with a `DecodeError` rather than being coerced: `"x"` is not a `Long`, and `"2"` is not a `Boolean`.
+All built-in codecs decode strictly. Bytes outside the type's canonical form cause a `DecodeError` instead of a conversion. For example, `"x"` is not a `Long`, and `"2"` is not a `Boolean`.
 
 ## Writing your own codec
 
-Define a `ValueCodec` to read and write your own types just like the built-in types. Build one from an existing codec with `imap` (a total, lossless mapping) or `emap` (a mapping whose decode can fail). Return `Left` when the input is invalid.
+Define a `ValueCodec` to read and write your own types. Build one from an existing codec with `imap` for a total, lossless mapping. Use `emap` when decoding can fail, and return `Left` for invalid input.
 
 Use `imap` for a newtype:
 

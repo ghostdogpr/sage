@@ -16,10 +16,10 @@ import sage.integration.{ContainerClient, Eventually, Images}
 import sage.protocol.Frame
 
 /**
-  * Shared scaffolding for the master-replica suites. One container runs two server processes — a master on 6379 and a replica on 6380 — kept
-  * single-container like [[sage.integration.cluster.ClusterSuite]] while still exercising the runtime end to end: `ROLE` discovery, a distinct
-  * replica-pool endpoint, [[ReadFrom]] routing, and genuine replication between two processes. The replica announces its testcontainers-mapped
-  * host port (via `replica-announce-ip`/`-port`) so the address the master reports in `ROLE` is reachable from the test.
+  * Shared setup for the master-replica suites. One container runs a master on port 6379 and a replica on port 6380. Like
+  * [[sage.integration.cluster.ClusterSuite]], this setup keeps both processes in one container while testing `ROLE` discovery, a separate
+  * replica-pool endpoint, [[ReadFrom]] routing, and replication. The replica advertises the host and port mapped by Testcontainers so that
+  * the test can reach the address from the master's `ROLE` reply.
   */
 abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
 
@@ -245,8 +245,8 @@ abstract class MasterReplicaFailoverSuite(image: String, serverBinary: String, f
 }
 
 /**
-  * Failover where the old master is demoted to follow the new one — it stays reachable but answers writes with `READONLY`, exercising the
-  * ownership-fault branch of the runtime's re-discovery.
+  * A failover that makes the old master follow the new master. The old master remains reachable but answers writes with `READONLY`, which
+  * tests topology discovery after an ownership failure.
   */
 abstract class MasterReplicaDemotionFailoverSuite(image: String, serverBinary: String)
   extends MasterReplicaFailoverSuite(image, serverBinary, "demoted master") {
@@ -273,9 +273,9 @@ abstract class MasterReplicaConnectionLossFailoverSuite(image: String, serverBin
 }
 
 /**
-  * A replica going down. The replica runs in the foreground so `SHUTDOWN`-ing it leaves the foreground master (and the container) alive. A
-  * strict `Replica` read then has no node to reach and fails, while `ReplicaPreferred` falls back to the master. Both clients connect before
-  * the replica dies, so they actually attempt the now-dead replica rather than simply never discovering it.
+  * Tests a replica shutdown. The replica runs in the background, so shutting it down leaves the foreground master and the container alive.
+  * A strict `Replica` read then fails because no replica is available. `ReplicaPreferred` falls back to the master. Both clients connect
+  * before the shutdown, which makes the test use the failed replica instead of omitting it during discovery.
   */
 abstract class MasterReplicaReplicaDownSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
 

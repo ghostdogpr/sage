@@ -68,8 +68,8 @@ object CommandLogType {
 }
 
 /**
-  * One `COMMANDLOG GET` entry. `metric` is microseconds for [[CommandLogType.Slow]] and bytes for the large-request/large-reply logs — the
-  * caller already chose the type, so the unit is known. `clientAddr`/`clientName` may be empty on older entries.
+  * One `COMMANDLOG GET` entry. `metric` uses microseconds for [[CommandLogType.Slow]] and bytes for large-request and large-reply logs. The
+  * caller selects the log type and therefore knows the unit. Older entries can have empty `clientAddr` and `clientName` values.
   */
 final case class CommandLogEntry(
   id: Long,

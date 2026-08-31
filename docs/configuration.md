@@ -8,7 +8,7 @@ val config = SageConfig(
 )
 ```
 
-Every field has a sensible default, so `SageConfig()` connects to a local standalone server. The sections below cover the fields that shape connectivity; [Connection tuning](#connection-tuning) summarizes the operational knobs.
+`SageConfig()` uses the defaults and connects to a local standalone server. The following sections describe the connection fields. [Connection tuning](#connection-tuning) lists the runtime settings.
 
 ## Standalone
 
@@ -47,9 +47,7 @@ in one slot, for example `user:{42}:profile` and `user:{42}:settings`. Transacti
 
 ### Supported cross-slot commands
 
-`mGet`, `mSet`, `exists`, `del`, `unlink`, and `touch` may span slots. Sage groups their keys by slot, sends one subcommand per slot, and merges the
-replies back into one: `mGet` restores request order (keeping missing and repeated positions), `exists`, `del`, `unlink`, and `touch` sum their
-counts, and `mSet` succeeds only if every group returns `OK`. This works inside a pipeline too.
+`mGet`, `mSet`, `exists`, `del`, `unlink`, and `touch` may span slots. Sage groups their keys by slot and sends one subcommand per slot. It then combines the replies. `mGet` restores request order, including missing and repeated positions. `exists`, `del`, `unlink`, and `touch` sum their counts. `mSet` succeeds only if every group returns `OK`. These commands also work inside a pipeline.
 
 Each slot's subcommand is atomic on its own, but the call as a whole is not. A cross-slot `mGet` is not a point-in-time snapshot, and a failing
 `mSet`, `del`, or `unlink` may already have written to the groups that succeeded. If any group fails, the whole call fails. Use a common hash tag
@@ -65,13 +63,9 @@ Each node sees only part of the keyspace. Script and function caches are also lo
 one: `keys` returns the whole keyspace, `dbSize` the cluster total, `pubsubChannels` every active channel, `pubsubNumSub` the summed subscriber
 count. If any master fails, the whole call fails.
 
-None of them can go in a pipeline, which batches per node — run them on the client directly; `dbSize` is also rejected inside a transaction, which
-pins to one node. Only masters are visited, so a subscriber connected through a replica is not counted by `pubsubNumSub`, and `pubsubNumPat` counts
-a pattern once per master holding it.
+These commands cannot run in a pipeline because a pipeline batches per node. Run them directly on the client. Sage also rejects `dbSize` inside a transaction because a transaction stays on one node. Sage queries only masters. As a result, `pubsubNumSub` does not count a subscriber connected through a replica, and `pubsubNumPat` counts a pattern once for each master that holds it.
 
-The keyless administrative commands — `info`, `configGet`, `configSet`, `slowLog*`, `latency*`, `commandLog*`, `functionDump` — are answered by a
-single master instead. Note that `configSet` sets the parameter on one master, not across the cluster. A keyless *read* such as `randomKey` is also
-answered by one node, but follows the [read routing](#read-routing) policy, so it can be served by a replica.
+A single master handles the keyless administrative commands `info`, `configGet`, `configSet`, `slowLog*`, `latency*`, `commandLog*`, and `functionDump`. `configSet` therefore changes one master, not the whole cluster. One node also handles a keyless read such as `randomKey`. Keyless reads follow the [read routing](#read-routing) policy and may run on a replica.
 
 This is also the one case where Sage does not retry a `-CLUSTERDOWN` for you; see
 [Refusals Sage retries for you](/error-handling#refusals-sage-retries-for-you).
@@ -110,7 +104,7 @@ val config = SageConfig(
 )
 ```
 
-The number of endpoints decides where Sage may connect:
+The number of endpoints controls where Sage may connect:
 
 | Seeds | Nodes Sage dials |
 | --- | --- |
@@ -119,9 +113,7 @@ The number of endpoints decides where Sage may connect:
 
 Use several endpoints for managed deployments whose stable primary and reader names differ from the per-node addresses Redis advertises.
 
-An endpoint that is unreachable, or a replica that is still synchronizing, is left out at connect time so a partially available deployment still
-connects. Sage adds it again when a command shows that the topology has changed, without polling. However, adding a *second* replica does not produce
-such a signal. Set `topologyRefreshInterval` if you scale readers out; see [Topology refresh](#topology-refresh).
+At connect time, Sage leaves out an unreachable endpoint or a replica that is still synchronizing. The client can therefore start against a partially available deployment. Sage adds the endpoint later when a command reports a topology change. Adding another replica does not produce such a signal, so set `topologyRefreshInterval` when you add readers. See [Topology refresh](#topology-refresh).
 
 ## Read routing
 
@@ -156,7 +148,7 @@ val config = SageConfig(
 
 ## Connection tuning
 
-The remaining fields tune connection lifecycle, pooling, and observability. Each is its own config type with its own defaults, so you set only what you need:
+The remaining fields control connection lifetime, pooling, and observability. Each config type has defaults, so set only the fields you need.
 
 | Field | Tunes | Defaults |
 | --- | --- | --- |
@@ -166,12 +158,12 @@ The remaining fields tune connection lifecycle, pooling, and observability. Each
 | `closeTimeout` | how long `close` waits for in-flight commands to finish (blocking commands and transactions are closed at once) | `5.seconds` |
 | `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
-| `clientCache` (`CacheConfig`) | client-side caching on/off and size cap | enabled, `64 MB` |
+| `clientCache` (`CacheConfig`) | whether client-side caching is enabled and its size limit | enabled, `64 MB` |
 | `clientName` | `CLIENT SETNAME`, shown in `CLIENT LIST` / `CLIENT INFO` | none |
 | `listeners` | observers of runtime events (`SageListener`) | none |
 | `tracer` | [distributed-tracing](/observability#distributed-tracing) spans on the command path (`CommandTracer`) | none |
 
-`dedicatedPool.maxConnections` is a ceiling per node, not per client: a blocking command runs on the node holding its keys, so every node gets its own pool. Connections open on demand and idle ones are evicted, so the ceiling is what a burst can reach, but size it against `maxclients` with your node count in mind.
+`dedicatedPool.maxConnections` applies to each node. A blocking command runs on the node that holds its keys, so every node has a separate pool. Connections open on demand, and Sage removes idle connections. When setting the limit, account for both the node count and the server's `maxclients` setting.
 
 For example, a cluster client with a shorter connect timeout, a larger blocking-command pool, a more frequent watchdog, and a name:
 
@@ -187,7 +179,7 @@ val config = SageConfig(
 )
 ```
 
-Disable client-side caching where the server permits ordinary commands but denies `CLIENT TRACKING` (some proxies and ACL setups); `cached` reads then run without caching, keeping the call portable:
+Disable client-side caching when a proxy or ACL permits ordinary commands but denies `CLIENT TRACKING`. A `cached` read then runs without caching, so the same call works against both server configurations.
 
 ```scala
 val config = SageConfig(
@@ -198,7 +190,7 @@ val config = SageConfig(
 
 ## From a connection URI
 
-For the common cases you can parse a `redis://` or `rediss://` URI instead of assembling the config by hand. `rediss` selects TLS with system trust, userinfo becomes the ACL auth, a `/<db>` path sets the database, and comma-separated hosts yield cluster seeds. It returns the problem as a `Left` rather than throwing, and there is intentionally no way to select insecure TLS from a URI:
+For common configurations, parse a `redis://` or `rediss://` URI instead of constructing each field. `rediss` selects TLS with system trust. User information becomes the ACL credentials, a `/<db>` path sets the database, and comma-separated hosts become cluster seeds. `fromUri` returns an error in `Left` instead of throwing. A URI cannot select insecure TLS.
 
 ```scala
 // fromUri returns Either: a Left describes the problem, a Right is the config

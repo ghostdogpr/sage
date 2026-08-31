@@ -10,8 +10,8 @@ import sage.codec.{Doubles, KeyCodec, ValueCodec}
 import sage.protocol.Frame
 
 /**
-  * Per-field outcome of HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT. `NoField` covers both an absent field and an absent key — the server
-  * reports a missing key as a `-2` per requested field, never a top-level null.
+  * The outcome for one field in `HEXPIRE`, `HPEXPIRE`, `HEXPIREAT`, or `HPEXPIREAT`. `NoField` represents a missing field or key. The server
+  * reports a missing key as `-2` for each requested field instead of returning a top-level null.
   */
 enum FieldExpiry {
   case NoField
