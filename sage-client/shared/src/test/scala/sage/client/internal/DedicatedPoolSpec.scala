@@ -311,7 +311,9 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val (pool, scheduler, transports) = make { payload =>
       if (payload.asUtf8String.contains("HELLO")) {
         bootstrapping.countDown()
-        assert(proceed.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        // MUnit holds the suite monitor while evaluating assertions. Wait outside it so the test thread can release this latch.
+        val resumed = proceed.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        assert(resumed)
         Seq(Replies.hello)
       } else Seq(popReply)
     }
@@ -320,7 +322,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val acquirer                      = new Thread(() => scheduler.advance(Duration.Zero))
     acquirer.start()
     try {
-      assert(bootstrapping.await(2, java.util.concurrent.TimeUnit.SECONDS))
+      val started = bootstrapping.await(2, java.util.concurrent.TimeUnit.SECONDS)
+      assert(started)
       lease.cancel()
       proceed.countDown()
       acquirer.join(2000)
