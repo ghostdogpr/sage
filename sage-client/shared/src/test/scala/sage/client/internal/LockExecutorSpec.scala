@@ -11,6 +11,7 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.{InvalidArgument, LockLost, ServerError, TimedOut}
+import sage.client.SageConfig
 import sage.commands.Command
 import sage.protocol.Frame
 
@@ -18,6 +19,34 @@ class LockExecutorSpec extends munit.FunSuite {
   override val munitTimeout = 10.seconds
 
   private given ExecutionContext = munitExecutionContext
+
+  test("standalone lock scopes use only the shared connection and do not send ROLE or WAIT") {
+    val written                                         = new ConcurrentLinkedQueue[String]()
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
+      new FakeTransport(
+        onFrame,
+        onClosed,
+        payload => {
+          val text = payload.asUtf8String
+          written.add(text)
+          if (text.contains("HELLO")) Seq(Replies.hello)
+          else if (text.contains("EVALSHA")) Seq(Frame.Integer(1))
+          else Seq(Replies.ok)
+        }
+      )
+    Client
+      .connectWith(factory, Scheduler.real, SageConfig(closeTimeout = Duration.Zero))
+      .flatMap { client =>
+        CIO.ensure(client.close) {
+          client.lock[String]().tryWithLock("key")(CIO.value(42)).map { result =>
+            assertEquals(result, Some(42))
+            assertEquals(written.asScala.count(_.contains("HELLO")), 1)
+            assert(!written.asScala.exists(text => text.contains("ROLE") || text.contains("WAIT")))
+          }
+        }
+      }
+      .unsafeRun
+  }
 
   private class Store extends CommandRunner[CIO, String] {
     private var entries                               = Map.empty[String, (String, Long)]
@@ -176,6 +205,39 @@ class LockExecutorSpec extends munit.FunSuite {
     store.stallRenewal = true
     executor(300.millis).tryWithLock(store, "key")(CIO.never).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[LockLost], error.toString)
+      assert(!store.held)
+    }
+  }
+
+  test("a renewal acknowledgement shortfall becomes LockLost and releases ownership") {
+    val shortfall = TimedOut("replication confirmed by 0 of 1 required replicas")
+    val store     = new Store {
+      override def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+        run(command).flatMap { renewed =>
+          if (command.args(4).asUtf8String == "renew") CIO.fail(shortfall)
+          else CIO.value(renewed)
+        }
+    }
+    executor(300.millis).tryWithLock(store, "key")(CIO.never).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[LockLost], error.toString)
+      assert(error.getCause eq shortfall)
+      assert(store.operations.asScala.exists(_.endsWith(":renew")))
+      assert(store.operations.asScala.exists(_.endsWith(":release")))
+      assert(!store.held)
+    }
+  }
+
+  test("replication checks respect a short acquisition wait and the remaining renewal lease") {
+    val store = new Store {
+      override def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] = {
+        val operation = command.args(4).asUtf8String
+        if (operation == "acquire") assert(timeout > Duration.Zero && timeout <= 200.millis, timeout.toString)
+        if (operation == "renew") assert(timeout > Duration.Zero && timeout <= 170.millis, timeout.toString)
+        run(command)
+      }
+    }
+    executor(300.millis).withLock(store, "key", 200.millis)(CIO.sleep(400.millis)).unsafeRun.map { _ =>
+      assert(store.operations.asScala.exists(_.endsWith(":renew")))
       assert(!store.held)
     }
   }

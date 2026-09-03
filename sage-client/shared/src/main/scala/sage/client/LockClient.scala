@@ -7,6 +7,7 @@ import sage.client.internal.{Client, LockExecutor}
 /**
   * A distributed mutex bound to a client. Each key has an expiring lease that Sage renews while the protected effect runs. All callers
   * coordinating the same work must use the same namespace and key. Locks are not reentrant and do not guarantee acquisition order.
+  * Master-replica and cluster clients require replica acknowledgement for acquisition and renewal.
   *
   * Mutual exclusion depends on the lease remaining valid and Redis retaining its state. Process pauses beyond expiry and Redis failover
   * can allow overlapping work. Cancellation after lease loss is cooperative and cannot undo completed external effects.

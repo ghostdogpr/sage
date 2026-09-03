@@ -250,5 +250,8 @@ object SageClient {
 
     // Release runs in a masked finalizer. Its command must remain interruptible for CIO.timeout to finish.
     override protected def lockCommand[A](command: Command[A]): CIO[A] = CIO.lift(underlying.run(command).lower.interruptible)
+
+    override protected def confirmedLockCommand(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+      CIO.lift(underlying.lockWrite(command, timeout).lower.interruptible)
   }
 }

@@ -39,14 +39,20 @@ All processes protecting the same resource must use the same deployment, namespa
 
 The same code works with standalone, master-replica, and cluster clients, including clients configured for replica reads.
 
+In master-replica and cluster mode, acquisition and renewal require acknowledgement from at least as many replicas as the client discovered for the granting master, including any additional replicas that master now reports. Sage allows up to one second for each write and its replication check, bounded by the remaining acquisition wait or lease. This includes waiting for a dedicated connection and receiving replies. A disconnected replica or one still synchronizing can prevent acquisition or cause a running lock to be lost. Failed confirmation requests a topology refresh so later attempts can account for removed replicas.
+
+These checks require permission to run `ROLE` and `WAIT`. Each write and its confirmation briefly borrow a dedicated connection, which is returned when confirmation finishes. Masters without replicas continue to work. Standalone clients do not check replication.
+
+Lock checks share `dedicatedPool` with blocking commands and transactions. A full pool can prevent acquisition or renewal, even for different lock keys. Increasing `dedicatedPool.maxConnections` allows more of these operations to run concurrently.
+
 ## Failure and cancellation
 
-If Sage loses ownership or cannot renew the lock, the operation fails with `SageException.LockLost` and attempts to cancel the body. Release must also be confirmed before Sage reports success. Server and connection errors propagate through your backend's normal failure channel. Cleanup preserves an existing body failure or cancellation.
+If replicas do not acknowledge acquisition in time, Sage raises `SageException.TimedOut` without starting the body. Acquisition can also raise `SageException.LockLost` if the granting master changes role or the lease expires before the body starts. If Sage loses ownership or cannot confirm renewal, the operation fails with `SageException.LockLost` and attempts to cancel the body. Successful completion requires the master to acknowledge release. Server and connection errors propagate through your backend's normal failure channel. Cleanup preserves an existing body failure or cancellation.
 
 Cancellation is cooperative and cannot undo completed work. Uninterruptible work can delay completion. Pekko uses `Future`, so its body may continue after lock loss even though Sage stops renewing the lock. A timed-out or cancelled acquisition can leave the lock held until its lease expires.
 
 ## Limits
 
-Exclusivity depends on the lease remaining valid and the server retaining the lock. A long process pause, failover, or an evicted lock key can allow overlapping work. Prevent eviction or deletion of active lock keys.
+Exclusivity depends on the lease remaining valid and the server retaining the lock. Replica acknowledgement reduces the risk of losing a lock during failover, but does not make Redis or Valkey strongly consistent. A long process pause, failover, or an evicted lock key can still allow overlapping work. Prevent eviction or deletion of active lock keys.
 
 Sage does not provide fencing tokens or exactly-once execution. If correctness must survive those failures, the system receiving the changes must enforce ownership or provide transactional protection. See [Redis's distributed lock documentation](https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/) for the failure assumptions.

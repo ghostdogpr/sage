@@ -244,6 +244,26 @@ final private[client] class MasterReplicaLive(
     Client.withLeaseIfBlocking(command)(body)
   }
 
+  override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+    Client.withLockLease(timeout, scheduler) { (lease, deadlineMillis) =>
+      CIO.async { complete =>
+        val tracked = Events.trackCommand(events, command, complete)
+        Client.completing(tracked) {
+          onMaster(tracked) { (nc, _, cb) =>
+            nc.submitLockWrite(
+              command,
+              asking = false,
+              replicasRef.get().size,
+              deadlineMillis,
+              cb,
+              lease,
+              () => refreshThrottle.request(rediscoverWork)
+            )
+          }
+        }
+      }
+    }
+
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)

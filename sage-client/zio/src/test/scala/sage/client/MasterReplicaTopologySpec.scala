@@ -72,6 +72,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     val roles                                                           = TrieMap.from(initialRoles)
     @volatile var writesFailReadonly                                    = false
     @volatile var diesOnRead: Node                                      = null
+    @volatile var lockAcknowledgements: Long                            = 1L
     private val dials                                                   = new ConcurrentLinkedQueue[Node]()
     private val roleRequests                                            = new ConcurrentLinkedQueue[Node]()
     private val transports                                              = new ConcurrentLinkedQueue[(Node, FakeTransport)]()
@@ -87,7 +88,9 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
           else if (text.contains("ROLE")) {
             roleRequests.add(node)
             roles.get(node).toSeq
-          } else if (reads > 0 && node == diesOnRead) {
+          } else if (text.contains("EVALSHA")) Seq(Frame.Integer(1))
+          else if (text.contains("WAIT")) Seq(Frame.Integer(lockAcknowledgements))
+          else if (reads > 0 && node == diesOnRead) {
             kill(node)
             Nil
           } else if (reads > 0) Seq.fill(reads)(Frame.Integer(1L))
@@ -122,6 +125,11 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
         transport.written.count(_.asUtf8String.contains("ZSCORE"))
       }.sum
 
+    def lockConfirmations(node: Node): Int =
+      transports.asScala.toVector.collect { case (`node`, transport) =>
+        transport.written.count(_.asUtf8String.contains("WAIT"))
+      }.sum
+
     def read(): Long =
       scala.concurrent.Await.result(live.run(readCommand).unsafeRun, 10.seconds)
 
@@ -142,6 +150,55 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
     def close(): Unit =
       scala.concurrent.Await.result(live.close.unsafeRun, 10.seconds)
+  }
+
+  test("master-replica locks confirm acquisition and renewal on the master with replica reads") {
+    val fixture = new Fixture(Vector(primary), Map(primary -> masterRole(reader), reader -> replicaRole(primary)))
+    fixture.live.bootstrapRoles()
+    try {
+      val result = scala.concurrent.Await.result(
+        fixture.live
+          .lock[String](3.seconds)
+          .tryWithLock("key") {
+            CIO.blocking(fixture.awaitTrue(fixture.lockConfirmations(primary) >= 2, "renewal was not confirmed"))
+          }
+          .unsafeRun,
+        5.seconds
+      )
+      assertEquals(result, Some(()))
+      assert(fixture.lockConfirmations(primary) >= 2)
+      assertEquals(fixture.lockConfirmations(reader), 0)
+    } finally fixture.close()
+  }
+
+  test("master-replica locks reject a missing replica and recover after refreshing its removal") {
+    val fixture   = new Fixture(Vector(primary), Map(primary -> masterRole(reader), reader -> replicaRole(primary)))
+    fixture.live.bootstrapRoles()
+    fixture.roles(primary) = masterRole()
+    fixture.lockAcknowledgements = 0
+    var evaluated = false
+    try {
+      val result = Try(
+        scala.concurrent.Await.result(
+          fixture.live
+            .lock[String]()
+            .tryWithLock("key") {
+              evaluated = true
+              CIO.value(42)
+            }
+            .unsafeRun,
+          5.seconds
+        )
+      )
+      assert(result.failed.get.isInstanceOf[TimedOut], result.toString)
+      assert(!evaluated)
+      assertEquals(fixture.lockConfirmations(primary), 1)
+      fixture.awaitTrue(
+        Try(scala.concurrent.Await.result(fixture.live.lock[String]().tryWithLock("key")(CIO.value(42)).unsafeRun, 5.seconds)).toOption
+          .contains(Some(42)),
+        "lock acquisition did not recover after the replica was removed"
+      )
+    } finally fixture.close()
   }
 
   test("several seeds keep the supplied addresses and never dial a ROLE-advertised address") {

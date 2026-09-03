@@ -26,8 +26,13 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   protected def lockCommand[A](command: Command[A]): CIO[A] = underlying.run(command)
 
+  protected def confirmedLockCommand(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+    underlying.lockWrite(command, timeout)
+
   private val lockRunner: CommandRunner[CIO, String] = new CommandRunner[CIO, String] {
-    def run[A](command: Command[A]): CIO[A] = lockCommand(command)
+    def run[A](command: Command[A]): CIO[A]                                                                = lockCommand(command)
+    override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+      confirmedLockCommand(command, timeout)
   }
 
   final def run[A](command: Command[A]): F[A] = lower(underlying.run(command))

@@ -8,7 +8,7 @@ import com.dimafeng.testcontainers.munit.TestContainerForAll
 import kyo.compat.*
 
 import sage.{Bytes, Message}
-import sage.SageException.DecodeError
+import sage.SageException.{DecodeError, LockLost, TimedOut}
 import sage.client.{Endpoint, MasterReplicaConfig, ReadFrom, SageConfig, Topology}
 import sage.client.internal.Client
 import sage.commands.{Command, Commands}
@@ -110,6 +110,52 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
   * the replica: a read that sees it was served by the replica, and one that does not was served by the master, which never has it.
   */
 abstract class MasterReplicaSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
+
+  for (duringRenewal <- Vector(false, true))
+    test(s"distributed locks fail when a replica stops acknowledging ${if (duringRenewal) "renewal" else "acquisition"}") {
+      withContainers { server =>
+        val host = server.host
+        val pm   = server.mappedPort(masterPort)
+        val pr   = server.mappedPort(replicaPort)
+        connectAndUse(standalone(host, pr)) { replica =>
+          ensureReplicating(replica, host, pr).flatMap { _ =>
+            connectAndUse(masterReplica(host, pm, ReadFrom.Replica)) { client =>
+              connectAndUse(standalone(host, pm)) { master =>
+                val key         = s"mr:unconfirmed-lock:$duringRenewal"
+                val bodyStarted = new java.util.concurrent.atomic.AtomicBoolean(false)
+                val bodyStopped = new java.util.concurrent.atomic.AtomicBoolean(false)
+                val detach      = replica.run(admin("REPLICAOF", "NO", "ONE"))
+                val attempt     = client.lock[String](3.seconds).tryWithLock(key) {
+                  CIO.defer(bodyStarted.set(true)).flatMap { _ =>
+                    if (duringRenewal)
+                      CIO.ensure(CIO.defer(bodyStopped.set(true)))(detach.flatMap(_ => CIO.never))
+                    else CIO.unit
+                  }
+                }
+                CIO.ensure(ensureReplicating(replica, host, pr)) {
+                  for {
+                    _      <- if (duringRenewal) CIO.unit else detach
+                    result <- attempt.liftToTry
+                    exists <- master.exists(s"4:lock:$key")
+                  } yield {
+                    if (duringRenewal) {
+                      assert(result.failed.get.isInstanceOf[LockLost], result.toString)
+                      assert(bodyStarted.get())
+                      assert(bodyStopped.get())
+                    } else {
+                      assert(result.failed.get.isInstanceOf[TimedOut], result.toString)
+                      assert(result.failed.get.getMessage.contains("replication confirmed by"), result.toString)
+                      assert(!bodyStarted.get())
+                    }
+                    assertEquals(exists, 0L)
+                  }
+                }
+              }
+            }
+          }
+        }.unsafeRun
+      }
+    }
 
   test("distributed locks acquire, renew, and release on the master with Replica reads") {
     withContainers { server =>

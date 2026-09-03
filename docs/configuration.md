@@ -156,7 +156,7 @@ The remaining fields control connection lifetime, pooling, and observability. Ea
 | `reconnect` (`BackoffConfig`) | exponential reconnect backoff with full jitter | `50.millis` to `5.seconds`, ×2 |
 | `watchdog` (`WatchdogConfig`) | connection liveness checks for pending commands and idle connections | ping every `60.seconds`, `30.seconds` timeout |
 | `closeTimeout` | how long `close` waits for in-flight commands to finish (blocking commands and transactions are closed at once) | `5.seconds` |
-| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands and transactions, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
+| `dedicatedPool` (`DedicatedPoolConfig`) | the pool behind blocking commands, transactions, and lock replication checks, per node | max `8`, acquire `5.seconds`, idle `30.seconds` |
 | `pubsub` (`PubSubConfig`) | per-subscription message buffer size | `128` |
 | `clientCache` (`CacheConfig`) | whether client-side caching is enabled and its size limit | enabled, `64 MB` |
 | `clientName` | `CLIENT SETNAME`, shown in `CLIENT LIST` / `CLIENT INFO` | none |
@@ -164,6 +164,8 @@ The remaining fields control connection lifetime, pooling, and observability. Ea
 | `tracer` | [distributed-tracing](/observability#distributed-tracing) spans on the command path (`CommandTracer`) | none |
 
 `dedicatedPool.maxConnections` applies to each node. A blocking command runs on the node that holds its keys, so every node has a separate pool. Connections open on demand, and Sage removes idle connections. When setting the limit, account for both the node count and the server's `maxclients` setting.
+
+Each lock write and its replication check have a budget of at most one second, including pool acquisition. The pool wait ends at the earlier of `dedicatedPool.acquireTimeout` and the remaining lock budget. See [Distributed locks](/distributed-locks) for contention and timeout behavior.
 
 For example, a cluster client with a shorter connect timeout, a larger blocking-command pool, a more frequent watchdog, and a name:
 

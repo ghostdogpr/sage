@@ -7,7 +7,7 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, UnsupportedServer}
+import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, TimedOut, UnsupportedServer}
 import sage.client.internal.{
   ClusterLive,
   CountingScheduler,
@@ -137,6 +137,114 @@ class ClusterClientSpec extends munit.FunSuite {
   private val mid: Int = Slot.Count / 2
 
   private val splitCluster: Frame = Replies.clusterSlots((nodeA, 0, mid - 1), (nodeB, mid, Slot.Count - 1))
+
+  for (redirect <- Vector("MOVED", "ASK"))
+    test(s"lock confirmation follows $redirect to the granting master and its replicas") {
+      val key     = "lock-key"
+      val slot    = Slot.of(Bytes.utf8(s"4:lock:$key")).value
+      val fixture = new Fixture(
+        (node, text) =>
+          if (text.contains("CLUSTER")) Seq(wholeClusterOn(nodeA))
+          else if (node == nodeA) Seq(Frame.SimpleError(s"$redirect $slot b:6379"))
+          else if (text.contains("ROLE")) Seq(Replies.masterRole(nodeDead))
+          else if (text.contains("WAIT")) Seq(Frame.Integer(1))
+          else if (text.contains("ASKING")) Seq(Replies.ok, Frame.Integer(1))
+          else Seq(Frame.Integer(1)),
+        Vector(nodeA)
+      )
+      fixture.live
+        .lock[String]()
+        .tryWithLock(key)(CIO.value(42))
+        .unsafeRun
+        .map { result =>
+          assertEquals(result, Some(42))
+          assert(fixture.written(nodeB).exists(_.contains("WAIT")))
+          assert(!fixture.written(nodeA).exists(_.contains("WAIT")))
+          assert(fixture.written(nodeDead).isEmpty)
+        }
+        .andThen { case _ => fixture.live.close.unsafeRun }
+    }
+
+  test("cluster locks reject acquisition when a known replica does not acknowledge") {
+    var evaluated = false
+    val fixture   = new Fixture(
+      (_, text) =>
+        if (text.contains("CLUSTER")) Seq(Replies.clusterShard(nodeA, nodeB))
+        else if (text.contains("ROLE")) Seq(Replies.masterRole())
+        else if (text.contains("WAIT")) Seq(Frame.Integer(0))
+        else Seq(Frame.Integer(1)),
+      Vector(nodeA),
+      readFrom = ReadFrom.Replica
+    )
+    fixture.live
+      .lock[String]()
+      .tryWithLock("key") {
+        evaluated = true
+        CIO.value(42)
+      }
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[TimedOut], error.toString)
+        assert(!evaluated)
+        assert(fixture.written(nodeA).exists(_.contains("WAIT")))
+        assert(fixture.written(nodeB).isEmpty)
+      }
+      .andThen { case _ => fixture.live.close.unsafeRun }
+  }
+
+  test("cluster locks recover after confirmation failure refreshes a removed replica") {
+    val removed = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val fixture = new Fixture(
+      (_, text) =>
+        if (text.contains("CLUSTER")) Seq(if (removed.get()) wholeClusterOn(nodeA) else Replies.clusterShard(nodeA, nodeB))
+        else if (text.contains("ROLE")) Seq(Replies.masterRole())
+        else if (text.contains("WAIT")) { removed.set(true); Seq(Frame.Integer(0)) }
+        else Seq(Frame.Integer(1)),
+      Vector(nodeA)
+    )
+    fixture.live
+      .lock[String]()
+      .tryWithLock("key")(CIO.value(42))
+      .unsafeRun
+      .failed
+      .map { error =>
+        assert(error.isInstanceOf[TimedOut])
+        awaitRefreshed(fixture, nodeA)
+        await("lock acquisition did not recover after the replica was removed") {
+          scala.util
+            .Try(scala.concurrent.Await.result(fixture.live.lock[String]().tryWithLock("key")(CIO.value(42)).unsafeRun, 5.seconds))
+            .toOption
+            .contains(Some(42))
+        }
+      }
+      .andThen { case _ => fixture.live.close.unsafeRun }
+  }
+
+  test("cluster locks do not replay an acquisition after a retryable confirmation error") {
+    val writes  = new java.util.concurrent.atomic.AtomicInteger(0)
+    val fixture = new Fixture(
+      (_, text) =>
+        if (text.contains("CLUSTER")) Seq(Replies.clusterShard(nodeA, nodeB))
+        else if (text.contains("ROLE")) Seq(Replies.masterRole(nodeB))
+        else if (text.contains("WAIT")) Seq(Frame.SimpleError("TRYAGAIN confirmation unavailable"))
+        else {
+          if (text.contains("acquire")) { writes.incrementAndGet(): Unit }
+          Seq(Frame.Integer(1))
+        },
+      Vector(nodeA)
+    )
+    fixture.live
+      .lock[String]()
+      .tryWithLock("key")(CIO.value(42))
+      .unsafeRun
+      .failed
+      .map { error =>
+        assertEquals(error, ConnectionLost(mayHaveExecuted = true))
+        assertEquals(writes.get(), 1)
+      }
+      .andThen { case _ => fixture.live.close.unsafeRun }
+  }
 
   test("a seed that owns no slots fails the bootstrap rather than adopting an empty topology") {
     val behaviour = (_: Node, text: String) => if (text.contains("CLUSTER")) Seq(Frame.Array(Vector.empty)) else Seq(Frame.Null)

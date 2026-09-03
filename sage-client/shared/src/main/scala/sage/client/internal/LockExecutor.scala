@@ -18,7 +18,7 @@ final private[client] class LockExecutor[K](leaseDuration: FiniteDuration, names
   private val leaseNanos        = leaseDuration.toMillis * 1000000L
   private val usableNanos       = leaseNanos - leaseNanos / 10L
   private val renewalDelay      = (leaseNanos / 3L).nanos
-  private val cleanupTimeout    = math.min(usableNanos, 1.second.toNanos).nanos
+  private val operationTimeout  = math.min(usableNanos, 1.second.toNanos).nanos
   private val contentionBackoff = BackoffConfig(initialDelay = 50.millis, maxDelay = 500.millis, multiplier = 2.0)
 
   final private case class Deadline(startedAtNanos: Long, durationNanos: Long) {
@@ -77,16 +77,34 @@ final private[client] class LockExecutor[K](leaseDuration: FiniteDuration, names
 
   private def remainingRelease(state: Attempt): CIO[Long] = CIO.nowMonotonic.map { now =>
     val deadline = state.releaseDeadline.updateAndGet { current =>
-      if (current == null) Deadline(now.toNanos, cleanupTimeout.toNanos) else current
+      if (current == null) Deadline(now.toNanos, operationTimeout.toNanos) else current
     }
     deadline.remainingAt(now.toNanos)
   }
 
-  private def eval(runner: CommandRunner[CIO, String], state: Attempt, operation: String): CIO[Boolean] =
-    runner.run(commands.command(state.key, state.token, operation, cached = true)).recover {
-      case ServerError("NOSCRIPT", _) => runner.run(commands.command(state.key, state.token, operation, cached = false))
+  private def eval(
+    runner: CommandRunner[CIO, String],
+    state: Attempt,
+    operation: String,
+    confirmationDeadline: Option[Deadline] = None
+  ): CIO[Boolean] = {
+    def run(cached: Boolean): CIO[Boolean] = {
+      val command = commands.command(state.key, state.token, operation, cached)
+      confirmationDeadline match {
+        case None           => runner.run(command)
+        case Some(deadline) =>
+          CIO.nowMonotonic.flatMap { now =>
+            val remaining = math.min(operationTimeout.toNanos, deadline.remainingAt(now.toNanos))
+            if (remaining <= 0L) CIO.fail(TimedOut("distributed lock write timed out"))
+            else runner.lockWrite(command, remaining.nanos)
+          }
+      }
+    }
+    run(cached = true).recover {
+      case ServerError("NOSCRIPT", _) => run(cached = false)
       case other                      => CIO.fail(other)
     }
+  }
 
   private def attempt[A](runner: CommandRunner[CIO, String], key: Bytes, wait: Option[Deadline])(body: () => CIO[A]): CIO[Option[A]] =
     // Allocate only local state during acquisition so a contended or unresponsive server never masks cancellation of the wait loop.
@@ -96,9 +114,10 @@ final private[client] class LockExecutor[K](leaseDuration: FiniteDuration, names
         CIO.nowMonotonic.flatMap { started =>
           state.renewedAt.set(started.toNanos)
           state.mayOwn.set(true)
+          val duration = math.min(waitRemaining, usableNanos)
           CIO
-            .timeoutWithError(math.min(waitRemaining, usableNanos).nanos)(TimedOut("distributed lock acquisition timed out"))(
-              eval(runner, state, "acquire")
+            .timeoutWithError(duration.nanos)(TimedOut("distributed lock acquisition timed out"))(
+              eval(runner, state, "acquire", Some(Deadline(started.toNanos, duration)))
             )
             .flatMap {
               case false =>
@@ -139,7 +158,7 @@ final private[client] class LockExecutor[K](leaseDuration: FiniteDuration, names
           CIO.nowMonotonic.flatMap { started =>
             CIO
               .timeoutWithError(remaining.nanos)(LockLost("distributed lock renewal timed out"))(
-                eval(runner, state, "renew")
+                eval(runner, state, "renew", Some(Deadline(started.toNanos, remaining)))
               )
               .recover(renewalFailed)
               .flatMap { renewed =>
