@@ -305,12 +305,16 @@ object CIO {
     * Bridges a one-shot completion callback into `CIO`; `register` receives a `Try[A] => Unit`.
     */
   inline def async[A](inline register: ((scala.util.Try[A] => Unit) => Unit)): CIO[A] =
-    lift(IO.async_[A] { k =>
-      val cb: scala.util.Try[A] => Unit = {
-        case scala.util.Success(a) => k(Right(a))
-        case scala.util.Failure(e) => k(Left(e))
+    lift(IO.async[A] { k =>
+      IO.delay {
+        val cb: scala.util.Try[A] => Unit = {
+          case scala.util.Success(a) => k(Right(a))
+          case scala.util.Failure(e) => k(Left(e))
+        }
+        register(cb)
+        // A cancel token makes callback waiting cancelable even when the external operation cannot be stopped.
+        Some(IO.unit)
       }
-      register(cb)
     })
 
   /**

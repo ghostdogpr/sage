@@ -31,6 +31,26 @@ class PekkoSmokeSuite extends ServerSuite(Images.redis) {
       }
     }
 
+  test("a distributed lock scopes native effects and skips contended bodies") {
+    withNativeClient { (client, _, _) =>
+      val locks     = client.lock[String]()
+      var evaluated = false
+      for {
+        busy     <- locks.withLock("native-lock", 2.seconds) {
+                      locks.tryWithLock("native-lock") {
+                        evaluated = true
+                        client.ping()
+                      }
+                    }
+        acquired <- locks.tryWithLock("native-lock")(client.ping())
+      } yield {
+        assertEquals(busy, None)
+        assertEquals(acquired, Some("PONG"))
+        assert(!evaluated)
+      }
+    }
+  }
+
   test("an end user connects and round-trips with scala.concurrent.Future") {
     val values = withNativeClient { (client, _, _) =>
       for {

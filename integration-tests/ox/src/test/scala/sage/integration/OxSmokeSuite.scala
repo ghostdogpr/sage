@@ -12,6 +12,23 @@ class OxSmokeSuite extends ServerSuite(Images.redis) {
   private def withNativeClient(body: Ox ?=> SageClient => Unit): Unit =
     withContainers(server => supervised(body(SageClient.scoped(configOf(server)))))
 
+  test("a distributed lock scopes native effects and skips contended bodies") {
+    withNativeClient { client =>
+      val locks     = client.lock[String]()
+      var evaluated = false
+      val busy      = locks.withLock("native-lock", 2.seconds) {
+        locks.tryWithLock("native-lock") {
+          evaluated = true
+          client.ping()
+        }
+      }
+      val acquired  = locks.tryWithLock("native-lock")(client.ping())
+      assertEquals(busy, None)
+      assertEquals(acquired, Some("PONG"))
+      assert(!evaluated)
+    }
+  }
+
   test("an end user connects and round-trips with direct-style Ox") {
     withNativeClient { client =>
       assertEquals(client.ping(), "PONG")

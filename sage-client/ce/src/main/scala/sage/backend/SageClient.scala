@@ -212,8 +212,25 @@ object SageClient {
   def resource(config: SageConfig): Resource[IO, SageClient] =
     Resource.make(connect(config))(_.close.voidError)
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[IO](underlying) {
+  final private[sage] class Lowered(underlying: Client[CIO, String]) extends LoweredClient[IO](underlying) {
     protected def lower[A](c: CIO[A]): IO[A] = c.lower
     protected def lift[A](fa: IO[A]): CIO[A] = CIO.lift(fa)
+
+    override protected def lockScope[A, B](body: () => IO[A])(runScope: CIO[A] => CIO[B]): IO[B] = {
+      val cancelled = new RuntimeException("lock body cancelled")
+      // Joining observes self-cancellation as an outcome. The bracket also cancels the body when ownership is lost.
+      val work      = IO
+        .defer(body())
+        .start
+        .bracket(_.join.flatMap {
+          case cats.effect.Outcome.Succeeded(value) => value
+          case cats.effect.Outcome.Errored(error)   => IO.raiseError(error)
+          case cats.effect.Outcome.Canceled()       => IO.raiseError(cancelled)
+        })(_.cancel)
+      runScope(CIO.lift(work)).lower.handleErrorWith {
+        case error if error eq cancelled => IO.canceled *> IO.never[B]
+        case other                       => IO.raiseError(other)
+      }
+    }
   }
 }

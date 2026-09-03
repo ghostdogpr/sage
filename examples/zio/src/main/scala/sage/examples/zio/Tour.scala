@@ -20,5 +20,6 @@ object Tour extends ZIOAppDefault {
       PubSubExample.run *>
       CachedReadsExample.run *>
       RateLimiterExample.run *>
+      LockExample.run *>
       StreamsExample.run).provide(SageClient.layer(config))
 }

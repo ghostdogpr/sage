@@ -6,7 +6,9 @@ This module implements the full [kyo-compat](https://github.com/getkyo/kyo/tree/
 
 Kyo removed its Cats Effect integrations in 1.0.0-RC6 in [kyo#1779](https://github.com/getkyo/kyo/pull/1779) and moved community bindings outside the project in [kyo#1840](https://github.com/getkyo/kyo/pull/1840). This module vendors the last upstream Cats Effect binding from commit [`eae31e1d`](https://github.com/getkyo/kyo/tree/eae31e1d39d4b8ff2df168272e60b38d9e9dd502/kyo-compat/bindings/ce). Those sources match `io.getkyo:kyo-compat-ce_3:1.0.0-RC5`.
 
-The vendored copy merges the `shared` and `jvm` source trees because Sage supports only the JVM. It also uses this repository's brace-based formatting and corrects several comments. The conformance suite checks that the API and behavior remain compatible with upstream.
+The vendored copy merges the `shared` and `jvm` source trees because Sage supports only the JVM. It also uses this repository's brace-based formatting and corrects several comments.
+
+Sage changes `CIO.async` from `IO.async_` to `IO.async` with a cancellation token so a timeout or cancellation can stop waiting for a callback. This applies to every CE command wait, including distributed lock acquisition, renewal, and release. Cancellation does not stop the external operation or retract a command already sent to the server. The transport still consumes its reply in order. The conformance suite checks compatibility with the shared API, and lock regression tests cover delayed callbacks.
 
 Kyo is licensed under [Apache 2.0](https://github.com/getkyo/kyo/blob/main/LICENSE), the same license as Sage.
 

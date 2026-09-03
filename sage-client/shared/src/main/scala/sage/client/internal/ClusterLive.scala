@@ -153,6 +153,12 @@ final private[client] class ClusterLive(
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
     executor.evalSha(this, subject, cost, peek)
 
+  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
+    executor.tryWithLock(this, key)(body)
+
+  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+    executor.withLock(this, key, waitTimeout)(body)
+
   // SCAN cursors are node-local. A full scan visits every master that owns slots. Resharding during the scan can still miss or duplicate keys.
   def scanTargets: CIO[Vector[ScanTarget]] =
     CIO.blocking {

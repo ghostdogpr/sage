@@ -15,10 +15,13 @@ Every Sage failure is a `SageException` in a sealed hierarchy that you can match
 | `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |
 | `TlsError(message)` | TLS could not be established (rejected certificate or unusable trust material). |
 | `CrossSlot(message)` | An unsupported multi-key command or a transaction touched keys in more than one cluster slot. `MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, and `TOUCH` are transparently split outside transactions. |
-| `TimedOut(message)` | A blocking command or transaction waited past `dedicatedPool.acquireTimeout` for a free pooled connection. Not a per-command timeout; bound a command's own duration with your backend's timeout combinator. |
+| `TimedOut(message)` | A pooled connection wait exceeded `dedicatedPool.acquireTimeout`, a topology probe exceeded `connectTimeout`, or distributed lock acquisition exceeded its wait or lease budget. |
+| `LockLost(message)` | A distributed lock expired, changed owner, or could not confirm renewal or release within its deadline. Sage attempts to cancel the protected body. Cancellation depends on the backend and cannot undo completed work. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
 | `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |
 | `InvalidArgument(message)` | A programming error, rejected before any server call: an invalid configuration or rate-limit policy, a blocking command inside a pipeline or transaction, or a command a cluster client cannot route as written. |
+
+Regular commands have no per-command timeout. Use your backend's timeout combinator to bound their duration. See [Distributed locks](/distributed-locks) for lock deadlines and cancellation behavior.
 
 ## Branching on the failure
 

@@ -111,6 +111,43 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
   */
 abstract class MasterReplicaSuite(image: String, serverBinary: String) extends MasterReplicaSuiteBase(image, serverBinary) {
 
+  test("distributed locks acquire, renew, and release on the master with Replica reads") {
+    withContainers { server =>
+      val host = server.host
+      val pm   = server.mappedPort(masterPort)
+      val pr   = server.mappedPort(replicaPort)
+
+      val program =
+        connectAndUse(standalone(host, pr))(ensureReplicating(_, host, pr)).flatMap { _ =>
+          connectAndUse(masterReplica(host, pm, ReadFrom.Replica)) { client =>
+            connectAndUse(standalone(host, pm)) { master =>
+              val key       = "mr:distributed-lock"
+              val holder    = client.lock[String](leaseDuration = 600.millis)
+              val contender = master.lock[String]()
+              for {
+                fromReplica <- client.get[String](marker)
+                denied      <- holder.withLock(key, 2.seconds) {
+                                 for {
+                                   before <- contender.tryWithLock(key)(CIO.value(1))
+                                   _      <- CIO.sleep(1500.millis)
+                                   after  <- contender.tryWithLock(key)(CIO.value(2))
+                                 } yield (before, after)
+                               }
+                acquired    <- contender.tryWithLock(key)(CIO.value(42))
+                exists      <- master.exists(s"4:lock:$key")
+              } yield {
+                assertEquals(fromReplica, Some("from-replica"))
+                assertEquals(denied, (None, None))
+                assertEquals(acquired, Some(42))
+                assertEquals(exists, 0L)
+              }
+            }
+          }
+        }
+      program.unsafeRun
+    }
+  }
+
   test("reads honor the ReadFrom policy and writes always reach the master") {
     withContainers { server =>
       val host       = server.host

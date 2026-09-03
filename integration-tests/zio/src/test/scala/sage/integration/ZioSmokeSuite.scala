@@ -20,6 +20,26 @@ class ZioSmokeSuite extends ServerSuite(Images.redis) {
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
     }
 
+  test("a distributed lock scopes native effects and skips contended bodies") {
+    withNativeClient { client =>
+      val locks     = client.lock[String]()
+      var evaluated = false
+      for {
+        busy     <- locks.withLock("native-lock", FiniteDuration(2L, TimeUnit.SECONDS)) {
+                      locks.tryWithLock("native-lock") {
+                        evaluated = true
+                        client.ping()
+                      }
+                    }
+        acquired <- locks.tryWithLock("native-lock")(client.ping())
+      } yield {
+        assertEquals(busy, None)
+        assertEquals(acquired, Some("PONG"))
+        assert(!evaluated)
+      }
+    }
+  }
+
   test("an end user connects and round-trips with native ZIO") {
     withNativeClient { client =>
       for {

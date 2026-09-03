@@ -26,7 +26,7 @@ export sage.client.{
   TrustSource,
   WatchdogConfig
 }
-export sage.client.RateLimiterClient
+export sage.client.{LockClient, RateLimiterClient}
 // the cluster node a Listener observes (SageEvent), the only cluster type users name
 export sage.cluster.Node
 // codec typeclasses (built-in givens live in their companions, already in implicit scope)

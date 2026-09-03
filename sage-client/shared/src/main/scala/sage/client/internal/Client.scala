@@ -2227,6 +2227,20 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   ): RateLimiterClient[F, RK] =
     new RateLimiterClient[F, RK](this, RateLimitExecutor(RateLimiter[RK](limit, namespace)))
 
+  /**
+    * Creates a distributed mutex for keys of type `LK`. The lease is renewed automatically while a protected effect runs. `leaseDuration`
+    * defaults to 30 seconds and must be at least 30 milliseconds. See [[LockClient]] for ownership and failover limits.
+    */
+  def lock[LK](
+    leaseDuration: FiniteDuration = FiniteDuration(30L, java.util.concurrent.TimeUnit.SECONDS),
+    namespace: String = "lock"
+  )(using KeyCodec[LK]): LockClient[F, LK] =
+    new LockClient[F, LK](this, new LockExecutor[LK](leaseDuration, namespace))
+
+  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]]
+
+  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A]
+
   // implementations validate the request, then execute the rate-limit script with EVALSHA and reload it after NOSCRIPT
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision]
 
@@ -2274,6 +2288,10 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
       private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]                                                    = self.runOn(target, command)
       private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
         self.rateLimitAcquire(executor, subject, cost, peek)
+      private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]]                       =
+        self.lockTryWith(executor, key)(body)
+      private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A]     =
+        self.lockWith(executor, key, waitTimeout)(body)
       def close: F[Unit]                                                                                                           = self.close
     }
   }
@@ -2532,6 +2550,12 @@ object Client {
 
     private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
       executor.evalSha(this, subject, cost, peek)
+
+    private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
+      executor.tryWithLock(this, key)(body)
+
+    private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+      executor.withLock(this, key, waitTimeout)(body)
 
     private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))

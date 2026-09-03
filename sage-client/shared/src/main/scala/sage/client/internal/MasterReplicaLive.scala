@@ -517,6 +517,12 @@ final private[client] class MasterReplicaLive(
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
     executor.evalSha(this, subject, cost, peek)
 
+  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
+    executor.tryWithLock(this, key)(body)
+
+  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+    executor.withLock(this, key, waitTimeout)(body)
+
   def close: CIO[Unit] = CIO.blocking(closeAll())
 
   private def closeAll(): Unit = {

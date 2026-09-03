@@ -215,6 +215,8 @@ extension [K](client: Client[IO[SageException, *], K])(using @unused ev: KeyCode
 
 object SageClient {
 
+  final private class LockBodyFailure(val cause: Cause[SageException]) extends RuntimeException
+
   /**
     * A client that uses `K` for keys, returned by `client.as[K]`. [[SageClient]] uses `String` keys by default. Calling `as` changes only
     * the key type and continues to use the same connection.
@@ -229,8 +231,24 @@ object SageClient {
   def layer(config: SageConfig): ZLayer[Any, SageException, SageClient] =
     ZLayer.scoped(scoped(config))
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[IO[SageException, *]](underlying) {
+  final private[sage] class Lowered(underlying: Client[CIO, String]) extends LoweredClient[IO[SageException, *]](underlying) {
     protected def lower[A](c: CIO[A]): IO[SageException, A] = c.lower.refineToOrDie[SageException]
     protected def lift[A](fa: IO[SageException, A]): CIO[A] = CIO.lift(fa)
+
+    override protected def lockScope[A, B](body: () => IO[SageException, A])(runScope: CIO[A] => CIO[B]): IO[SageException, B] = {
+      val work = ZIO.suspendSucceed(body()).exit.flatMap {
+        case Exit.Success(value) => ZIO.succeed(value)
+        case Exit.Failure(cause) => ZIO.fail(new LockBodyFailure(cause))
+      }
+      runScope(CIO.lift(work)).lower
+        .catchAll {
+          case failure: LockBodyFailure => ZIO.refailCause(failure.cause)
+          case other                    => ZIO.fail(other)
+        }
+        .refineToOrDie[SageException]
+    }
+
+    // Release runs in a masked finalizer. Its command must remain interruptible for CIO.timeout to finish.
+    override protected def lockCommand[A](command: Command[A]): CIO[A] = CIO.lift(underlying.run(command).lower.interruptible)
   }
 }
