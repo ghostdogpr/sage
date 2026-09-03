@@ -7,6 +7,47 @@ import scala.concurrent.duration.*
 
 class RefreshThrottleSpec extends munit.FunSuite {
 
+  test("retained requests coalesce and run after the minimum interval without another failure") {
+    val scheduler = new ManualScheduler
+    val throttle  = new RefreshThrottle(scheduler, minRefreshMs = 1000L)
+    var runs      = 0
+    val work      = () => runs += 1
+    throttle.request(work)
+    throttle.trigger(() => fail("an ordinary trigger duplicated an immediate retained refresh"))
+    scheduler.advance(Duration.Zero)
+    (1 to 100).foreach(_ => throttle.request(work))
+    throttle.trigger(() => fail("an ordinary trigger duplicated a retained refresh"))
+    scheduler.advance(999.millis)
+    assertEquals(runs, 1)
+    scheduler.advance(1.milli)
+    assertEquals(runs, 2)
+    scheduler.advance(2.seconds)
+    assertEquals(runs, 2)
+  }
+
+  test("a retained request during refresh runs after completion and respects a later forced refresh") {
+    val scheduler = new ManualScheduler
+    val throttle  = new RefreshThrottle(scheduler, minRefreshMs = 1000L)
+    var runs      = 0
+    throttle.trigger(() => throttle.request(() => runs += 1))
+    scheduler.advance(Duration.Zero)
+    scheduler.advance(500.millis)
+    throttle(force = true)(())
+    scheduler.advance(999.millis)
+    assertEquals(runs, 0)
+    scheduler.advance(1.milli)
+    assertEquals(runs, 1)
+  }
+
+  test("closing discards a retained refresh") {
+    val scheduler = new ManualScheduler
+    val throttle  = new RefreshThrottle(scheduler, minRefreshMs = 1000L)
+    throttle(force = true)(())
+    throttle.request(() => fail("refresh ran after close"))
+    throttle.stopPolling()
+    scheduler.advance(2.seconds)
+  }
+
   test("a non-blocking trigger schedules once while a refresh is in flight without changing blocking callers") {
     val scheduler = new CountingScheduler
     val throttle  = new RefreshThrottle(scheduler, minRefreshMs = 0L)

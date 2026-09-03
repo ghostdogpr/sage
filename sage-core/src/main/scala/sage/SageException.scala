@@ -86,9 +86,15 @@ object SageException {
   /**
     * A wait exceeded its configured limit. This applies when a blocking command or transaction waits longer than
     * `dedicatedPool.acquireTimeout` for a pooled connection, or when a topology probe (`ROLE` or `CLUSTER SLOTS`) exceeds `connectTimeout`.
-    * Regular commands do not use this timeout.
+    * It also applies when distributed lock acquisition exceeds its wait or lease budget. Regular commands do not use this timeout.
     */
   final case class TimedOut(message: String) extends SageException(message)
+
+  /**
+    * A distributed lock expired, changed owner, or could not confirm renewal or release within its deadline. Sage attempts to cancel the
+    * protected effect, but cancellation depends on the backend and cannot undo completed work.
+    */
+  final case class LockLost(message: String) extends SageException(message)
 
   /**
     * The server discarded a transaction because a command could not be queued (`EXECABORT`). The transaction did not run. Execution-phase

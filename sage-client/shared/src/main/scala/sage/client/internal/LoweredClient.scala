@@ -19,6 +19,22 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   protected def lift[A](fa: F[A]): CIO[A]
 
+  // Native adapters encode failure and cancellation for the shared race, then restore the original outcome after cleanup.
+  // Explicit deferral is required because mapping CIO.unit can evaluate immediately in Kyo.
+  protected def lockScope[A, B](body: () => F[A])(runScope: CIO[A] => CIO[B]): F[B] =
+    lower(runScope(CIO.defer(()).flatMap(_ => lift(body()))))
+
+  protected def lockCommand[A](command: Command[A]): CIO[A] = underlying.run(command)
+
+  protected def confirmedLockCommand(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+    underlying.lockWrite(command, timeout)
+
+  private val lockRunner: CommandRunner[CIO, String] = new CommandRunner[CIO, String] {
+    def run[A](command: Command[A]): CIO[A]                                                                = lockCommand(command)
+    override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+      confirmedLockCommand(command, timeout)
+  }
+
   final def run[A](command: Command[A]): F[A] = lower(underlying.run(command))
 
   final def cached[A](command: Command[A], ttl: FiniteDuration): F[A] = lower(underlying.cached(command, ttl))
@@ -45,6 +61,16 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   final private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
     lower(underlying.rateLimitAcquire(executor, subject, cost, peek))
+
+  final private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]] = {
+    val bodyThunk = () => body
+    lockScope(bodyThunk)(executor.tryWithLock(lockRunner, key)(_))
+  }
+
+  final private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A] = {
+    val bodyThunk = () => body
+    lockScope(bodyThunk)(executor.withLock(lockRunner, key, waitTimeout)(_))
+  }
 
   final def close: F[Unit] = lower(underlying.close)
 

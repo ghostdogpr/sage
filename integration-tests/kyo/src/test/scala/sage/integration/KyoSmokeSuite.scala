@@ -21,6 +21,26 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       KyoApp.Unsafe.runAndBlock(timeout)(program).getOrThrow
     }
 
+  test("a distributed lock scopes native effects and skips contended bodies") {
+    withNativeClient { client =>
+      val locks     = client.lock[String]()
+      var evaluated = false
+      for {
+        busy     <- locks.withLock("native-lock", FiniteDuration(2L, TimeUnit.SECONDS)) {
+                      locks.tryWithLock("native-lock") {
+                        evaluated = true
+                        client.ping()
+                      }
+                    }
+        acquired <- locks.tryWithLock("native-lock")(client.ping())
+      } yield {
+        assertEquals(busy, None)
+        assertEquals(acquired, Some("PONG"))
+        assert(!evaluated)
+      }
+    }
+  }
+
   test("an end user connects and round-trips with native Kyo") {
     withNativeClient { client =>
       for {
@@ -30,6 +50,25 @@ class KyoSmokeSuite extends ServerSuite(Images.redis) {
       } yield {
         assertEquals(pong, "PONG")
         assertEquals(values.toList, (1 to 50).toList.map(i => Some(s"value-$i")))
+      }
+    }
+  }
+
+  test("a distributed lock preserves a native panic and releases ownership") {
+    withBoundedClient(3L.seconds) { client =>
+      val failure = new IllegalStateException("body panic")
+      val locks   = client.lock[String]()
+      for {
+        result   <- Abort.run[SageException](locks.tryWithLock[Int]("native-panic")(Abort.panic(failure)))
+        _         = result match {
+                      case Result.Panic(error) => assert(error eq failure)
+                      case other               => fail(s"expected the original panic, got $other")
+                    }
+        exists   <- client.exists("4:lock:native-panic")
+        acquired <- locks.tryWithLock("native-panic")(client.ping())
+      } yield {
+        assertEquals(exists, 0L)
+        assertEquals(acquired, Some("PONG"))
       }
     }
   }

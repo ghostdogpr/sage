@@ -1,0 +1,3 @@
+package sage.client.internal
+
+class KyoLockCancellationSpec extends LockCancellationSpec

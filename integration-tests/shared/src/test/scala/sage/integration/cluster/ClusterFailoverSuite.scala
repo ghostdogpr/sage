@@ -8,9 +8,11 @@ import com.dimafeng.testcontainers.FixedHostPortGenericContainer
 import com.dimafeng.testcontainers.munit.TestContainerForEach
 import kyo.compat.*
 
+import sage.Bytes
 import sage.client.{ClusterConfig, Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
-import sage.commands.Commands
+import sage.cluster.Slot
+import sage.commands.{Commands, Connection}
 import sage.integration.{ContainerClient, Eventually, Images}
 
 /**
@@ -125,6 +127,54 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
       slots.toString,
       "--cluster-yes"
     )
+
+  private def replicationWaits(container: FixedHostPortGenericContainer, port: Int): Long =
+    cli(container, port, "info", "commandstats").linesIterator
+      .find(_.startsWith("cmdstat_wait:calls="))
+      .fold(0L)(_.stripPrefix("cmdstat_wait:calls=").takeWhile(_ != ',').toLong)
+
+  test("distributed locks confirm acquisition and renewal on each master's replica") {
+    withContainers { container =>
+      val config = SageConfig(topology = Topology.Cluster(Vector(Endpoint("127.0.0.1", ports.head))))
+      formCluster(container).flatMap { _ =>
+        connectAndUse(config) { client =>
+          val keys = Vector("orders", "delta", "epsilon").map(tag => s"replicated-lock:{$tag}")
+          CIO.blocking(clusterNodes(container, ports.head)).flatMap { nodes =>
+            val owners = keys.map(key => nodes.find(_.owns(Slot.of(Bytes.utf8(s"4:lock:$key")).value)).get)
+            assertEquals(owners.map(_.port).distinct.size, 3)
+            keys.zip(owners).foldLeft(CIO.unit) { case (previous, (key, owner)) =>
+              previous.flatMap { _ =>
+                val replica       = nodes.find(node => node.isReplica && node.masterId == owner.id).get
+                val replicaConfig = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", replica.port)))
+                connectAndUse(replicaConfig) { reader =>
+                  for {
+                    _           <- reader.run(Connection.readonly)
+                    // Initial replica synchronization can finish after the cluster starts accepting writes.
+                    _           <- Eventually.converges(100, 100.millis)(() => reader.run(Commands.role))(_.isConnectedReplica)(_ =>
+                                     "cluster replica did not connect"
+                                   )
+                    waitsBefore <- CIO.blocking(replicationWaits(container, owner.port))
+                    _           <- client.lock[String](3.seconds).withLock(key, 5.seconds) {
+                                     for {
+                                       before     <- reader.exists(s"4:lock:$key")
+                                       _          <- CIO.sleep(3200.millis)
+                                       after      <- reader.exists(s"4:lock:$key")
+                                       waitsAfter <- CIO.blocking(replicationWaits(container, owner.port))
+                                     } yield {
+                                       assertEquals(before, 1L)
+                                       assertEquals(after, 1L)
+                                       assert(waitsAfter >= waitsBefore + 2, "acquisition and renewal did not wait for replication")
+                                     }
+                                   }
+                  } yield ()
+                }
+              }
+            }
+          }
+        }
+      }.unsafeRun
+    }
+  }
 
   test("the client recovers reads after a master crashes and its replica is promoted") {
     withContainers { container =>

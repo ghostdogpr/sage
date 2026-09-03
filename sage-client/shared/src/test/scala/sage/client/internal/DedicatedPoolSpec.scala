@@ -9,7 +9,8 @@ import Replies.bulk
 import sage.Bytes
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
-import sage.commands.{BlockTimeout, Connection, Lists}
+import sage.cluster.Node
+import sage.commands.{BlockTimeout, Connection, Lists, Server}
 import sage.protocol.Frame
 
 class DedicatedPoolSpec extends munit.FunSuite {
@@ -38,6 +39,154 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val pool                                                   =
       new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, liveGeneration, isCurrent, config, 1000L)
     (pool, scheduler, transports)
+  }
+
+  private val lockWrite = new LockCommands[String](3.seconds, "lock").command(Bytes.utf8("key"), "owner", "acquire", cached = true)
+
+  test("WAIT accounts for elapsed work and leaves time to return a shortfall on a reusable socket") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(40.millis)
+    val transport                     = transports.head
+    transport.emit(Frame.Integer(1))
+    scheduler.advance(20.millis)
+    transport.emit(Replies.masterRole(Node("replica", 6380)))
+    assert(transport.written.last.sameBytes(Server.waitReplicas(1, 20.millis).encode))
+    scheduler.advance(20.millis)
+    transport.emit(Frame.Integer(0))
+    assert(result.get.failed.get.isInstanceOf[TimedOut])
+    pool.useLockWrite(lockWrite, false, 0, 200L, _ => (), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1)
+    pool.close()
+  }
+
+  test("an exhausted confirmation budget never sends an unbounded WAIT") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    transports.head.emit(Frame.Integer(1))
+    scheduler.advance(99.millis)
+    transports.head.emit(Replies.masterRole(Node("replica", 6380)))
+    assert(result.get.failed.get.isInstanceOf[TimedOut])
+    assert(!transports.head.written.exists(_.asUtf8String.contains("WAIT")))
+    pool.close()
+  }
+
+  test("lock writes keep their socket until every required replica acknowledges") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, false, 2, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    val transport                     = transports.head
+    transport.emit(Frame.Integer(1))
+    assertEquals(result, None)
+    assert(transport.written.last.asUtf8String.contains("ROLE"))
+    transport.emit(Replies.masterRole(Node("replica", 6380)))
+    assert(transport.written.last.sameBytes(Server.waitReplicas(2, 50.millis).encode))
+    assertEquals(result, None)
+    transport.emit(Frame.Integer(2))
+    assertEquals(result, Some(Success(true)))
+    pool.useLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1)
+    pool.close()
+  }
+
+  for ((known, connected) <- Vector((0, Vector(Node("replica", 6380))), (1, Vector.empty[Node])))
+    test(s"lock confirmation requires discovered replicas when topology has $known and ROLE has ${connected.size}") {
+      val (pool, scheduler, transports) = make(replyWith(Nil))
+      var result: Option[Try[Boolean]]  = None
+      var refreshed                     = false
+      pool.useLockWrite(lockWrite, false, known, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true)
+      scheduler.advance(Duration.Zero)
+      transports.head.emit(Frame.Integer(1))
+      transports.head.emit(Replies.masterRole(connected*))
+      assert(transports.head.written.last.sameBytes(Server.waitReplicas(1, 50.millis).encode))
+      transports.head.emit(Frame.Integer(0))
+      assert(result.get.failed.get.isInstanceOf[TimedOut])
+      assert(refreshed)
+      pool.close()
+    }
+
+  test("busy locks skip confirmation and masters without replicas skip WAIT") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    transports.head.emit(Frame.Integer(0))
+    assertEquals(result, Some(Success(false)))
+    assert(!transports.head.written.exists(_.asUtf8String.contains("ROLE")))
+    pool.useLockWrite(lockWrite, false, 0, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    transports.head.emit(Frame.Integer(1))
+    transports.head.emit(Replies.masterRole())
+    assertEquals(result, Some(Success(true)))
+    assert(!transports.head.written.exists(_.asUtf8String.contains("WAIT")))
+    pool.close()
+  }
+
+  test("ASKING precedes the lock write on the socket that confirms it") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, true, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    assert(transports.head.written.last.sameBytes(Bytes.concat(Vector(Connection.asking.encode, lockWrite.encode))))
+    transports.head.emit(Replies.ok)
+    transports.head.emit(Frame.Integer(1))
+    transports.head.emit(Replies.masterRole(Node("replica", 6380)))
+    transports.head.emit(Frame.Integer(1))
+    assertEquals(result, Some(Success(true)))
+    pool.close()
+  }
+
+  test("connection loss during confirmation keeps the write ambiguous and refreshes topology") {
+    val (pool, scheduler, transports) = make(replyWith(Nil))
+    var result: Option[Try[Boolean]]  = None
+    var refreshed                     = false
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true)
+    scheduler.advance(Duration.Zero)
+    transports.head.emit(Frame.Integer(1))
+    transports.head.close()
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    assert(refreshed)
+    pool.close()
+  }
+
+  test("a stalled confirmation leaves ordinary commands free and cancellation releases the pool slot") {
+    val (pool, scheduler, transports) = make(replyWith(Nil), config = DedicatedPoolConfig(maxConnections = 1))
+    val shared                        = MultiplexedConnection.connect(
+      (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG"))),
+      scheduler,
+      Vector.empty,
+      BackoffConfig(),
+      WatchdogConfig(enabled = false),
+      1.second,
+      Duration.Zero
+    )
+    val node                          = new NodeClient(shared, pool)
+    val lease                         = new DedicatedPool.Lease
+    var result: Option[Try[Boolean]]  = None
+    var refreshed                     = false
+    node.submitLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), lease, () => refreshed = true)
+    scheduler.advance(Duration.Zero)
+    transports.head.emit(Frame.Integer(1))
+    transports.head.emit(Replies.masterRole(Node("replica", 6380)))
+    var ping: Option[Try[String]]     = None
+    node.submit(Connection.ping(), false, r => ping = Some(r))
+    assertEquals(ping, Some(Success("PONG")))
+    assertEquals(result, None)
+    lease.cancel()
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    assert(refreshed)
+    node.submitLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => ())
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 2)
+    assertEquals(transports.head.closeCount, 1)
+    node.close()
   }
 
   private val blPop = Lists.blPop[String, String]("k")(BlockTimeout.Forever)
@@ -106,7 +255,86 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
     scheduler.advance(Duration.Zero)
-    assertEquals(transports.headOption.map(_.closeCount), Some(1))
+    assertEquals(transports.size, 0)
+  }
+
+  test("cancelling a parked acquisition wakes it without consuming the next available connection") {
+    val config                                                  = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 5.seconds, idleTimeout = Duration.Inf)
+    val (pool, scheduler, transports)                           = make(replyWith(Seq(popReply)), config = config)
+    val held                                                    = pool.acquireForTransaction()
+    val lease                                                   = new DedicatedPool.Lease
+    @volatile var result: Option[Try[Option[(String, String)]]] = None
+    pool.use(blPop, r => result = Some(r), lease)
+    val waiter                                                  = new Thread(() => scheduler.advance(Duration.Zero))
+    waiter.start()
+    try {
+      val deadline = System.nanoTime() + 2.seconds.toNanos
+      while (waiter.getState != Thread.State.TIMED_WAITING && waiter.isAlive && System.nanoTime() < deadline) Thread.sleep(1)
+      assertEquals(waiter.getState, Thread.State.TIMED_WAITING)
+      lease.cancel()
+      waiter.join(2000)
+      assert(!waiter.isAlive, "cancellation must wake acquisition while the slot is still occupied")
+      assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+      pool.releaseTransaction(held, reusable = true)
+      pool.use(blPop, _ => ())
+      scheduler.advance(Duration.Zero)
+      assertEquals(transports.size, 1)
+      assertEquals(transports.head.closeCount, 0)
+    } finally {
+      pool.close()
+      waiter.join(2000)
+    }
+  }
+
+  test("a lock deadline ends pool acquisition before acquireTimeout and leaves the occupied connection reusable") {
+    val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 5.seconds, idleTimeout = Duration.Inf)
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), config = config)
+    val held                          = pool.acquireForTransaction()
+    var result: Option[Try[Boolean]]  = None
+    pool.useLockWrite(lockWrite, false, 0, 40L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    val started                       = System.nanoTime()
+    scheduler.advance(Duration.Zero)
+    assert((System.nanoTime() - started).nanos < 1.second)
+    assert(result.get.failed.get.isInstanceOf[TimedOut])
+    pool.releaseTransaction(held, reusable = true)
+    pool.use(blPop, _ => ())
+    scheduler.advance(Duration.Zero)
+    assertEquals(transports.size, 1)
+    assertEquals(transports.head.closeCount, 0)
+    assert(!transports.head.written.exists(_.asUtf8String.contains("EVALSHA")))
+    pool.close()
+  }
+
+  test("cancellation during bootstrap returns the unused healthy connection to the pool") {
+    val bootstrapping                 = new java.util.concurrent.CountDownLatch(1)
+    val proceed                       = new java.util.concurrent.CountDownLatch(1)
+    val (pool, scheduler, transports) = make { payload =>
+      if (payload.asUtf8String.contains("HELLO")) {
+        bootstrapping.countDown()
+        assert(proceed.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        Seq(Replies.hello)
+      } else Seq(popReply)
+    }
+    val lease                         = new DedicatedPool.Lease
+    pool.use(blPop, _ => (), lease)
+    val acquirer                      = new Thread(() => scheduler.advance(Duration.Zero))
+    acquirer.start()
+    try {
+      assert(bootstrapping.await(2, java.util.concurrent.TimeUnit.SECONDS))
+      lease.cancel()
+      proceed.countDown()
+      acquirer.join(2000)
+      assert(!acquirer.isAlive)
+      assert(!transports.head.written.exists(_.asUtf8String.contains("BLPOP")))
+      pool.use(blPop, _ => ())
+      scheduler.advance(Duration.Zero)
+      assertEquals(transports.size, 1)
+      assertEquals(transports.head.closeCount, 0)
+    } finally {
+      proceed.countDown()
+      acquirer.join(2000)
+      pool.close()
+    }
   }
 
   test("cancelling a lease after the blocking reply landed does not re-fire the callback") {

@@ -52,6 +52,36 @@ abstract class ClusterMultiMasterSuite(val image: String, val serverBinary: Stri
       formCluster(container).flatMap(_ => connectAndUse(config)(client => body(container, client))).unsafeRun
     }
 
+  test("distributed locks acquire, renew, and release keys owned by different masters") {
+    onCluster { (container, first) =>
+      val keys = Vector("orders", "delta", "epsilon").map(tag => s"distributed:{$tag}")
+      assertEquals(keys.map(key => slotOwner(container, s"4:lock:$key")).toSet, ports.toSet)
+      connectAndUse(config) { second =>
+        CIO
+          .foreach(keys) { key =>
+            val holder    = first.lock[String](leaseDuration = 600.millis)
+            val contender = second.lock[String]()
+            for {
+              denied   <- holder.withLock(key, 2.seconds) {
+                            for {
+                              before <- contender.tryWithLock(key)(CIO.value(1))
+                              _      <- CIO.sleep(1500.millis)
+                              after  <- contender.tryWithLock(key)(CIO.value(2))
+                            } yield (before, after)
+                          }
+              acquired <- contender.tryWithLock(key)(CIO.value(42))
+              exists   <- first.exists(s"4:lock:$key")
+            } yield {
+              assertEquals(denied, (None, None))
+              assertEquals(acquired, Some(42))
+              assertEquals(exists, 0L)
+            }
+          }
+          .unit
+      }
+    }
+  }
+
   test("PUBSUB CHANNELS returns a channel whose only subscriber sits on a master the client never picked") {
     onCluster { (container, client) =>
       ports.foreach(p => subscribeOn(container, p, "subscribe", s"only-$p"))
@@ -90,7 +120,7 @@ abstract class ClusterMultiMasterSuite(val image: String, val serverBinary: Stri
   test("PUBSUB SHARDCHANNELS concatenates the shard channels of every master, one per shard") {
     onCluster { (container, client) =>
       val oneChannelPerShard                  = Vector("orders", "delta", "epsilon")
-      oneChannelPerShard.foreach(channel => subscribeOn(container, ownerOfChannel(container, channel), "ssubscribe", channel))
+      oneChannelPerShard.foreach(channel => subscribeOn(container, slotOwner(container, channel), "ssubscribe", channel))
       val sweptAll: Vector[String] => Boolean = found => oneChannelPerShard.forall(found.contains)
       Eventually.converges(50, 200.millis)(() => client.pubsubShardChannels())(sweptAll)(found =>
         s"swept shard channels $found missed ${oneChannelPerShard.filterNot(found.contains)}"
@@ -103,7 +133,7 @@ abstract class ClusterMultiMasterSuite(val image: String, val serverBinary: Stri
       // Use one channel per slot range and give each a distinct subscriber count. The expected result therefore requires replies from all masters.
       val expected = Map("sn-d" -> 1L, "sn-a" -> 2L, "sn-c" -> 3L)
       expected.foreach { case (channel, subscribers) =>
-        val owner = ownerOfChannel(container, channel)
+        val owner = slotOwner(container, channel)
         (1L to subscribers).foreach(_ => subscribeOn(container, owner, "ssubscribe", channel))
       }
       Eventually.converges(50, 200.millis)(() => client.pubsubShardNumSub(expected.keys.toSeq*))(_ == expected)(counts =>
@@ -144,8 +174,8 @@ abstract class ClusterMultiMasterSuite(val image: String, val serverBinary: Stri
     }
   }
 
-  private def ownerOfChannel(container: FixedHostPortGenericContainer, channel: String): Int = {
-    val slot = cli(container, basePort, "cluster", "keyslot", channel).trim.toInt
+  private def slotOwner(container: FixedHostPortGenericContainer, key: String): Int = {
+    val slot = cli(container, basePort, "cluster", "keyslot", key).trim.toInt
     clusterNodes(container, basePort).find(node => node.isMaster && node.owns(slot)).map(_.port).getOrElse(fail(s"no master owns slot $slot"))
   }
 }

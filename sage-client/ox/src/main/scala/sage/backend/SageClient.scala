@@ -229,6 +229,8 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
 
 object SageClient {
 
+  final private class LockBodyFailure(val original: scala.util.control.ControlThrowable) extends RuntimeException
+
   /**
     * A client that uses `K` for keys, returned by `client.as[K]`. [[SageClient]] uses `String` keys by default. Calling `as` changes only
     * the key type and continues to use the same connection.
@@ -243,8 +245,17 @@ object SageClient {
       catch { case _: Throwable => () }
     }
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[X] =>> Ox ?=> X](underlying) {
+  final private[sage] class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[X] =>> Ox ?=> X](underlying) {
     protected def lower[A](c: CIO[A]): Ox ?=> A = c.lower
     protected def lift[A](fa: Ox ?=> A): CIO[A] = CIO.lift(fa)
+
+    override protected def lockScope[A, B](body: () => (Ox ?=> A))(runScope: CIO[A] => CIO[B]): Ox ?=> B = {
+      val work: CIO[A] = CIO.deferLift {
+        try body()
+        catch { case control: scala.util.control.ControlThrowable => throw new LockBodyFailure(control) }
+      }
+      try runScope(work).lower
+      catch { case failure: LockBodyFailure => throw failure.original }
+    }
   }
 }

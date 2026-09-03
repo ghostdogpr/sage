@@ -32,6 +32,8 @@ final private[sage] class ClusterTopology private (val shards: Vector[Shard], pr
   // the core only locates the owning shard; selecting a live replica and applying the read policy is the runtime's job
   def shardForSlot(slot: Slot): Option[Shard] = Option(shardOwners(slot.value))
 
+  def replicasForMaster(master: Node): Vector[Node] = shards.find(_.master == master).fold(Vector.empty[Node])(_.replicas)
+
   // masters in `previous` that no longer own a slot they hold in this (new) topology
   def mastersLosingSlots(previous: ClusterTopology): Set[Node] = {
     val losing = mutable.Set.empty[Node]

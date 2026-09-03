@@ -31,6 +31,7 @@ object Tour {
           _ <- PubSubExample.run(client)
           _ <- CachedReadsExample.run(client)
           _ <- RateLimiterExample.run(client)
+          _ <- LockExample.run(client)
           _ <- StreamsExample.run(client)
         } yield ()
       }

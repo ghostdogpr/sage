@@ -21,6 +21,7 @@ object Tour extends IOApp.Simple {
         PubSubExample.run(client) *>
         CachedReadsExample.run(client) *>
         RateLimiterExample.run(client) *>
+        LockExample.run(client) *>
         StreamsExample.run(client)
     }
 }

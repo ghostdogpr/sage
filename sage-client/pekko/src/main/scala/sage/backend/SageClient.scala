@@ -260,7 +260,7 @@ object SageClient {
       case other                => Right(other)
     }
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[Future](underlying) {
+  final private[sage] class Lowered(underlying: Client[CIO, String]) extends LoweredClient[Future](underlying) {
     protected def lower[A](c: CIO[A]): Future[A] = c.unsafeRun
     protected def lift[A](fa: Future[A]): CIO[A] = CIO.lift(fa)
   }

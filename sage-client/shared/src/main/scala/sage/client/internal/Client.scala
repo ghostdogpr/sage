@@ -21,15 +21,17 @@ import sage.protocol.Frame
 import sage.ratelimit.{Decision, RateLimit, RateLimiter}
 
 /**
-  * Redis and Valkey command methods shared by [[Client]] and [[TransactionScope]]. Each method delegates to [[run]], allowing the same
-  * definitions to work with the real client, backend adapters, and test implementations.
+  * Redis and Valkey command methods shared by [[Client]] and [[TransactionScope]]. Public command methods delegate to [[run]], allowing
+  * the same definitions to work with the real client, backend adapters, and test implementations.
   */
 trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
-    * Runs a [[sage.commands.Command]] and returns its decoded result. The other command methods delegate to this one.
+    * Runs a [[sage.commands.Command]] and returns its decoded result. Public command methods delegate to this one.
     */
   def run[A](command: Command[A]): F[A]
+
+  private[sage] def lockWrite(command: Command[Boolean], @scala.annotation.unused timeout: FiniteDuration): F[Boolean] = run(command)
 
   /**
     * Returns a view that uses another key type and reuses the same connection. Command builders encode keys before calling `run`, so the
@@ -40,7 +42,8 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   def as[K2](using KeyCodec[K2]): CommandRunner[F, K2] = {
     val self = this
     new CommandRunner[F, K2] {
-      def run[A](command: Command[A]): F[A] = self.run(command)
+      def run[A](command: Command[A]): F[A]                                                                = self.run(command)
+      override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): F[Boolean] = self.lockWrite(command, timeout)
     }
   }
 
@@ -2227,6 +2230,20 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
   ): RateLimiterClient[F, RK] =
     new RateLimiterClient[F, RK](this, RateLimitExecutor(RateLimiter[RK](limit, namespace)))
 
+  /**
+    * Creates a distributed mutex for keys of type `LK`. The lease is renewed automatically while a protected effect runs. `leaseDuration`
+    * defaults to 30 seconds and must be at least 30 milliseconds. See [[LockClient]] for ownership and failover limits.
+    */
+  def lock[LK](
+    leaseDuration: FiniteDuration = FiniteDuration(30L, java.util.concurrent.TimeUnit.SECONDS),
+    namespace: String = "lock"
+  )(using KeyCodec[LK]): LockClient[F, LK] =
+    new LockClient[F, LK](this, new LockExecutor[LK](leaseDuration, namespace))
+
+  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]]
+
+  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A]
+
   // implementations validate the request, then execute the rate-limit script with EVALSHA and reload it after NOSCRIPT
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision]
 
@@ -2263,6 +2280,7 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     val self = this
     new Client[F, K2] {
       def run[A](command: Command[A]): F[A]                                                                                        = self.run(command)
+      override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): F[Boolean]                         = self.lockWrite(command, timeout)
       def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                                = self.cached(command, ttl)
       private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                              = self.pipeline(p)
       private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                         = self.pipelineAttempt(p)
@@ -2274,6 +2292,10 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
       private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A]                                                    = self.runOn(target, command)
       private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
         self.rateLimitAcquire(executor, subject, cost, peek)
+      private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]]                       =
+        self.lockTryWith(executor, key)(body)
+      private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A]     =
+        self.lockWith(executor, key, waitTimeout)(body)
       def close: F[Unit]                                                                                                           = self.close
     }
   }
@@ -2299,7 +2321,18 @@ object Client {
   private[internal] def withLeaseIfBlocking[A](command: Command[?])(body: DedicatedPool.Lease => CIO[A]): CIO[A] =
     command.execution match {
       case Execution.Ordinary => body(null)
-      case Execution.Blocking => CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+      case Execution.Blocking => withLease(body)
+    }
+
+  private[internal] def withLease[A](body: DedicatedPool.Lease => CIO[A]): CIO[A] =
+    CIO.acquireReleaseWith(CIO.defer(new DedicatedPool.Lease))(lease => CIO.blocking(lease.cancel()))(body)
+
+  // Keep the timeout inside the lease scope so Future also frees its pool slot when a reply never arrives.
+  private[internal] def withLockLease[A](timeout: FiniteDuration, scheduler: Scheduler)(body: (DedicatedPool.Lease, Long) => CIO[A]): CIO[A] =
+    withLease { lease =>
+      CIO.defer(scheduler.nowMillis + timeout.toMillis).flatMap { deadlineMillis =>
+        CIO.timeoutWithError(timeout)(TimedOut("distributed lock replication timed out"))(body(lease, deadlineMillis))
+      }
     }
 
   // attribute the node at completion. A batch that never reaches the wire leaves its callbacks unattributed.
@@ -2532,6 +2565,12 @@ object Client {
 
     private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
       executor.evalSha(this, subject, cost, peek)
+
+    private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
+      executor.tryWithLock(this, key)(body)
+
+    private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+      executor.withLock(this, key, waitTimeout)(body)
 
     private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
       submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))

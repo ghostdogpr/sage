@@ -244,6 +244,26 @@ final private[client] class MasterReplicaLive(
     Client.withLeaseIfBlocking(command)(body)
   }
 
+  override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+    Client.withLockLease(timeout, scheduler) { (lease, deadlineMillis) =>
+      CIO.async { complete =>
+        val tracked = Events.trackCommand(events, command, complete)
+        Client.completing(tracked) {
+          onMaster(tracked) { (nc, _, cb) =>
+            nc.submitLockWrite(
+              command,
+              asking = false,
+              replicasRef.get().size,
+              deadlineMillis,
+              cb,
+              lease,
+              () => refreshThrottle.request(rediscoverWork)
+            )
+          }
+        }
+      }
+    }
+
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
     if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
     else if (!cachingEnabled)
@@ -516,6 +536,12 @@ final private[client] class MasterReplicaLive(
 
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
     executor.evalSha(this, subject, cost, peek)
+
+  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
+    executor.tryWithLock(this, key)(body)
+
+  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+    executor.withLock(this, key, waitTimeout)(body)
 
   def close: CIO[Unit] = CIO.blocking(closeAll())
 

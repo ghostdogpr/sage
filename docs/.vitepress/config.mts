@@ -32,6 +32,7 @@ export default defineConfig({
           { text: 'JSON', link: '/json' },
           { text: 'Client-side caching', link: '/client-side-caching' },
           { text: 'Rate limiting', link: '/rate-limiting' },
+          { text: 'Distributed locks', link: '/distributed-locks' },
           { text: 'Configuration', link: '/configuration' },
           { text: 'Error handling', link: '/error-handling' },
           { text: 'Observability', link: '/observability' },
