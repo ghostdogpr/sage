@@ -19,10 +19,10 @@ abstract class LockCancellationSpec extends munit.FunSuite {
   private given ExecutionContext = munitExecutionContext
 
   protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
-    new LockExecutor[String](lease, "cancel").tryWithLock(commands, "key")(body)
+    new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).tryWithLock(commands, "key")(body)
 
   protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
-    new LockExecutor[String](lease, "cancel").withLock(commands, "key", wait)(body)
+    new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).withLock(commands, "key", wait)(body)
 
   protected def runner(released: AtomicBoolean, renewals: AtomicInteger, stallRelease: Boolean): CommandRunner[CIO, String] =
     new CommandRunner[CIO, String] {

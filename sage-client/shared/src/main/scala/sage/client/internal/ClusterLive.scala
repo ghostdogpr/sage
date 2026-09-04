@@ -643,16 +643,19 @@ final private[client] class ClusterLive(
     context.mode match {
       case Cached(ttlMillis, deferred) if !asking            => nc.cachedSubmit[A](command, ttlMillis, onReply, deferred)
       case Confirmed(deadlineMillis, replicaAcknowledgement) =>
-        val replicas = topologyRef.get().replicasForMaster(node).size
+        val replication = new LockReplication(
+          scheduler,
+          topologyRef.get().replicasForMaster(node).size,
+          deadlineMillis,
+          () => refreshThrottle.request(refreshWork),
+          replicaAcknowledgement
+        )
         nc.submitLockWrite(
           command,
           asking,
-          replicas,
-          deadlineMillis,
           onReply,
           context.lease,
-          () => refreshThrottle.request(refreshWork),
-          replicaAcknowledgement
+          replication
         )
       case Ordinary | Cached(_, _)                           => nc.submit[A](command, asking, onReply, context.lease)
     }
@@ -667,7 +670,7 @@ final private[client] class ClusterLive(
     context: DispatchContext
   ): Unit =
     Fault.categorize(error) match {
-      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, context)
+      case Fault.Redirected(redirect)       => onRedirect(node, redirect, command, redirectsLeft, complete, context, Some(error))
       case Fault.Lost(false)                => onUnreachable(command, redirectsLeft, complete, context)
       case Fault.TryAgain                   => onRetryable(command, error, refreshFirst = false, redirectsLeft, complete, context)
       case Fault.Unavailable(clusterWide)   => onRetryable(command, error, clusterWide, redirectsLeft, complete, context)
@@ -686,13 +689,19 @@ final private[client] class ClusterLive(
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
-    context: DispatchContext = DispatchContext.Default
+    context: DispatchContext = DispatchContext.Default,
+    exhaustedFailure: Option[Throwable] = None
   ): Unit = {
     // a MOVED proves `from` lost the slot; retire its cache even if the retry budget is now exhausted
     if (redirect.kind == RedirectKind.Moved) flushNode(from)
     if (redirectsLeft <= 0) {
       if (redirect.kind == RedirectKind.Moved) refreshBeforeFailing()
-      complete(Failure(ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")))
+      val limitFailure = ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")
+      val failure      = context.mode match {
+        case Confirmed(_, _) => exhaustedFailure.getOrElse(limitFailure)
+        case _               => limitFailure
+      }
+      complete(Failure(failure))
     } else {
       val target = resolve(redirect.target, from)
       redirect.kind match {

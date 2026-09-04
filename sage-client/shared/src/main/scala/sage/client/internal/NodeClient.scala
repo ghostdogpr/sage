@@ -25,13 +25,10 @@ final private[client] class NodeClient(connection: MultiplexedConnection, pool: 
   def submitLockWrite[A](
     command: Command[A],
     asking: Boolean,
-    replicas: Int,
-    deadlineMillis: Long,
     callback: Try[A] => Unit,
     lease: DedicatedPool.Lease,
-    onConfirmationFailure: () => Unit,
-    replicaAcknowledgement: Boolean
-  ): Unit = pool.useLockWrite(command, asking, replicas, deadlineMillis, callback, lease, onConfirmationFailure, replicaAcknowledgement)
+    replication: LockReplication
+  ): Unit = pool.useLockWrite(command, asking, callback, lease, replication)
 
   def cachedSubmit[A](command: Command[A], ttlMillis: Long, callback: Try[A] => Unit, deferred: () => CommandSpan = null): Unit =
     connection.cachedSubmit(command, ttlMillis, callback, deferred)

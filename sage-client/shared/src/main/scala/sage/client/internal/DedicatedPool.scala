@@ -72,16 +72,11 @@ final private[client] class DedicatedPool(
   def useLockWrite[A](
     command: Command[A],
     asking: Boolean,
-    replicas: Int,
-    deadlineMillis: Long,
     callback: Try[A] => Unit,
     lease: DedicatedPool.Lease,
-    onConfirmationFailure: () => Unit,
-    replicaAcknowledgement: Boolean
-  ): Unit = {
-    val replication = new LockReplication(scheduler, replicas, deadlineMillis, onConfirmationFailure, replicaAcknowledgement)
-    useConnection(callback, lease, replication.cancelled, Some(deadlineMillis))(replication.submit(_, command, asking, _))
-  }
+    replication: LockReplication
+  ): Unit =
+    useConnection(callback, lease, replication.cancelled, Some(replication.deadlineMillis))(replication.submit(_, command, asking, _))
 
   private def useConnection[A](
     callback: Try[A] => Unit,

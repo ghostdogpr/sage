@@ -15,8 +15,9 @@ import sage.client.internal.{Client, LockExecutor}
 final class LockClient[F[_], K] private[sage] (client: Client[F, ?], executor: LockExecutor[K]) {
 
   /**
-    * Attempts acquisition once. Returns `None` when busy, without evaluating `body`. After acquisition, renews the lease and releases it
-    * when `body` finishes. Returns `Some(result)` on success. Ownership or renewal failure raises [[sage.SageException.LockLost]].
+    * Checks contention once and returns `None` when busy, without evaluating `body`. Temporary failures may be retried for about one second,
+    * after which acquisition raises [[sage.SageException.TimedOut]]. After acquisition, renews the lease and releases it when `body`
+    * finishes. Returns `Some(result)` on success. Ownership or renewal failure raises [[sage.SageException.LockLost]].
     */
   def tryWithLock[A](key: K)(body: => F[A]): F[Option[A]] = client.lockTryWith(executor, key)(body)
 

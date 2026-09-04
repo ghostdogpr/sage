@@ -19,11 +19,11 @@ The body returns your backend's native effect. With Ox, it is a direct-style blo
 ## Waiting for a lock
 
 - `withLock(key, waitTimeout)(body)` waits for the lock and returns the body's result. Retries back off under contention to reduce server traffic. If acquisition times out, it raises `SageException.TimedOut`.
-- `tryWithLock(key)(body)` attempts acquisition once. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. It waits up to about one second for the server and raises `SageException.TimedOut` after that.
+- `tryWithLock(key)(body)` checks contention once. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. It may retry temporary failures for about one second, then raises `SageException.TimedOut`.
 
 `waitTimeout` must be positive. It covers acquisition, including server replies and retry delays, but does not limit the body's runtime. Cleanup can add up to one second before a timeout returns.
 
-Sage retries temporary connection and routing failures within the acquisition wait. Other server errors return immediately.
+Sage retries connection failures, routing changes, and temporary server refusals within the acquisition wait. Other failures return immediately.
 
 Sage never retries the body. Locks do not guarantee acquisition order. Acquiring the same key inside its own lock scope contends with the outer scope.
 

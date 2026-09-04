@@ -13,8 +13,8 @@ import sage.commands.{Command, Connection, Reply, Role, Server}
   */
 final private[client] class LockReplication(
   scheduler: Scheduler,
-  replicas: Int,
-  deadlineMillis: Long,
+  knownReplicaCount: Int,
+  val deadlineMillis: Long,
   onConfirmationFailure: () => Unit,
   replicaAcknowledgement: Boolean
 ) {
@@ -23,7 +23,7 @@ final private[client] class LockReplication(
   def cancelled(): Unit = if (confirming.get()) onConfirmationFailure()
 
   def submit[A](conn: DedicatedConnection, command: Command[A], asking: Boolean, complete: Try[A] => Unit): Unit = {
-    // Report that the write may have executed. Lock acquisition retries are safe because they reuse the same ownership token.
+    // Lock acquisition retries are safe because they reuse the same ownership token.
     def confirmationFailed(error: Throwable): Unit = {
       onConfirmationFailure()
       val failure = Fault.categorize(error) match {
@@ -41,11 +41,11 @@ final private[client] class LockReplication(
       conn.submit(
         Server.role,
         {
-          case Success(Role.Master(_, connected)) =>
-            if (replicaAcknowledgement) waitForReplicas(conn, value, connected.size, complete, confirmationFailed)
+          case Success(Role.Master(_, connectedReplicas)) =>
+            if (replicaAcknowledgement) waitForReplicas(conn, value, connectedReplicas.size, complete, confirmationFailed)
             else complete(Success(value))
-          case Success(_)                         => confirmationFailed(LockLost("the granting node is no longer a master"))
-          case Failure(error)                     => confirmationFailed(error)
+          case Success(_)                                 => confirmationFailed(LockLost("the granting node is no longer a master"))
+          case Failure(error)                             => confirmationFailed(error)
         }
       )
     }
@@ -62,25 +62,40 @@ final private[client] class LockReplication(
   private def waitForReplicas[A](
     conn: DedicatedConnection,
     value: A,
-    connected: Int,
+    connectedReplicaCount: Int,
     complete: Try[A] => Unit,
     confirmationFailed: Throwable => Unit
   ): Unit = {
-    val required = math.max(replicas, connected)
+    val required = math.max(knownReplicaCount, connectedReplicaCount)
     if (required == 0) complete(Success(value))
     else {
       // Reserve half the remaining budget for the server's timeout processing and the reply's transit.
       val waitMillis = (deadlineMillis - scheduler.nowMillis) / 2L
-      if (waitMillis <= 0L) confirmationFailed(TimedOut("distributed lock replication deadline reached before WAIT"))
+      if (waitMillis <= 0L)
+        confirmationFailed(LockReplication.acknowledgementTimedOut("distributed lock replication deadline reached before WAIT"))
       else
         conn.submit(
           Server.waitReplicas(required.toLong, waitMillis.millis),
           {
             case Success(count) if count >= required => complete(Success(value))
-            case Success(count)                      => confirmationFailed(TimedOut(s"replication confirmed by $count of $required required replicas"))
+            case Success(count)                      =>
+              confirmationFailed(LockReplication.acknowledgementTimedOut(s"replication confirmed by $count of $required required replicas"))
             case Failure(error)                      => confirmationFailed(error)
           }
         )
     }
   }
+}
+
+private[client] object LockReplication {
+  final private class AcknowledgementFailure extends Exception
+
+  def acknowledgementTimedOut(message: String): TimedOut = {
+    val timeout = TimedOut(message)
+    timeout.initCause(new AcknowledgementFailure)
+    timeout
+  }
+
+  def isAcknowledgementFailure(error: Throwable): Boolean =
+    error.isInstanceOf[TimedOut] && error.getCause.isInstanceOf[AcknowledgementFailure]
 }

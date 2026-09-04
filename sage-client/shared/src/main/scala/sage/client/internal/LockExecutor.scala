@@ -15,7 +15,7 @@ import sage.codec.KeyCodec
 final private[client] class LockExecutor[K](
   leaseDuration: FiniteDuration,
   namespace: String,
-  replicaAcknowledgement: Boolean = true
+  replicaAcknowledgement: Boolean
 )(using KeyCodec[K]) {
   import LockCommands.Operation
 
@@ -55,8 +55,7 @@ final private[client] class LockExecutor[K](
           case Some(value) => CIO.value(value)
           case None        =>
             remainingWait(wait).flatMap { remaining =>
-              val delay = math.min(remaining, Backoff.jitteredMillis(contentionBackoff, retry, Scheduler.real).millis.toNanos)
-              CIO.sleep(delay.nanos).flatMap(_ => loop(if (retry < Int.MaxValue) retry + 1 else retry))
+              retryAfter(remaining, contentionBackoff, retry)(loop)
             }
         }
         loop(0)
@@ -119,9 +118,8 @@ final private[client] class LockExecutor[K](
       val budget = wait.fold(CIO.value(operationTimeout.toNanos))(remainingWait)
       budget.flatMap { waitRemaining =>
         CIO.nowMonotonic.flatMap { started =>
-          state.renewedAt.set(started.toNanos)
           state.mayOwn.set(true)
-          val duration = math.min(waitRemaining, usableNanos)
+          val duration = waitRemaining
           val deadline = Deadline(started.toNanos, duration)
           CIO
             .timeoutWithError(duration.nanos)(TimedOut("distributed lock acquisition timed out"))(
@@ -135,8 +133,7 @@ final private[client] class LockExecutor[K](
                 val checkWait = wait.fold(CIO.unit)(remainingWait(_).unit)
                 checkWait.flatMap(_ => remainingLease(state)).flatMap { _ =>
                   val work = CIO.defer(()).flatMap(_ => body()).flatMap(value => remainingLease(state).map(_ => value))
-                  // The renewal branch starts before the lease midpoint and bounds its write by the remaining lease, so it also watches the
-                  // body deadline. Returning errors as values lets the race stop on either body failure or lock loss.
+                  // Returning errors as values lets the race stop on either body failure or lock loss.
                   CIO.race(work.liftToTry, renew[A](runner, state).liftToTry).flatMap(CIO.get(_)).flatMap { value =>
                     state.stopped.set(true)
                     remainingLease(state).flatMap { remaining =>
@@ -165,17 +162,17 @@ final private[client] class LockExecutor[K](
     deadline: Deadline,
     retry: Int
   ): CIO[Boolean] =
-    eval(runner, state, Operation.Acquire, Some(deadline)).recover {
-      case error if retryableAcquisitionFailure(error) =>
-        CIO.nowMonotonic.flatMap { now =>
-          val remaining = deadline.remainingAt(now.toNanos)
-          if (remaining <= 0L) CIO.fail(TimedOut("distributed lock acquisition timed out"))
-          else {
-            val delay = math.min(remaining, Backoff.jitteredMillis(failureBackoff, retry, Scheduler.real).millis.toNanos)
-            CIO.sleep(delay.nanos).flatMap(_ => acquire(runner, state, deadline, if (retry < Int.MaxValue) retry + 1 else retry))
+    CIO.nowMonotonic.flatMap { started =>
+      state.renewedAt.set(started.toNanos)
+      eval(runner, state, Operation.Acquire, Some(deadline)).recover {
+        case error if retryableFailure(error) =>
+          CIO.nowMonotonic.flatMap { now =>
+            val remaining = deadline.remainingAt(now.toNanos)
+            if (remaining <= 0L) CIO.fail(TimedOut("distributed lock acquisition timed out"))
+            else retryAfter(remaining, failureBackoff, retry)(acquire(runner, state, deadline, _))
           }
-        }
-      case error                                       => CIO.fail(error)
+        case error                            => CIO.fail(error)
+      }
     }
 
   private def renew[A](runner: CommandRunner[CIO, String], state: Attempt): CIO[A] =
@@ -204,8 +201,8 @@ final private[client] class LockExecutor[K](
               }
           }
           .recover {
-            case error if retryableLockFailure(error) => retryRenewal(runner, state, retry, error)
-            case error                                => renewalFailed(error)
+            case error if retryableFailure(error) => retryRenewal(runner, state, retry, error)
+            case error                            => renewalFailed(error)
           }
       }
     }
@@ -216,33 +213,30 @@ final private[client] class LockExecutor[K](
     retry: Int,
     lastError: Throwable
   ): CIO[Unit] =
-    CIO.nowMonotonic.flatMap { now =>
-      val remaining = usableNanos - (now.toNanos - state.renewedAt.get())
-      if (remaining <= 0L) renewalFailed(lastError)
-      else {
-        val delay = math.min(remaining, Backoff.jitteredMillis(failureBackoff, retry, Scheduler.real).millis.toNanos)
-        CIO.sleep(delay.nanos).flatMap { _ =>
+    retryRemainingLease(state, lastError).flatMap { remaining =>
+      retryAfter(remaining, failureBackoff, retry) { nextRetry =>
+        CIO.defer(()).flatMap { _ =>
           if (state.stopped.get()) CIO.never
-          else
-            CIO.nowMonotonic.flatMap { afterDelay =>
-              if (usableNanos - (afterDelay.toNanos - state.renewedAt.get()) <= 0L) renewalFailed(lastError)
-              else renewAttempt(runner, state, if (retry < Int.MaxValue) retry + 1 else retry)
-            }
+          else retryRemainingLease(state, lastError).flatMap(_ => renewAttempt(runner, state, nextRetry))
         }
       }
     }
 
-  private def retryableLockFailure(error: Throwable): Boolean =
-    error.isInstanceOf[TimedOut] || (Fault.categorize(error) match {
-      case Fault.Redirected(_) | Fault.Demoted | Fault.Lost(_) | Fault.TryAgain | Fault.Unavailable(_) => true
-      case Fault.Fatal                                                                                 => false
-    })
+  private def retryRemainingLease(state: Attempt, lastError: Throwable): CIO[Long] =
+    remainingLease(state).recover { case _ => renewalFailed(lastError) }
 
-  private def retryableAcquisitionFailure(error: Throwable): Boolean =
-    Fault.categorize(error) match {
-      case Fault.Redirected(_) | Fault.Demoted | Fault.Lost(_) | Fault.TryAgain | Fault.Unavailable(_) => true
-      case Fault.Fatal                                                                                 => false
-    }
+  private def retryAfter[A](remainingNanos: Long, config: BackoffConfig, retry: Int)(next: Int => CIO[A]): CIO[A] = {
+    val delay = math.min(remainingNanos, Backoff.jitteredMillis(config, retry, Scheduler.real).millis.toNanos)
+    CIO.sleep(delay.nanos).flatMap(_ => next(if (retry < Int.MaxValue) retry + 1 else retry))
+  }
+
+  private def retryableFailure(error: Throwable): Boolean =
+    if (error.isInstanceOf[TimedOut]) !LockReplication.isAcknowledgementFailure(error)
+    else
+      Fault.categorize(error) match {
+        case Fault.Redirected(_) | Fault.Demoted | Fault.Lost(_) | Fault.TryAgain | Fault.Unavailable(_) => true
+        case Fault.Fatal                                                                                 => false
+      }
 
   private def renewalFailed(cause: Throwable): CIO[Nothing] = cause match {
     case lost: LockLost => CIO.fail(lost)

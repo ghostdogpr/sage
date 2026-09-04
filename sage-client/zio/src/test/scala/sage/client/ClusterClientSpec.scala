@@ -165,6 +165,31 @@ class ClusterClientSpec extends munit.FunSuite {
         .andThen { case _ => fixture.live.close.unsafeRun }
     }
 
+  test("cluster locks retry after the per-command redirect limit is exhausted") {
+    val key     = "lock-key"
+    val slot    = Slot.of(Bytes.utf8(s"4:lock:$key")).value
+    val moved   = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val fixture = new Fixture(
+      (node, text) =>
+        if (text.contains("CLUSTER")) Seq(wholeClusterOn(if (moved.get()) nodeB else nodeA))
+        else if (node == nodeA && text.contains("EVAL") && moved.compareAndSet(false, true))
+          Seq(Frame.SimpleError(s"MOVED $slot b:6379"))
+        else if (text.contains("ROLE")) Seq(Replies.masterRole())
+        else Seq(Frame.Integer(1)),
+      Vector(nodeA),
+      cluster = ClusterConfig(maxRedirects = 0)
+    )
+    fixture.live
+      .lock[String]()
+      .tryWithLock(key)(CIO.value(42))
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, Some(42))
+        assert(fixture.written(nodeB).exists(_.contains("EVAL")))
+      }
+      .andThen { case _ => fixture.live.close.unsafeRun }
+  }
+
   test("cluster locks reject acquisition when a known replica does not acknowledge") {
     var evaluated = false
     val fixture   = new Fixture(

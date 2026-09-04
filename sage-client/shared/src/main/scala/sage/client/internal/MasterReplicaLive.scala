@@ -254,15 +254,19 @@ final private[client] class MasterReplicaLive(
         val tracked = Events.trackCommand(events, command, complete)
         Client.completing(tracked) {
           onMaster(tracked) { (nc, _, cb) =>
+            val replication = new LockReplication(
+              scheduler,
+              replicasRef.get().size,
+              deadlineMillis,
+              () => refreshThrottle.request(rediscoverWork),
+              replicaAcknowledgement
+            )
             nc.submitLockWrite(
               command,
               asking = false,
-              replicasRef.get().size,
-              deadlineMillis,
               cb,
               lease,
-              () => refreshThrottle.request(rediscoverWork),
-              replicaAcknowledgement
+              replication
             )
           }
         }
