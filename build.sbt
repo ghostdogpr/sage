@@ -2,7 +2,7 @@ import _root_.io.getkyo.compat.CompatBackendAxis
 import sbt.VirtualAxis
 
 val scala3Version     = "3.3.8"
-val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
+val scala3NextVersion = "3.9.0"                             // Kyo requires Scala 3.8.x (Next)
 val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
 
 val munitVersion          = "1.3.5"
