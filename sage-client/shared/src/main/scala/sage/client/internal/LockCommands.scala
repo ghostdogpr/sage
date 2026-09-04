@@ -8,6 +8,8 @@ import sage.codec.KeyCodec
 import sage.commands.*
 
 final private[client] class LockCommands[K](leaseDuration: FiniteDuration, namespace: String)(using codec: KeyCodec[K]) {
+  import LockCommands.Operation
+
   private val prefix = {
     val ns = Bytes.utf8(namespace)
     Bytes.concat(Vector(Bytes.utf8(s"${ns.length}:"), ns, Bytes.utf8(":")))
@@ -15,7 +17,7 @@ final private[client] class LockCommands[K](leaseDuration: FiniteDuration, names
 
   def key(value: K): Bytes = Bytes.concat(Vector(prefix, codec.encode(value)))
 
-  def command(key: Bytes, token: String, operation: String, cached: Boolean): Command[Boolean] =
+  def command(key: Bytes, token: String, operation: Operation, cached: Boolean): Command[Boolean] =
     Command(
       if (cached) "EVALSHA" else "EVAL",
       Vector(2),
@@ -24,7 +26,7 @@ final private[client] class LockCommands[K](leaseDuration: FiniteDuration, names
         Bytes.utf8("1"),
         key,
         Bytes.utf8(token),
-        Bytes.utf8(operation),
+        Bytes.utf8(operation.wireName),
         Bytes.utf8(leaseDuration.toMillis.toString)
       ),
       _.asLong.flatMap {
@@ -36,11 +38,18 @@ final private[client] class LockCommands[K](leaseDuration: FiniteDuration, names
 }
 
 private[client] object LockCommands {
+  enum Operation(val wireName: String) {
+    case Acquire extends Operation("acquire")
+    case Renew   extends Operation("renew")
+    case Release extends Operation("release")
+  }
+
   val script: String =
     """local token = ARGV[1]
       |local operation = ARGV[2]
       |if operation == 'acquire' then
       |  if redis.call('SET', KEYS[1], token, 'NX', 'PX', ARGV[3]) then return 1 end
+      |  if redis.call('GET', KEYS[1]) == token then return redis.call('PEXPIRE', KEYS[1], ARGV[3]) end
       |  return 0
       |end
       |if operation ~= 'renew' and operation ~= 'release' then

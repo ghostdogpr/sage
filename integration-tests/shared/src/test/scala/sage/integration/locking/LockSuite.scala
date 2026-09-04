@@ -5,17 +5,48 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
+import sage.Bytes
 import sage.SageException.LockLost
 import sage.client.internal.Client
-import sage.integration.{Images, ServerSuite}
+import sage.commands.Command
+import sage.integration.{Eventually, Images, ServerSuite, Ttls}
 
 abstract class LockSuite(image: String) extends ServerSuite(image) {
+  private def killClient(id: Long): Command[Unit] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector("KILL", "ID", id.toString).map(Bytes.utf8),
+      _ => Right(())
+    )
+
+  private val pauseClients: Command[Unit] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector("PAUSE", "600", "ALL").map(Bytes.utf8),
+      _ => Right(())
+    )
+
   private def withClients[A](body: (Client[CIO, String], Client[CIO, String]) => CIO[A]): Future[A] =
     withContainers { server =>
       connectAndUse(configOf(server)) { first =>
         connectAndUse(configOf(server))(second => body(first, second))
       }.unsafeRun
     }
+
+  private def awaitRenewal(client: Client[CIO, String], key: String): CIO[Unit] =
+    Eventually.changes(30, 50.millis)(() => client.pTtl(key))((before, after) =>
+      (Ttls.remaining(before), Ttls.remaining(after)) match {
+        case (Some(previous), Some(current)) => current > previous + 100.millis
+        case _                               => false
+      }
+    )(ttl => s"$key was not renewed; its TTL was $ttl")
+
+  private def commandCalls(info: String, command: String): Long =
+    info.linesIterator
+      .find(_.startsWith(s"cmdstat_${command.toLowerCase}:calls="))
+      .fold(0L)(_.dropWhile(_ != '=').drop(1).takeWhile(_ != ',').toLong)
 
   test("independent clients contend on the same key and acquire after release") {
     withClients { (first, second) =>
@@ -43,7 +74,7 @@ abstract class LockSuite(image: String) extends ServerSuite(image) {
             val client = if (i % 2 == 0) first else second
             client.lock[String]().withLock("counter", 5.seconds) {
               client.get[Int]("counter").flatMap { current =>
-                CIO.sleep(5.millis).flatMap(_ => client.set("counter", current.get + 1))
+                client.ping().flatMap(_ => client.set("counter", current.get + 1))
               }
             }
           }
@@ -53,17 +84,42 @@ abstract class LockSuite(image: String) extends ServerSuite(image) {
     }
   }
 
-  test("automatic renewal excludes another client after the initial lease would have expired") {
+  test("automatic renewal extends the lease and excludes another client") {
     withClients { (first, second) =>
       first
-        .lock[String](leaseDuration = 600.millis)
+        .lock[String](leaseDuration = 900.millis)
         .withLock("long", 2.seconds) {
-          CIO.sleep(1500.millis).flatMap { _ =>
-            second.lock[String]().tryWithLock("long")(CIO.value(42)).map(result => assertEquals(result, None))
-          }
+          awaitRenewal(second, "4:lock:long")
+            .flatMap(_ => second.lock[String]().tryWithLock("long")(CIO.value(42)))
+            .map(result => assertEquals(result, None))
         }
         .flatMap(_ => second.lock[String]().tryWithLock("long")(CIO.value(42)))
         .map(result => assertEquals(result, Some(42)))
+    }
+  }
+
+  test("a standalone lock survives connection loss during renewal") {
+    withClients { (first, second) =>
+      val holder    = first.lock[String](leaseDuration = 1500.millis)
+      val contender = second.lock[String]()
+      first.clientId.flatMap { id =>
+        holder
+          .withLock("reconnect", 2.seconds) {
+            second
+              .info("commandstats")
+              .flatMap { before =>
+                second.pipeline((killClient(id), pauseClients)).flatMap { _ =>
+                  Eventually.converges(30, 50.millis)(() => second.info("commandstats"))(
+                    commandCalls(_, "evalsha") > commandCalls(before, "evalsha")
+                  )(info => s"the lock was not renewed after reconnecting: $info")
+                }
+              }
+              .flatMap(_ => contender.tryWithLock("reconnect")(CIO.value(1)))
+              .map(result => assertEquals(result, None))
+          }
+          .flatMap(_ => contender.tryWithLock("reconnect")(CIO.value(42)))
+          .map(result => assertEquals(result, Some(42)))
+      }
     }
   }
 
@@ -98,8 +154,11 @@ abstract class LockSuite(image: String) extends ServerSuite(image) {
       client
         .scriptFlush()
         .flatMap { _ =>
-          client.lock[String](leaseDuration = 600.millis).withLock("flush", 2.seconds) {
-            client.scriptFlush().flatMap(_ => CIO.sleep(1.second)).flatMap(_ => client.scriptFlush())
+          client.lock[String](leaseDuration = 900.millis).withLock("flush", 2.seconds) {
+            client
+              .scriptFlush()
+              .flatMap(_ => awaitRenewal(client, "4:lock:flush"))
+              .flatMap(_ => client.scriptFlush())
           }
         }
         .flatMap(_ => client.exists("4:lock:flush"))

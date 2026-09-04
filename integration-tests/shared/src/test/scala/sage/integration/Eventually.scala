@@ -28,4 +28,20 @@ object Eventually {
     value(attempts, interval)(action)(holds).flatMap { seen =>
       if (holds(seen)) CIO.value(()) else CIO.fail(new RuntimeException(orFail(seen)))
     }
+
+  /**
+    * Polls until two consecutive results satisfy `changed`.
+    */
+  def changes[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: () => CIO[A])(changed: (A, A) => Boolean)(
+    orFail: A => String
+  ): CIO[Unit] = {
+    def loop(remaining: Int, previous: A): CIO[Unit] =
+      if (remaining <= 0) CIO.fail(new RuntimeException(orFail(previous)))
+      else
+        CIO.sleep(interval).flatMap(_ => action()).flatMap { current =>
+          if (changed(previous, current)) CIO.unit else loop(remaining - 1, current)
+        }
+
+    action().flatMap(loop(attempts - 1, _))
+  }
 }
