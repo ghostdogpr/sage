@@ -31,7 +31,11 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     */
   def run[A](command: Command[A]): F[A]
 
-  private[sage] def lockWrite(command: Command[Boolean], @scala.annotation.unused timeout: FiniteDuration): F[Boolean] = run(command)
+  private[sage] def lockWrite(
+    command: Command[Boolean],
+    @scala.annotation.unused timeout: FiniteDuration,
+    @scala.annotation.unused replicaAcknowledgement: Boolean
+  ): F[Boolean] = run(command)
 
   /**
     * Returns a view that uses another key type and reuses the same connection. Command builders encode keys before calling `run`, so the
@@ -42,8 +46,12 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
   def as[K2](using KeyCodec[K2]): CommandRunner[F, K2] = {
     val self = this
     new CommandRunner[F, K2] {
-      def run[A](command: Command[A]): F[A]                                                                = self.run(command)
-      override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): F[Boolean] = self.lockWrite(command, timeout)
+      def run[A](command: Command[A]): F[A] = self.run(command)
+      override private[sage] def lockWrite(
+        command: Command[Boolean],
+        timeout: FiniteDuration,
+        replicaAcknowledgement: Boolean
+      ): F[Boolean]                         = self.lockWrite(command, timeout, replicaAcknowledgement)
     }
   }
 
@@ -2232,13 +2240,16 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
 
   /**
     * Creates a distributed mutex for keys of type `LK`. The lease is renewed automatically while a protected effect runs. `leaseDuration`
-    * defaults to 30 seconds and must be at least 30 milliseconds. See [[LockClient]] for ownership and failover limits.
+    * defaults to 30 seconds and must be at least 30 milliseconds. In master-replica and cluster deployments, `replicaAcknowledgement`
+    * waits for replicas by default. Disabling it improves availability but increases the chance of losing a lock during failover. See
+    * [[LockClient]] for ownership and failover limits.
     */
   def lock[LK](
     leaseDuration: FiniteDuration = FiniteDuration(30L, java.util.concurrent.TimeUnit.SECONDS),
-    namespace: String = "lock"
+    namespace: String = "lock",
+    replicaAcknowledgement: Boolean = true
   )(using KeyCodec[LK]): LockClient[F, LK] =
-    new LockClient[F, LK](this, new LockExecutor[LK](leaseDuration, namespace))
+    new LockClient[F, LK](this, new LockExecutor[LK](leaseDuration, namespace, replicaAcknowledgement))
 
   private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]]
 
@@ -2280,7 +2291,11 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     val self = this
     new Client[F, K2] {
       def run[A](command: Command[A]): F[A]                                                                                        = self.run(command)
-      override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): F[Boolean]                         = self.lockWrite(command, timeout)
+      override private[sage] def lockWrite(
+        command: Command[Boolean],
+        timeout: FiniteDuration,
+        replicaAcknowledgement: Boolean
+      ): F[Boolean]                                                                                                                = self.lockWrite(command, timeout, replicaAcknowledgement)
       def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                                = self.cached(command, ttl)
       private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                              = self.pipeline(p)
       private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                         = self.pipelineAttempt(p)

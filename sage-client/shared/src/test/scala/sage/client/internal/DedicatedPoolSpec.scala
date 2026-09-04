@@ -41,12 +41,13 @@ class DedicatedPoolSpec extends munit.FunSuite {
     (pool, scheduler, transports)
   }
 
-  private val lockWrite = new LockCommands[String](3.seconds, "lock").command(Bytes.utf8("key"), "owner", "acquire", cached = true)
+  private val lockWrite =
+    new LockCommands[String](3.seconds, "lock").command(Bytes.utf8("key"), "owner", LockCommands.Operation.Acquire, cached = true)
 
   test("WAIT accounts for elapsed work and leaves time to return a shortfall on a reusable socket") {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(40.millis)
     val transport                     = transports.head
     transport.emit(Frame.Integer(1))
@@ -56,7 +57,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(20.millis)
     transport.emit(Frame.Integer(0))
     assert(result.get.failed.get.isInstanceOf[TimedOut])
-    pool.useLockWrite(lockWrite, false, 0, 200L, _ => (), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 0, 200L, _ => (), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
     pool.close()
@@ -65,7 +66,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
   test("an exhausted confirmation budget never sends an unbounded WAIT") {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(1))
     scheduler.advance(99.millis)
@@ -78,7 +79,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
   test("lock writes keep their socket until every required replica acknowledges") {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, false, 2, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 2, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     val transport                     = transports.head
     transport.emit(Frame.Integer(1))
@@ -89,7 +90,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     assertEquals(result, None)
     transport.emit(Frame.Integer(2))
     assertEquals(result, Some(Success(true)))
-    pool.useLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
     pool.close()
@@ -100,7 +101,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       val (pool, scheduler, transports) = make(replyWith(Nil))
       var result: Option[Try[Boolean]]  = None
       var refreshed                     = false
-      pool.useLockWrite(lockWrite, false, known, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true)
+      pool.useLockWrite(lockWrite, false, known, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true, true)
       scheduler.advance(Duration.Zero)
       transports.head.emit(Frame.Integer(1))
       transports.head.emit(Replies.masterRole(connected*))
@@ -114,12 +115,12 @@ class DedicatedPoolSpec extends munit.FunSuite {
   test("busy locks skip confirmation and masters without replicas skip WAIT") {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(0))
     assertEquals(result, Some(Success(false)))
     assert(!transports.head.written.exists(_.asUtf8String.contains("ROLE")))
-    pool.useLockWrite(lockWrite, false, 0, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 0, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(1))
     transports.head.emit(Replies.masterRole())
@@ -131,7 +132,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
   test("ASKING precedes the lock write on the socket that confirms it") {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, true, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, true, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     assert(transports.head.written.last.sameBytes(Bytes.concat(Vector(Connection.asking.encode, lockWrite.encode))))
     transports.head.emit(Replies.ok)
@@ -146,7 +147,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val (pool, scheduler, transports) = make(replyWith(Nil))
     var result: Option[Try[Boolean]]  = None
     var refreshed                     = false
-    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true)
+    pool.useLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), new DedicatedPool.Lease, () => refreshed = true, true)
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(1))
     transports.head.close()
@@ -170,7 +171,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val lease                         = new DedicatedPool.Lease
     var result: Option[Try[Boolean]]  = None
     var refreshed                     = false
-    node.submitLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), lease, () => refreshed = true)
+    node.submitLockWrite(lockWrite, false, 1, 100L, r => result = Some(r), lease, () => refreshed = true, true)
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(1))
     transports.head.emit(Replies.masterRole(Node("replica", 6380)))
@@ -182,7 +183,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
     assert(refreshed)
-    node.submitLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => ())
+    node.submitLockWrite(lockWrite, false, 0, 100L, _ => (), new DedicatedPool.Lease, () => (), true)
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 2)
     assertEquals(transports.head.closeCount, 1)
@@ -291,7 +292,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
     val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), config = config)
     val held                          = pool.acquireForTransaction()
     var result: Option[Try[Boolean]]  = None
-    pool.useLockWrite(lockWrite, false, 0, 40L, r => result = Some(r), new DedicatedPool.Lease, () => ())
+    pool.useLockWrite(lockWrite, false, 0, 40L, r => result = Some(r), new DedicatedPool.Lease, () => (), true)
     val started                       = System.nanoTime()
     scheduler.advance(Duration.Zero)
     assert((System.nanoTime() - started).nanos < 1.second)

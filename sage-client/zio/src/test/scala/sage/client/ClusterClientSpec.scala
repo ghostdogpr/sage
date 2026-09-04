@@ -193,6 +193,27 @@ class ClusterClientSpec extends munit.FunSuite {
       .andThen { case _ => fixture.live.close.unsafeRun }
   }
 
+  test("cluster locks can skip replica acknowledgement while still checking the master role") {
+    val fixture = new Fixture(
+      (_, text) =>
+        if (text.contains("CLUSTER")) Seq(Replies.clusterShard(nodeA, nodeB))
+        else if (text.contains("ROLE")) Seq(Replies.masterRole(nodeB))
+        else if (text.contains("WAIT")) Seq(Frame.Integer(0))
+        else Seq(Frame.Integer(1)),
+      Vector(nodeA)
+    )
+    fixture.live
+      .lock[String](replicaAcknowledgement = false)
+      .tryWithLock("key")(CIO.value(42))
+      .unsafeRun
+      .map { result =>
+        assertEquals(result, Some(42))
+        assert(fixture.written(nodeA).exists(_.contains("ROLE")))
+        assert(!fixture.written(nodeA).exists(_.contains("WAIT")))
+      }
+      .andThen { case _ => fixture.live.close.unsafeRun }
+  }
+
   test("cluster locks recover after confirmation failure refreshes a removed replica") {
     val removed = new java.util.concurrent.atomic.AtomicBoolean(false)
     val fixture = new Fixture(
@@ -221,13 +242,16 @@ class ClusterClientSpec extends munit.FunSuite {
       .andThen { case _ => fixture.live.close.unsafeRun }
   }
 
-  test("cluster locks do not replay an acquisition after a retryable confirmation error") {
-    val writes  = new java.util.concurrent.atomic.AtomicInteger(0)
-    val fixture = new Fixture(
+  test("cluster locks safely retry acquisition after a transient confirmation error") {
+    val writes        = new java.util.concurrent.atomic.AtomicInteger(0)
+    val confirmations = new java.util.concurrent.atomic.AtomicInteger(0)
+    val fixture       = new Fixture(
       (_, text) =>
         if (text.contains("CLUSTER")) Seq(Replies.clusterShard(nodeA, nodeB))
         else if (text.contains("ROLE")) Seq(Replies.masterRole(nodeB))
-        else if (text.contains("WAIT")) Seq(Frame.SimpleError("TRYAGAIN confirmation unavailable"))
+        else if (text.contains("WAIT") && confirmations.getAndIncrement() == 0)
+          Seq(Frame.SimpleError("TRYAGAIN confirmation unavailable"))
+        else if (text.contains("WAIT")) Seq(Frame.Integer(1))
         else {
           if (text.contains("acquire")) { writes.incrementAndGet(): Unit }
           Seq(Frame.Integer(1))
@@ -238,10 +262,9 @@ class ClusterClientSpec extends munit.FunSuite {
       .lock[String]()
       .tryWithLock("key")(CIO.value(42))
       .unsafeRun
-      .failed
-      .map { error =>
-        assertEquals(error, ConnectionLost(mayHaveExecuted = true))
-        assertEquals(writes.get(), 1)
+      .map { result =>
+        assertEquals(result, Some(42))
+        assertEquals(writes.get(), 2)
       }
       .andThen { case _ => fixture.live.close.unsafeRun }
   }

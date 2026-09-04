@@ -5,11 +5,29 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
+import sage.Bytes
 import sage.SageException.LockLost
 import sage.client.internal.Client
+import sage.commands.Command
 import sage.integration.{Images, ServerSuite}
 
 abstract class LockSuite(image: String) extends ServerSuite(image) {
+  private def killClient(id: Long): Command[Unit] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector("KILL", "ID", id.toString).map(Bytes.utf8),
+      _ => Right(())
+    )
+
+  private val pauseClients: Command[Unit] =
+    Command(
+      "CLIENT",
+      Command.NoKeys,
+      Vector("PAUSE", "450", "ALL").map(Bytes.utf8),
+      _ => Right(())
+    )
+
   private def withClients[A](body: (Client[CIO, String], Client[CIO, String]) => CIO[A]): Future[A] =
     withContainers { server =>
       connectAndUse(configOf(server)) { first =>
@@ -64,6 +82,26 @@ abstract class LockSuite(image: String) extends ServerSuite(image) {
         }
         .flatMap(_ => second.lock[String]().tryWithLock("long")(CIO.value(42)))
         .map(result => assertEquals(result, Some(42)))
+    }
+  }
+
+  test("a standalone lock survives connection loss during renewal") {
+    withClients { (first, second) =>
+      val holder    = first.lock[String](leaseDuration = 1500.millis)
+      val contender = second.lock[String]()
+      first.clientId.flatMap { id =>
+        holder
+          .withLock("reconnect", 2.seconds) {
+            CIO
+              .sleep(250.millis)
+              .flatMap(_ => second.pipeline((killClient(id), pauseClients)))
+              .flatMap(_ => CIO.sleep(1400.millis))
+              .flatMap(_ => contender.tryWithLock("reconnect")(CIO.value(1)))
+              .map(result => assertEquals(result, None))
+          }
+          .flatMap(_ => contender.tryWithLock("reconnect")(CIO.value(42)))
+          .map(result => assertEquals(result, Some(42)))
+      }
     }
   }
 

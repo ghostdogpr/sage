@@ -56,6 +56,11 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
       }
     )
 
+  protected def commandCalls(info: String, command: String): Long =
+    info.linesIterator
+      .find(_.startsWith(s"cmdstat_${command.toLowerCase}:calls="))
+      .fold(0L)(_.dropWhile(_ != '=').drop(1).takeWhile(_ != ',').toLong)
+
   // Follow the master and announce the host-mapped port, then write a marker key the master never has, so a read's origin is observable. The
   // marker goes in after the link is up, since REPLICAOF triggers a full resync that would wipe an earlier write. Idempotent across a suite's tests.
   protected def ensureReplicating(replica: Client[CIO, String], announceHost: String, announcePort: Int): CIO[Unit] =
@@ -191,6 +196,32 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
           }
         }
       program.unsafeRun
+    }
+  }
+
+  test("distributed locks can skip replica acknowledgement") {
+    withContainers { server =>
+      val host = server.host
+      val pm   = server.mappedPort(masterPort)
+      val pr   = server.mappedPort(replicaPort)
+
+      connectAndUse(standalone(host, pr))(ensureReplicating(_, host, pr)).flatMap { _ =>
+        connectAndUse(masterReplica(host, pm, ReadFrom.Replica)) { client =>
+          connectAndUse(standalone(host, pm)) { master =>
+            for {
+              before <- master.info("commandstats")
+              result <- client
+                          .lock[String](leaseDuration = 600.millis, replicaAcknowledgement = false)
+                          .tryWithLock("mr:no-replica-ack")(CIO.sleep(900.millis).map(_ => 42))
+              after  <- master.info("commandstats")
+            } yield {
+              assertEquals(result, Some(42))
+              assertEquals(commandCalls(after, "wait"), commandCalls(before, "wait"))
+              assert(commandCalls(after, "role") > commandCalls(before, "role"))
+            }
+          }
+        }
+      }.unsafeRun
     }
   }
 

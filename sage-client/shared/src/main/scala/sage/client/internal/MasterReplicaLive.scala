@@ -244,7 +244,11 @@ final private[client] class MasterReplicaLive(
     Client.withLeaseIfBlocking(command)(body)
   }
 
-  override private[sage] def lockWrite(command: Command[Boolean], timeout: FiniteDuration): CIO[Boolean] =
+  override private[sage] def lockWrite(
+    command: Command[Boolean],
+    timeout: FiniteDuration,
+    replicaAcknowledgement: Boolean
+  ): CIO[Boolean] =
     Client.withLockLease(timeout, scheduler) { (lease, deadlineMillis) =>
       CIO.async { complete =>
         val tracked = Events.trackCommand(events, command, complete)
@@ -257,7 +261,8 @@ final private[client] class MasterReplicaLive(
               deadlineMillis,
               cb,
               lease,
-              () => refreshThrottle.request(rediscoverWork)
+              () => refreshThrottle.request(rediscoverWork),
+              replicaAcknowledgement
             )
           }
         }

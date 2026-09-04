@@ -1,17 +1,17 @@
 package sage.client.internal
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Try}
 import scala.util.control.NonFatal
 
 import sage.SageException
-import sage.SageException.{ConnectionLost, LockLost, NotConnected, TimedOut}
+import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.DedicatedPoolConfig
-import sage.commands.{Command, Connection, Reply, Role, Server}
+import sage.commands.{Command, Connection}
 
 /**
   * A pool of dedicated connections for blocking commands, transactions, and lock replication checks. Connections are created when needed,
@@ -76,59 +76,11 @@ final private[client] class DedicatedPool(
     deadlineMillis: Long,
     callback: Try[A] => Unit,
     lease: DedicatedPool.Lease,
-    onConfirmationFailure: () => Unit
+    onConfirmationFailure: () => Unit,
+    replicaAcknowledgement: Boolean
   ): Unit = {
-    val confirming = new AtomicBoolean(false)
-    useConnection(callback, lease, () => if (confirming.get()) onConfirmationFailure(), Some(deadlineMillis)) { (conn, complete) =>
-      // Once the write succeeds, a failed confirmation cannot make it safe to replay the write.
-      def confirmationFailed(error: Throwable): Unit = {
-        onConfirmationFailure()
-        val failure = Fault.categorize(error) match {
-          case Fault.Lost(_) | Fault.Redirected(_) | Fault.TryAgain | Fault.Unavailable(_) =>
-            val lost = ConnectionLost(mayHaveExecuted = true)
-            lost.initCause(error)
-            lost
-          case _                                                                           => error
-        }
-        complete(Failure(failure))
-      }
-
-      def confirm(value: A): Unit = {
-        confirming.set(true)
-        conn.submit(
-          Server.role,
-          {
-            case Success(Role.Master(_, connected)) =>
-              val required = math.max(replicas, connected.size)
-              if (required == 0) complete(Success(value))
-              else {
-                // Reserve half the remaining budget for the server's timeout processing and the reply's transit.
-                val waitMillis = (deadlineMillis - scheduler.nowMillis) / 2L
-                if (waitMillis <= 0L) confirmationFailed(TimedOut("distributed lock replication deadline reached before WAIT"))
-                else
-                  conn.submit(
-                    Server.waitReplicas(required.toLong, waitMillis.millis),
-                    {
-                      case Success(count) if count >= required => complete(Success(value))
-                      case Success(count)                      => confirmationFailed(TimedOut(s"replication confirmed by $count of $required required replicas"))
-                      case Failure(error)                      => confirmationFailed(error)
-                    }
-                  )
-              }
-            case Success(_)                         => confirmationFailed(LockLost("the granting node is no longer a master"))
-            case Failure(error)                     => confirmationFailed(error)
-          }
-        )
-      }
-
-      val onReply: Try[A] => Unit = {
-        case Success(value) if value == true => confirm(value)
-        case result                          => complete(result)
-      }
-      if (asking)
-        conn.submitRaw(Vector(Connection.asking, command.rawFrame), result => onReply(result.flatMap(frames => Reply.decode(command, frames.last))))
-      else conn.submit(command, onReply)
-    }
+    val replication = new LockReplication(scheduler, replicas, deadlineMillis, onConfirmationFailure, replicaAcknowledgement)
+    useConnection(callback, lease, replication.cancelled, Some(deadlineMillis))(replication.submit(_, command, asking, _))
   }
 
   private def useConnection[A](
