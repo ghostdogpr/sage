@@ -19,7 +19,7 @@ The body returns your backend's native effect. With Ox, it is a direct-style blo
 ## Waiting for a lock
 
 - `withLock(key, waitTimeout)(body)` waits for the lock and returns the body's result. Retries back off under contention to reduce server traffic. If acquisition times out, it raises `SageException.TimedOut`.
-- `tryWithLock(key)(body)` checks contention once. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. It may retry temporary failures for about one second, then raises `SageException.TimedOut`.
+- `tryWithLock(key)(body)` does not wait for a busy lock. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. Sage retries temporary failures for about one second, then raises `SageException.TimedOut`.
 
 `waitTimeout` must be positive. It covers acquisition, including server replies and retry delays, but does not limit the body's runtime. Cleanup can add up to one second before a timeout returns.
 

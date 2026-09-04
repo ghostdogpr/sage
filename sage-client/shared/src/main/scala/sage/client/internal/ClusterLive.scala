@@ -697,6 +697,7 @@ final private[client] class ClusterLive(
     if (redirectsLeft <= 0) {
       if (redirect.kind == RedirectKind.Moved) refreshBeforeFailing()
       val limitFailure = ServerError("ERR", s"exceeded ${cluster.maxRedirects} cluster redirects for ${command.name}")
+      // Lock writes retry redirect faults within their lock budget after the topology refresh. Ordinary commands report the redirect limit.
       val failure      = context.mode match {
         case Confirmed(_, _) => exhaustedFailure.getOrElse(limitFailure)
         case _               => limitFailure

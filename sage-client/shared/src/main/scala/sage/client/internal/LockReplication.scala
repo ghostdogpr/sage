@@ -88,7 +88,7 @@ final private[client] class LockReplication(
 }
 
 private[client] object LockReplication {
-  final private class AcknowledgementFailure extends Exception
+  final private class AcknowledgementFailure extends Exception("replica acknowledgement shortfall")
 
   def acknowledgementTimedOut(message: String): TimedOut = {
     val timeout = TimedOut(message)
