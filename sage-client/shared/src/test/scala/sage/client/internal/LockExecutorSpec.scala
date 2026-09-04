@@ -315,10 +315,10 @@ class LockExecutorSpec extends munit.FunSuite {
     val store   = new Store
     store.stallRelease = true
     val started = System.nanoTime()
-    executor(300.millis).tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
+    executor().tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
       val elapsed = (System.nanoTime() - started).nanos
       assert(error.isInstanceOf[LockLost], error.toString)
-      assert(elapsed < 2.seconds, s"release exceeded its shared budget: $elapsed")
+      assert(elapsed < 1500.millis, s"release exceeded its shared budget: $elapsed")
       assertEquals(store.operations.asScala.count(_.endsWith(":release")), 1)
     }
   }

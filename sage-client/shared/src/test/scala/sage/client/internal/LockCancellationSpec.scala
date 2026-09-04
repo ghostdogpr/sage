@@ -57,15 +57,13 @@ abstract class LockCancellationSpec extends munit.FunSuite {
     })(CIO.never)
     CIO
       .timeout(150.millis)(tryWithLock(runner(released, renewals, false, releaseCompleted), 300.millis)(body))
-      .flatMap { result =>
-        assertEquals(result, None)
-        CIO.blocking {
-          assert(cleanupCompleted.await(2, TimeUnit.SECONDS), "lock cleanup did not complete")
-          assert(released.get())
-          assert(bodyStopped.get())
-        }
-      }
       .unsafeRun
+      .map { result =>
+        assertEquals(result, None)
+        assert(cleanupCompleted.await(2, TimeUnit.SECONDS), "lock cleanup did not complete")
+        assert(released.get())
+        assert(bodyStopped.get())
+      }
   }
 
   test("losing ownership cancels the protected body") {
@@ -79,13 +77,11 @@ abstract class LockCancellationSpec extends munit.FunSuite {
       bodyStopped.set(true)
       cleanupCompleted.countDown()
     })(CIO.never)
-    tryWithLock(commands, 300.millis)(body).liftToTry.flatMap { result =>
+    tryWithLock(commands, 300.millis)(body).liftToTry.unsafeRun.map { result =>
       assert(result.failed.get.isInstanceOf[LockLost], result.toString)
-      CIO.blocking {
-        assert(cleanupCompleted.await(2, TimeUnit.SECONDS), "body finalizer did not complete")
-        assert(bodyStopped.get())
-      }
-    }.unsafeRun
+      assert(cleanupCompleted.await(2, TimeUnit.SECONDS), "body finalizer did not complete")
+      assert(bodyStopped.get())
+    }
   }
 
   test("cleanup stays bounded when the release command never replies") {
