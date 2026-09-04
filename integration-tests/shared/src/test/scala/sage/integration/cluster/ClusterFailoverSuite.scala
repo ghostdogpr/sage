@@ -154,10 +154,13 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
                                      "cluster replica did not connect"
                                    )
                     waitsBefore <- CIO.blocking(replicationWaits(container, owner.port))
-                    _           <- client.lock[String](3.seconds).withLock(key, 5.seconds) {
+                    _           <- client.lock[String](900.millis).withLock(key, 5.seconds) {
                                      for {
                                        before     <- reader.exists(s"4:lock:$key")
-                                       _          <- CIO.sleep(3200.millis)
+                                       _          <-
+                                         Eventually.converges(30, 50.millis)(() => CIO.blocking(replicationWaits(container, owner.port)))(_ >= waitsBefore + 2)(
+                                           waits => s"acquisition and renewal did not both wait for replication: $waits"
+                                         )
                                        after      <- reader.exists(s"4:lock:$key")
                                        waitsAfter <- CIO.blocking(replicationWaits(container, owner.port))
                                      } yield {

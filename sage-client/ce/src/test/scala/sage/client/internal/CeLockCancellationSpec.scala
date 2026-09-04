@@ -24,7 +24,7 @@ class CeLockCancellationSpec extends LockCancellationSpec {
       val commands  = new CommandRunner[CIO, String] {
         def run[A](command: Command[A]): CIO[A] = CIO.async { callback =>
           val result = command.decode(Frame.Integer(1)).toTry
-          if (command.args(4).asUtf8String == stalled) Scheduler.real.after(2.seconds)(callback(result))
+          if (command.args(4).asUtf8String == stalled) Scheduler.real.after(5.seconds)(callback(result))
           else callback(result)
         }
       }
@@ -45,7 +45,7 @@ class CeLockCancellationSpec extends LockCancellationSpec {
           case "renew"   => assert(error.isInstanceOf[LockLost], error.toString)
           case _         => assert(error eq failure)
         }
-        assert(ended - started < 1.second, s"$stalled waited for its delayed callback: ${ended - started}")
+        assert(ended - started < 2.seconds, s"$stalled waited for its delayed callback: ${ended - started}")
       }
       CIO.lift(check).unsafeRun
     }

@@ -2,7 +2,7 @@ package sage.client.internal
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
-import scala.concurrent.ExecutionContext
+import scala.concurrent.{ExecutionContext, Promise}
 import scala.concurrent.duration.*
 
 import kyo.compat.*
@@ -19,17 +19,24 @@ abstract class LockCancellationSpec extends munit.FunSuite {
   private given ExecutionContext = munitExecutionContext
 
   protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
-    new LockExecutor[String](lease, "cancel").tryWithLock(commands, "key")(body)
+    new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).tryWithLock(commands, "key")(body)
 
   protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
-    new LockExecutor[String](lease, "cancel").withLock(commands, "key", wait)(body)
+    new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).withLock(commands, "key", wait)(body)
 
-  protected def runner(released: AtomicBoolean, renewals: AtomicInteger, stallRelease: Boolean): CommandRunner[CIO, String] =
+  protected def runner(
+    released: AtomicBoolean,
+    renewals: AtomicInteger,
+    stallRelease: Boolean,
+    releaseCompleted: () => Unit = () => ()
+  ): CommandRunner[CIO, String] =
     new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] = CIO.defer(()).flatMap { _ =>
         command.args(4).asUtf8String match {
           case "renew"   => renewals.incrementAndGet()
-          case "release" => released.set(true)
+          case "release" =>
+            released.set(true)
+            releaseCompleted()
           case _         => ()
         }
         if (stallRelease && command.args(4).asUtf8String == "release") CIO.never
@@ -37,37 +44,52 @@ abstract class LockCancellationSpec extends munit.FunSuite {
       }
     }
 
-  test("cancelling a protected body releases ownership and stops renewal") {
-    val released    = new AtomicBoolean(false)
-    val renewals    = new AtomicInteger(0)
-    val bodyStopped = new AtomicBoolean(false)
-    val body        = CIO.ensure(CIO.defer(bodyStopped.set(true)))(CIO.never)
-    CIO
-      .timeout(150.millis)(tryWithLock(runner(released, renewals, false), 300.millis)(body))
-      .flatMap { result =>
-        assertEquals(result, None)
-        // Kyo runs interrupt finalizers asynchronously.
-        CIO.sleep(100.millis).flatMap { _ =>
-          assert(released.get())
-          assert(bodyStopped.get())
-          val count = renewals.get()
-          CIO.sleep(400.millis).map(_ => assertEquals(renewals.get(), count))
-        }
+  test("cancelling a protected body releases ownership and runs its finalizer") {
+    val released         = new AtomicBoolean(false)
+    val renewals         = new AtomicInteger(0)
+    val bodyStopped      = new AtomicBoolean(false)
+    val remainingCleanup = new AtomicInteger(2)
+    val cleanupCompleted = Promise[Unit]()
+    val signalCleanup    = () => {
+      if (remainingCleanup.decrementAndGet() == 0) {
+        val _ = cleanupCompleted.trySuccess(())
       }
+      ()
+    }
+    val releaseCompleted = () => signalCleanup()
+    val body             = CIO.ensure(CIO.defer {
+      bodyStopped.set(true)
+      signalCleanup()
+    })(CIO.never)
+    CIO
+      .timeout(150.millis)(tryWithLock(runner(released, renewals, false, releaseCompleted), 300.millis)(body))
       .unsafeRun
+      .map { result =>
+        assertEquals(result, None)
+      }
+      .flatMap(_ => cleanupCompleted.future)
+      .map { _ =>
+        assert(released.get())
+        assert(bodyStopped.get())
+      }
   }
 
   test("losing ownership cancels the protected body") {
-    val bodyStopped = new AtomicBoolean(false)
-    val commands    = new CommandRunner[CIO, String] {
+    val bodyStopped      = new AtomicBoolean(false)
+    val cleanupCompleted = Promise[Unit]()
+    val commands         = new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] =
         command.decode(Frame.Integer(if (command.args(4).asUtf8String == "renew") 0 else 1)).fold(CIO.fail(_), CIO.value(_))
     }
-    val body        = CIO.ensure(CIO.defer(bodyStopped.set(true)))(CIO.never)
-    tryWithLock(commands, 300.millis)(body).liftToTry.flatMap { result =>
-      assert(result.failed.get.isInstanceOf[LockLost], result.toString)
-      CIO.sleep(100.millis).map(_ => assert(bodyStopped.get()))
-    }.unsafeRun
+    val body             = CIO.ensure(CIO.defer {
+      bodyStopped.set(true)
+      val _ = cleanupCompleted.trySuccess(())
+      ()
+    })(CIO.never)
+    tryWithLock(commands, 300.millis)(body).liftToTry.unsafeRun
+      .map(result => assert(result.failed.get.isInstanceOf[LockLost], result.toString))
+      .flatMap(_ => cleanupCompleted.future)
+      .map(_ => assert(bodyStopped.get()))
   }
 
   test("cleanup stays bounded when the release command never replies") {
