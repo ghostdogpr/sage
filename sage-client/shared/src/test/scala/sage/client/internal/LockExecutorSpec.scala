@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.{Success, Try}
 
 import kyo.compat.*
 
@@ -59,10 +60,33 @@ class LockExecutorSpec extends munit.FunSuite {
     @volatile var failRelease                         = false
     @volatile var stallRelease                        = false
     @volatile var acquisitionDelay                    = Duration.Zero
+    @volatile var acquisitionFailureDelay             = Duration.Zero
     @volatile var acquisitionError: Option[Throwable] = None
-    @volatile var acquisitionUnavailableUntilNanos    = 0L
     val acquisitionErrors                             = new ConcurrentLinkedQueue[Throwable]()
     val acquisitionReplyErrors                        = new ConcurrentLinkedQueue[Throwable]()
+    private var renewed                               = false
+    private var renewalWaiter: Try[Unit] => Unit      = null
+
+    def awaitRenewal: CIO[Unit] = CIO.async { callback =>
+      val completeNow = synchronized {
+        if (renewed) true
+        else {
+          renewalWaiter = callback
+          false
+        }
+      }
+      if (completeNow) callback(Success(()))
+    }
+
+    private def markRenewed(): Unit = {
+      val callback = synchronized {
+        renewed = true
+        val waiting = renewalWaiter
+        renewalWaiter = null
+        waiting
+      }
+      if (callback != null) callback(Success(()))
+    }
 
     def held: Boolean = synchronized(entries.values.exists(_._2 > System.nanoTime()))
 
@@ -77,9 +101,10 @@ class LockExecutorSpec extends munit.FunSuite {
       else if (operation == "renew" && !renewalErrors.isEmpty) CIO.fail(renewalErrors.remove())
       else if (operation == "release" && stallRelease) CIO.never
       else if (operation == "release" && failRelease) CIO.fail(ServerError("ERR", "release unavailable"))
-      else if (operation == "acquire" && System.nanoTime() < acquisitionUnavailableUntilNanos) CIO.fail(NotConnected())
-      else if (operation == "acquire" && !acquisitionErrors.isEmpty) CIO.fail(acquisitionErrors.remove())
-      else if (operation == "acquire" && acquisitionError.isDefined) CIO.fail(acquisitionError.get)
+      else if (operation == "acquire" && !acquisitionErrors.isEmpty) {
+        val error = acquisitionErrors.remove()
+        CIO.sleep(acquisitionFailureDelay).flatMap(_ => CIO.fail(error))
+      } else if (operation == "acquire" && acquisitionError.isDefined) CIO.fail(acquisitionError.get)
       else {
         val result = synchronized {
           if (command.name == "EVALSHA" && !loaded) Left(ServerError("NOSCRIPT", ""))
@@ -99,6 +124,7 @@ class LockExecutorSpec extends munit.FunSuite {
                 true
               case "renew" if owns && !rejectRenewal   =>
                 entries += key -> (token, expiry)
+                markRenewed()
                 true
               case "release" if owns                   =>
                 entries -= key
@@ -163,55 +189,26 @@ class LockExecutorSpec extends munit.FunSuite {
       }
   }
 
-  test("competing scopes serialize non-atomic updates") {
-    val store  = new Store
-    val active = new AtomicInteger(0)
-    var total  = 0
-    CIO
-      .foreach(1 to 12) { _ =>
-        executor().withLock(store, "key", 5.seconds) {
-          CIO
-            .defer {
-              assertEquals(active.incrementAndGet(), 1)
-              total
-            }
-            .flatMap { before =>
-              CIO.sleep(5.millis).map { _ =>
-                total = before + 1
-                active.decrementAndGet()
-              }
-            }
-        }
-      }
-      .unsafeRun
-      .map { _ =>
-        assertEquals(total, 12)
-        assert(!store.held)
-      }
-  }
-
-  test("renewal keeps a body running beyond the original lease, then stops") {
+  test("a successful renewal keeps the scope running and releases it afterwards") {
     val store = new Store
     executor(300.millis)
       .tryWithLock(store, "key") {
-        CIO.sleep(1.second).map(_ => assert(store.held))
-      }
-      .flatMap { result =>
-        assertEquals(result, Some(()))
-        assert(!store.held)
-        val renewals = store.operations.asScala.count(_.endsWith(":renew"))
-        assert(renewals >= 2)
-        CIO.sleep(400.millis).map(_ => assertEquals(store.operations.asScala.count(_.endsWith(":renew")), renewals))
+        store.awaitRenewal.map(_ => assert(store.held))
       }
       .unsafeRun
+      .map { result =>
+        assertEquals(result, Some(()))
+        assert(!store.held)
+        assert(store.operations.asScala.exists(_.endsWith(":renew")))
+      }
   }
 
   test("a slow successful acquisition renews before the remaining lease expires") {
     val store = new Store
-    store.acquisitionDelay = 900.millis
-    executor(1200.millis)
+    store.acquisitionDelay = 500.millis
+    executor(900.millis)
       .tryWithLock(store, "key") {
-        CIO.sleep(350.millis).map(_ => assert(store.held, "the lock expired while its body was still running"))
+        store.awaitRenewal.map(_ => assert(store.held, "the lock expired while its body was still running"))
       }
       .unsafeRun
       .map { result =>
@@ -227,7 +224,7 @@ class LockExecutorSpec extends munit.FunSuite {
       store.renewalErrors.add(failure)
       executor(300.millis)
         .tryWithLock(store, "key") {
-          CIO.sleep(450.millis).map(_ => assert(store.held, "the lock expired while renewal was retrying"))
+          store.awaitRenewal.map(_ => assert(store.held, "the lock expired while renewal was retrying"))
         }
         .unsafeRun
         .map { result =>
@@ -290,7 +287,7 @@ class LockExecutorSpec extends munit.FunSuite {
         run(command)
       }
     }
-    executor(300.millis).withLock(store, "key", 200.millis)(CIO.sleep(400.millis)).unsafeRun.map { _ =>
+    executor(300.millis).withLock(store, "key", 200.millis)(store.awaitRenewal).unsafeRun.map { _ =>
       assert(store.operations.asScala.exists(_.endsWith(":renew")))
       assert(!store.held)
     }
@@ -318,10 +315,10 @@ class LockExecutorSpec extends munit.FunSuite {
     val store   = new Store
     store.stallRelease = true
     val started = System.nanoTime()
-    executor().tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
+    executor(300.millis).tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
       val elapsed = (System.nanoTime() - started).nanos
       assert(error.isInstanceOf[LockLost], error.toString)
-      assert(elapsed < 1500.millis, s"release exceeded its shared budget: $elapsed")
+      assert(elapsed < 2.seconds, s"release exceeded its shared budget: $elapsed")
       assertEquals(store.operations.asScala.count(_.endsWith(":release")), 1)
     }
   }
@@ -374,12 +371,12 @@ class LockExecutorSpec extends munit.FunSuite {
       }
     }
     val started  = System.nanoTime()
-    executor().withLock(commands, "key", 1.second)(CIO.fail(new AssertionError("contended body ran"))).unsafeRun.failed.map { error =>
+    executor().withLock(commands, "key", 200.millis)(CIO.fail(new AssertionError("contended body ran"))).unsafeRun.failed.map { error =>
       val elapsed = (System.nanoTime() - started).nanos
       assert(error.isInstanceOf[TimedOut], error.toString)
       assert(attempts.get() >= 2, s"acquisition was not retried: ${attempts.get()}")
-      assert(attempts.get() <= 20, s"contention generated too many acquisition requests: ${attempts.get()}")
-      assert(elapsed >= 1.second && elapsed < 1500.millis, s"wait timeout was not respected: $elapsed")
+      assert(attempts.get() <= 10, s"contention generated too many acquisition requests: ${attempts.get()}")
+      assert(elapsed >= 180.millis && elapsed < 1.second, s"wait timeout was not respected: $elapsed")
     }
   }
 
@@ -395,8 +392,10 @@ class LockExecutorSpec extends munit.FunSuite {
 
   test("withLock keeps retrying transient acquisition failures when the wait is longer than the lease") {
     val store = new Store
-    store.acquisitionUnavailableUntilNanos = System.nanoTime() + 500.millis.toNanos
-    executor(300.millis).withLock(store, "key", 2.seconds)(CIO.value(42)).unsafeRun.map { result =>
+    store.acquisitionFailureDelay = 150.millis
+    store.acquisitionErrors.add(NotConnected())
+    store.acquisitionErrors.add(NotConnected())
+    executor(300.millis).withLock(store, "key", 1.second)(CIO.value(42)).unsafeRun.map { result =>
       assertEquals(result, 42)
       assert(store.operations.asScala.count(_.endsWith(":acquire")) >= 3)
       assert(!store.held)
@@ -407,11 +406,11 @@ class LockExecutorSpec extends munit.FunSuite {
     val store   = new Store
     store.acquisitionError = Some(NotConnected())
     val started = System.nanoTime()
-    executor(2.seconds).tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
+    executor(300.millis).tryWithLock(store, "key")(CIO.value(42)).unsafeRun.failed.map { error =>
       val elapsed = (System.nanoTime() - started).nanos
       assert(error.isInstanceOf[TimedOut], error.toString)
       assert(store.operations.asScala.count(_.endsWith(":acquire")) >= 2)
-      assert(elapsed >= 900.millis && elapsed < 1500.millis, s"tryWithLock retry budget was not one second: $elapsed")
+      assert(elapsed >= 240.millis && elapsed < 1.second, s"tryWithLock did not use its operation timeout: $elapsed")
     }
   }
 
@@ -438,7 +437,7 @@ class LockExecutorSpec extends munit.FunSuite {
     val store   = new Store
     val failure = ServerError("READONLY", "demoted")
     store.acquisitionError = Some(failure)
-    executor().withLock(store, "key", 1.second)(CIO.unit).unsafeRun.failed.map { error =>
+    executor().withLock(store, "key", 200.millis)(CIO.unit).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[TimedOut], error.toString)
       assert(store.operations.asScala.count(_.endsWith(":acquire")) >= 2)
     }

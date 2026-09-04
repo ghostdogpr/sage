@@ -12,7 +12,7 @@ import sage.SageException.{DecodeError, LockLost, TimedOut}
 import sage.client.{Endpoint, MasterReplicaConfig, ReadFrom, SageConfig, Topology}
 import sage.client.internal.Client
 import sage.commands.{Command, Commands}
-import sage.integration.{ContainerClient, Eventually, Images}
+import sage.integration.{ContainerClient, Eventually, Images, Ttls}
 import sage.protocol.Frame
 
 /**
@@ -29,8 +29,8 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
 
   // --protected-mode no admits the testcontainers-mapped (non-loopback) connection; --save '' / --appendonly no keep the nodes in-memory
   override val containerDef: GenericContainer.Def[GenericContainer] = {
-    val master                   = s"$serverBinary --port 6379 --save '' --appendonly no --protected-mode no"
-    val replica                  = s"$serverBinary --port 6380 --save '' --appendonly no --protected-mode no"
+    val master                   = s"$serverBinary --port 6379 --save '' --appendonly no --protected-mode no --repl-diskless-sync-delay 0"
+    val replica                  = s"$serverBinary --port 6380 --save '' --appendonly no --protected-mode no --repl-diskless-sync-delay 0"
     val (background, foreground) = if (masterRunsInForeground) (replica, master) else (master, replica)
     GenericContainer.Def(image, exposedPorts = Seq(6379, 6380), command = Seq("sh", "-c", s"$background & exec $foreground"))
   }
@@ -129,17 +129,17 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
                 val key         = s"mr:unconfirmed-lock:$duringRenewal"
                 val bodyStarted = new java.util.concurrent.atomic.AtomicBoolean(false)
                 val bodyStopped = new java.util.concurrent.atomic.AtomicBoolean(false)
-                val detach      = replica.run(admin("REPLICAOF", "NO", "ONE"))
-                val attempt     = client.lock[String](3.seconds).tryWithLock(key) {
+                val pause       = replica.run(admin("CLIENT", "PAUSE", "800", "ALL"))
+                val attempt     = client.lock[String](600.millis).tryWithLock(key) {
                   CIO.defer(bodyStarted.set(true)).flatMap { _ =>
                     if (duringRenewal)
-                      CIO.ensure(CIO.defer(bodyStopped.set(true)))(detach.flatMap(_ => CIO.never))
+                      CIO.ensure(CIO.defer(bodyStopped.set(true)))(pause.flatMap(_ => CIO.never))
                     else CIO.unit
                   }
                 }
-                CIO.ensure(ensureReplicating(replica, host, pr)) {
+                CIO.ensure(replica.run(admin("CLIENT", "UNPAUSE"))) {
                   for {
-                    _      <- if (duringRenewal) CIO.unit else detach
+                    _      <- if (duringRenewal) CIO.unit else pause
                     result <- attempt.liftToTry
                     exists <- master.exists(s"4:lock:$key")
                   } yield {
@@ -173,14 +173,17 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
           connectAndUse(masterReplica(host, pm, ReadFrom.Replica)) { client =>
             connectAndUse(standalone(host, pm)) { master =>
               val key       = "mr:distributed-lock"
-              val holder    = client.lock[String](leaseDuration = 600.millis)
+              val holder    = client.lock[String](leaseDuration = 900.millis)
               val contender = master.lock[String]()
               for {
                 fromReplica <- client.get[String](marker)
+                waitsBefore <- master.info("commandstats")
                 denied      <- holder.withLock(key, 2.seconds) {
                                  for {
                                    before <- contender.tryWithLock(key)(CIO.value(1))
-                                   _      <- CIO.sleep(1500.millis)
+                                   _      <- Eventually.converges(30, 50.millis)(() => master.info("commandstats"))(
+                                               commandCalls(_, "wait") >= commandCalls(waitsBefore, "wait") + 2
+                                             )(info => s"acquisition and renewal did not both wait for replication: $info")
                                    after  <- contender.tryWithLock(key)(CIO.value(2))
                                  } yield (before, after)
                                }
@@ -211,8 +214,17 @@ abstract class MasterReplicaSuite(image: String, serverBinary: String) extends M
             for {
               before <- master.info("commandstats")
               result <- client
-                          .lock[String](leaseDuration = 600.millis, replicaAcknowledgement = false)
-                          .tryWithLock("mr:no-replica-ack")(CIO.sleep(900.millis).map(_ => 42))
+                          .lock[String](leaseDuration = 900.millis, replicaAcknowledgement = false)
+                          .tryWithLock("mr:no-replica-ack") {
+                            Eventually
+                              .changes(30, 50.millis)(() => master.pTtl("4:lock:mr:no-replica-ack"))((before, current) =>
+                                (Ttls.remaining(before), Ttls.remaining(current)) match {
+                                  case (Some(previous), Some(renewed)) => renewed > previous + 100.millis
+                                  case _                               => false
+                                }
+                              )(ttl => s"lock was not renewed; its TTL was $ttl")
+                              .map(_ => 42)
+                          }
               after  <- master.info("commandstats")
             } yield {
               assertEquals(result, Some(42))

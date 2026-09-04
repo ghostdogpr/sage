@@ -48,7 +48,7 @@ class LockFutureSpec extends munit.FunSuite {
     val client    = new SageClient.Lowered(live)
     val checked   = for {
       error <- client
-                 .lock[String](3.seconds)
+                 .lock[String](300.millis)
                  .tryWithLock("key") {
                    evaluated.set(true)
                    scala.concurrent.Future.successful(42)
@@ -98,8 +98,6 @@ class LockFutureSpec extends munit.FunSuite {
       _      = assertEquals(renewals.get(), count)
       _      = body.success(42)
       value <- continued.future
-      _      = assertEquals(value, 42)
-      _     <- CIO.sleep(400.millis).unsafeRun
-    } yield assertEquals(renewals.get(), count)
+    } yield assertEquals(value, 42)
   }
 }

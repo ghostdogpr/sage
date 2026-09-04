@@ -185,8 +185,8 @@ lazy val client = (projectMatrix in file("sage-client"))
   .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
 
-// Run the shared testcontainers suite for every backend to test each backend against real servers. Run command behavior, security, cluster,
-// master-replica, and rate-limit suites on one backend because those features use the same shared implementation in every backend.
+// Run each backend's smoke suite against a real server. Run the shared command, security, cluster, master-replica, rate-limit, and lock suites
+// on one backend because those features use the same implementation in every backend.
 lazy val integrationTests = (projectMatrix in file("integration-tests"))
   .dependsOn(client, core % "test->test")
   .settings(name := "integration-tests")
@@ -207,6 +207,7 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
           "sage.integration.commands.",
           "sage.integration.security.",
           "sage.integration.cluster.",
+          "sage.integration.locking.",
           "sage.integration.masterreplica.",
           "sage.integration.ratelimit."
         )

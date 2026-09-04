@@ -15,16 +15,18 @@ import sage.client.internal.{Client, LockExecutor}
 final class LockClient[F[_], K] private[sage] (client: Client[F, ?], executor: LockExecutor[K]) {
 
   /**
-    * Does not wait for a busy lock. Returns `None` when busy, without evaluating `body`, or `Some(result)` after successful execution and
-    * release. Sage retries temporary failures for about one second, then raises [[sage.SageException.TimedOut]]. After acquisition, renews
-    * the lease while `body` runs and releases it when `body` finishes. Ownership or renewal failure raises [[sage.SageException.LockLost]].
+    * Runs `body` while holding the lock and returns its result in `Some` after releasing the lock. If the lock is busy, returns `None`
+    * without evaluating `body`. The lease is renewed while `body` runs. A body failure is propagated after cleanup, and an ownership or
+    * renewal failure raises [[sage.SageException.LockLost]]. Temporary acquisition failures are retried for about one second before raising
+    * [[sage.SageException.TimedOut]].
     */
   def tryWithLock[A](key: K)(body: => F[A]): F[Option[A]] = client.lockTryWith(executor, key)(body)
 
   /**
-    * Retries acquisition with exponential backoff and jitter until `waitTimeout` elapses, then raises [[sage.SageException.TimedOut]]. The timeout
-    * must be positive and covers acquisition only. Once acquired, the lease is renewed for the duration of `body`. The body is evaluated
-    * only after acquisition and is never retried by Sage.
+    * Waits up to `waitTimeout` to acquire the lock, runs `body` while holding it, and returns the body's result after releasing the lock. If
+    * the lock cannot be acquired in time, raises [[sage.SageException.TimedOut]] without evaluating `body`. The lease is renewed while `body`
+    * runs. Sage never retries the body. A body failure is propagated after cleanup, and an ownership or renewal failure raises
+    * [[sage.SageException.LockLost]]. The timeout must be positive and covers acquisition only.
     */
   def withLock[A](key: K, waitTimeout: FiniteDuration)(body: => F[A]): F[A] =
     client.lockWith(executor, key, waitTimeout)(body)
