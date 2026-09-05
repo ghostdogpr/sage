@@ -63,14 +63,14 @@ class LockFutureSpec extends munit.FunSuite {
   }
 
   test("lease loss fails the scope while a Future body keeps running") {
-    val body      = Promise[Int]()
-    val continued = Promise[Int]()
-    val released  = new AtomicBoolean(false)
-    val commands  = new CommandRunner[CIO, String] {
+    val body        = Promise[Int]()
+    val continued   = Promise[Int]()
+    val bodyStarted = new AtomicBoolean(false)
+    val released    = new AtomicBoolean(false)
+    val commands    = new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] = CIO.defer(()).flatMap { _ =>
         val reply = command.args(4).asUtf8String match {
-          case "renew"   =>
-            0L
+          case "renew"   => if (bodyStarted.get()) 0L else 1L
           case "release" =>
             released.set(true)
             1L
@@ -79,8 +79,9 @@ class LockFutureSpec extends munit.FunSuite {
         command.decode(Frame.Integer(reply)).fold(CIO.fail(_), CIO.value(_))
       }
     }
-    val client    = new SageClient.Lowered(new LockTestClient(commands))
-    val scoped    = client.lock[String](300.millis).tryWithLock("key") {
+    val client      = new SageClient.Lowered(new LockTestClient(commands))
+    val scoped      = client.lock[String](300.millis).tryWithLock("key") {
+      bodyStarted.set(true)
       body.future.map { value =>
         continued.success(value)
         value
