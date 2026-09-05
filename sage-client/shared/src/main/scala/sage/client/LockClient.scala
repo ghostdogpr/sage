@@ -9,16 +9,16 @@ import sage.client.internal.{Client, LockExecutor}
   * runs. All callers coordinating the same work must use the same namespace and key. Locks are not reentrant and do not guarantee
   * acquisition order. Master-replica and cluster clients wait for replica acknowledgement by default.
   *
-  * Mutual exclusion depends on the lease remaining valid and Redis retaining its state. Process pauses beyond expiry and Redis failover
-  * can allow overlapping work. Cancellation after lease loss is cooperative and cannot undo completed external effects.
+  * Mutual exclusion depends on the lease remaining valid and the server retaining the lock state. Process pauses beyond expiry and server
+  * failover can allow overlapping work. Cancellation after lease loss is cooperative and cannot undo completed external effects.
   */
 final class LockClient[F[_], K] private[sage] (client: Client[F, ?], executor: LockExecutor[K]) {
 
   /**
     * Runs `body` while holding the lock and returns its result in `Some` after releasing the lock. If the lock is busy, returns `None`
     * without evaluating `body`. The lease is renewed while `body` runs. A body failure is propagated after cleanup, and an ownership or
-    * renewal failure raises [[sage.SageException.LockLost]]. Temporary acquisition failures are retried for about one second before raising
-    * [[sage.SageException.TimedOut]].
+    * renewal failure raises [[sage.SageException.LockLost]]. Temporary acquisition failures are retried for up to about one second, bounded by
+    * the usable lease, before raising [[sage.SageException.TimedOut]].
     */
   def tryWithLock[A](key: K)(body: => F[A]): F[Option[A]] = client.lockTryWith(executor, key)(body)
 
