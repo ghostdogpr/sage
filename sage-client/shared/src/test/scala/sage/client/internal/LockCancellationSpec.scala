@@ -48,6 +48,7 @@ abstract class LockCancellationSpec extends munit.FunSuite {
     val released         = new AtomicBoolean(false)
     val renewals         = new AtomicInteger(0)
     val bodyStopped      = new AtomicBoolean(false)
+    val bodyStarted      = Promise[Unit]()
     val remainingCleanup = new AtomicInteger(2)
     val cleanupCompleted = Promise[Unit]()
     val signalCleanup    = () => {
@@ -60,9 +61,10 @@ abstract class LockCancellationSpec extends munit.FunSuite {
     val body             = CIO.ensure(CIO.defer {
       bodyStopped.set(true)
       signalCleanup()
-    })(CIO.never)
+    })(CIO.defer(bodyStarted.trySuccess(())).flatMap(_ => CIO.never))
+    val scope            = tryWithLock(runner(released, renewals, false, releaseCompleted), 300.millis)(body)
     CIO
-      .timeout(150.millis)(tryWithLock(runner(released, renewals, false, releaseCompleted), 300.millis)(body))
+      .race(scope, CIO.fromScalaFuture(bodyStarted.future).map(_ => None))
       .unsafeRun
       .map { result =>
         assertEquals(result, None)
@@ -75,17 +77,20 @@ abstract class LockCancellationSpec extends munit.FunSuite {
   }
 
   test("losing ownership cancels the protected body") {
+    val bodyStarted      = new AtomicBoolean(false)
     val bodyStopped      = new AtomicBoolean(false)
     val cleanupCompleted = Promise[Unit]()
     val commands         = new CommandRunner[CIO, String] {
       def run[A](command: Command[A]): CIO[A] =
-        command.decode(Frame.Integer(if (command.args(4).asUtf8String == "renew") 0 else 1)).fold(CIO.fail(_), CIO.value(_))
+        command
+          .decode(Frame.Integer(if (command.args(4).asUtf8String == "renew" && bodyStarted.get()) 0 else 1))
+          .fold(CIO.fail(_), CIO.value(_))
     }
     val body             = CIO.ensure(CIO.defer {
       bodyStopped.set(true)
       val _ = cleanupCompleted.trySuccess(())
       ()
-    })(CIO.never)
+    })(CIO.defer(bodyStarted.set(true)).flatMap(_ => CIO.never))
     tryWithLock(commands, 300.millis)(body).liftToTry.unsafeRun
       .map(result => assert(result.failed.get.isInstanceOf[LockLost], result.toString))
       .flatMap(_ => cleanupCompleted.future)
