@@ -14,12 +14,12 @@ locks.withLock("account:42", waitTimeout = 2.seconds) {
 }
 ```
 
-The body returns your backend's native effect. With Ox, it is a direct-style block. Construct the operation inside the block: an already-started `Future` may run before acquisition. Keep all protected work inside the returned effect, including any child tasks it starts.
+The body returns your backend's native effect. With Ox, it is a direct-style block. Construct the operation inside the block: an already-started `Future` may run before acquisition. Keep all protected work inside the returned effect. Wait for every child task before the body completes because detached work can continue after Sage releases the lock.
 
 ## Waiting for a lock
 
 - `withLock(key, waitTimeout)(body)` waits for the lock and returns the body's result. Retries back off under contention to reduce server traffic. If acquisition times out, it raises `SageException.TimedOut`.
-- `tryWithLock(key)(body)` does not wait for a busy lock. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. Sage retries temporary failures for about one second, then raises `SageException.TimedOut`.
+- `tryWithLock(key)(body)` does not wait for a busy lock. It returns `None` when busy, without evaluating the body, or `Some(result)` after successful execution and release. Sage retries temporary failures for up to about one second, bounded by the usable lease, then raises `SageException.TimedOut`.
 
 `waitTimeout` must be positive. It covers acquisition, including server replies and retry delays, but does not limit the body's runtime. Cleanup can add up to one second before a timeout returns.
 
