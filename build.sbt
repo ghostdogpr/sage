@@ -66,7 +66,8 @@ addCommandAlias(
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
     s"benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo$scala3NextSuffix/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
-    s"examplesKyo$scala3NextSuffix/Compile/compile examplesFuture/Compile/compile " +
+    s"examplesKyo$scala3NextSuffix/Compile/compile examplesFuture/Compile/compile; " +
+    // The conformance suite has wall-clock parallelism checks. Run it after the parallel block so five forked test cells do not starve it.
     "ceConformanceCe/test"
 )
 addCommandAlias("conformanceCe", "ceConformanceCe/test")
