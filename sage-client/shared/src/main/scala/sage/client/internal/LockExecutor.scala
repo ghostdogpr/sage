@@ -61,7 +61,6 @@ final private[client] class LockExecutor[K](
         loop(0)
       }
     }
-
   }
 
   private def validate(wait: Option[FiniteDuration]): CIO[Unit] =
@@ -119,10 +118,9 @@ final private[client] class LockExecutor[K](
       budget.flatMap { waitRemaining =>
         CIO.nowMonotonic.flatMap { started =>
           state.mayOwn.set(true)
-          val duration = waitRemaining
-          val deadline = Deadline(started.toNanos, duration)
+          val deadline = Deadline(started.toNanos, waitRemaining)
           CIO
-            .timeoutWithError(duration.nanos)(TimedOut("distributed lock acquisition timed out"))(
+            .timeoutWithError(waitRemaining.nanos)(TimedOut("distributed lock acquisition timed out"))(
               acquire(runner, state, deadline, retry = 0)
             )
             .flatMap {
@@ -131,30 +129,37 @@ final private[client] class LockExecutor[K](
                 CIO.value(None)
               case true  =>
                 val checkWait = wait.fold(CIO.unit)(remainingWait(_).unit)
-                checkWait.flatMap(_ => remainingLease(state)).flatMap { _ =>
-                  val work = CIO.defer(()).flatMap(_ => body()).flatMap(value => remainingLease(state).map(_ => value))
-                  // Returning errors as values lets the race stop on either body failure or lock loss.
-                  CIO.race(work.liftToTry, renew[A](runner, state).liftToTry).flatMap(CIO.get(_)).flatMap { value =>
-                    state.stopped.set(true)
-                    remainingLease(state).flatMap { remaining =>
-                      remainingRelease(state).flatMap { releaseRemaining =>
-                        CIO
-                          .timeoutWithError(math.min(remaining, releaseRemaining).nanos)(LockLost("distributed lock release timed out"))(
-                            eval(runner, state, Operation.Release)
-                          )
-                          .flatMap { released =>
-                            state.mayOwn.set(false)
-                            if (released) CIO.value(Some(value))
-                            else CIO.fail(LockLost("distributed lock ownership was lost before release"))
-                          }
-                      }
-                    }
-                  }
-                }
+                checkWait.flatMap(_ => runWithAcquiredLock(runner, state)(body)).map(Some(_))
             }
         }
       }
     }
+
+  private def runWithAcquiredLock[A](runner: CommandRunner[CIO, String], state: Attempt)(body: () => CIO[A]): CIO[A] =
+    remainingLease(state).flatMap { _ =>
+      val work = CIO.defer(()).flatMap(_ => body()).flatMap(value => remainingLease(state).map(_ => value))
+      // Returning errors as values lets the race stop on either body failure or lock loss.
+      CIO.race(work.liftToTry, renew[A](runner, state).liftToTry).flatMap(CIO.get(_)).flatMap { value =>
+        release(runner, state).map(_ => value)
+      }
+    }
+
+  private def release(runner: CommandRunner[CIO, String], state: Attempt): CIO[Unit] = {
+    state.stopped.set(true)
+    remainingLease(state).flatMap { remaining =>
+      remainingRelease(state).flatMap { releaseRemaining =>
+        CIO
+          .timeoutWithError(math.min(remaining, releaseRemaining).nanos)(LockLost("distributed lock release timed out"))(
+            eval(runner, state, Operation.Release)
+          )
+          .flatMap { released =>
+            state.mayOwn.set(false)
+            if (released) CIO.unit
+            else CIO.fail(LockLost("distributed lock ownership was lost before release"))
+          }
+      }
+    }
+  }
 
   private def acquire(
     runner: CommandRunner[CIO, String],
