@@ -1,9 +1,7 @@
 import _root_.io.getkyo.compat.CompatBackendAxis
 import sbt.VirtualAxis
 
-val scala3Version     = "3.3.8"
-val scala3NextVersion = "3.8.4"                             // Kyo requires Scala 3.8.x (Next)
-val scala3NextSuffix  = scala3NextVersion.replace('.', '_') // Kyo cells embed the Next Scala version in their project id
+val scala3Version = "3.9.0"
 
 val munitVersion          = "1.3.6"
 val testcontainersVersion = "0.44.1"
@@ -52,21 +50,21 @@ name := "sage"
 addCommandAlias(
   "fmt",
   "all scalafmtSbt scalafmt test:scalafmt " +
-    s"benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo$scala3NextSuffix/scalafmt"
+    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo/scalafmt"
 )
 addCommandAlias(
   "check",
   "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
-    s"benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo$scala3NextSuffix/scalafmtCheck"
+    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo/scalafmtCheck"
 )
 
 addCommandAlias(
   "testUnit",
-  s"all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo$scala3NextSuffix/test " +
+  "all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
-    s"benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo$scala3NextSuffix/compile " +
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
-    s"examplesKyo$scala3NextSuffix/Compile/compile examplesFuture/Compile/compile; " +
+    "examplesKyo/Compile/compile examplesFuture/Compile/compile; " +
     // The conformance suite has wall-clock parallelism checks. Run it after the parallel block so five forked test cells do not starve it.
     "ceConformanceCe/test"
 )
@@ -75,13 +73,13 @@ addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
 addCommandAlias("itPekko", "integrationTestsPekko/test")
-addCommandAlias("itKyo", s"integrationTestsKyo$scala3NextSuffix/test")
+addCommandAlias("itKyo", "integrationTestsKyo/test")
 
-addCommandAlias("exampleKyo", s"examplesKyo$scala3NextSuffix/run")
+addCommandAlias("exampleKyo", "examplesKyo/run")
 
 addCommandAlias(
   "docAll",
-  s"all core/doc opentelemetry/doc compatCe/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo$scala3NextSuffix/doc"
+  "all core/doc opentelemetry/doc compatCe/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc"
 )
 
 lazy val root = project
@@ -95,7 +93,6 @@ lazy val root = project
   )
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
-// Built for both Scala LTS (published) and Scala Next (compile-only, so the kyo client cell can depend on it).
 lazy val core = (projectMatrix in file("sage-core"))
   .settings(name := "sage-core")
   .settings(commonSettings)
@@ -106,13 +103,8 @@ lazy val core = (projectMatrix in file("sage-core"))
     axisValues = Seq(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version)),
     process = identity[Project] _
   )
-  .customRow(
-    autoScalaLibrary = true,
-    axisValues = Seq(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3NextVersion, scala3NextVersion)),
-    process = (p: Project) => p.settings(publish / skip := true)
-  )
 
-// OpenTelemetry tracing. LTS-only: a Scala Next (kyo) app consumes the LTS artifact, as it already does for sage-core.
+// OpenTelemetry tracing.
 lazy val opentelemetry = (projectMatrix in file("sage-opentelemetry"))
   .dependsOn(core)
   .settings(name := "sage-opentelemetry")
@@ -155,7 +147,6 @@ lazy val ceConformance = (projectMatrix in file("sage-compat-ce/.conformance"))
   .compatConformance()
 
 // Runtime written once against kyo-compat, cross-published per backend. JDK 21+.
-// The kyo cell builds with Scala Next; the others stay on LTS.
 lazy val client = (projectMatrix in file("sage-client"))
   .dependsOn(core)
   .enablePlugins(BuildInfoPlugin)
@@ -182,8 +173,7 @@ lazy val client = (projectMatrix in file("sage-client"))
       else Seq.empty
     }
   )
-  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
 
 // Run each backend's smoke suite against a real server. Run the shared command, security, cluster, master-replica, rate-limit, and lock suites
@@ -215,8 +205,7 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
       Tests.Filter(name => !isAnchor && (isDesignated || !onceOnly.exists(name.startsWith)))
     }
   )
-  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
 
 // Build runnable, unpublished examples for ZIO, Cats Effect, Ox, Kyo, and Pekko in separate cells so each uses its native client artifact. The
@@ -230,8 +219,7 @@ lazy val examples = (projectMatrix in file("examples"))
   // These runnable samples are not published. Skip API documentation because third-party parent types such as Cats Effect's IOApp contain
   // links that cannot be resolved here.
   .settings(Compile / doc / sources := Seq.empty)
-  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
 
 // Runtime end-to-end benchmark harness (JMH), used only during development. Each backend has a separate cell. The ZIO cell includes
@@ -261,8 +249,7 @@ lazy val benchmarks = (projectMatrix in file("benchmarks"))
       else Seq.empty
     }
   )
-  .compatLibrary(KyoLib)(VirtualAxis.jvm)(Seq(scala3NextVersion))
-  .compatLibrary(ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
 
 // The runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
@@ -274,22 +261,20 @@ addCommandAlias(
     ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
     ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
     ";benchmarksPekko/Jmh/run -rf json -rff benchmarks/results/pekko.json " +
-    s";benchmarksKyo$scala3NextSuffix/Jmh/run -rf json -rff benchmarks/results/kyo.json"
+    ";benchmarksKyo/Jmh/run -rf json -rff benchmarks/results/kyo.json"
 )
 
 lazy val commonSettings = Def.settings(
-  scalacOptions ++= {
-    val base = Seq(
-      "-deprecation",
-      "-no-indent",
-      "-release",
-      "21",
-      "-Wunused:imports,params,privates,implicits,explicits",
-      "-Wvalue-discard"
-    )
-    if (scalaVersion.value.startsWith("3.8")) base :+ "-Xkind-projector"
-    else base ++ Seq("-Xfatal-warnings", "-Ykind-projector", "-Yfuture-lazy-vals")
-  },
+  scalacOptions ++= Seq(
+    "-deprecation",
+    "-no-indent",
+    "-release",
+    "21",
+    "-Wunused:imports,params,privates,implicits,explicits",
+    "-Wvalue-discard",
+    "-Werror",
+    "-Xkind-projector"
+  ),
   libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test,
   Test / fork                            := true
 )

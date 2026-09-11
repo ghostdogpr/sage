@@ -192,7 +192,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
   // convert pages from the shared Paged helper into individual Source elements
   private def pagedSource[S, A](init: S)(step: Paged.Step[S, A]): Source[A, NotUsed] =
     Source
-      .unfoldAsync[S, Vector[A]](init)(s => step(s).unsafeRun.map(_.map { case (items, next) => (next, items) })(ExecutionContext.parasitic))
+      .unfoldAsync[S, Vector[A]](init)(s => step(s).unsafeRun.map(_.map { case (items, next) => (next, items) })(using ExecutionContext.parasitic))
       .mapConcat(identity)
 
   // Open on materialization and close on cancellation, completion, or failure. Complete Future[Done] after the subscription open call finishes;
@@ -208,12 +208,12 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
               opened.onComplete {
                 case Success(_) => confirmed.trySuccess(Done)
                 case Failure(e) => confirmed.tryFailure(e)
-              }(ExecutionContext.parasitic)
+              }(using ExecutionContext.parasitic)
               opened
             },
             sub => sub.next,
             // swallow unsubscribe errors on teardown (close-on-release policy)
-            sub => sub.close.map(_ => Done)(ExecutionContext.parasitic).recover { case _ => Done }(ExecutionContext.parasitic)
+            sub => sub.close.map(_ => Done)(using ExecutionContext.parasitic).recover { case _ => Done }(using ExecutionContext.parasitic)
           )
           .mapMaterializedValue(_ => confirmed.future)
       }
@@ -232,7 +232,7 @@ object SageClient {
     * Connects and returns a Pekko-native client. The caller owns the client lifecycle and must call `close` explicitly.
     */
   def connect(config: SageConfig): Future[SageClient] =
-    Client.connect(config).unsafeRun.map(new Lowered(_))(ExecutionContext.parasitic)
+    Client.connect(config).unsafeRun.map(new Lowered(_))(using ExecutionContext.parasitic)
 
   /**
     * Connects, runs `f`, and then closes the client whether `f` succeeds, throws, or returns a failed `Future`. Errors raised while closing

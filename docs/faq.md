@@ -28,7 +28,7 @@ Both. Sage targets Redis 8+ and Valkey 8+, where every command it exposes is ava
 
 ## What Scala and JDK versions are required?
 
-Scala 3.3.x LTS and later, on JDK 21 or newer.
+Scala 3.9.x LTS and later, on JDK 21 or newer.
 
 ## Is Scala.js or Scala Native supported?
 

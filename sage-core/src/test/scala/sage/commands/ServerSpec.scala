@@ -87,11 +87,11 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
     def waitAofMs(d: FiniteDuration) = Server.waitAof(1L, 0L, d).args(2).asUtf8String
     assertEquals(waitMs(500.microseconds), "1")
     assertEquals(waitMs(Duration.Zero), "0")
-    assertEquals(waitMs(-5.milliseconds), "1")
+    assertEquals(waitMs((-5).milliseconds), "1")
     assertEquals(waitMs(2.seconds), "2000")
     assertEquals(waitAofMs(500.microseconds), "1")
     assertEquals(waitAofMs(Duration.Zero), "0")
-    assertEquals(waitAofMs(-5.milliseconds), "1")
+    assertEquals(waitAofMs((-5).milliseconds), "1")
     assertEquals(waitAofMs(2.seconds), "2000")
   }
 

@@ -2,7 +2,7 @@
 
 Sage is a [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). It implements RESP3, commands, and codecs directly in Scala. The core has no dependencies on an effect system.
 
-Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses its ecosystem's native types. Sage targets Redis 8+ and Valkey 8+. It supports Scala 3.3.x LTS and later and requires JDK 21 or later.
+Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses its ecosystem's native types. Sage targets Redis 8+ and Valkey 8+. It supports Scala 3.9.x LTS and later and requires JDK 21 or later.
 
 ## Installation
 
