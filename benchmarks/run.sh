@@ -14,9 +14,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 args="$*"
-# The Kyo cell's project id includes the Scala Next version. Read it from build.sbt so version changes need no edit here.
-kyoSuffix="$(grep -E '^val scala3NextVersion' build.sbt | sed -E 's/.*"([0-9.]+)".*/\1/' | tr '.' '_')"
-cells=(benchmarksZio:zio benchmarksCe:ce benchmarksOx:ox benchmarksPekko:pekko "benchmarksKyo${kyoSuffix}:kyo")
+cells=(benchmarksZio:zio benchmarksCe:ce benchmarksOx:ox benchmarksPekko:pekko benchmarksKyo:kyo)
 failed=0
 
 rm -f benchmarks/results/*.json
