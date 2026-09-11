@@ -16,7 +16,7 @@ Add `-prof gc` to measure allocations.
 
 ## Clients
 
-Each backend runs in a separate JVM and `projectMatrix` cell. The Sage backends compile from the same `sage.*` sources and cannot share a classpath. Kyo also uses a different Scala version. Each competing client runs in the cell for its ecosystem.
+Each backend runs in a separate JVM and `projectMatrix` cell. The Sage backends compile from the same `sage.*` sources and cannot share a classpath. Each competing client runs in the cell for its ecosystem.
 
 | `client` param | Cell | Notes |
 | --- | --- | --- |
@@ -24,7 +24,7 @@ Each backend runs in a separate JVM and `projectMatrix` cell. The Sage backends 
 | `sage-ce` / `redis4cats` | `benchmarksCe` | redis4cats wraps Lettuce. |
 | `sage-ox` / `lettuce` / `rediscala` / `jedis` | `benchmarksOx` | `lettuce` is the asynchronous, auto-pipelined Java baseline. `jedis` is the synchronous RESP3 Java client and uses one pooled connection per concurrency lane. |
 | `sage-pekko` | `benchmarksPekko` | no native Pekko (Future) competitor exists. |
-| `sage-kyo` | `benchmarksKyo<scala-next>` | suffix tracks the Next Scala version; no native Kyo competitor exists. |
+| `sage-kyo` | `benchmarksKyo` | No native Kyo competitor exists. |
 
 ## Running
 
