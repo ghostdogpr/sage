@@ -10,20 +10,17 @@ import sage.commands.*
 final private[client] class LockCommands[K](leaseDuration: FiniteDuration, namespace: String)(using codec: KeyCodec[K]) {
   import LockCommands.Operation
 
-  private val prefix = {
-    val ns = Bytes.utf8(namespace)
-    Bytes.concat(Vector(Bytes.utf8(s"${ns.length}:"), ns, Bytes.utf8(":")))
-  }
+  private val namespaced = SingleKeyScript.namespaced(namespace)
 
-  def key(value: K): Bytes = Bytes.concat(Vector(prefix, codec.encode(value)))
+  def key(value: K): Bytes = namespaced(codec.encode(value))
 
   def command(key: Bytes, token: String, operation: Operation, cached: Boolean): Command[Boolean] =
     Command(
-      if (cached) "EVALSHA" else "EVAL",
-      Vector(2),
+      LockCommands.compiled.verb(cached),
+      SingleKeyScript.KeyIndices,
       Vector(
-        if (cached) LockCommands.digest else LockCommands.body,
-        Bytes.utf8("1"),
+        LockCommands.compiled.reference(cached),
+        SingleKeyScript.NumKeys,
         key,
         Bytes.utf8(token),
         Bytes.utf8(operation.wireName),
@@ -60,8 +57,5 @@ private[client] object LockCommands {
       |return redis.call('DEL', KEYS[1])
       |""".stripMargin
 
-  val body: Bytes   = Bytes.utf8(script)
-  val digest: Bytes = Bytes.utf8(
-    java.security.MessageDigest.getInstance("SHA-1").digest(body.toArray).iterator.map(b => f"${b & 0xff}%02x").mkString
-  )
+  val compiled = SingleKeyScript(script)
 }

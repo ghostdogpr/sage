@@ -9,13 +9,9 @@ private[sage] object HyperLogLog {
     Command("PFADD", Command.FirstKey, keyCodec.encode(key) +: elements.toVector.map(valueCodec.encode), Decode.flag)
 
   // PFCOUNT is cacheable. Its documented internal register-cache write does not change the estimate or send an invalidation.
-  def pfCount[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] = {
-    val keys = (first +: rest).iterator.map(keyCodec.encode).toVector
-    Command.read("PFCOUNT", keys.indices.toVector, keys, Decode.long)
-  }
+  def pfCount[K](first: K, rest: K*)(using KeyCodec[K]): Command[Long] =
+    KeyArgs.allKeys("PFCOUNT", first +: rest.toVector, Decode.long, readOnly = true)
 
-  def pfMerge[K](destination: K, sources: K*)(using keyCodec: KeyCodec[K]): Command[Unit] = {
-    val keys = (destination +: sources).iterator.map(keyCodec.encode).toVector
-    Command("PFMERGE", keys.indices.toVector, keys, Decode.ok)
-  }
+  def pfMerge[K](destination: K, sources: K*)(using KeyCodec[K]): Command[Unit] =
+    KeyArgs.allKeys("PFMERGE", destination +: sources.toVector, Decode.ok)
 }

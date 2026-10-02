@@ -2,8 +2,7 @@ package sage.client.internal
 
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
-import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.atomic.AtomicReference
 
 import scala.collection.mutable
 import scala.concurrent.duration.*
@@ -15,9 +14,9 @@ import kyo.compat.*
 import sage.{Bytes, CommandSpan, Message, PatternMessage, SageEvent, SageException}
 import sage.SageException.{ConnectionLost, CrossSlot, DecodeError, InvalidArgument, NotConnected, ServerError, TimedOut, UnsupportedServer}
 import sage.client.{BackoffConfig, ClusterConfig, DedicatedPoolConfig, ReadFrom, SageConfig, WatchdogConfig}
-import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Rejected, Route, Shard, Slot, SplitPlan}
+import sage.cluster.{ClusterTopology, Node, NodeGroup, Redirect, RedirectKind, Route, Shard, Slot, SlotRange, SplitPlan}
 import sage.codec.{KeyCodec, ValueCodec}
-import sage.commands.{BroadcastReduce, Cluster, Command, Connection, Pipeline, Reply}
+import sage.commands.{Cluster, Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
 import sage.ratelimit.Decision
 
@@ -53,7 +52,7 @@ final private[client] class ClusterLive(
   events: Events = Events.disabled,
   cachingEnabled: Boolean = false,
   cacheMaxBytes: Long = 0L
-) extends Client[CIO, String] {
+) extends LivePipelines {
 
   private val topologyRef = new AtomicReference[ClusterTopology](ClusterTopology.from(Vector.empty))
 
@@ -114,8 +113,8 @@ final private[client] class ClusterLive(
       val node = candidates.next()
       try
         querySlotsVia(node) match {
-          case Right(shards) =>
-            adopt(node, shards)
+          case Right(ranges) =>
+            adopt(ranges)
             startRefreshPoll()
             return
           case Left(error)   => lastError = error
@@ -188,12 +187,9 @@ final private[client] class ClusterLive(
   // SCAN cursors are node-local. A full scan visits every master that owns slots. Resharding during the scan can still miss or duplicate keys.
   def scanTargets: CIO[Vector[ScanTarget]] =
     CIO.blocking {
-      val masters = slotOwningMasters(topologyRef.get())
+      val masters = topologyRef.get().masters
       if (masters.isEmpty) Vector(ScanTarget.any) else masters.map(node => ScanTarget(Some(node)))
     }
-
-  private def slotOwningMasters(topology: ClusterTopology): Vector[Node] =
-    topology.shards.collect { case shard if shard.slots.nonEmpty => shard.master }.distinct
 
   // Resume a SCAN page on the node that issued its cursor. If that node is unavailable, fail the scan because another master would interpret
   // the node-local cursor against a different keyspace. redirectsLeft = 0 disables rerouting.
@@ -208,9 +204,6 @@ final private[client] class ClusterLive(
         Client.withLeaseIfBlocking(command)(body)
       case None       => run(command)
     }
-
-  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
-  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
 
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     CIO.acquireReleaseWith(acquireScope)(releaseScope)(scope => CIO.unit.flatMap(_ => body(scope)))
@@ -257,37 +250,37 @@ final private[client] class ClusterLive(
     else {
       val topology = topologyRef.get()
       if (command.allMasters)
-        if (slotOwningMasters(topology).forall(node => masterPool.existing(node) != null))
+        if (topology.masters.forall(node => masterPool.existing(node) != null))
           broadcast(topology, command, redirectsLeft, complete, masterPool.existing)
         else scheduler.offload(broadcast(topology, command, redirectsLeft, complete, masterPool.getOrEstablishOrNull))
       else
         topology.route(command) match {
-          case Route.ToNode(node, slot) => sendOwned(command, node, slot, redirectsLeft, complete, allowReplica, context)
-          case Route.Keyless            =>
+          case Route.ToNode(shard, _) => sendOwned(command, shard, redirectsLeft, complete, allowReplica, context)
+          case Route.Keyless          =>
             if (servesFromReplica(command, allowReplica)) sendKeylessRead(topology, command, redirectsLeft, complete)
             else sendToAny(topology, command, redirectsLeft, complete, context)
-          case Route.Unowned(_)         => scheduler.offload(onUnowned(command, redirectsLeft, complete, context))
-          case Route.CrossSlot(slots)   =>
+          case Route.Unowned(_)       => scheduler.offload(onUnowned(command, redirectsLeft, complete, context))
+          case Route.CrossSlot        =>
             multiSlotPolicy(command) match {
               case Some(policy) => scatterMultiSlot(command, policy, redirectsLeft, complete, allowReplica, context)
-              case None         => complete(Failure(crossSlot(command.name, slots)))
+              case None         => complete(Failure(crossSlot(command)))
             }
-          case Route.Malformed          =>
+          case Route.Malformed        =>
             complete(Failure(malformedKeys(command.name)))
         }
     }
 
   private def sendOwned[A](
     command: Command[A],
-    node: Node,
-    slot: Slot,
+    shard: Shard,
     redirectsLeft: Int,
     complete: Try[A] => Unit,
     allowReplica: Boolean,
     context: DispatchContext
   ): Unit =
-    if (servesFromReplica(command, allowReplica)) sendRead(command, node, slot, redirectsLeft, complete)
-    else sendTo(node, command, asking = false, redirectsLeft, complete, context)
+    if (servesFromReplica(command, allowReplica))
+      walkRead(command, reads.candidatesFor(shard.master, shard.replicas), shard.master, redirectsLeft, complete)
+    else sendTo(shard.master, command, asking = false, redirectsLeft, complete, context)
 
   private def servesFromReplica(command: Command[?], allowReplica: Boolean): Boolean =
     allowReplica && readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)
@@ -321,47 +314,36 @@ final private[client] class ClusterLive(
     }
     val groups = bySlot.valuesIterator.map(_.toVector).toVector
 
-    lazy val values = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](command.keyIndices.size)
-    lazy val total  = new java.util.concurrent.atomic.AtomicLong(0L)
-    val remaining   = new java.util.concurrent.atomic.AtomicInteger(groups.size)
-    val firstError  = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
-
-    def settle(group: Vector[MultiSlotEntry], result: Try[Frame]): Unit = {
-      (policy.merge, result) match {
-        case (MultiSlotMerge.Positional, Success(Frame.Array(elements))) if elements.size == group.size =>
-          group.iterator.zip(elements).foreach { case (entry, frame) => values.set(entry.resultIndex, frame) }
-        case (MultiSlotMerge.Positional, Success(Frame.Array(elements)))                                =>
-          firstError.compareAndSet(
-            null,
-            DecodeError(s"an array of ${group.size} MGET values", s"an array of ${elements.size} values")
-          )
-        case (MultiSlotMerge.Positional, Success(other))                                                =>
-          firstError.compareAndSet(null, DecodeError(s"an array of ${group.size} MGET values", Frame.describe(other)))
-        case (MultiSlotMerge.Sum, Success(Frame.Integer(value)))                                        => total.addAndGet(value)
-        case (MultiSlotMerge.Sum, Success(other))                                                       =>
-          firstError.compareAndSet(null, DecodeError("an integer count", Frame.describe(other)))
-        case (MultiSlotMerge.AllSucceeded, Success(Frame.SimpleString("OK")))                           => ()
-        case (MultiSlotMerge.AllSucceeded, Success(other))                                              =>
-          firstError.compareAndSet(null, DecodeError("simple string 'OK'", Frame.describe(other)))
-        case (_, Failure(error))                                                                        =>
-          firstError.compareAndSet(null, error)
-      }
-
-      if (remaining.decrementAndGet() == 0)
-        Option(firstError.get()) match {
-          case Some(error) => complete(Failure(error))
-          case None        =>
-            val merged = policy.merge match {
-              case MultiSlotMerge.Positional   => Frame.Array(Vector.tabulate(command.keyIndices.size)(values.get))
-              case MultiSlotMerge.Sum          => Frame.Integer(total.get())
-              case MultiSlotMerge.AllSucceeded => Frame.SimpleString("OK")
+    val collector = gather(command, groups.size, complete) { frames =>
+      policy.merge match {
+        case MultiSlotMerge.Positional   =>
+          val values = new Array[Frame](command.keyIndices.size)
+          groups.lazyZip(frames).foreach { (group, frame) =>
+            frame match {
+              case Frame.Array(elements) if elements.size == group.size =>
+                group.lazyZip(elements).foreach((entry, value) => values(entry.resultIndex) = value)
+              case Frame.Array(elements)                                =>
+                throw DecodeError(s"an array of ${group.size} MGET values", s"an array of ${elements.size} values")
+              case other                                                => throw DecodeError(s"an array of ${group.size} MGET values", Frame.describe(other))
             }
-            complete(Reply.decode(command, merged))
-        }
+          }
+          Frame.Array(values.toVector)
+        case MultiSlotMerge.Sum          =>
+          Frame.Integer(frames.foldLeft(0L) {
+            case (total, Frame.Integer(value)) => total + value
+            case (_, other)                    => throw DecodeError("an integer count", Frame.describe(other))
+          })
+        case MultiSlotMerge.AllSucceeded =>
+          frames.foreach {
+            case Frame.SimpleString("OK") => ()
+            case other                    => throw DecodeError("simple string 'OK'", Frame.describe(other))
+          }
+          Frame.SimpleString("OK")
+      }
     }
 
     val raw = command.rawFrame
-    groups.foreach { group =>
+    groups.iterator.zipWithIndex.foreach { case (group, index) =>
       val args = Vector.newBuilder[Bytes]
       args.sizeHint(group.size * policy.argsPerKey)
       group.foreach { entry =>
@@ -376,7 +358,7 @@ final private[client] class ClusterLive(
         keyIndices = Vector.tabulate(group.size)(_ * policy.argsPerKey),
         args = args.result()
       )
-      dispatch(sub, redirectsLeft, result => settle(group, result), allowReplica = allowReplica, context = context)
+      dispatch(sub, redirectsLeft, collector.set(index, _), allowReplica = allowReplica, context = context)
     }
   }
 
@@ -400,11 +382,6 @@ final private[client] class ClusterLive(
   private def hasLeadingKeys(command: Command[?], suffixArgs: Int): Boolean =
     command.args.size > suffixArgs &&
       command.keyIndices == Vector.tabulate(command.args.size - suffixArgs)(identity)
-
-  private def sendRead[A](command: Command[A], master: Node, slot: Slot, redirectsLeft: Int, complete: Try[A] => Unit): Unit = {
-    val replicas = topologyRef.get().shardForSlot(slot).map(_.replicas).getOrElse(Vector.empty)
-    walkRead(command, reads.candidatesFor(master, replicas), master, redirectsLeft, complete)
-  }
 
   // RANDOMKEY has no slot. Try replicas across the cluster in round-robin order, then apply the configured fallback policy.
   // ReadFrom.Replica uses only replica candidates.
@@ -466,79 +443,39 @@ final private[client] class ClusterLive(
         complete(Failure(error))
     }
 
+  // A broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
+  // cache; any node failing terminally fails the command. Replies are combined before decoding: KEYS concatenates the keys returned by each
+  // node, and WAIT and WAITAOF use the lowest acknowledgement counts returned by any shard.
   private def broadcast[A](
     topology: ClusterTopology,
     command: Command[A],
     redirectsLeft: Int,
     complete: Try[A] => Unit,
     resolve: Node => NodeClient
-  ): Unit =
-    command.broadcast match {
-      case BroadcastReduce.First      => sendToAllMasters(topology, command, redirectsLeft, complete, resolve)
-      case BroadcastReduce.Concat     => broadcastCombine(topology, command, concatFrames, redirectsLeft, complete, resolve)
-      case BroadcastReduce.Fold(fold) => broadcastCombine(topology, command, _.reduce(fold), redirectsLeft, complete, resolve)
-    }
-
-  // A broadcast command (SCRIPT LOAD, FUNCTION LOAD, …) runs on every slot-owning master, since a cluster replicates no script/function
-  // cache; any node failing terminally fails the command
-  private def sendToAllMasters[A](
-    topology: ClusterTopology,
-    command: Command[A],
-    redirectsLeft: Int,
-    complete: Try[A] => Unit,
-    resolve: Node => NodeClient
   ): Unit = {
-    val masters = slotOwningMasters(topology)
+    val masters = topology.masters
     if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
     else {
-      val remaining                    = new java.util.concurrent.atomic.AtomicInteger(masters.size)
-      val firstError                   = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
-      val firstValue                   = new java.util.concurrent.atomic.AtomicReference[Try[A]](null)
-      def settle(result: Try[A]): Unit = {
-        result match {
-          case Success(_) => firstValue.compareAndSet(null, result)
-          case Failure(e) => firstError.compareAndSet(null, e)
-        }
-        if (remaining.decrementAndGet() == 0)
-          complete(Option(firstError.get()).map(Failure(_)).getOrElse(firstValue.get()))
-      }
-      masters.foreach(node => submitBroadcast(node, command, resolve, redirectsLeft, settle))
-    }
-  }
-
-  // Combine replies from an all-masters command before decoding them. KEYS concatenates the keys returned by each node. WAIT and WAITAOF use
-  // the lowest acknowledgement counts returned by any shard. If a node cannot complete the command, fail the combined result.
-  private def broadcastCombine[A](
-    topology: ClusterTopology,
-    command: Command[A],
-    combine: Vector[Frame] => Frame,
-    redirectsLeft: Int,
-    complete: Try[A] => Unit,
-    resolve: Node => NodeClient
-  ): Unit = {
-    val masters = slotOwningMasters(topology)
-    if (masters.isEmpty) sendToAny(topology, command, cluster.maxRedirects, complete)
-    else {
-      val raw                                          = command.rawFrame
-      val frames                                       = new java.util.concurrent.atomic.AtomicReferenceArray[Frame](masters.size)
-      val remaining                                    = new java.util.concurrent.atomic.AtomicInteger(masters.size)
-      val firstError                                   = new java.util.concurrent.atomic.AtomicReference[Throwable](null)
-      def settle(index: Int, result: Try[Frame]): Unit = {
-        result match {
-          case Success(frame) => frames.set(index, frame)
-          case Failure(e)     => firstError.compareAndSet(null, e)
-        }
-        if (remaining.decrementAndGet() == 0)
-          Option(firstError.get()) match {
-            case Some(e) => complete(Failure(e))
-            case None    => complete(Try(combine(Vector.tabulate(masters.size)(frames.get))).flatMap(Reply.decode(command, _)))
-          }
-      }
+      val raw       = command.rawFrame
+      val collector = gather(command, masters.size, complete)(frames => command.reduceReplies(frames(0), frames.drop(1)))
       masters.iterator.zipWithIndex.foreach { case (node, index) =>
-        submitBroadcast(node, raw, resolve, redirectsLeft, result => settle(index, result))
+        submitBroadcast(node, raw, resolve, redirectsLeft, collector.set(index, _))
       }
     }
   }
+
+  // after every part replies, completes with the first failure by part index or with the decoded combination of all frames
+  private def gather[A](command: Command[A], parts: Int, complete: Try[A] => Unit)(combine: Vector[Frame] => Frame) =
+    new TxSupport.IndexedCollector[Try[Frame]](
+      parts,
+      results =>
+        complete(
+          results
+            .collectFirst { case Failure(e) => Failure(e) }
+            .getOrElse(Try(combine(results.collect { case Success(f) => f })))
+            .flatMap(Reply.decode(command, _))
+        )
+    )
 
   private def submitBroadcast[B](node: Node, command: Command[B], resolve: Node => NodeClient, attemptsLeft: Int, settle: Try[B] => Unit): Unit = {
     val nc = resolve(node)
@@ -584,16 +521,9 @@ final private[client] class ClusterLive(
     } else
       afterBackoff(attemptsLeft) {
         if (refreshFirst) refresh(force = true)
-        if (closed || !slotOwningMasters(topologyRef.get()).contains(node)) settle(Failure(error))
+        if (closed || !topologyRef.get().masters.contains(node)) settle(Failure(error))
         else submitBroadcast(node, command, masterPool.getOrEstablishOrNull, attemptsLeft - 1, settle)
       }
-
-  private def concatFrames(frames: Vector[Frame]): Frame =
-    Frame.Array(frames.flatMap {
-      case Frame.Array(elements) => elements
-      case Frame.Set(elements)   => elements
-      case other                 => Vector(other)
-    })
 
   private def sendToAny[A](
     topology: ClusterTopology,
@@ -704,7 +634,7 @@ final private[client] class ClusterLive(
       }
       complete(Failure(failure))
     } else {
-      val target = resolve(redirect.target, from)
+      val target = redirect.target(from)
       redirect.kind match {
         case RedirectKind.Moved =>
           triggerRefresh()
@@ -760,8 +690,8 @@ final private[client] class ClusterLive(
     val allowReplica = replicaAllowed(context.mode)
     topology.route(command) match {
       // apply the read policy after the slot resolves. Eligible reads still use replica routing.
-      case Route.ToNode(node, slot)                                                                  =>
-        sendOwned(command, node, slot, redirectsLeft, complete, allowReplica, context)
+      case Route.ToNode(shard, _)                                                                    =>
+        sendOwned(command, shard, redirectsLeft, complete, allowReplica, context)
       // ReadFrom.Replica has no master fallback. Refresh and retry within the configured limit.
       case _ if allowReplica && readFrom == ReadFrom.Replica && ReadRouting.replicaEligible(command) =>
         onUnreachable(command, redirectsLeft, complete, context)
@@ -770,14 +700,13 @@ final private[client] class ClusterLive(
     }
   }
 
-  // an empty redirect host means "the node I just talked to" (e.g. `MOVED 3999 :6381`)
-  private def resolve(target: Node, from: Node): Node = if (target.host.isEmpty) Node(from.host, target.port) else target
-
   private def pickNode(topology: ClusterTopology): Option[Node] =
     masterPool.firstLiveNode.orElse(topology.shards.headOption.map(_.master))
 
-  private def crossSlot(name: String, slots: Set[Slot]): CrossSlot =
-    CrossSlot(s"$name: keys span ${slots.size} slots; a single command must touch exactly one")
+  private def crossSlot(command: Command[?]): CrossSlot = {
+    val slots = command.keyIndices.iterator.flatMap(command.args.lift).map(Slot.of).distinct.size
+    CrossSlot(s"${command.name}: keys span $slots slots; a single command must touch exactly one")
+  }
 
   private def malformedKeys(name: String): InvalidArgument =
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
@@ -787,15 +716,10 @@ final private[client] class ClusterLive(
 
   // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
 
-  private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
-    if (p.commands.isEmpty)
-      CIO.value(Vector.empty)
-    // reject the whole pipeline before submission when it contains a blocking command
-    else if (p.commands.exists(_.isBlocking))
-      CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
+  protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
     // A pipeline batches commands per node, but all-masters commands must run on every master. Reject them before submission because running
     // one on a single node could break a later key-routed EVALSHA or FCALL, or return only part of the keyspace.
-    else if (p.commands.exists(_.allMasters))
+    if (p.commands.exists(_.allMasters))
       CIO.fail(
         InvalidArgument("a Pipeline cannot carry an all-masters command (e.g. SCRIPT LOAD, FUNCTION LOAD, KEYS); run it individually on the client")
       )
@@ -805,21 +729,21 @@ final private[client] class ClusterLive(
       }
 
   // use per-command dispatch for positions that the current topology cannot resolve. Complete after every position has succeeded or failed.
-  private def runPipeline[Out, R](
-    p: Pipeline[Out, R],
+  private def runPipeline[R](
+    p: Pipeline[R],
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
     deferred: Vector[() => CommandSpan]
   ): Unit = {
-    val plan = topologyRef.get().split(p)
+    val plan = topologyRef.get().split(p.commands)
     // reject a malformed command before starting spans or submitting any part of the pipeline
-    plan.rejected.iterator.collectFirst { case (index, Rejected.Malformed) => index } match {
-      case Some(index) => complete(Failure(malformedKeys(p.commands(index).name)))
-      case None        => dispatchPipeline(p, complete, deferred, plan)
+    plan.routes.indexOf(Route.Malformed) match {
+      case -1    => dispatchPipeline(p, complete, deferred, plan)
+      case index => complete(Failure(malformedKeys(p.commands(index).name)))
     }
   }
 
-  private def dispatchPipeline[Out, R](
-    p: Pipeline[Out, R],
+  private def dispatchPipeline[R](
+    p: Pipeline[R],
     complete: Try[Vector[Either[SageException, Any]]] => Unit,
     deferred: Vector[() => CommandSpan],
     plan: SplitPlan
@@ -829,7 +753,12 @@ final private[client] class ClusterLive(
       new TxSupport.IndexedCollector[Either[SageException, Any]](n, results => complete(Success(results)))
     // settling a command releases its latch; a retry waits for the previous command on the same slot to preserve write order
     val gates                       = Vector.fill(n)(new CountDownLatch(1))
-    val slotAt                      = p.commands.map(slotOf)
+    // the slot a retry orders on; -1 for a keyless or cross-slot position, which orders against nothing
+    val slotAt                      = plan.routes.map {
+      case Route.ToNode(_, slot) => slot.value
+      case Route.Unowned(slot)   => slot.value
+      case _                     => -1
+    }
     val emits                       = Vector.tabulate(n) { i =>
       val span                     = if (deferred.isEmpty) CommandSpan.noop else Events.startDeferred(deferred(i))
       val settle: Try[Any] => Unit = result => {
@@ -850,60 +779,47 @@ final private[client] class ClusterLive(
       dispatch(p.commands(index), cluster.maxRedirects, emits(index), allowReplica = useReplica)
     }
 
-    plan.rejected.foreach {
-      case (index, Rejected.CrossSlot(slots)) =>
+    plan.routes.iterator.zipWithIndex.foreach {
+      case (Route.CrossSlot, index)                       =>
         if (multiSlotPolicy(p.commands(index)).nonEmpty) reroute(index)
-        else emits(index)(Failure(crossSlot(p.commands(index).name, slots)))
-      case (index, Rejected.Unowned(_))       => reroute(index) // dispatch refreshes then re-routes
-      case (_, Rejected.Malformed)            => ()             // unreachable: the guard above returned
+        else emits(index)(Failure(crossSlot(p.commands(index))))
+      case (Route.Unowned(_), index)                      => reroute(index) // dispatch refreshes then re-routes
+      case (Route.Keyless, index) if plan.perNode.isEmpty => reroute(index)
+      case _                                              => ()
     }
-    // add keyless commands to the first node batch. If there is no keyed batch, route each one independently.
-    if (plan.perNode.isEmpty) plan.keyless.foreach(reroute)
-    plan.perNode.zipWithIndex.foreach { case (NodeGroup(node, positions), groupIndex) =>
-      // sort positions to preserve submission order within each node's batch, including keyless commands added to the first group
-      sendBatch(node, if (groupIndex == 0) (positions ++ plan.keyless).sorted else positions, p, emits, reroute, awaitTurn, useReplica)
-    }
+    plan.perNode.foreach { case NodeGroup(shard, positions) => sendBatch(shard, positions, p, emits, reroute, awaitTurn, useReplica) }
   }
 
-  // the slot a retry orders on; -1 for a keyless or cross-slot position, which orders against nothing
-  private def slotOf(command: Command[?]): Int =
-    topologyRef.get().route(command) match {
-      case Route.ToNode(_, slot) => slot.value
-      case Route.Unowned(slot)   => slot.value
-      case _                     => -1
-    }
-
-  private def sendBatch[Out, R](
-    node: Node,
+  private def sendBatch[R](
+    shard: Shard,
     indices: Vector[Int],
-    p: Pipeline[Out, R],
+    p: Pipeline[R],
     emits: Vector[Try[Any] => Unit],
     reroute: Int => Unit,
     awaitTurn: Int => Unit,
     useReplica: Boolean
   ): Unit =
     // attribute the batch to the node that handles it, which is a replica when useReplica is true
-    if (useReplica) {
-      val replicas = topologyRef.get().shards.collectFirst { case s if s.master == node => s.replicas }.getOrElse(Vector.empty)
-      reads.pickOne(reads.candidatesFor(node, replicas), node) {
+    if (useReplica)
+      reads.pickOne(reads.candidatesFor(shard.master, shard.replicas), shard.master) {
         case Some(picked) => submitBatch(picked.node, picked.client, indices, p, emits, reroute, awaitTurn, useReplica)
         case None         => indices.foreach(reroute)
       }
-    } else {
-      val existing = masterPool.existing(node)
-      if (existing != null) submitBatch(node, existing, indices, p, emits, reroute, awaitTurn, useReplica)
+    else {
+      val existing = masterPool.existing(shard.master)
+      if (existing != null) submitBatch(shard.master, existing, indices, p, emits, reroute, awaitTurn, useReplica)
       else
         scheduler.offload {
-          val nc = masterPool.getOrEstablishOrNull(node)
-          submitBatch(node, nc, indices, p, emits, reroute, awaitTurn, useReplica)
+          val nc = masterPool.getOrEstablishOrNull(shard.master)
+          submitBatch(shard.master, nc, indices, p, emits, reroute, awaitTurn, useReplica)
         }
     }
 
-  private def submitBatch[Out, R](
+  private def submitBatch[R](
     target: Node,
     nc: NodeClient,
     indices: Vector[Int],
-    p: Pipeline[Out, R],
+    p: Pipeline[R],
     emits: Vector[Try[Any] => Unit],
     reroute: Int => Unit,
     awaitTurn: Int => Unit,
@@ -959,15 +875,12 @@ final private[client] class ClusterLive(
     * Later keys must use the same slot or fail with [[CrossSlot]]. The transaction does not follow redirects or reconnect after a connection
     * loss. These failures trigger a background topology refresh, and the caller can retry the full transaction.
     */
-  final private class ClusterTxScope extends TransactionScope[CIO, String] {
+  final private class ClusterTxScope extends LiveTransactionScope {
 
-    private val lock                      = new ReentrantLock()
-    private var released                  = false
     private var nodeClient: NodeClient    = null
     private var conn: DedicatedConnection = null
     private var pinnedNode: Node          = null
     private var pinnedSlot: Option[Slot]  = None
-    private val armed                     = new AtomicBoolean(false)
 
     def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] = {
       val command = Connection.watch(key, rest*)
@@ -1029,45 +942,23 @@ final private[client] class ClusterLive(
       case success                  => complete(success)
     }
 
-    private def refreshOnExecFault(frames: Vector[Frame]): Unit =
-      refreshFor(TxSupport.execErrors(frames).map(Fault.categorize).toVector)
-
-    private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
-      runExec(p).flatMap {
-        case None          => CIO.value(None)
-        case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
-      }
-
-    private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
-      runExec(p).map(_.map(p.toResults))
-
-    private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
-      if (isReleased)
-        CIO.fail(TxSupport.scopeReleasedError)
-      else if (p.commands.isEmpty && !armed.get)
-        CIO.value(Some(Vector.empty))
-      else if (p.commands.exists(_.isBlocking))
-        CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
-      else if (p.commands.exists(_.requiresClusterWideTxResult))
+    protected def sendMultiExec[R](p: Pipeline[R]): CIO[Vector[Frame]] =
+      if (p.commands.exists(_.requiresClusterWideTxResult))
         CIO.fail(
           InvalidArgument(
             "a Transaction cannot carry a command that returns a cluster-wide result; run it individually on the client"
           )
         )
       else
-        CIO
-          .async[Vector[Frame]] { complete =>
-            val tracked = Events.trackSpan(events, Connection.multi, complete)
-            scheduler.offload(submitExec(p, tracked))
-          }
-          .flatMap { frames =>
-            armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
-            refreshOnExecFault(frames)
-            TxSupport.interpretExec(p.commands, frames)
-          }
+        CIO.async[Vector[Frame]] { complete =>
+          val tracked = Events.trackSpan(events, Connection.multi, complete)
+          scheduler.offload(submitExec(p, tracked))
+        }
+
+    protected def onExecReplies(frames: Vector[Frame]): Unit = refreshFor(TxSupport.execErrors(frames).map(Fault.categorize).toVector)
 
     // validate every pipeline slot before sending MULTI. Reject a cross-slot transaction before submitting any commands.
-    private def submitExec[Out, R](p: Pipeline[Out, R], complete: Try[Vector[Frame]] => Unit): Unit =
+    private def submitExec[R](p: Pipeline[R], complete: Try[Vector[Frame]] => Unit): Unit =
       onConn(pipelineSlot(p), complete)(c => c.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(complete)))
 
     private def withConn[A](command: Command[?], complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit =
@@ -1179,14 +1070,14 @@ final private[client] class ClusterLive(
     // select the transaction connection by key slot. Keep the slot even when the topology does not currently identify its owner.
     private def commandSlot(command: Command[?]): Either[Throwable, Option[Slot]] =
       topologyRef.get().route(command) match {
-        case Route.Malformed        => Left(malformedKeys(command.name))
-        case Route.Keyless          => Right(None)
-        case Route.ToNode(_, slot)  => Right(Some(slot))
-        case Route.Unowned(slot)    => Right(Some(slot))
-        case Route.CrossSlot(slots) => Left(crossSlot(command.name, slots))
+        case Route.Malformed       => Left(malformedKeys(command.name))
+        case Route.Keyless         => Right(None)
+        case Route.ToNode(_, slot) => Right(Some(slot))
+        case Route.Unowned(slot)   => Right(Some(slot))
+        case Route.CrossSlot       => Left(crossSlot(command))
       }
 
-    private def pipelineSlot[Out, R](p: Pipeline[Out, R]): Either[Throwable, Option[Slot]] = {
+    private def pipelineSlot[R](p: Pipeline[R]): Either[Throwable, Option[Slot]] = {
       var acc = Option.empty[Slot]
       val it  = p.commands.iterator
       while (it.hasNext)
@@ -1201,12 +1092,6 @@ final private[client] class ClusterLive(
             }
         }
       Right(acc)
-    }
-
-    private def isReleased: Boolean = {
-      lock.lock()
-      try released
-      finally lock.unlock()
     }
 
     // Reject further operations, then release the transaction connection. Reuse it only when healthy, with no pending commands or watched
@@ -1243,28 +1128,28 @@ final private[client] class ClusterLive(
   private def runRefresh(): Unit =
     if (!closed)
       querySlots(refreshCandidates()) match {
-        case Some((from, shards)) => adopt(from, shards)
+        case Some(ranges) => adopt(ranges)
         // if no candidate answers CLUSTER SLOTS, slot ownership is unknown. Clear every client-side cache.
-        case None                 => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
+        case None         => if (cachingEnabled) masterPool.foreachEstablished(_.flushCache())
       }
 
   private def refreshCandidates(): Vector[Node] = (masterPool.candidatesByLiveness ++ seeds).distinct
 
-  private def querySlots(candidates: Vector[Node]): Option[(Node, Vector[Shard])] =
+  private def querySlots(candidates: Vector[Node]): Option[Vector[SlotRange]] =
     candidates.iterator.flatMap(trySlots).nextOption()
 
-  private def trySlots(node: Node): Option[(Node, Vector[Shard])] =
-    try querySlotsVia(node).toOption.map(node -> _)
+  private def trySlots(node: Node): Option[Vector[SlotRange]] =
+    try querySlotsVia(node).toOption
     catch { case NonFatal(_) => None }
 
   // treat an empty CLUSTER SLOTS reply as unavailable topology information. A node can return it before joining a formed cluster.
-  private def querySlotsVia(node: Node): Either[Throwable, Vector[Shard]] = {
+  private def querySlotsVia(node: Node): Either[Throwable, Vector[SlotRange]] = {
     val nc = masterPool.getOrEstablish(node)
-    Bootstrap.awaitReply[Vector[Shard]](connectTimeout.toMillis)(callback => nc.submit(Cluster.slots, asking = false, callback)) match {
+    Bootstrap.awaitReply[Vector[SlotRange]](connectTimeout.toMillis)(callback => nc.submit(Cluster.slots(node), asking = false, callback)) match {
       case None                                     =>
         Left(TimedOut(s"CLUSTER SLOTS on ${node.host}:${node.port} timed out after ${connectTimeout.toMillis}ms"))
-      case Some(Success(shards)) if shards.nonEmpty =>
-        Right(shards)
+      case Some(Success(ranges)) if ranges.nonEmpty =>
+        Right(ranges)
       case Some(Success(_))                         =>
         Left(UnsupportedServer(s"${node.host}:${node.port} owns no slots: it is not part of a formed cluster"))
       case Some(Failure(error: ServerError))        =>
@@ -1274,25 +1159,23 @@ final private[client] class ClusterLive(
     }
   }
 
-  // Prune bundles for masters that are no longer listed. This stops reconnect loops for nodes that have left. An empty announce-IP from CLUSTER SLOTS
-  // means "the node I queried", so substitute `from` as redirects do
-  private def adopt(from: Node, shards: Vector[Shard]): Unit = {
-    val resolved     = shards.map(shard => shard.copy(master = resolve(shard.master, from), replicas = shard.replicas.map(resolve(_, from))))
+  // Prune bundles for masters that are no longer listed. This stops reconnect loops for nodes that have left.
+  private def adopt(ranges: Vector[SlotRange]): Unit = {
     val oldTopology  = topologyRef.get()
-    val previous     = if (events.emitsEvents) slotOwningMasters(oldTopology).toSet else Set.empty[Node]
-    val newTopology  = ClusterTopology.from(resolved)
+    val previous     = if (events.emitsEvents) oldTopology.masters.toSet else Set.empty[Node]
+    val newTopology  = ClusterTopology.from(ranges)
     // retire losing masters' caches before the new topology is published
     if (cachingEnabled) newTopology.mastersLosingSlots(oldTopology).foreach(flushNode)
     topologyRef.set(newTopology)
     // skip the empty -> populated bootstrap transition: discovering the topology at connect is not a change
     if (events.emitsEvents && previous.nonEmpty) {
-      val current = slotOwningMasters(newTopology)
+      val current = newTopology.masters
       if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
     }
-    val masters      = resolved.map(_.master).toSet
+    val masters      = ranges.map(_.master).toSet
     masterPool.retain(masters.contains)
     // prune replica connections and their cursors for replicas the new topology no longer lists, mirroring the master prune
-    val replicaNodes = resolved.iterator.flatMap(_.replicas).toSet
+    val replicaNodes = ranges.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
     reads.retain(masters.contains)
     // Reassign shard subscriptions only when slot ownership changes. Doing this for every forced refresh during failover would create a

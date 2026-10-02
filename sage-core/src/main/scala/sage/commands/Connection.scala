@@ -10,7 +10,7 @@ private[sage] object Connection {
   val multi: Command[Unit] = Command("MULTI", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
   // the reply (an array of per-command results, or a null array on WATCH abort) is interpreted by the runtime, not this passthrough decoder
-  val exec: Command[Frame] = Command("EXEC", keyIndices = Command.NoKeys, args = Vector.empty, decode = frame => Right(frame))
+  val exec: Command[Frame] = Command("EXEC", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.frame)
 
   val unwatch: Command[Unit] = Command("UNWATCH", keyIndices = Command.NoKeys, args = Vector.empty, decode = Decode.ok)
 
@@ -33,39 +33,39 @@ private[sage] object Connection {
   def isClientTracking(command: Command[?]): Boolean =
     command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "TRACKING")
 
-  def watch[K](first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Unit] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
-    Command("WATCH", keyIndices = Vector.range(0, keys.length), args = keys, decode = Decode.ok)
-  }
+  def watch[K](first: K, rest: K*)(using KeyCodec[K]): Command[Unit] = KeyArgs.allKeys("WATCH", first +: rest.toVector, Decode.ok)
 
   def ping(message: Option[String] = None): Command[String] =
     Command(
       "PING",
       keyIndices = Command.NoKeys,
       args = message.map(Bytes.utf8).toVector,
-      decode = {
-        case Frame.SimpleString(value) => Right(value)
-        case Frame.BulkString(value)   => Right(value.asUtf8String)
-        case other                     => Left(DecodeError("simple or bulk string", Frame.describe(other)))
-      }
+      decode = pingReply
     )
 
+  private val pingReply = Decode.shape("simple or bulk string") { case Decode.Text(value) => Right(value) }
+
   /**
-    * The protocol handshake. Unknown reply entries are ignored for forward compatibility.
+    * The protocol handshake. The reply must confirm RESP3, the only supported protocol. Other reply entries are ignored.
     */
-  def hello(auth: Option[(String, String)] = None): Command[HelloReply] =
+  def hello(auth: Option[(String, String)] = None): Command[Unit] =
     Command(
       "HELLO",
       keyIndices = Command.NoKeys,
       args = Bytes.utf8("3") +: auth.toVector.flatMap { case (username, password) => Vector("AUTH", username, password).map(Bytes.utf8) },
-      decode = HelloReply.decode
+      decode = Decode.fields(_.required("proto", proto3))
     )
+
+  private val proto3: Frame => Either[DecodeError, Unit] = Decode.shape("integer for 'proto'") {
+    case Frame.Integer(3)     => Right(())
+    case Frame.Integer(value) => Left(DecodeError("proto 3", s"proto $value"))
+  }
 
   // These commands configure connection state during the HELLO setup and run again after reconnecting. They are not exposed as ordinary
   // operations because concurrent users of a shared connection would all observe the changed state.
 
   def select(database: Int): Command[Unit] =
-    Command("SELECT", Command.NoKeys, Vector(Bytes.utf8(database.toString)), Decode.ok)
+    Command("SELECT", Command.NoKeys, Vector(Args.long(database)), Decode.ok)
 
   def clientSetName(name: String): Command[Unit] =
     Command("CLIENT", Command.NoKeys, Vector("SETNAME", name).map(Bytes.utf8), Decode.ok)
@@ -83,10 +83,9 @@ private[sage] object Connection {
       "CLIENT",
       Command.NoKeys,
       Vector(Bytes.utf8("GETNAME")),
-      {
+      Decode.shape("bulk string or null") {
         case Frame.Null              => Right("")
         case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
-        case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
       }
     )
   val clientInfo: Command[String]    = Command("CLIENT", Command.NoKeys, Vector(Bytes.utf8("INFO")), Decode.text)

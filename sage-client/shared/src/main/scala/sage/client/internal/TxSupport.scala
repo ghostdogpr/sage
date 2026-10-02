@@ -1,14 +1,15 @@
 package sage.client.internal
 
-import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReferenceArray}
+import java.util.concurrent.locks.ReentrantLock
 
 import scala.util.{Failure, Success, Try}
 
 import kyo.compat.*
 
 import sage.SageException
-import sage.SageException.{DecodeError, ProtocolError, ServerError, TransactionDiscarded}
-import sage.commands.{Command, Reply}
+import sage.SageException.{DecodeError, InvalidArgument, ProtocolError, ServerError, TransactionDiscarded}
+import sage.commands.{Command, Pipeline, Reply}
 import sage.protocol.Frame
 
 /**
@@ -16,18 +17,6 @@ import sage.protocol.Frame
   * per-position model and the MULTI/EXEC interpretation cannot drift between them.
   */
 private[internal] object TxSupport {
-
-  def collapseStrict[Out](results: Vector[Either[SageException, Any]], toOut: Vector[Any] => Out): CIO[Out] = {
-    val values = Vector.newBuilder[Any]
-    values.sizeHint(results.length)
-    val it     = results.iterator
-    while (it.hasNext)
-      it.next() match {
-        case Right(value) => values += value
-        case Left(error)  => return CIO.fail(error)
-      }
-    CIO.value(toOut(values.result()))
-  }
 
   // decoders should return Either; another exception indicates a decoder bug and becomes DecodeError to preserve per-command results
   def toEither(result: Try[Any]): Either[SageException, Any] =
@@ -95,4 +84,60 @@ private[internal] object TxSupport {
       if (remaining.decrementAndGet() == 0) complete(Vector.tabulate(n)(slots.get))
     }
   }
+}
+
+private[internal] trait LivePipelines extends Client[CIO, String] {
+
+  // receives only non-empty pipelines without blocking commands
+  protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]]
+
+  final private[sage] def pipeline[R](p: Pipeline[R]): CIO[R] = checked(p).flatMap(p.finish(_).fold(CIO.fail(_), CIO.value(_)))
+
+  private def checked[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
+    if (p.commands.isEmpty) CIO.value(Vector.empty)
+    else if (p.commands.exists(_.isBlocking))
+      CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
+    else submitPipeline(p)
+}
+
+private[internal] trait LiveTransactionScope extends TransactionScope[CIO, String] {
+
+  protected val lock     = new ReentrantLock()
+  protected var released = false
+
+  // true after WATCH is attempted and false after EXEC or UNWATCH; prevents reuse while the server may still track watched keys
+  protected val armed = new AtomicBoolean(false)
+
+  // receives only pipelines without blocking commands, from a scope that is not released
+  protected def sendMultiExec[R](p: Pipeline[R]): CIO[Vector[Frame]]
+
+  protected def onExecReplies(frames: Vector[Frame]): Unit
+
+  protected def isReleased: Boolean = {
+    lock.lock()
+    try released
+    finally lock.unlock()
+  }
+
+  final private[sage] def exec[R](p: Pipeline[R]): CIO[Option[R]] =
+    runExec(p).flatMap {
+      case None          => CIO.value(None)
+      case Some(results) => p.finish(results).map(Some(_)).fold(CIO.fail(_), CIO.value(_))
+    }
+
+  // return None when EXEC reports a WATCH abort and Some with one decoded result per command; a queueing error fails the effect before execution
+  private def runExec[R](p: Pipeline[R]): CIO[Option[Vector[Either[SageException, Any]]]] =
+    if (isReleased)
+      CIO.fail(TxSupport.scopeReleasedError)
+    // skip MULTI/EXEC for an empty pipeline only when WATCH is inactive; watched keys still require EXEC to detect concurrent changes
+    else if (p.commands.isEmpty && !armed.get)
+      CIO.value(Some(Vector.empty))
+    else if (p.commands.exists(_.isBlocking))
+      CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
+    else
+      sendMultiExec(p).flatMap { frames =>
+        armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
+        onExecReplies(frames)
+        TxSupport.interpretExec(p.commands, frames)
+      }
 }

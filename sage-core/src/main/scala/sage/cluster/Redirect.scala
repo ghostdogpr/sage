@@ -9,28 +9,20 @@ private[sage] enum RedirectKind {
 }
 
 /**
-  * A parsed `MOVED`/`ASK` reply. An empty target host means the IP of the current connection, which the runtime substitutes.
+  * A parsed `MOVED`/`ASK` reply.
   */
-final private[sage] case class Redirect(kind: RedirectKind, slot: Slot, target: Node)
+final private[sage] case class Redirect(kind: RedirectKind, private val announced: Node) {
+
+  // an empty announced host means the node that sent the redirect (e.g. `MOVED 3999 :6381`)
+  def target(from: Node): Node = if (announced.host.isEmpty) Node(from.host, announced.port) else announced
+}
 
 private[sage] object Redirect {
 
-  def parse(error: String): Option[Redirect] = {
-    val parts = error.split(' ')
-    if (parts.length == 3)
-      for {
-        kind   <- kindOf(parts(0))
-        slot   <- parts(1).toIntOption.flatMap(Slot.at)
-        target <- addressOf(parts(2))
-      } yield Redirect(kind, slot, target)
-    else None
-  }
-
-  private def kindOf(token: String): Option[RedirectKind] =
-    token match {
-      case "MOVED" => Some(RedirectKind.Moved)
-      case "ASK"   => Some(RedirectKind.Ask)
-      case _       => None
+  def parse(kind: RedirectKind, detail: String): Option[Redirect] =
+    detail.split(' ') match {
+      case Array(_, address) => addressOf(address).map(Redirect(kind, _))
+      case _                 => None
     }
 
   private def addressOf(address: String): Option[Node] = {

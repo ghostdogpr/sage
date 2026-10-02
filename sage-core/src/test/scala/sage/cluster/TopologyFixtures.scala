@@ -13,6 +13,6 @@ object TopologyFixtures {
 
   val keyless: Command[Long] = Command("PING", Command.NoKeys, Vector.empty, _ => Right(0L))
 
-  def covering(node: Node, from: Int, to: Int): Shard =
-    Shard(node, Vector.empty, Vector(SlotRange(Slot.unsafe(from), Slot.unsafe(to))))
+  def covering(node: Node, from: Int, to: Int): SlotRange =
+    SlotRange(Slot.at(from).get, Slot.at(to).get, node, Vector.empty)
 }

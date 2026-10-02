@@ -6,7 +6,8 @@ import scala.concurrent.duration.FiniteDuration
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{KeyCodec, ValueCodec}
+import sage.codec.{KeyCodec, Primitives, ValueCodec}
+import sage.commands.Args.{Count, LimitWord}
 import sage.protocol.Frame
 
 /**
@@ -14,11 +15,12 @@ import sage.protocol.Frame
   * positions that accept special tokens (`*`, `-`/`+`, `$`, `>`, `(`) use separate sealed types that list the supported values.
   */
 final case class StreamId(ms: Long, seq: Long) extends Ordered[StreamId] {
-  def compare(that: StreamId): Int  = {
+  def compare(that: StreamId): Int   = {
     val c = java.lang.Long.compareUnsigned(ms, that.ms)
     if (c != 0) c else java.lang.Long.compareUnsigned(seq, that.seq)
   }
-  private[commands] def wire: Bytes = Bytes.utf8(s"$ms-$seq")
+  private[commands] def text: String = s"${java.lang.Long.toUnsignedString(ms)}-${java.lang.Long.toUnsignedString(seq)}"
+  private[commands] def wire: Bytes  = Bytes.utf8(text)
 }
 
 object StreamId {
@@ -152,8 +154,6 @@ private[sage] object Streams {
   private val MinIdWord    = Bytes.utf8("MINID")
   private val Eq           = Bytes.utf8("=")
   private val Tilde        = Bytes.utf8("~")
-  private val LimitWord    = Bytes.utf8("LIMIT")
-  private val Count        = Bytes.utf8("COUNT")
   private val Block        = Bytes.utf8("BLOCK")
   private val StreamsWord  = Bytes.utf8("STREAMS")
   private val Group        = Bytes.utf8("GROUP")
@@ -168,11 +168,8 @@ private[sage] object Streams {
   private val Force        = Bytes.utf8("FORCE")
   private val JustId       = Bytes.utf8("JUSTID")
   private val Ids          = Bytes.utf8("IDS")
-  private val DelRef       = Bytes.utf8("DELREF")
-  private val Acked        = Bytes.utf8("ACKED")
-  private val Silent       = Bytes.utf8("SILENT")
-  private val Fail         = Bytes.utf8("FAIL")
-  private val Fatal        = Bytes.utf8("FATAL")
+  private val policyWord   = Args.keywords(StreamDeletionPolicy.values)
+  private val nackModeWire = Args.keywords(NackMode.values)
   private val IdmpDuration = Bytes.utf8("IDMP-DURATION")
   private val IdmpMaxSize  = Bytes.utf8("IDMP-MAXSIZE")
 
@@ -196,7 +193,7 @@ private[sage] object Streams {
     Command.read("XLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def xDel[K](key: K)(first: StreamId, rest: StreamId*)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("XDEL", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(_.wire), Decode.long)
+    Command("XDEL", Command.FirstKey, Args.keyThen(key, first, rest)(_.wire), Decode.long)
 
   def xTrim[K](key: K, trim: Trimming, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command("XTRIM", Command.FirstKey, (keyCodec.encode(key) +: trimArgs(trim)) ++ policyArgs(policy), Decode.long)
@@ -207,8 +204,8 @@ private[sage] object Streams {
     Command(
       "XSETID",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), groupStartWire(id)) ++ entriesAdded.toVector.flatMap(n => Vector(EntriesAdded, Bytes.utf8(n.toString)))) ++
-        maxDeletedId.toVector.flatMap(d => Vector(MaxDeletedId, d.wire)),
+      (Vector(keyCodec.encode(key), groupStartWire(id)) ++ Args.optLong(EntriesAdded, entriesAdded)) ++
+        Args.opt(MaxDeletedId, maxDeletedId)(_.wire),
       Decode.ok
     )
 
@@ -218,8 +215,8 @@ private[sage] object Streams {
       "XCFGSET",
       Command.FirstKey,
       keyCodec.encode(key) +:
-        (idmpDuration.toVector.flatMap(d => Vector(IdmpDuration, Bytes.utf8(d.toSeconds.toString))) ++
-          idmpMaxSize.toVector.flatMap(n => Vector(IdmpMaxSize, Bytes.utf8(n.toString)))),
+        (Args.opt(IdmpDuration, idmpDuration)(d => Args.long(Math.ceilDiv(d.toNanos, 1000000000L))) ++
+          Args.optLong(IdmpMaxSize, idmpMaxSize)),
       Decode.ok
     )
 
@@ -247,7 +244,7 @@ private[sage] object Streams {
     Command.read(
       name,
       Command.FirstKey,
-      Vector(keyCodec.encode(key), rangeWire(a), rangeWire(b)) ++ count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString))),
+      Vector(keyCodec.encode(key), rangeWire(a), rangeWire(b)) ++ Args.optLong(Count, count),
       Decode.vector(streamEntry[F, V])
     )
 
@@ -258,7 +255,7 @@ private[sage] object Streams {
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Command[Vector[(K, Vector[StreamEntry[F, V]])]] = {
-    val leading      = countArg(count) ++ blockArg(block)
+    val leading      = Args.optLong(Count, count) ++ blockArg(block)
     val (args, keys) = streamsArgs(first +: rest.toVector, leading, readWire)
     Command("XREAD", keys, args, readReply[K, F, V], execution = blockExecution(block), isReadOnly = true)
   }
@@ -269,7 +266,7 @@ private[sage] object Streams {
     noAck: Boolean = false
   )(using keyCodec: KeyCodec[K], fieldCodec: KeyCodec[F], valueCodec: ValueCodec[V]): Command[Vector[(K, Vector[StreamEntry[F, V]])]] = {
     val leading      =
-      Vector(Group, Bytes.utf8(group), Bytes.utf8(consumer)) ++ countArg(count) ++ blockArg(block) ++ (if (noAck) Vector(NoAck) else Vector.empty)
+      Vector(Group, Bytes.utf8(group), Bytes.utf8(consumer)) ++ Args.optLong(Count, count) ++ blockArg(block) ++ Args.flag(noAck, NoAck)
     val (args, keys) = streamsArgs(first +: rest.toVector, leading, groupReadWire)
     Command("XREADGROUP", keys, args, readReply[K, F, V], execution = blockExecution(block))
   }
@@ -285,8 +282,8 @@ private[sage] object Streams {
     Command(
       "XGROUP CREATE",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), Bytes.utf8(group), groupStartWire(id)) ++ (if (mkStream) Vector(MkStream) else Vector.empty)) ++
-        entriesRead.toVector.flatMap(n => Vector(EntriesRead, Bytes.utf8(n.toString))),
+      (Vector(keyCodec.encode(key), Bytes.utf8(group), groupStartWire(id)) ++ Args.flag(mkStream, MkStream)) ++
+        Args.optLong(EntriesRead, entriesRead),
       Decode.ok
     )
 
@@ -296,9 +293,7 @@ private[sage] object Streams {
     Command(
       "XGROUP SETID",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(group), groupStartWire(id)) ++ entriesRead.toVector.flatMap(n =>
-        Vector(EntriesRead, Bytes.utf8(n.toString))
-      ),
+      Vector(keyCodec.encode(key), Bytes.utf8(group), groupStartWire(id)) ++ Args.optLong(EntriesRead, entriesRead),
       Decode.ok
     )
 
@@ -321,7 +316,7 @@ private[sage] object Streams {
     Command(
       "XCLAIM",
       Command.FirstKey,
-      claimArgs(key, group, consumer, minIdle, first +: rest.toVector, idle, retryCount, force, justId = false),
+      claimArgs(key, group, consumer, minIdle, first +: rest.toVector, idle, retryCount, force),
       Decode.vector(streamEntry[F, V])
     )
 
@@ -333,7 +328,7 @@ private[sage] object Streams {
     Command(
       "XCLAIM",
       Command.FirstKey,
-      claimArgs(key, group, consumer, minIdle, first +: rest.toVector, idle, retryCount, force, justId = true),
+      claimArgs(key, group, consumer, minIdle, first +: rest.toVector, idle, retryCount, force) :+ JustId,
       Decode.vector(streamId)
     )
 
@@ -349,7 +344,7 @@ private[sage] object Streams {
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Command[XAutoClaimResult[F, V]] =
-    Command("XAUTOCLAIM", Command.FirstKey, autoClaimArgs(key, group, consumer, minIdle, start, count, justId = false), autoClaimReply[F, V])
+    Command("XAUTOCLAIM", Command.FirstKey, autoClaimArgs(key, group, consumer, minIdle, start, count), autoClaimReply[F, V])
 
   def xAutoClaimJustId[K](
     key: K,
@@ -361,7 +356,7 @@ private[sage] object Streams {
   )(
     using keyCodec: KeyCodec[K]
   ): Command[XAutoClaimJustIdResult] =
-    Command("XAUTOCLAIM", Command.FirstKey, autoClaimArgs(key, group, consumer, minIdle, start, count, justId = true), autoClaimJustIdReply)
+    Command("XAUTOCLAIM", Command.FirstKey, autoClaimArgs(key, group, consumer, minIdle, start, count) :+ JustId, autoClaimJustIdReply)
 
   // --- pending ------------------------------------------------------------
 
@@ -380,8 +375,8 @@ private[sage] object Streams {
     Command.readUncacheable(
       "XPENDING",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), Bytes.utf8(group)) ++ idle.toVector.flatMap(d => Vector(Idle, Bytes.utf8(TimeArgs.millis(d).toString)))) ++
-        Vector(rangeWire(start), rangeWire(end), Bytes.utf8(count.toString)) ++ consumer.toVector.map(Bytes.utf8),
+      (Vector(keyCodec.encode(key), Bytes.utf8(group)) ++ Args.opt(Idle, idle)(d => Args.long(TimeArgs.millis(d)))) ++
+        Vector(rangeWire(start), rangeWire(end), Args.long(count)) ++ consumer.toVector.map(Bytes.utf8),
       Decode.vector(pendingEntryElement)
     )
 
@@ -389,41 +384,30 @@ private[sage] object Streams {
 
   def xDelEx[K](key: K, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(first: StreamId, rest: StreamId*)(
     using keyCodec: KeyCodec[K]
-  ): Command[Vector[StreamEntryDeletion]] = {
-    val ids = first +: rest.toVector
-    Command(
-      "XDELEX",
-      Command.FirstKey,
-      (keyCodec.encode(key) +: policyArgs(policy)) ++ (Ids +: Bytes.utf8(ids.size.toString) +: ids.map(_.wire)),
-      Decode.vector(deletionElement)
-    )
-  }
+  ): Command[Vector[StreamEntryDeletion]] =
+    Command("XDELEX", Command.FirstKey, (keyCodec.encode(key) +: policyArgs(policy)) ++ idsArgs(first, rest), Decode.vector(deletionElement))
 
   def xAckDel[K](key: K, group: String, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(first: StreamId, rest: StreamId*)(
     using keyCodec: KeyCodec[K]
-  ): Command[Vector[StreamEntryDeletion]] = {
-    val ids = first +: rest.toVector
+  ): Command[Vector[StreamEntryDeletion]] =
     Command(
       "XACKDEL",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), Bytes.utf8(group)) ++ policyArgs(policy)) ++ (Ids +: Bytes.utf8(ids.size.toString) +: ids.map(_.wire)),
+      (Vector(keyCodec.encode(key), Bytes.utf8(group)) ++ policyArgs(policy)) ++ idsArgs(first, rest),
       Decode.vector(deletionElement)
     )
-  }
 
   def xNack[K](key: K, group: String, mode: NackMode)(first: StreamId, rest: StreamId*)(
     retryCount: Option[Long] = None,
     force: Boolean = false
-  )(using keyCodec: KeyCodec[K]): Command[Long] = {
-    val ids = first +: rest.toVector
+  )(using keyCodec: KeyCodec[K]): Command[Long] =
     Command(
       "XNACK",
       Command.FirstKey,
-      (Vector(keyCodec.encode(key), Bytes.utf8(group), nackModeWire(mode), Ids, Bytes.utf8(ids.size.toString)) ++ ids.map(_.wire)) ++
-        retryCount.toVector.flatMap(n => Vector(RetryCount, Bytes.utf8(n.toString))) ++ (if (force) Vector(Force) else Vector.empty),
+      (Vector(keyCodec.encode(key), Bytes.utf8(group), nackModeWire(mode)) ++ idsArgs(first, rest)) ++
+        Args.optLong(RetryCount, retryCount) ++ Args.flag(force, Force),
       Decode.long
     )
-  }
 
   // --- arg builders -------------------------------------------------------
 
@@ -432,10 +416,8 @@ private[sage] object Streams {
     fieldCodec: KeyCodec[F],
     valueCodec: ValueCodec[V]
   ): Vector[Bytes] =
-    (keyCodec.encode(key) +: (if (noMkStream) Vector(NoMkStream) else Vector.empty)) ++
-      policyArgs(policy) ++ trim.toVector.flatMap(trimArgs) ++ (xAddIdWire(id) +: fields.flatMap { case (f, v) =>
-        Vector(fieldCodec.encode(f), valueCodec.encode(v))
-      })
+    (keyCodec.encode(key) +: Args.flag(noMkStream, NoMkStream)) ++
+      policyArgs(policy) ++ trim.toVector.flatMap(trimArgs) ++ (xAddIdWire(id) +: Args.pairs(fields))
 
   private def claimArgs[K](
     key: K,
@@ -445,12 +427,11 @@ private[sage] object Streams {
     ids: Vector[StreamId],
     idle: Option[ClaimIdle],
     retryCount: Option[Long],
-    force: Boolean,
-    justId: Boolean
+    force: Boolean
   )(using keyCodec: KeyCodec[K]): Vector[Bytes] =
-    (Vector(keyCodec.encode(key), Bytes.utf8(group), Bytes.utf8(consumer), Bytes.utf8(TimeArgs.millis(minIdle).toString)) ++ ids.map(_.wire)) ++
-      idleArgs(idle) ++ retryCount.toVector.flatMap(n => Vector(RetryCount, Bytes.utf8(n.toString))) ++
-      (if (force) Vector(Force) else Vector.empty) ++ (if (justId) Vector(JustId) else Vector.empty)
+    (Vector(keyCodec.encode(key), Bytes.utf8(group), Bytes.utf8(consumer), Args.long(TimeArgs.millis(minIdle))) ++ ids.map(_.wire)) ++
+      idleArgs(idle) ++ Args.optLong(RetryCount, retryCount) ++
+      Args.flag(force, Force)
 
   private def autoClaimArgs[K](
     key: K,
@@ -458,44 +439,36 @@ private[sage] object Streams {
     consumer: String,
     minIdle: FiniteDuration,
     start: StreamId,
-    count: Option[Long],
-    justId: Boolean
+    count: Option[Long]
   )(
     using keyCodec: KeyCodec[K]
   ): Vector[Bytes] =
-    Vector(keyCodec.encode(key), Bytes.utf8(group), Bytes.utf8(consumer), Bytes.utf8(TimeArgs.millis(minIdle).toString), start.wire) ++
-      count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString))) ++ (if (justId) Vector(JustId) else Vector.empty)
+    Vector(keyCodec.encode(key), Bytes.utf8(group), Bytes.utf8(consumer), Args.long(TimeArgs.millis(minIdle)), start.wire) ++
+      Args.optLong(Count, count)
+
+  private def idsArgs(first: StreamId, rest: Seq[StreamId]): Vector[Bytes] =
+    Ids +: Args.long(rest.length + 1) +: (first +: rest.toVector).map(_.wire)
 
   private def idleArgs(idle: Option[ClaimIdle]): Vector[Bytes] =
     idle.toVector.flatMap {
-      case ClaimIdle.Idle(duration) => Vector(Idle, Bytes.utf8(TimeArgs.millis(duration).toString))
-      case ClaimIdle.At(timestamp)  => Vector(Time, Bytes.utf8(TimeArgs.millis(timestamp).toString))
+      case ClaimIdle.Idle(duration) => Vector(Idle, Args.long(TimeArgs.millis(duration)))
+      case ClaimIdle.At(timestamp)  => Vector(Time, Args.long(TimeArgs.millis(timestamp)))
     }
 
   private def trimArgs(trim: Trimming): Vector[Bytes] =
     trim match {
-      case Trimming.Exact(threshold)              => thresholdKeyword(threshold) +: Vector(Eq, thresholdValue(threshold))
-      case Trimming.Approximate(threshold, limit) =>
-        (thresholdKeyword(threshold) +: Vector(Tilde, thresholdValue(threshold))) ++ limit.toVector.flatMap(n =>
-          Vector(LimitWord, Bytes.utf8(n.toString))
-        )
+      case Trimming.Exact(threshold)              => thresholdArgs(threshold, Eq)
+      case Trimming.Approximate(threshold, limit) => thresholdArgs(threshold, Tilde) ++ Args.optLong(LimitWord, limit)
     }
 
-  private def thresholdKeyword(threshold: TrimThreshold): Bytes = threshold match {
-    case _: TrimThreshold.MaxLen => MaxLenWord
-    case _: TrimThreshold.MinId  => MinIdWord
-  }
-  private def thresholdValue(threshold: TrimThreshold): Bytes   = threshold match {
-    case TrimThreshold.MaxLen(c) => Bytes.utf8(c.toString)
-    case TrimThreshold.MinId(id) => id.wire
-  }
+  private def thresholdArgs(threshold: TrimThreshold, operator: Bytes): Vector[Bytes] =
+    threshold match {
+      case TrimThreshold.MaxLen(count) => Vector(MaxLenWord, operator, Args.long(count))
+      case TrimThreshold.MinId(id)     => Vector(MinIdWord, operator, id.wire)
+    }
 
   private def policyArgs(policy: StreamDeletionPolicy): Vector[Bytes] =
-    policy match {
-      case StreamDeletionPolicy.KeepRef => Vector.empty
-      case StreamDeletionPolicy.DelRef  => Vector(DelRef)
-      case StreamDeletionPolicy.Acked   => Vector(Acked)
-    }
+    if (policy == StreamDeletionPolicy.KeepRef) Vector.empty else Vector(policyWord(policy))
 
   private def streamsArgs[K, I](keysAndIds: Vector[(K, I)], leading: Vector[Bytes], idWire: I => Bytes)(
     using keyCodec: KeyCodec[K]
@@ -507,8 +480,7 @@ private[sage] object Streams {
     ((leading :+ StreamsWord) ++ keys ++ ids, keyIndices)
   }
 
-  private def countArg(count: Option[Long]): Vector[Bytes]           = count.toVector.flatMap(n => Vector(Count, Bytes.utf8(n.toString)))
-  private def blockArg(block: Option[BlockTimeout]): Vector[Bytes]   = block.toVector.flatMap(b => Vector(Block, BlockTimeout.millisWire(b)))
+  private def blockArg(block: Option[BlockTimeout]): Vector[Bytes]   = Args.opt(Block, block)(BlockTimeout.millisWire)
   private def blockExecution(block: Option[BlockTimeout]): Execution = if (block.isDefined) Execution.Blocking else Execution.Ordinary
 
   // --- token wire forms ---------------------------------------------------
@@ -516,7 +488,7 @@ private[sage] object Streams {
   private def xAddIdWire(id: XAddId): Bytes =
     id match {
       case XAddId.Auto          => Star
-      case XAddId.AutoSeq(ms)   => Bytes.utf8(s"$ms-*")
+      case XAddId.AutoSeq(ms)   => Bytes.utf8(s"${java.lang.Long.toUnsignedString(ms)}-*")
       case XAddId.Explicit(sid) => sid.wire
     }
 
@@ -525,7 +497,7 @@ private[sage] object Streams {
       case StreamRangeId.Min            => Dash
       case StreamRangeId.Max            => Plus
       case StreamRangeId.Inclusive(sid) => sid.wire
-      case StreamRangeId.Exclusive(sid) => Bytes.utf8(s"(${sid.ms}-${sid.seq}")
+      case StreamRangeId.Exclusive(sid) => Bytes.utf8("(" + sid.text)
     }
 
   private def readWire(id: ReadId): Bytes =
@@ -547,44 +519,31 @@ private[sage] object Streams {
       case GroupStartId.At(sid) => sid.wire
     }
 
-  private def nackModeWire(mode: NackMode): Bytes =
-    mode match {
-      case NackMode.Silent => Silent
-      case NackMode.Fail   => Fail
-      case NackMode.Fatal  => Fatal
-    }
-
   // --- decoders -----------------------------------------------------------
 
-  private[commands] val streamId: Frame => Either[DecodeError, StreamId] = {
+  private[commands] val streamId: Frame => Either[DecodeError, StreamId] = Decode.shape("stream id") {
     case Frame.BulkString(raw)   => parseId(raw.asUtf8String)
     case Frame.SimpleString(raw) => parseId(raw)
-    case other                   => Left(DecodeError("stream id", Frame.describe(other)))
   }
 
+  // both parts are unsigned 64-bit numbers, matching StreamId.compare
   private def parseId(text: String): Either[DecodeError, StreamId] = {
     val dash = text.indexOf('-')
-    if (dash < 0) text.toLongOption.map(ms => StreamId(ms, 0L)).toRight(DecodeError("stream id 'ms-seq'", s"'$text'"))
-    else
-      (text.substring(0, dash).toLongOption, text.substring(dash + 1).toLongOption) match {
-        case (Some(ms), Some(seq)) => Right(StreamId(ms, seq))
-        case _                     => Left(DecodeError("stream id 'ms-seq'", s"'$text'"))
-      }
+    val id   =
+      if (dash < 0) unsignedLong(text).map(StreamId(_, 0L))
+      else unsignedLong(text.substring(0, dash)).zip(unsignedLong(text.substring(dash + 1))).map(StreamId(_, _))
+    id.toRight(DecodeError("stream id 'ms-seq'", s"'$text'"))
   }
 
-  private val optionalStreamId: Frame => Either[DecodeError, Option[StreamId]] = {
-    case Frame.Null => Right(None)
-    case other      => streamId(other).map(Some(_))
-  }
+  private def unsignedLong(text: String): Option[Long] =
+    try Some(java.lang.Long.parseUnsignedLong(text))
+    catch { case _: NumberFormatException => None }
+
+  private val optionalStreamId: Frame => Either[DecodeError, Option[StreamId]] = Decode.nullable(streamId)
 
   // an entry is `[id, [field, value, …]]`; a tombstone (claimed entry whose data was deleted) is `[id, nil]`
-  private[commands] def streamEntry[F, V](using KeyCodec[F], ValueCodec[V]): Frame => Either[DecodeError, StreamEntry[F, V]] = {
-    val fields: Frame => Either[DecodeError, Vector[(F, V)]] = {
-      case Frame.Null => Right(Vector.empty)
-      case other      => Decode.flatPairs[F, V](other)
-    }
-    Decode.array2(streamId, fields, "stream entry [id, fields]")(StreamEntry(_, _))
-  }
+  private[commands] def streamEntry[F, V](using KeyCodec[F], ValueCodec[V]): Frame => Either[DecodeError, StreamEntry[F, V]] =
+    Decode.array2(streamId, Decode.orEmpty(Decode.flatPairs[F, V]), "stream entry [id, fields]")(StreamEntry(_, _))
 
   // XREAD/XREADGROUP reply: RESP3 map of stream-name -> entries (RESP2 array of [name, entries] pairs); null when nothing is ready
   private def readReply[K, F, V](
@@ -592,89 +551,64 @@ private[sage] object Streams {
     KeyCodec[F],
     ValueCodec[V]
   ): Frame => Either[DecodeError, Vector[(K, Vector[StreamEntry[F, V]])]] = {
-    val entries                                                                                          = Decode.vector(streamEntry[F, V])
-    def pair(nameFrame: Frame, entriesFrame: Frame): Either[DecodeError, (K, Vector[StreamEntry[F, V]])] =
-      for {
-        name    <- Decode.key[K](nameFrame)
-        decoded <- entries(entriesFrame)
-      } yield name -> decoded
-    frame =>
-      frame match {
-        case Frame.Null        => Right(Vector.empty)
-        case Frame.Map(rows)   => Decode.each(rows) { case (n, e) => pair(n, e) }
-        case Frame.Array(rows) =>
-          Decode.each(rows) {
-            case Frame.Array(Vector(n, e)) => pair(n, e)
-            case other                     => Left(DecodeError("stream [name, entries] pair", Frame.describe(other)))
-          }
-        case other             => Left(DecodeError("stream read map or null", Frame.describe(other)))
-      }
+    val pair = Decode.pair(Decode.key[K], Decode.vector(streamEntry[F, V]))
+    Decode.shape("stream read map or null") {
+      case Frame.Null        => Right(Vector.empty)
+      case Frame.Map(rows)   => Decode.each(rows)(pair.tupled)
+      case Frame.Array(rows) =>
+        Decode.each(rows) {
+          case Frame.Array(Vector(n, e)) => pair(n, e)
+          case other                     => Left(DecodeError("stream [name, entries] pair", Frame.describe(other)))
+        }
+    }
   }
 
-  private def autoClaimReply[F, V](using KeyCodec[F], ValueCodec[V]): Frame => Either[DecodeError, XAutoClaimResult[F, V]] = {
-    case Frame.Array(Vector(cursorFrame, entriesFrame, deletedFrame)) =>
-      for {
-        cursor  <- streamId(cursorFrame)
-        entries <- Decode.vector(streamEntry[F, V])(entriesFrame)
-        deleted <- Decode.vector(streamId)(deletedFrame)
-      } yield XAutoClaimResult(cursor, entries, deleted)
-    // pre-7.0 omits the deleted-ids element
-    case Frame.Array(Vector(cursorFrame, entriesFrame))               =>
-      for {
-        cursor  <- streamId(cursorFrame)
-        entries <- Decode.vector(streamEntry[F, V])(entriesFrame)
-      } yield XAutoClaimResult(cursor, entries, Vector.empty)
-    case other                                                        => Left(DecodeError("xautoclaim [cursor, entries, deleted]", Frame.describe(other)))
+  private def autoClaimReply[F, V](using KeyCodec[F], ValueCodec[V]): Frame => Either[DecodeError, XAutoClaimResult[F, V]] =
+    autoClaim(Decode.vector(streamEntry[F, V]), "xautoclaim [cursor, entries, deleted]")(XAutoClaimResult(_, _, _))
+
+  private val autoClaimJustIdReply: Frame => Either[DecodeError, XAutoClaimJustIdResult] =
+    autoClaim(Decode.vector(streamId), "xautoclaim justid [cursor, ids, deleted]")(XAutoClaimJustIdResult(_, _, _))
+
+  private def autoClaim[A, R](items: Frame => Either[DecodeError, Vector[A]], label: String)(
+    build: (StreamId, Vector[A], Vector[StreamId]) => R
+  ): Frame => Either[DecodeError, R] = {
+    val deletedIds = Decode.vector(streamId)
+    Decode.shape(label) {
+      // pre-7.0 omits the deleted-ids element
+      case Frame.Array(cursorFrame +: itemsFrame +: rest) if rest.length <= 1 =>
+        for {
+          cursor  <- streamId(cursorFrame)
+          decoded <- items(itemsFrame)
+          deleted <- rest.headOption.fold[Either[DecodeError, Vector[StreamId]]](Right(Vector.empty))(deletedIds)
+        } yield build(cursor, decoded, deleted)
+    }
   }
 
-  private val autoClaimJustIdReply: Frame => Either[DecodeError, XAutoClaimJustIdResult] = {
-    case Frame.Array(Vector(cursorFrame, claimedFrame, deletedFrame)) =>
-      for {
-        cursor  <- streamId(cursorFrame)
-        claimed <- Decode.vector(streamId)(claimedFrame)
-        deleted <- Decode.vector(streamId)(deletedFrame)
-      } yield XAutoClaimJustIdResult(cursor, claimed, deleted)
-    case Frame.Array(Vector(cursorFrame, claimedFrame))               =>
-      for {
-        cursor  <- streamId(cursorFrame)
-        claimed <- Decode.vector(streamId)(claimedFrame)
-      } yield XAutoClaimJustIdResult(cursor, claimed, Vector.empty)
-    case other                                                        => Left(DecodeError("xautoclaim justid [cursor, ids, deleted]", Frame.describe(other)))
-  }
-
-  private val deletionElement: Frame => Either[DecodeError, StreamEntryDeletion] = {
+  private val deletionElement: Frame => Either[DecodeError, StreamEntryDeletion] = Decode.shape("deletion status -1/1/2") {
     case Frame.Integer(-1L) => Right(StreamEntryDeletion.NotFound)
     case Frame.Integer(1L)  => Right(StreamEntryDeletion.Deleted)
     case Frame.Integer(2L)  => Right(StreamEntryDeletion.Retained)
-    case other              => Left(DecodeError("deletion status -1/1/2", Frame.describe(other)))
   }
 
-  // XPENDING summary: [total, min-id, max-id, [[consumer, count], …]]; an empty group replies [0, nil, nil, nil]
-  private val pendingSummaryReply: Frame => Either[DecodeError, PendingSummary] = {
-    val consumers: Frame => Either[DecodeError, Vector[(String, Long)]] = {
-      case Frame.Null        => Right(Vector.empty)
-      case Frame.Array(rows) => Decode.each(rows)(consumerCount)
-      case other             => Left(DecodeError("consumer counts array or null", Frame.describe(other)))
-    }
-    Decode.array4(Decode.long, optionalStreamId, optionalStreamId, consumers, "xpending summary")(PendingSummary(_, _, _, _))
+  // XPENDING per-consumer counts come back as bulk-string integers
+  private val countText: Frame => Either[DecodeError, Long] = Decode.shape("integer") {
+    case Frame.Integer(value)    => Right(value)
+    case Frame.BulkString(bytes) => Primitives.decodeLong("integer", Long.MinValue, Long.MaxValue)(bytes)
   }
 
   private val consumerCount: Frame => Either[DecodeError, (String, Long)] =
     Decode.array2(Decode.utf8String, countText, "[consumer, count] pair")(_ -> _)
 
+  // XPENDING summary: [total, min-id, max-id, [[consumer, count], …]]; an empty group replies [0, nil, nil, nil]
+  private val pendingSummaryReply: Frame => Either[DecodeError, PendingSummary] = {
+    val consumers = Decode.orEmpty(Decode.vector(consumerCount, "consumer counts array or null"))
+    Decode.array4(Decode.long, optionalStreamId, optionalStreamId, consumers, "xpending summary")(PendingSummary(_, _, _, _))
+  }
+
   // XPENDING extended row: [id, consumer, idle-ms, delivery-count]
   private val pendingEntryElement: Frame => Either[DecodeError, PendingEntry] =
-    Decode.array4(streamId, Decode.utf8String, Decode.long, Decode.long, "xpending entry [id, consumer, idle, count]") {
-      (id, consumer, idle, deliveries) =>
-        PendingEntry(id, consumer, FiniteDuration(idle, java.util.concurrent.TimeUnit.MILLISECONDS), deliveries)
-    }
-
-  // XPENDING per-consumer counts come back as bulk-string integers
-  private def countText(frame: Frame): Either[DecodeError, Long] =
-    frame match {
-      case Frame.Integer(value)    => Right(value)
-      case Frame.BulkString(bytes) => bytes.asUtf8String.toLongOption.toRight(DecodeError("integer", s"bulk string '${bytes.asUtf8String}'"))
-      case other                   => Left(DecodeError("integer", Frame.describe(other)))
-    }
+    Decode.array4(streamId, Decode.utf8String, Decode.millisDuration, Decode.long, "xpending entry [id, consumer, idle, count]")(
+      PendingEntry(_, _, _, _)
+    )
 
 }

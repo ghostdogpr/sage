@@ -1,5 +1,6 @@
 package sage.commands
 
+import sage.SageException.DecodeError
 import sage.protocol.Frame
 import sage.protocol.Frames.bulk
 
@@ -40,66 +41,80 @@ class PubsubSpec extends munit.FunSuite with BroadcastFolds {
     val merge = fold(Pubsub.pubsubChannels())
     val first = Frame.Array(Vector(bulk("news"), bulk("sport")))
     val other = Frame.Array(Vector(bulk("news"), bulk("weather")))
-    assertEquals(Reply.run(Pubsub.pubsubChannels(), merge(first, other)), Right(Vector("news", "sport", "weather")))
+    assertEquals(Reply.decode(Pubsub.pubsubChannels(), merge(first, other)).toEither, Right(Vector("news", "sport", "weather")))
   }
 
   test("CHANNELS merges an empty master in either position without losing the other's slice") {
     val merge    = fold(Pubsub.pubsubChannels())
     val occupied = Frame.Array(Vector(bulk("news")))
     val bare     = Frame.Array(Vector.empty)
-    assertEquals(Reply.run(Pubsub.pubsubChannels(), merge(occupied, bare)), Right(Vector("news")))
-    assertEquals(Reply.run(Pubsub.pubsubChannels(), merge(bare, occupied)), Right(Vector("news")))
+    assertEquals(Reply.decode(Pubsub.pubsubChannels(), merge(occupied, bare)).toEither, Right(Vector("news")))
+    assertEquals(Reply.decode(Pubsub.pubsubChannels(), merge(bare, occupied)).toEither, Right(Vector("news")))
   }
 
-  test("the CHANNELS merge passes a malformed reply through in either operand position, so it never hides behind a valid one") {
+  test("the CHANNELS merge fails on a malformed reply in either operand position, so it never hides behind a valid one") {
     val merge = fold(Pubsub.pubsubChannels())
     val valid = Frame.Array(Vector(bulk("news")))
     val bad   = Frame.SimpleString("nonsense")
-    assertEquals(merge(valid, bad), bad)
-    assertEquals(merge(bad, valid), bad)
-    assert(Reply.run(Pubsub.pubsubChannels(), merge(valid, bad)).isLeft)
+    intercept[DecodeError](merge(valid, bad))
+    intercept[DecodeError](merge(bad, valid))
   }
 
   test("NUMSUB sums a channel's subscribers across masters instead of letting the decoder's Map keep only the last count") {
     val merge = fold(Pubsub.pubsubNumSub("news", "sport"))
     val first = Frame.Array(Vector(bulk("news"), Frame.Integer(1L), bulk("sport"), Frame.Integer(0L)))
     val other = Frame.Array(Vector(bulk("news"), Frame.Integer(2L), bulk("sport"), Frame.Integer(5L)))
-    assertEquals(Reply.run(Pubsub.pubsubNumSub("news", "sport"), merge(first, other)), Right(Map("news" -> 3L, "sport" -> 5L)))
+    assertEquals(Reply.decode(Pubsub.pubsubNumSub("news", "sport"), merge(first, other)).toEither, Right(Map("news" -> 3L, "sport" -> 5L)))
   }
 
-  test("the NUMSUB merge keeps each channel's first-seen position and admits a master that reports a channel the other does not") {
-    val merge  = fold(Pubsub.pubsubNumSub("news", "sport"))
-    val first  = Frame.Array(Vector(bulk("news"), Frame.Integer(1L)))
-    val other  = Frame.Array(Vector(bulk("sport"), Frame.Integer(4L), bulk("news"), Frame.Integer(2L)))
-    val merged = merge(first, other)
-    assertEquals(Reply.run(Pubsub.pubsubNumSub("news", "sport"), merged), Right(Map("news" -> 3L, "sport" -> 4L)))
-    assertEquals(merged, Frame.Array(Vector(bulk("news"), Frame.Integer(3L), bulk("sport"), Frame.Integer(4L))))
+  test("the NUMSUB merge admits a master that reports a channel the other does not") {
+    val merge = fold(Pubsub.pubsubNumSub("news", "sport"))
+    val first = Frame.Array(Vector(bulk("news"), Frame.Integer(1L)))
+    val other = Frame.Array(Vector(bulk("sport"), Frame.Integer(4L), bulk("news"), Frame.Integer(2L)))
+    assertEquals(Reply.decode(Pubsub.pubsubNumSub("news", "sport"), merge(first, other)).toEither, Right(Map("news" -> 3L, "sport" -> 4L)))
+  }
+
+  test("NUMSUB with a repeated channel counts each master once, as a standalone server's reply does") {
+    val merge = fold(Pubsub.pubsubNumSub("news", "news"))
+    val reply = Frame.Array(Vector(bulk("news"), Frame.Integer(1L), bulk("news"), Frame.Integer(1L)))
+    assertEquals(Reply.decode(Pubsub.pubsubNumSub("news", "news"), reply).toEither, Right(Map("news" -> 1L)))
+    assertEquals(Reply.decode(Pubsub.pubsubNumSub("news", "news"), merge(reply, reply)).toEither, Right(Map("news" -> 2L)))
   }
 
   test("SHARDNUMSUB sums per channel too, so a shard channel keeps its owner's count when the other masters report zero") {
     val merge = fold(Pubsub.pubsubShardNumSub("orders"))
     val owner = Frame.Array(Vector(bulk("orders"), Frame.Integer(3L)))
     val bare  = Frame.Array(Vector(bulk("orders"), Frame.Integer(0L)))
-    assertEquals(Reply.run(Pubsub.pubsubShardNumSub("orders"), merge(bare, owner)), Right(Map("orders" -> 3L)))
+    assertEquals(Reply.decode(Pubsub.pubsubShardNumSub("orders"), merge(bare, owner)).toEither, Right(Map("orders" -> 3L)))
   }
 
-  test("the NUMSUB merge passes an odd-length or mistyped reply through in either operand position") {
+  test("the NUMSUB merge fails on an odd-length or mistyped reply in either operand position") {
     val merge = fold(Pubsub.pubsubNumSub("news"))
     val valid = Frame.Array(Vector(bulk("news"), Frame.Integer(1L)))
     val odd   = Frame.Array(Vector(bulk("news")))
     val typed = Frame.Array(Vector(bulk("news"), bulk("1")))
-    assertEquals(merge(valid, odd), odd)
-    assertEquals(merge(odd, valid), odd)
-    assertEquals(merge(valid, typed), typed)
-    assert(Reply.run(Pubsub.pubsubNumSub("news"), merge(valid, odd)).isLeft)
+    intercept[DecodeError](merge(valid, odd))
+    intercept[DecodeError](merge(odd, valid))
+    intercept[DecodeError](merge(valid, typed))
   }
 
-  test("NUMPAT sums each master's pattern count, with checked overflow and malformed passthrough") {
+  test("NUMPAT sums each master's pattern count, with checked overflow and malformed replies rejected") {
     val merge = fold(Pubsub.pubsubNumPat)
-    assertEquals(Reply.run(Pubsub.pubsubNumPat, merge(Frame.Integer(2L), Frame.Integer(3L))), Right(5L))
+    assertEquals(Reply.decode(Pubsub.pubsubNumPat, merge(Frame.Integer(2L), Frame.Integer(3L))).toEither, Right(5L))
     val bad   = Frame.SimpleString("nonsense")
-    assertEquals(merge(Frame.Integer(2L), bad), bad)
-    assertEquals(merge(bad, Frame.Integer(2L)), bad)
+    intercept[DecodeError](merge(Frame.Integer(2L), bad))
+    intercept[DecodeError](merge(bad, Frame.Integer(2L)))
     intercept[ArithmeticException](merge(Frame.Integer(Long.MaxValue), Frame.Integer(1L)))
+  }
+
+  test("an invalidate push whose key list does not decode flushes the cache instead of being ignored") {
+    def decode(keys: Frame) = Invalidation.decode(Vector(bulk("invalidate"), keys))
+    decode(Frame.Array(Vector(bulk("k")))) match {
+      case Some(Invalidation.Evict(keys)) => assertEquals(keys.map(_.asUtf8String), Vector("k"))
+      case other                          => fail(s"expected Evict, got $other")
+    }
+    assertEquals(decode(Frame.Null), Some(Invalidation.FlushAll))
+    assertEquals(decode(Frame.Array(Vector(Frame.Integer(1)))), Some(Invalidation.FlushAll))
+    assertEquals(decode(bulk("k")), Some(Invalidation.FlushAll))
   }
 }

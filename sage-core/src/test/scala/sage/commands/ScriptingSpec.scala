@@ -11,9 +11,9 @@ class ScriptingSpec extends munit.FunSuite with BroadcastFolds {
   private def existsFold: (Frame, Frame) => Frame = fold(Scripting.scriptExists("x"))
 
   test("EVAL returns the raw RESP3 frame untouched") {
-    assertEquals(Reply.run(Scripting.eval("return 1"), Frame.Integer(1L)), Right(Frame.Integer(1L)))
+    assertEquals(Reply.decode(Scripting.eval("return 1"), Frame.Integer(1L)).toEither, Right(Frame.Integer(1L)))
     val nested = Frame.Array(Vector(bulk("a"), Frame.Integer(2L)))
-    assertEquals(Reply.run(Scripting.eval("x", Seq("k")), nested), Right(nested))
+    assertEquals(Reply.decode(Scripting.eval("x", Seq("k")), nested).toEither, Right(nested))
   }
 
   test("EVAL computes numkeys and key indices from the key list") {
@@ -35,11 +35,11 @@ class ScriptingSpec extends munit.FunSuite with BroadcastFolds {
 
   test("SCRIPT EXISTS decodes one flag per sha, in order") {
     val reply = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(0L), Frame.Integer(1L)))
-    assertEquals(Reply.run(Scripting.scriptExists("a", "b", "c"), reply), Right(Vector(true, false, true)))
+    assertEquals(Reply.decode(Scripting.scriptExists("a", "b", "c"), reply).toEither, Right(Vector(true, false, true)))
   }
 
   test("SCRIPT LOAD decodes the sha") {
-    assertEquals(Reply.run(Scripting.scriptLoad("return 1"), bulk("abc123")), Right("abc123"))
+    assertEquals(Reply.decode(Scripting.scriptLoad("return 1"), bulk("abc123")).toEither, Right("abc123"))
   }
 
   test("SCRIPT LOAD, FLUSH and EXISTS are All-Masters Commands; KILL and EVALSHA are not") {
@@ -54,8 +54,9 @@ class ScriptingSpec extends munit.FunSuite with BroadcastFolds {
     assertEquals(existsFold(flags(1L, 1L), flags(1L, 0L)), flags(1L, 0L))
   }
 
-  test("SCRIPT EXISTS surfaces a non-binary flag so the strict decode rejects it rather than coercing to false") {
-    assert(Reply.run(Scripting.scriptExists("a"), existsFold(flags(2L), flags(1L))).isLeft)
+  test("SCRIPT EXISTS rejects a non-binary flag rather than coercing it to false") {
+    intercept[DecodeError](existsFold(flags(2L), flags(1L)))
+    intercept[DecodeError](existsFold(flags(1L), flags(2L)))
   }
 
   test("SCRIPT EXISTS fails a length mismatch across masters rather than hiding the malformed reply") {

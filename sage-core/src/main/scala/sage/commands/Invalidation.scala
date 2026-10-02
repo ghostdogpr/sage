@@ -15,32 +15,14 @@ private[sage] enum Invalidation {
 private[sage] object Invalidation {
 
   /**
-    * Decodes the elements of an invalidation push frame. Returns `None` for malformed frames and other push kinds. A null key list becomes
-    * [[FlushAll]]. Pub/sub push frames are handled separately by [[Pubsub.decode]].
+    * Decodes the elements of an invalidation push frame. Returns `None` for other push kinds. A null or undecodable key list becomes
+    * [[FlushAll]], so no stale entry survives. Pub/sub push frames are handled separately by [[Pubsub.decode]].
     */
   def decode(elements: Vector[Frame]): Option[Invalidation] =
     elements match {
-      case Vector(kind, keys) if isInvalidate(kind) =>
-        keys match {
-          case Frame.Null            => Some(FlushAll)
-          case Frame.Array(elements) =>
-            val builder = Vector.newBuilder[Bytes]
-            val it      = elements.iterator
-            while (it.hasNext)
-              it.next() match {
-                case Frame.BulkString(key) => builder += key
-                case _                     => return None
-              }
-            Some(Evict(builder.result()))
-          case _                     => None
-        }
-      case _                                        => None
+      case Vector(Decode.Text("invalidate"), keys) => Some(evictedKeys(keys).fold(_ => FlushAll, Evict(_)))
+      case _                                       => None
     }
 
-  private def isInvalidate(frame: Frame): Boolean =
-    frame match {
-      case Frame.BulkString(b)   => b.asUtf8String == "invalidate"
-      case Frame.SimpleString(s) => s == "invalidate"
-      case _                     => false
-    }
+  private val evictedKeys = Decode.vector(Decode.bytes)
 }

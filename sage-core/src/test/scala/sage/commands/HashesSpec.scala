@@ -7,31 +7,31 @@ class HashesSpec extends munit.FunSuite {
 
   test("HGETALL decodes a RESP3 map frame into a field-keyed map") {
     val reply = map("f1" -> bulk("v1"), "f2" -> bulk("v2"))
-    assertEquals(Reply.run(Hashes.hGetAll[String, String, String]("h"), reply), Right(Map("f1" -> "v1", "f2" -> "v2")))
-    assertEquals(Reply.run(Hashes.hGetAll[String, String, String]("h"), Frame.Map(Vector.empty)), Right(Map.empty[String, String]))
+    assertEquals(Reply.decode(Hashes.hGetAll[String, String, String]("h"), reply).toEither, Right(Map("f1" -> "v1", "f2" -> "v2")))
+    assertEquals(Reply.decode(Hashes.hGetAll[String, String, String]("h"), Frame.Map(Vector.empty)).toEither, Right(Map.empty[String, String]))
   }
 
   test("HMGET keeps missing fields as None positionally") {
     val reply = Frame.Array(Vector(bulk("v1"), Frame.Null, bulk("v3")))
-    assertEquals(Reply.run(Hashes.hmGet[String, String, String]("h", "a", "b", "c"), reply), Right(Vector(Some("v1"), None, Some("v3"))))
+    assertEquals(Reply.decode(Hashes.hmGet[String, String, String]("h", "a", "b", "c"), reply).toEither, Right(Vector(Some("v1"), None, Some("v3"))))
   }
 
   test("HRANDFIELD decodes null as None and a single field as Some") {
-    assertEquals(Reply.run(Hashes.hRandField[String, String]("h"), Frame.Null), Right(None))
-    assertEquals(Reply.run(Hashes.hRandField[String, String]("h"), bulk("f")), Right(Some("f")))
+    assertEquals(Reply.decode(Hashes.hRandField[String, String]("h"), Frame.Null).toEither, Right(None))
+    assertEquals(Reply.decode(Hashes.hRandField[String, String]("h"), bulk("f")).toEither, Right(Some("f")))
   }
 
   test("HRANDFIELD WITHVALUES decodes the nested field/value pairs") {
     val reply = Frame.Array(Vector(Frame.Array(Vector(bulk("f1"), bulk("v1"))), Frame.Array(Vector(bulk("f2"), bulk("v2")))))
     assertEquals(
-      Reply.run(Hashes.hRandFieldWithValues[String, String, String]("h", 2L), reply),
+      Reply.decode(Hashes.hRandFieldWithValues[String, String, String]("h", 2L), reply).toEither,
       Right(Vector("f1" -> "v1", "f2" -> "v2"))
     )
   }
 
   test("HSCAN decodes the cursor and the flat field/value array into pairs") {
     val reply = Frame.Array(Vector(bulk("12"), Frame.Array(Vector(bulk("f1"), bulk("v1"), bulk("f2"), bulk("v2")))))
-    Reply.run(Hashes.hScan[String, String, String]("h", ScanCursor.start), reply) match {
+    Reply.decode(Hashes.hScan[String, String, String]("h", ScanCursor.start), reply).toEither match {
       case Right(page) =>
         assertEquals(page.items, Vector("f1" -> "v1", "f2" -> "v2"))
         assert(page.next.isDefined)
@@ -41,12 +41,12 @@ class HashesSpec extends munit.FunSuite {
 
   test("HSCAN rejects an odd-length field/value array") {
     val reply = Frame.Array(Vector(bulk("0"), Frame.Array(Vector(bulk("f1"), bulk("v1"), bulk("f2")))))
-    assert(Reply.run(Hashes.hScan[String, String, String]("h", ScanCursor.start), reply).isLeft)
+    assert(Reply.decode(Hashes.hScan[String, String, String]("h", ScanCursor.start), reply).toEither.isLeft)
   }
 
   test("HSCAN NOVALUES decodes a zero cursor as complete and the items as bare fields") {
     val reply = Frame.Array(Vector(bulk("0"), Frame.Array(Vector(bulk("f1"), bulk("f2")))))
-    Reply.run(Hashes.hScanNoValues[String, String]("h", ScanCursor.start), reply) match {
+    Reply.decode(Hashes.hScanNoValues[String, String]("h", ScanCursor.start), reply).toEither match {
       case Right(page) =>
         assertEquals(page.items, Vector("f1", "f2"))
         assertEquals(page.next, None)
@@ -55,8 +55,8 @@ class HashesSpec extends munit.FunSuite {
   }
 
   test("HINCRBYFLOAT decodes the bulk-string double") {
-    assertEquals(Reply.run(Hashes.hIncrByFloat("h", "f", 1.5), bulk("10.75")), Right(10.75))
-    assert(Reply.run(Hashes.hIncrByFloat("h", "f", 1.5), bulk("not-a-number")).isLeft)
+    assertEquals(Reply.decode(Hashes.hIncrByFloat("h", "f", 1.5), bulk("10.75")).toEither, Right(10.75))
+    assert(Reply.decode(Hashes.hIncrByFloat("h", "f", 1.5), bulk("not-a-number")).toEither.isLeft)
   }
 
   test("every hash command routes on the hash key alone") {

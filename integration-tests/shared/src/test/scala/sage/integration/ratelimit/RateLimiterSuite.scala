@@ -100,10 +100,10 @@ abstract class RateLimiterSuite(image: String) extends ServerSuite(image) {
       val rl = RateLimiter[String](limit(2))
       for {
         loaded <- client.scriptLoad(RateLimiter.script)
-        first  <- client.run(rl.evalSha("es", 1))
-        second <- client.run(rl.evalSha("es", 1))
+        first  <- client.run(rl.eval(cached = true, "es", 1, peek = false))
+        second <- client.run(rl.eval(cached = true, "es", 1, peek = false))
       } yield {
-        assertEquals(loaded, RateLimiter.sha)
+        assertEquals(loaded, RateLimiter.compiled.sha)
         assert(first.isAllowed && first.remainingTokens == 1L)
         assert(second.isAllowed && second.remainingTokens == 0L)
       }

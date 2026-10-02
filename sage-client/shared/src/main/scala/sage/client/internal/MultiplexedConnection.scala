@@ -363,7 +363,7 @@ final private[client] class MultiplexedConnection private (
           case ClientCache.Acquire.Fetch             =>
             if (events.emitsEvents) events.emit(SageEvent.Cache.Miss(command.name))
             traced(command, deferred) { settle =>
-              val raw                         = Command[Frame](command.name, command.keyIndices, command.args, frame => Right(frame))
+              val raw                         = command.rawFrame
               val onReply: Try[Frame] => Unit = { result =>
                 result match {
                   case Success(frame) => cache.store(commandBytes, keys, frame, scheduler.nowMillis, ttlMillis)

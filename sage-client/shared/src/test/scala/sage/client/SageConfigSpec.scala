@@ -17,6 +17,15 @@ class SageConfigSpec extends munit.FunSuite {
     assertEquals(parsed("redis://h").tls, None)
   }
 
+  test("the scheme is case-insensitive under any default locale, so REDIS and REDISS parse with a Turkish locale") {
+    val previous = java.util.Locale.getDefault
+    java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+    try {
+      assertEquals(parsed("REDIS://h").tls, None)
+      assertEquals(parsed("REDISS://h").tls, Some(TlsConfig(TrustSource.System)))
+    } finally java.util.Locale.setDefault(previous)
+  }
+
   test("userinfo becomes auth, with the default user when only a password is given") {
     assertEquals(parsed("redis://alice:secret@h").auth, Some(AuthConfig("secret", "alice")))
     assertEquals(parsed("redis://:secret@h").auth, Some(AuthConfig("secret", "default")))

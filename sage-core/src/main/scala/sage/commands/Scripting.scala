@@ -3,6 +3,7 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.KeyArgs.ScriptVerb
 import sage.protocol.Frame
 
 /**
@@ -19,65 +20,47 @@ private[sage] object Scripting {
   private val Kill   = Bytes.utf8("KILL")
   private val Show   = Bytes.utf8("SHOW")
 
-  def eval(script: String): Command[Frame] = evalCommand("EVAL", script, Vector.empty, Vector.empty, readOnly = false)
+  def eval(script: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.Eval, script, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def eval[K](script: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    evalCommand("EVAL", script, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = false)
+  def eval[K](script: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.Eval, script, keys, Seq.empty[Bytes])
 
-  def eval[K, V](script: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    evalCommand("EVAL", script, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = false)
+  def eval[K, V](script: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.Eval, script, keys, args)
 
-  def evalRo(script: String): Command[Frame] = evalCommand("EVAL_RO", script, Vector.empty, Vector.empty, readOnly = true)
+  def evalRo(script: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.EvalRo, script, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def evalRo[K](script: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    evalCommand("EVAL_RO", script, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = true)
+  def evalRo[K](script: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalRo, script, keys, Seq.empty[Bytes])
 
-  def evalRo[K, V](script: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    evalCommand("EVAL_RO", script, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = true)
+  def evalRo[K, V](script: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalRo, script, keys, args)
 
-  def evalSha(sha: String): Command[Frame] = evalCommand("EVALSHA", sha, Vector.empty, Vector.empty, readOnly = false)
+  def evalSha(sha: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.EvalSha, sha, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def evalSha[K](sha: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    evalCommand("EVALSHA", sha, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = false)
+  def evalSha[K](sha: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalSha, sha, keys, Seq.empty[Bytes])
 
-  def evalSha[K, V](sha: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    evalCommand("EVALSHA", sha, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = false)
+  def evalSha[K, V](sha: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalSha, sha, keys, args)
 
-  def evalShaRo(sha: String): Command[Frame] = evalCommand("EVALSHA_RO", sha, Vector.empty, Vector.empty, readOnly = true)
+  def evalShaRo(sha: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.EvalShaRo, sha, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def evalShaRo[K](sha: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    evalCommand("EVALSHA_RO", sha, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = true)
+  def evalShaRo[K](sha: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalShaRo, sha, keys, Seq.empty[Bytes])
 
-  def evalShaRo[K, V](sha: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    evalCommand("EVALSHA_RO", sha, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = true)
-
-  private def evalCommand(name: String, script: String, keys: Vector[Bytes], args: Vector[Bytes], readOnly: Boolean): Command[Frame] = {
-    val allArgs    = (Bytes.utf8(script) +: Bytes.utf8(keys.length.toString) +: keys) ++ args
-    val keyIndices = Vector.range(2, 2 + keys.length)
-    Command(name, keyIndices, allArgs, Decode.frame, Execution.Ordinary, isReadOnly = readOnly, cacheable = false)
-  }
+  def evalShaRo[K, V](sha: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.EvalShaRo, sha, keys, args)
 
   def scriptLoad(script: String): Command[String] =
     Command("SCRIPT", Command.NoKeys, Vector(Load, Bytes.utf8(script)), Decode.utf8String, allMasters = true)
 
-  private def isFlag(n: Long): Boolean = n == 0L || n == 1L
+  private val existsFlags = Decode.vector(Decode.flag)
 
-  private def flagFrame(f: Frame): Boolean = f match {
-    case Frame.Integer(n) => isFlag(n)
-    case _                => false
-  }
-
-  private def andFlag(a: Frame, b: Frame): Frame =
-    (a, b) match {
-      case (Frame.Integer(x), Frame.Integer(y)) if isFlag(x) && isFlag(y) => Frame.Integer(if (x == 1L && y == 1L) 1L else 0L)
-      case (bad, _) if !flagFrame(bad)                                    => bad
-      case (_, bad)                                                       => bad
-    }
-
-  private val existsAnd: (Frame, Frame) => Frame = (a, b) =>
-    (a, b) match {
-      case (Frame.Array(xs), Frame.Array(ys)) if xs.length == ys.length => Frame.Array(xs.lazyZip(ys).map(andFlag))
-      case _                                                            => throw DecodeError("SCRIPT EXISTS per-master flag arrays of equal length", s"${Frame.describe(a)} vs ${Frame.describe(b)}")
+  private val existsAnd =
+    Merge.typed[Vector[Boolean]](existsFlags, flags => Frame.Array(flags.map(f => Frame.Integer(if (f) 1L else 0L)))) { (xs, ys) =>
+      if (xs.length == ys.length) xs.lazyZip(ys).map(_ && _)
+      else throw DecodeError("SCRIPT EXISTS per-master flag arrays of equal length", s"${xs.length} and ${ys.length} flags")
     }
 
   def scriptExists(first: String, rest: String*): Command[Vector[Boolean]] =
@@ -85,7 +68,7 @@ private[sage] object Scripting {
       "SCRIPT",
       Command.NoKeys,
       Exists +: (first +: rest).iterator.map(Bytes.utf8).toVector,
-      Decode.vector(Decode.flag),
+      existsFlags,
       allMasters = true,
       broadcast = BroadcastReduce.Fold(existsAnd)
     )
@@ -98,4 +81,27 @@ private[sage] object Scripting {
   // Valkey-only: returns the source of a script previously loaded by its SHA
   def scriptShow(sha: String): Command[String] =
     Command("SCRIPT", Command.NoKeys, Vector(Show, Bytes.utf8(sha)), Decode.utf8String)
+}
+
+// a Lua script that declares exactly one key, sent by digest (EVALSHA) or by body (EVAL)
+final private[sage] class SingleKeyScript(source: String) {
+  private val body   = Bytes.utf8(source)
+  val sha: String    = java.security.MessageDigest.getInstance("SHA-1").digest(body.toArray).iterator.map(b => f"${b & 0xff}%02x").mkString
+  private val digest = Bytes.utf8(sha)
+
+  def verb(cached: Boolean): String     = if (cached) "EVALSHA" else "EVAL"
+  def reference(cached: Boolean): Bytes = if (cached) digest else body
+}
+
+private[sage] object SingleKeyScript {
+  // the arguments are the script reference, numkeys = 1, the key, then ARGV
+  val NumKeys: Bytes          = Bytes.utf8("1")
+  val KeyIndices: Vector[Int] = Vector(2)
+
+  // length framing distinguishes namespace `a` with key `b:c` from namespace `a:b` with key `c`
+  def namespaced(namespace: String): Bytes => Bytes = {
+    val ns     = Bytes.utf8(namespace)
+    val prefix = Bytes.concat(Vector(Bytes.utf8(s"${ns.length}:"), ns, Bytes.utf8(":")))
+    key => Bytes.concat(Vector(prefix, key))
+  }
 }

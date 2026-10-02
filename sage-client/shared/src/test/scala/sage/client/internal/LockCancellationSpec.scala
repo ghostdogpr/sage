@@ -120,8 +120,7 @@ final class LockTestClient(runner: CommandRunner[CIO, String]) extends Client[CI
 
   def run[A](command: Command[A]): CIO[A]                                                                                        = runner.run(command)
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A]                                                                = unsupported
-  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]                                                              = unsupported
-  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R]                                                         = unsupported
+  private[sage] def pipeline[R](p: Pipeline[R]): CIO[R]                                                                          = unsupported
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A]                                                      = unsupported
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]]                       = unsupported
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]]                = unsupported

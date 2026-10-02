@@ -4,25 +4,27 @@ import java.time.Instant
 
 import scala.concurrent.duration.*
 
+import sage.Bytes
+import sage.SageException.DecodeError
 import sage.protocol.Frame
 import sage.protocol.Frames.bulk
 
 class KeysSpec extends munit.FunSuite {
 
   test("TTL and PTTL decode the sentinels and a remaining duration in their unit") {
-    assertEquals(Reply.run(Keys.ttl("k"), Frame.Integer(-2)), Right(Ttl.NoKey))
-    assertEquals(Reply.run(Keys.ttl("k"), Frame.Integer(-1)), Right(Ttl.NoExpiry))
-    assertEquals(Reply.run(Keys.ttl("k"), Frame.Integer(42)), Right(Ttl.Expires(42.seconds)))
-    assertEquals(Reply.run(Keys.pTtl("k"), Frame.Integer(42)), Right(Ttl.Expires(42.millis)))
-    assert(Reply.run(Keys.ttl("k"), Frame.Integer(-3)).isLeft)
+    assertEquals(Reply.decode(Keys.ttl("k"), Frame.Integer(-2)).toEither, Right(Ttl.NoKey))
+    assertEquals(Reply.decode(Keys.ttl("k"), Frame.Integer(-1)).toEither, Right(Ttl.NoExpiry))
+    assertEquals(Reply.decode(Keys.ttl("k"), Frame.Integer(42)).toEither, Right(Ttl.Expires(42.seconds)))
+    assertEquals(Reply.decode(Keys.pTtl("k"), Frame.Integer(42)).toEither, Right(Ttl.Expires(42.millis)))
+    assert(Reply.decode(Keys.ttl("k"), Frame.Integer(-3)).toEither.isLeft)
   }
 
   test("EXPIRETIME and PEXPIRETIME decode the sentinels and an absolute timestamp in their unit") {
-    assertEquals(Reply.run(Keys.expireTime("k"), Frame.Integer(-2)), Right(ExpiryTime.NoKey))
-    assertEquals(Reply.run(Keys.expireTime("k"), Frame.Integer(-1)), Right(ExpiryTime.NoExpiry))
-    assertEquals(Reply.run(Keys.expireTime("k"), Frame.Integer(2000000000L)), Right(ExpiryTime.At(Instant.ofEpochSecond(2000000000L))))
+    assertEquals(Reply.decode(Keys.expireTime("k"), Frame.Integer(-2)).toEither, Right(ExpiryTime.NoKey))
+    assertEquals(Reply.decode(Keys.expireTime("k"), Frame.Integer(-1)).toEither, Right(ExpiryTime.NoExpiry))
+    assertEquals(Reply.decode(Keys.expireTime("k"), Frame.Integer(2000000000L)).toEither, Right(ExpiryTime.At(Instant.ofEpochSecond(2000000000L))))
     assertEquals(
-      Reply.run(Keys.pExpireTime("k"), Frame.Integer(2000000000123L)),
+      Reply.decode(Keys.pExpireTime("k"), Frame.Integer(2000000000123L)).toEither,
       Right(ExpiryTime.At(Instant.ofEpochMilli(2000000000123L)))
     )
   }
@@ -37,10 +39,10 @@ class KeysSpec extends munit.FunSuite {
       "stream" -> RedisType.Stream
     )
     expected.foreach { case (wire, tpe) =>
-      assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString(wire)), Right(Some(tpe)))
+      assertEquals(Reply.decode(Keys.typeOf("k"), Frame.SimpleString(wire)).toEither, Right(Some(tpe)))
     }
-    assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString("none")), Right(None))
-    assertEquals(Reply.run(Keys.typeOf("k"), Frame.SimpleString("ReJSON-RL")), Right(Some(RedisType.Other("ReJSON-RL"))))
+    assertEquals(Reply.decode(Keys.typeOf("k"), Frame.SimpleString("none")).toEither, Right(None))
+    assertEquals(Reply.decode(Keys.typeOf("k"), Frame.SimpleString("ReJSON-RL")).toEither, Right(Some(RedisType.Other("ReJSON-RL"))))
   }
 
   test("SCAN decodes a mid-iteration page with a next cursor") {
@@ -50,7 +52,7 @@ class KeysSpec extends munit.FunSuite {
         Frame.Array(Vector(bulk("a"), bulk("b")))
       )
     )
-    Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
+    Reply.decode(Keys.scan[String](ScanCursor.start), reply).toEither match {
       case Right(page) =>
         assertEquals(page.items, Vector("a", "b"))
         assert(page.next.isDefined)
@@ -60,7 +62,7 @@ class KeysSpec extends munit.FunSuite {
 
   test("SCAN decodes a zero cursor as iteration complete, even with keys in the page") {
     val reply = Frame.Array(Vector(bulk("0"), Frame.Array(Vector(bulk("last")))))
-    Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
+    Reply.decode(Keys.scan[String](ScanCursor.start), reply).toEither match {
       case Right(page) =>
         assertEquals(page.items, Vector("last"))
         assertEquals(page.next, None)
@@ -70,7 +72,7 @@ class KeysSpec extends munit.FunSuite {
 
   test("a returned cursor feeds the next SCAN call") {
     val reply = Frame.Array(Vector(bulk("17"), Frame.Array(Vector.empty)))
-    Reply.run(Keys.scan[String](ScanCursor.start), reply) match {
+    Reply.decode(Keys.scan[String](ScanCursor.start), reply).toEither match {
       case Right(ScanPage(_, Some(next))) =>
         assertEquals(Keys.scan[String](next).args.head.asUtf8String, "17")
       case other                          => fail(s"expected a next cursor, got $other")
@@ -78,13 +80,13 @@ class KeysSpec extends munit.FunSuite {
   }
 
   test("SCAN rejects a malformed reply shape") {
-    assert(Reply.run(Keys.scan[String](ScanCursor.start), Frame.Array(Vector(Frame.Integer(0)))).isLeft)
-    assert(Reply.run(Keys.scan[String](ScanCursor.start), Frame.Integer(0)).isLeft)
+    assert(Reply.decode(Keys.scan[String](ScanCursor.start), Frame.Array(Vector(Frame.Integer(0)))).toEither.isLeft)
+    assert(Reply.decode(Keys.scan[String](ScanCursor.start), Frame.Integer(0)).toEither.isLeft)
   }
 
   test("RANDOMKEY decodes null as None on an empty database") {
-    assertEquals(Reply.run(Keys.randomKey[String], Frame.Null), Right(None))
-    assertEquals(Reply.run(Keys.randomKey[String], bulk("k")), Right(Some("k")))
+    assertEquals(Reply.decode(Keys.randomKey[String], Frame.Null).toEither, Right(None))
+    assertEquals(Reply.decode(Keys.randomKey[String], bulk("k")).toEither, Right(Some("k")))
   }
 
   test("multi-key commands mark every position for the slot engine") {
@@ -106,6 +108,12 @@ class KeysSpec extends munit.FunSuite {
     assertEquals(command.rawFrame.broadcast, BroadcastReduce.Concat)
   }
 
+  test("KEYS concatenates per-master key arrays and rejects a master reply that is not an array instead of reporting it as a key") {
+    val keys = Keys.keys[String]("*")
+    assertEquals(keys.reduceReplies(Frame.Array(Vector(bulk("a"))), Vector(Frame.Set(Vector(bulk("b"))))), Frame.Array(Vector(bulk("a"), bulk("b"))))
+    intercept[DecodeError](keys.reduceReplies(Frame.Array(Vector(bulk("a"))), Vector(bulk("b"))))
+  }
+
   test("expire picks the wire command from the duration's precision") {
     assertEquals(Keys.expire("k", 90.seconds).name, "EXPIRE")
     assertEquals(Keys.expire("k", 90500.millis).name, "PEXPIRE")
@@ -119,6 +127,12 @@ class KeysSpec extends munit.FunSuite {
     assertEquals(Strings.set("k", "v", expiry = SetExpiry.In(500.micros)).args.last.asUtf8String, "1")
     assertEquals(Strings.getEx[String, String]("k", GetExpiry.In(500.micros)).args.last.asUtf8String, "1")
     assertEquals(Keys.expireAt("k", Instant.ofEpochSecond(2000000000L, 1)).args(1).asUtf8String, "2000000000001")
+  }
+
+  test("RESTORE expiries and the MIGRATE timeout never encode the wire value 0, which means no expiry or the default timeout") {
+    assertEquals(Keys.restore("k", Bytes.utf8("p"), RestoreExpiry.In(Duration.Zero)).args(1).asUtf8String, "1")
+    assertEquals(Keys.restore("k", Bytes.utf8("p"), RestoreExpiry.At(Instant.EPOCH)).args(1).asUtf8String, "1")
+    assertEquals(Keys.migrate("h", 6380, 0, 500.micros)("k").args(4).asUtf8String, "1")
   }
 
   test("an extreme instant saturates instead of throwing while building the command") {

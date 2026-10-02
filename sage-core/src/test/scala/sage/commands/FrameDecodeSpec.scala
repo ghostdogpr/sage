@@ -23,6 +23,8 @@ class FrameDecodeSpec extends munit.FunSuite {
     val array = Frame.Array(Vector(Frame.BulkString(Bytes.utf8("1")), Frame.BulkString(Bytes.utf8("2"))))
     assertEquals(array.asArray.map(_.length), Right(2))
     assertEquals(array.asArrayOf[Int], Right(Vector(1, 2)))
+    assertEquals(Frame.Set(array.elements).asArrayOf[Int], Right(Vector(1, 2)))
+    assertEquals(Frame.Push(array.elements).asArrayOf[Int], Right(Vector(1, 2)))
     assertEquals(Frame.Integer(1).asArray, Left(DecodeError("array", "integer 1")))
   }
 }

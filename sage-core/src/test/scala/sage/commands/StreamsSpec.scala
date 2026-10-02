@@ -12,15 +12,33 @@ class StreamsSpec extends munit.FunSuite {
   private def entry(id: String, fields: String*): Frame = Frame.Array(Vector(bulk(id), Frame.Array(fields.toVector.map(bulk))))
 
   test("XADD decodes the generated id; NOMKSTREAM decodes null as None") {
-    assertEquals(Reply.run(Streams.xAdd("k")(("f", "v")), bulk("1526919030474-55")), Right(StreamId(1526919030474L, 55L)))
-    assertEquals(Reply.run(Streams.xAddNoMkStream("k")(("f", "v")), Frame.Null), Right(None))
-    assertEquals(Reply.run(Streams.xAddNoMkStream("k")(("f", "v")), bulk("5-0")), Right(Some(StreamId(5L, 0L))))
+    assertEquals(Reply.decode(Streams.xAdd("k")(("f", "v")), bulk("1526919030474-55")).toEither, Right(StreamId(1526919030474L, 55L)))
+    assertEquals(Reply.decode(Streams.xAddNoMkStream("k")(("f", "v")), Frame.Null).toEither, Right(None))
+    assertEquals(Reply.decode(Streams.xAddNoMkStream("k")(("f", "v")), bulk("5-0")).toEither, Right(Some(StreamId(5L, 0L))))
+  }
+
+  test("stream ids are unsigned 64-bit numbers when decoded and encoded") {
+    val max = StreamId(-1L, -1L)
+    assertEquals(Reply.decode(Streams.xAdd("k")(("f", "v")), bulk("18446744073709551615-18446744073709551615")).toEither, Right(max))
+    assertEquals(Streams.xDel("k")(max).args(1).asUtf8String, "18446744073709551615-18446744073709551615")
+    assertEquals(
+      Streams.xRange[String, String, String]("k", StreamRangeId.Exclusive(max)).args(1).asUtf8String,
+      "(18446744073709551615-18446744073709551615"
+    )
+    assertEquals(Streams.xAdd("k", XAddId.AutoSeq(-1L))(("f", "v")).args.map(_.asUtf8String).contains("18446744073709551615-*"), true)
+  }
+
+  test("XCFGSET rounds IDMP-DURATION up to whole seconds so ids are kept at least as long as requested") {
+    def wire(duration: FiniteDuration) = Streams.xCfgSet("s", idmpDuration = Some(duration)).args(2).asUtf8String
+    assertEquals(wire(FiniteDuration(500, TimeUnit.MILLISECONDS)), "1")
+    assertEquals(wire(FiniteDuration(1500, TimeUnit.MILLISECONDS)), "2")
+    assertEquals(wire(FiniteDuration(3, TimeUnit.SECONDS)), "3")
   }
 
   test("XRANGE decodes entries, preserving field order") {
     val reply = Frame.Array(Vector(entry("1-0", "a", "1", "b", "2"), entry("2-0", "c", "3")))
     assertEquals(
-      Reply.run(Streams.xRange[String, String, String]("k"), reply),
+      Reply.decode(Streams.xRange[String, String, String]("k"), reply).toEither,
       Right(Vector(StreamEntry(StreamId(1L, 0L), Vector("a" -> "1", "b" -> "2")), StreamEntry(StreamId(2L, 0L), Vector("c" -> "3"))))
     )
   }
@@ -28,16 +46,16 @@ class StreamsSpec extends munit.FunSuite {
   test("XREAD decodes a RESP3 map of stream -> entries, and null/timeout as an empty vector") {
     val reply = map("s1" -> Frame.Array(Vector(entry("1-0", "f", "v"))))
     assertEquals(
-      Reply.run(Streams.xRead[String, String, String](("s1", ReadId.New))(), reply),
+      Reply.decode(Streams.xRead[String, String, String](("s1", ReadId.New))(), reply).toEither,
       Right(Vector("s1" -> Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v")))))
     )
-    assertEquals(Reply.run(Streams.xRead[String, String, String](("s1", ReadId.New))(), Frame.Null), Right(Vector.empty))
+    assertEquals(Reply.decode(Streams.xRead[String, String, String](("s1", ReadId.New))(), Frame.Null).toEither, Right(Vector.empty))
   }
 
   test("XREAD also accepts the RESP2 array-of-pairs shape") {
     val reply = Frame.Array(Vector(Frame.Array(Vector(bulk("s1"), Frame.Array(Vector(entry("1-0", "f", "v")))))))
     assertEquals(
-      Reply.run(Streams.xRead[String, String, String](("s1", ReadId.New))(), reply),
+      Reply.decode(Streams.xRead[String, String, String](("s1", ReadId.New))(), reply).toEither,
       Right(Vector("s1" -> Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v")))))
     )
   }
@@ -45,12 +63,12 @@ class StreamsSpec extends munit.FunSuite {
   test("XAUTOCLAIM decodes the cursor/entries/deleted triple and the pre-7.0 two-element form") {
     val three = Frame.Array(Vector(bulk("5-0"), Frame.Array(Vector(entry("1-0", "f", "v"))), Frame.Array(Vector(bulk("2-0")))))
     assertEquals(
-      Reply.run(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), three),
+      Reply.decode(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), three).toEither,
       Right(XAutoClaimResult(StreamId(5L, 0L), Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v"))), Vector(StreamId(2L, 0L))))
     )
     val two   = Frame.Array(Vector(bulk("0-0"), Frame.Array(Vector(entry("1-0", "f", "v")))))
     assertEquals(
-      Reply.run(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), two),
+      Reply.decode(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), two).toEither,
       Right(XAutoClaimResult(StreamId(0L, 0L), Vector(StreamEntry(StreamId(1L, 0L), Vector("f" -> "v"))), Vector.empty))
     )
   }
@@ -58,7 +76,7 @@ class StreamsSpec extends munit.FunSuite {
   test("XAUTOCLAIM tolerates a tombstone entry [id, nil] as an entry with no fields") {
     val reply = Frame.Array(Vector(bulk("0-0"), Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), Frame.Null)))), Frame.Array(Vector.empty)))
     assertEquals(
-      Reply.run(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), reply),
+      Reply.decode(Streams.xAutoClaim[String, String, String]("k", "g", "c", FiniteDuration(1, TimeUnit.SECONDS)), reply).toEither,
       Right(XAutoClaimResult(StreamId(0L, 0L), Vector(StreamEntry(StreamId(1L, 0L), Vector.empty)), Vector.empty))
     )
   }
@@ -73,17 +91,17 @@ class StreamsSpec extends munit.FunSuite {
       )
     )
     assertEquals(
-      Reply.run(Streams.xPending("k", "g"), populated),
+      Reply.decode(Streams.xPending("k", "g"), populated).toEither,
       Right(PendingSummary(2L, Some(StreamId(1L, 0L)), Some(StreamId(9L, 0L)), Vector("c1" -> 1L, "c2" -> 1L)))
     )
     val empty     = Frame.Array(Vector(Frame.Integer(0L), Frame.Null, Frame.Null, Frame.Null))
-    assertEquals(Reply.run(Streams.xPending("k", "g"), empty), Right(PendingSummary(0L, None, None, Vector.empty)))
+    assertEquals(Reply.decode(Streams.xPending("k", "g"), empty).toEither, Right(PendingSummary(0L, None, None, Vector.empty)))
   }
 
   test("XPENDING extended decodes a row with its idle time and delivery count") {
     val reply = Frame.Array(Vector(Frame.Array(Vector(bulk("1-0"), bulk("c1"), Frame.Integer(5000L), Frame.Integer(3L)))))
     assertEquals(
-      Reply.run(Streams.xPendingExtended("k", "g"), reply),
+      Reply.decode(Streams.xPendingExtended("k", "g"), reply).toEither,
       Right(Vector(PendingEntry(StreamId(1L, 0L), "c1", FiniteDuration(5000L, TimeUnit.MILLISECONDS), 3L)))
     )
   }
@@ -91,7 +109,7 @@ class StreamsSpec extends munit.FunSuite {
   test("XDELEX decodes the per-id deletion status") {
     val reply = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(-1L), Frame.Integer(2L)))
     assertEquals(
-      Reply.run(Streams.xDelEx("k")(StreamId(1L, 0L), StreamId(2L, 0L), StreamId(3L, 0L)), reply),
+      Reply.decode(Streams.xDelEx("k")(StreamId(1L, 0L), StreamId(2L, 0L), StreamId(3L, 0L)), reply).toEither,
       Right(Vector(StreamEntryDeletion.Deleted, StreamEntryDeletion.NotFound, StreamEntryDeletion.Retained))
     )
   }
@@ -109,7 +127,7 @@ class StreamsSpec extends munit.FunSuite {
       "first-entry"             -> entry("1-0", "f", "v"),
       "last-entry"              -> entry("5-0", "g", "w")
     )
-    val info    = Reply.run(StreamInfo.xInfoStream[String, String, String]("k"), withNew).toOption.get
+    val info    = Reply.decode(StreamInfo.xInfoStream[String, String, String]("k"), withNew).toEither.toOption.get
     assertEquals(info.length, 2L)
     assertEquals(info.entriesAdded, Some(7L))
     assertEquals(info.maxDeletedEntryId, Some(StreamId(3L, 0L)))
@@ -124,7 +142,7 @@ class StreamsSpec extends munit.FunSuite {
       "first-entry"       -> Frame.Null,
       "last-entry"        -> Frame.Null
     )
-    val old    = Reply.run(StreamInfo.xInfoStream[String, String, String]("k"), legacy).toOption.get
+    val old    = Reply.decode(StreamInfo.xInfoStream[String, String, String]("k"), legacy).toEither.toOption.get
     assertEquals(old.entriesAdded, None)
     assertEquals(old.maxDeletedEntryId, None)
     assertEquals(old.firstEntry, None)
@@ -144,7 +162,7 @@ class StreamsSpec extends munit.FunSuite {
       )
     )
     assertEquals(
-      Reply.run(StreamInfo.xInfoGroups("k"), reply),
+      Reply.decode(StreamInfo.xInfoGroups("k"), reply).toEither,
       Right(Vector(GroupInfo("g1", 2L, 3L, StreamId(5L, 0L), Some(5L), None)))
     )
   }
@@ -168,7 +186,7 @@ class StreamsSpec extends munit.FunSuite {
       "entries"           -> Frame.Array(Vector(entry("1-0", "f", "v"))),
       "groups"            -> Frame.Array(Vector(group))
     )
-    val full        = Reply.run(StreamInfo.xInfoStreamFull[String, String, String]("k"), reply).toOption.get
+    val full        = Reply.decode(StreamInfo.xInfoStreamFull[String, String, String]("k"), reply).toEither.toOption.get
     assertEquals(full.entries.map(_.id), Vector(StreamId(1L, 0L)))
     val g           = full.groups.head
     assertEquals(g.pending, Vector(FullPendingEntry(StreamId(1L, 0L), Some("c1"), java.time.Instant.ofEpochMilli(1000L), 2L)))

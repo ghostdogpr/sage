@@ -10,7 +10,7 @@ import scala.util.control.NonFatal
 import kyo.compat.*
 
 import sage.{CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
-import sage.SageException.{ConnectionFailed, ConnectionLost, InvalidArgument, NotConnected, TimedOut}
+import sage.SageException.{ConnectionFailed, ConnectionLost, NotConnected, TimedOut}
 import sage.client.{MasterReplicaConfig, ReadFrom, SageConfig}
 import sage.cluster.Node
 import sage.codec.ValueCodec
@@ -36,7 +36,7 @@ final private[client] class MasterReplicaLive(
   seeds: Vector[Node],
   masterReplica: MasterReplicaConfig,
   events: Events = Events.disabled
-) extends Client[CIO, String] {
+) extends LivePipelines {
 
   private val readFrom       = config.readFrom
   private val cachingEnabled = config.clientCache.enabled
@@ -398,70 +398,63 @@ final private[client] class MasterReplicaLive(
 
   // --- pipelines -----------------------------------------------------------------------------------------------------------------------
 
-  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out]      = submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
-  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] = submitPipeline(p).map(p.toResults)
-
-  private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
-    if (p.commands.isEmpty) CIO.value(Vector.empty)
-    else if (p.commands.exists(_.isBlocking))
-      CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
-    else
-      CIO.async { complete =>
-        val spans           = Events.startSpans(events, p.commands)
-        // route the whole pipeline to a replica only when every command is eligible. Otherwise, route the whole pipeline to the master.
-        val useReplica      = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-        val master          = masterNodeRef.get()
-        val refreshOnUnsent = () => triggerRefresh()
-        if (useReplica) {
-          val batch                                              = new Client.TrackedBatch(events, p.commands, spans, complete)
-          def failUnsent(): Unit                                 =
-            // without a submission, a connection error cannot trigger role discovery. Refresh roles before failing the batch.
-            batch.failUnsent(refreshOnUnsent)
-          def submitOn(picked: Option[ReadRouting.Picked]): Unit =
-            picked match {
-              case Some(ReadRouting.Picked(node, nc, rest)) =>
-                val route     = ReadRoute(node, master, rest)
-                val attempt   = new TxSupport.IndexedCollector[Try[Any]](
-                  p.commands.length,
-                  results =>
-                    handleReadFaults(route, results.collect { case Failure(error) => error }, RetryExecution.Offloaded)(
-                      remaining => reads.pickOne(remaining, master)(submitOn),
-                      () => batch.settleAll(node, results)
-                    )
-                )
-                val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => attempt.set(i, result))
-                // the selected connection died before reserving the batch; retry the whole batch on the remaining candidates
-                if (!nc.submitAll(p.commands, callbacks))
-                  if (rest.nonEmpty) reads.pickOne(rest, master)(submitOn)
-                  else failUnsent()
-              case None                                     => failUnsent()
-            }
-          reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
-        } else {
-          def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
-            val submit = picked match {
-              case Some((_, nc)) => nc.submitAll
-              case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
-            }
-            Client.submitBatchOnOne(
-              events,
-              p.commands,
-              spans,
-              submit,
-              complete,
-              onUnsent = refreshOnUnsent,
-              node = picked.map(_._1)
-            )
+  protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
+    CIO.async { complete =>
+      val spans           = Events.startSpans(events, p.commands)
+      // route the whole pipeline to a replica only when every command is eligible. Otherwise, route the whole pipeline to the master.
+      val useReplica      = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
+      val master          = masterNodeRef.get()
+      val refreshOnUnsent = () => triggerRefresh()
+      if (useReplica) {
+        val batch                                              = new Client.TrackedBatch(events, p.commands, spans, complete)
+        def failUnsent(): Unit                                 =
+          // without a submission, a connection error cannot trigger role discovery. Refresh roles before failing the batch.
+          batch.failUnsent(refreshOnUnsent)
+        def submitOn(picked: Option[ReadRouting.Picked]): Unit =
+          picked match {
+            case Some(ReadRouting.Picked(node, nc, rest)) =>
+              val route     = ReadRoute(node, master, rest)
+              val attempt   = new TxSupport.IndexedCollector[Try[Any]](
+                p.commands.length,
+                results =>
+                  handleReadFaults(route, results.collect { case Failure(error) => error }, RetryExecution.Offloaded)(
+                    remaining => reads.pickOne(remaining, master)(submitOn),
+                    () => batch.settleAll(node, results)
+                  )
+              )
+              val callbacks = Vector.tabulate(p.commands.length)(i => (result: Try[Any]) => attempt.set(i, result))
+              // the selected connection died before reserving the batch; retry the whole batch on the remaining candidates
+              if (!nc.submitAll(p.commands, callbacks))
+                if (rest.nonEmpty) reads.pickOne(rest, master)(submitOn)
+                else failUnsent()
+            case None                                     => failUnsent()
           }
-          val existing                                           = masterPool.existing(master)
-          if (existing != null) submitOn(Some((master, existing)))
-          else
-            scheduler.offload {
-              val nc = masterPool.getOrEstablishOrNull(master)
-              submitOn(Option(nc).map(master -> _))
-            }
+        reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
+      } else {
+        def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
+          val submit = picked match {
+            case Some((_, nc)) => nc.submitAll
+            case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
+          }
+          Client.submitBatchOnOne(
+            events,
+            p.commands,
+            spans,
+            submit,
+            complete,
+            onUnsent = refreshOnUnsent,
+            node = picked.map(_._1)
+          )
         }
+        val existing                                           = masterPool.existing(master)
+        if (existing != null) submitOn(Some((master, existing)))
+        else
+          scheduler.offload {
+            val nc = masterPool.getOrEstablishOrNull(master)
+            submitOn(Option(nc).map(master -> _))
+          }
       }
+    }
 
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
 

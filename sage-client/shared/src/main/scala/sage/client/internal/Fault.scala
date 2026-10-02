@@ -42,17 +42,20 @@ private[client] object Fault {
 
   def categorize(error: Throwable): Fault =
     error match {
-      case e: ServerError           =>
-        Redirect.parse(e.getMessage) match {
-          case Some(redirect)                                        => Fault.Redirected(redirect)
-          case None if e.code == "READONLY"                          => Fault.Demoted
-          case None if e.code == "TRYAGAIN"                          => Fault.TryAgain
-          case None if e.code == "CLUSTERDOWN"                       => Fault.Unavailable(clusterWide = true)
-          case None if e.code == "LOADING" || e.code == "MASTERDOWN" => Fault.Unavailable(clusterWide = false)
-          case None                                                  => Fault.Fatal
-        }
-      case NotConnected()           => Fault.Lost(mayHaveExecuted = false)
-      case ConnectionLost(executed) => Fault.Lost(executed)
-      case _                        => Fault.Fatal
+      case ServerError("MOVED", detail)             => redirected(RedirectKind.Moved, detail)
+      case ServerError("ASK", detail)               => redirected(RedirectKind.Ask, detail)
+      case ServerError("READONLY", _)               => Fault.Demoted
+      case ServerError("TRYAGAIN", _)               => Fault.TryAgain
+      case ServerError("CLUSTERDOWN", _)            => Fault.Unavailable(clusterWide = true)
+      case ServerError("LOADING" | "MASTERDOWN", _) => Fault.Unavailable(clusterWide = false)
+      case NotConnected()                           => Fault.Lost(mayHaveExecuted = false)
+      case ConnectionLost(executed)                 => Fault.Lost(executed)
+      case _                                        => Fault.Fatal
+    }
+
+  private def redirected(kind: RedirectKind, detail: String): Fault =
+    Redirect.parse(kind, detail) match {
+      case Some(redirect) => Fault.Redirected(redirect)
+      case None           => Fault.Fatal
     }
 }

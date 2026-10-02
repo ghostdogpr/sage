@@ -158,8 +158,8 @@ final private[client] class SubscriptionConnection(
     locked {
       val emptied = deregister(sink, names, kind)
       // best-effort: swallow a failed (or interrupted) unsubscribe write so the caller still learns emptiness and terminates the sink
-      if (emptied.nonEmpty && state == State.Live)
-        try current.send(kind.unsubscribeWire(emptied))
+      if (state == State.Live)
+        try kind.unsubscribeWire(emptied).foreach(current.send)
         catch { case NonFatal(_) | _: InterruptedException => () }
       isEmptyUnlocked
     }
@@ -201,7 +201,7 @@ final private[client] class SubscriptionConnection(
         val pending = Kind.values.map(kind => kind -> sinksFor(kind).keys.toVector)
         try
           pending.foreach { case (kind, names) =>
-            if (names.nonEmpty) sendSubscribe(conn, kind, names)
+            sendSubscribe(conn, kind, names)
           }
         catch {
           // If writing the subscriptions fails, clear current and close this connection before reporting the failure; this prevents an older
@@ -232,10 +232,11 @@ final private[client] class SubscriptionConnection(
     if (failure != null) throw failure
   }
 
-  private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {
-    conn.send(kind.subscribeWire(names))
-    subscribeSent += names.size
-  }
+  private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit =
+    kind.subscribeWire(names).foreach { wire =>
+      conn.send(wire)
+      subscribeSent += names.size
+    }
 
   // Wait up to the connection timeout for subscribeConfirmed to reach the target. A target of -1 is replaced with liveTarget after the
   // connection becomes live, covering subscriptions sent by goLive after reconnecting. Owned subscriptions fail with NotConnected when
@@ -366,19 +367,14 @@ final private[client] class SubscriptionConnection(
       case Frame.Push(elements) =>
         // a push confirms only that reads are working. Leave lastReplyAtMillis unchanged so push-only traffic still receives idle PING checks.
         Pubsub.decode(elements) match {
-          case Some(Pubsub.Event.Message(channel, payload))            =>
-            dispatch(sinksFor(Kind.Channel), channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.ShardMessage(channel, payload))       =>
-            dispatch(sinksFor(Kind.Shard), channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) =>
-            dispatch(sinksFor(Kind.Pattern), pattern, Delivery.Pattern(pattern, ch, payload))
-          case Some(_: Pubsub.Event.Subscribed)                        =>
+          case Some(Pubsub.Event.Delivered(kind, subscription, delivery)) => dispatch(sinksFor(kind), subscription, delivery)
+          case Some(Pubsub.Event.Subscribed)                              =>
             // conn eq current: a late ack from a superseded generation must not advance this generation's count
             locked(if (conn eq current) {
               subscribeConfirmed += 1
               confirmed.signalAll()
             })
-          case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
+          case _                                                          => () // an unsubscribe ack is informational; re-homing is disconnect-driven
         }
       case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
         lastReplyAtMillis = scheduler.nowMillis
@@ -409,7 +405,7 @@ final private[client] class SubscriptionConnection(
     var failure: Throwable = null
     locked {
       val emptied = deregister(sink, sink.names, sink.kind)
-      try if (emptied.nonEmpty && state == State.Live) current.send(sink.kind.unsubscribeWire(emptied))
+      try if (state == State.Live) sink.kind.unsubscribeWire(emptied).foreach(current.send)
       catch { case e: Throwable => failure = e }
       if (isEmptyUnlocked && (state == State.Live || state == State.Reconnecting)) {
         stopWatchdog()
@@ -573,35 +569,7 @@ private[client] object SubscriptionConnection {
     case Idle, Establishing, Live, Reconnecting, Closed
   }
 
-  /**
-    * The three subscription kinds, each with its wire encoders: classic channels (`SUBSCRIBE`), glob patterns (`PSUBSCRIBE`), and shard
-    * channels (`SSUBSCRIBE`).
-    */
-  private[internal] enum Kind {
-    case Channel, Pattern, Shard
-
-    def subscribeWire(names: Vector[String]): Bytes =
-      this match {
-        case Channel => Pubsub.subscribe(names)
-        case Pattern => Pubsub.psubscribe(names)
-        case Shard   => Pubsub.ssubscribe(names)
-      }
-
-    def unsubscribeWire(names: Vector[String]): Bytes =
-      this match {
-        case Channel => Pubsub.unsubscribe(names)
-        case Pattern => Pubsub.punsubscribe(names)
-        case Shard   => Pubsub.sunsubscribe(names)
-      }
-  }
-
-  /**
-    * A raw delivery sent to a subscription buffer. Shard channel messages use [[Channel]] because they contain the same channel and payload.
-    */
-  enum Delivery {
-    case Channel(channel: String, payload: Bytes)
-    case Pattern(pattern: String, channel: String, payload: Bytes)
-  }
+  export Pubsub.{Delivery, Kind}
 
   // pub/sub writes (SUBSCRIBE/UNSUBSCRIBE) are confirmed by push frames, not a per-write reply, so the write hooks are no-ops
   final private class RawItem(val payload: Bytes) extends Transport.Item {

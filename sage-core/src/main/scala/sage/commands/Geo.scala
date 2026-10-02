@@ -2,7 +2,8 @@ package sage.commands
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{Doubles, KeyCodec, ValueCodec}
+import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.Args.{Ch, Count, Nx, Xx}
 import sage.protocol.Frame
 
 /**
@@ -59,16 +60,11 @@ final case class GeoSearchResult[V](member: V, distance: Option[Double], hash: O
 
 private[sage] object Geo {
 
-  private val Nx             = Bytes.utf8("NX")
-  private val Xx             = Bytes.utf8("XX")
-  private val Ch             = Bytes.utf8("CH")
   private val FromMember     = Bytes.utf8("FROMMEMBER")
   private val FromLonLat     = Bytes.utf8("FROMLONLAT")
   private val ByRadius       = Bytes.utf8("BYRADIUS")
   private val ByBox          = Bytes.utf8("BYBOX")
-  private val Asc            = Bytes.utf8("ASC")
-  private val Desc           = Bytes.utf8("DESC")
-  private val CountWord      = Bytes.utf8("COUNT")
+  private val sortWord       = Args.keywords(GeoSort.values)
   private val AnyWord        = Bytes.utf8("ANY")
   private val WithCoord      = Bytes.utf8("WITHCOORD")
   private val WithDist       = Bytes.utf8("WITHDIST")
@@ -86,7 +82,7 @@ private[sage] object Geo {
     Command(
       "GEOADD",
       Command.FirstKey,
-      (keyCodec.encode(key) +: conditionArgs(condition)) ++ (if (changed) Vector(Ch) else Vector.empty) ++ memberCoordArgs(first +: rest.toVector),
+      (keyCodec.encode(key) +: conditionArgs(condition)) ++ Args.flag(changed, Ch) ++ memberCoordArgs(first +: rest.toVector),
       Decode.long
     )
 
@@ -102,20 +98,10 @@ private[sage] object Geo {
     )
 
   def geoHash[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[String]]] =
-    Command.read(
-      "GEOHASH",
-      Command.FirstKey,
-      keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode),
-      Decode.vector(Decode.optionalUtf8String)
-    )
+    Command.read("GEOHASH", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.vector(Decode.optionalUtf8String))
 
   def geoPos[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[GeoCoordinates]]] =
-    Command.read(
-      "GEOPOS",
-      Command.FirstKey,
-      keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode),
-      Decode.vector(optionalCoordinates)
-    )
+    Command.read("GEOPOS", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.vector(optionalCoordinates))
 
   def geoSearch[K, V](
     key: K,
@@ -127,7 +113,7 @@ private[sage] object Geo {
     Command.read(
       "GEOSEARCH",
       Command.FirstKey,
-      keyCodec.encode(key) +: (originArgs(origin) ++ shapeArgs(shape) ++ sortArgs(sort) ++ countArgs(count)),
+      keyCodec.encode(key) +: searchArgs(origin, shape, sort, count),
       Decode.vector(Decode.value[V])
     )
 
@@ -144,8 +130,7 @@ private[sage] object Geo {
     Command.read(
       "GEOSEARCH",
       Command.FirstKey,
-      keyCodec
-        .encode(key) +: (originArgs(origin) ++ shapeArgs(shape) ++ sortArgs(sort) ++ countArgs(count) ++ withArgs(withCoord, withDist, withHash)),
+      keyCodec.encode(key) +: (searchArgs(origin, shape, sort, count) ++ withArgs(withCoord, withDist, withHash)),
       searchReply[V](withCoord, withDist, withHash)
     )
 
@@ -161,10 +146,7 @@ private[sage] object Geo {
     Command(
       "GEOSEARCHSTORE",
       Vector(0, 1),
-      (Vector(keyCodec.encode(destination), keyCodec.encode(source)) ++ originArgs(origin) ++ shapeArgs(shape) ++ sortArgs(sort) ++ countArgs(
-        count
-      )) ++
-        (if (storeDist) Vector(StoreDist) else Vector.empty),
+      (Vector(keyCodec.encode(destination), keyCodec.encode(source)) ++ searchArgs(origin, shape, sort, count)) ++ Args.flag(storeDist, StoreDist),
       Decode.long
     )
 
@@ -176,33 +158,28 @@ private[sage] object Geo {
     }
 
   private def memberCoordArgs[V](pairs: Vector[(V, GeoCoordinates)])(using valueCodec: ValueCodec[V]): Vector[Bytes] =
-    pairs.flatMap { case (member, coords) => Vector(coordArg(coords.longitude), coordArg(coords.latitude), valueCodec.encode(member)) }
+    pairs.flatMap { case (member, coords) => Vector(Args.double(coords.longitude), Args.double(coords.latitude), valueCodec.encode(member)) }
 
   private def originArgs[V](origin: GeoOrigin[V])(using valueCodec: ValueCodec[V]): Vector[Bytes] =
     origin match {
       case GeoOrigin.FromMember(member) => Vector(FromMember, valueCodec.encode(member))
-      case GeoOrigin.FromLonLat(coords) => Vector(FromLonLat, coordArg(coords.longitude), coordArg(coords.latitude))
+      case GeoOrigin.FromLonLat(coords) => Vector(FromLonLat, Args.double(coords.longitude), Args.double(coords.latitude))
     }
 
   private def shapeArgs(shape: GeoShape): Vector[Bytes] =
     shape match {
-      case GeoShape.ByRadius(radius, unit)     => Vector(ByRadius, Bytes.utf8(Doubles.format(radius)), unitArg(unit))
-      case GeoShape.ByBox(width, height, unit) => Vector(ByBox, Bytes.utf8(Doubles.format(width)), Bytes.utf8(Doubles.format(height)), unitArg(unit))
+      case GeoShape.ByRadius(radius, unit)     => Vector(ByRadius, Args.double(radius), unitArg(unit))
+      case GeoShape.ByBox(width, height, unit) => Vector(ByBox, Args.double(width), Args.double(height), unitArg(unit))
     }
 
-  private def sortArgs(sort: Option[GeoSort]): Vector[Bytes] =
-    sort.toVector.map {
-      case GeoSort.Asc  => Asc
-      case GeoSort.Desc => Desc
-    }
-
-  private def countArgs(count: Option[GeoCount]): Vector[Bytes] =
-    count.toVector.flatMap(c => Vector(CountWord, Bytes.utf8(c.count.toString)) ++ (if (c.any) Vector(AnyWord) else Vector.empty))
+  private def searchArgs[V: ValueCodec](origin: GeoOrigin[V], shape: GeoShape, sort: Option[GeoSort], count: Option[GeoCount]): Vector[Bytes] =
+    originArgs(origin) ++ shapeArgs(shape) ++ sort.toVector.map(sortWord) ++
+      count.toVector.flatMap(c => Vector(Count, Args.long(c.count)) ++ Args.flag(c.any, AnyWord))
 
   private def withArgs(withCoord: Boolean, withDist: Boolean, withHash: Boolean): Vector[Bytes] =
-    (if (withCoord) Vector(WithCoord) else Vector.empty) ++
-      (if (withDist) Vector(WithDist) else Vector.empty) ++
-      (if (withHash) Vector(WithHash) else Vector.empty)
+    Args.flag(withCoord, WithCoord) ++
+      Args.flag(withDist, WithDist) ++
+      Args.flag(withHash, WithHash)
 
   private def unitArg(unit: GeoUnit): Bytes =
     unit match {
@@ -212,15 +189,10 @@ private[sage] object Geo {
       case GeoUnit.Feet       => UnitFeet
     }
 
-  private def coordArg(value: Double): Bytes = Bytes.utf8(Doubles.format(value))
-
   private val coordinates: Frame => Either[DecodeError, GeoCoordinates] =
-    Decode.array2(Decode.lenientDouble, Decode.lenientDouble, "longitude/latitude pair")(GeoCoordinates(_, _))
+    Decode.array2(Decode.double, Decode.double, "longitude/latitude pair")(GeoCoordinates(_, _))
 
-  private val optionalCoordinates: Frame => Either[DecodeError, Option[GeoCoordinates]] = {
-    case Frame.Null => Right(None)
-    case other      => coordinates(other).map(Some(_))
-  }
+  private val optionalCoordinates: Frame => Either[DecodeError, Option[GeoCoordinates]] = Decode.nullable(coordinates)
 
   // Without any WITH flag GEOSEARCH replies a flat array of member bulk strings; any flag turns each row into [member, dist?, hash?, coord?]
   // in that fixed field order regardless of the order the flags were requested
@@ -238,7 +210,7 @@ private[sage] object Geo {
         case Frame.Array(fields) if fields.length == width =>
           for {
             member   <- Decode.value[V](fields(0))
-            distance <- if (withDist) Decode.lenientDouble(fields(distIdx)).map(Some(_)) else Right(None)
+            distance <- if (withDist) Decode.double(fields(distIdx)).map(Some(_)) else Right(None)
             hash     <- if (withHash) Decode.long(fields(hashIdx)).map(Some(_)) else Right(None)
             coords   <- if (withCoord) coordinates(fields(coordIdx)).map(Some(_)) else Right(None)
           } yield GeoSearchResult(member, distance, hash, coords)

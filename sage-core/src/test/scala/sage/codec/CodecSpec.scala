@@ -75,6 +75,16 @@ class CodecSpec extends munit.FunSuite {
     assertEquals(summon[ValueCodec[Long]].decode(Bytes.utf8("9223372036854775808")), Left(DecodeError("Long", "'9223372036854775808'")))
   }
 
+  test("Int and Long decoding accepts only the canonical decimal form, so distinct keys never decode to the same number") {
+    for (text <- List("05", "-0", "+5", "\u0665", "\uff15", "", "-", " 5", "5 ")) {
+      assert(summon[KeyCodec[Int]].decode(Bytes.utf8(text)).isLeft, text)
+      assert(summon[ValueCodec[Long]].decode(Bytes.utf8(text)).isLeft, text)
+    }
+    assertEquals(summon[KeyCodec[Long]].decode(Bytes.utf8("-5")), Right(-5L))
+    assertEquals(summon[ValueCodec[Int]].decode(Bytes.utf8("2147483648")), Left(DecodeError("Int", "'2147483648'")))
+    assertEquals(summon[ValueCodec[Long]].decode(Bytes.utf8("-9223372036854775809")), Left(DecodeError("Long", "'-9223372036854775809'")))
+  }
+
   test("String decode rejects invalid UTF-8") {
     val invalid = Bytes.fromArray(Array(0xff.toByte, 0xfe.toByte))
     summon[ValueCodec[String]].decode(invalid) match {

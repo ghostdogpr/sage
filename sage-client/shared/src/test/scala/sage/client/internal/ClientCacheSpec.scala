@@ -3,6 +3,7 @@ package sage.client.internal
 import scala.util.{Failure, Success, Try}
 
 import sage.Bytes
+import sage.commands.Command
 import sage.protocol.Frame
 
 class ClientCacheSpec extends munit.FunSuite {
@@ -16,6 +17,12 @@ class ClientCacheSpec extends munit.FunSuite {
   private def hitFrame(acquired: ClientCache.Acquire): Frame              = acquired match {
     case ClientCache.Acquire.Hit(frame, _) => frame
     case other                             => fail(s"expected a hit, got $other")
+  }
+
+  test("a command whose declared key positions fall outside its arguments is not cacheable") {
+    val decode: Frame => Either[sage.SageException.DecodeError, Frame] = Right(_)
+    assert(Client.cacheable(Command("GET", Vector(0), Vector(key("k")), decode, isReadOnly = true, cacheable = true)))
+    assert(!Client.cacheable(Command("GET", Vector(5), Vector(key("k")), decode, isReadOnly = true, cacheable = true)))
   }
 
   test("first miss fetches, a concurrent miss waits, and the stored reply reaches both") {

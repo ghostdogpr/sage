@@ -96,7 +96,7 @@ private[client] object Tls {
   }
 
   private def keyStoreType(path: Path): String = {
-    val name = path.getFileName.toString.toLowerCase
+    val name = path.getFileName.toString.toLowerCase(java.util.Locale.ROOT)
     if (name.endsWith(".p12") || name.endsWith(".pfx")) "PKCS12"
     else if (name.endsWith(".jks")) "JKS"
     else KeyStore.getDefaultType

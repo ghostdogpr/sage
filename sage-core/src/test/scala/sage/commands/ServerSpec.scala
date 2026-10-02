@@ -4,6 +4,7 @@ import java.time.Instant
 
 import scala.concurrent.duration.*
 
+import sage.SageException.DecodeError
 import sage.protocol.Frame
 import sage.protocol.Frames.{bulk, map}
 
@@ -11,36 +12,36 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
 
   test("CONFIG GET decodes a RESP3 map and the RESP2 flat-array shape alike") {
     val resp3 = map("maxmemory" -> bulk("100mb"), "save" -> bulk("3600 1"))
-    assertEquals(Reply.run(Server.configGet("*"), resp3), Right(Map("maxmemory" -> "100mb", "save" -> "3600 1")))
+    assertEquals(Reply.decode(Server.configGet("*"), resp3).toEither, Right(Map("maxmemory" -> "100mb", "save" -> "3600 1")))
     val resp2 = Frame.Array(Vector(bulk("maxmemory"), bulk("100mb")))
-    assertEquals(Reply.run(Server.configGet("*"), resp2), Right(Map("maxmemory" -> "100mb")))
+    assertEquals(Reply.decode(Server.configGet("*"), resp2).toEither, Right(Map("maxmemory" -> "100mb")))
   }
 
   test("TIME decodes seconds + microseconds into an Instant") {
     val reply = Frame.Array(Vector(bulk("1700000000"), bulk("123456")))
-    assertEquals(Reply.run(Server.time, reply), Right(Instant.ofEpochSecond(1700000000L, 123456000L)))
+    assertEquals(Reply.decode(Server.time, reply).toEither, Right(Instant.ofEpochSecond(1700000000L, 123456000L)))
   }
 
   test("ROLE decodes master, replica, and sentinel forms") {
     val master = Frame.Array(
       Vector(bulk("master"), Frame.Integer(100L), Frame.Array(Vector(Frame.Array(Vector(bulk("127.0.0.1"), bulk("6380"), bulk("90"))))))
     )
-    assertEquals(Reply.run(Server.role, master), Right(Role.Master(100L, Vector(ReplicaNode("127.0.0.1", 6380, 90L)))))
+    assertEquals(Reply.decode(Server.role, master).toEither, Right(Role.Master(100L, Vector(ReplicaNode("127.0.0.1", 6380, 90L)))))
 
     val replica = Frame.Array(Vector(bulk("slave"), bulk("127.0.0.1"), Frame.Integer(6379L), bulk("connected"), Frame.Integer(50L)))
-    assertEquals(Reply.run(Server.role, replica), Right(Role.Replica("127.0.0.1", 6379, "connected", 50L)))
+    assertEquals(Reply.decode(Server.role, replica).toEither, Right(Role.Replica("127.0.0.1", 6379, "connected", 50L)))
 
     val sentinel = Frame.Array(Vector(bulk("sentinel"), Frame.Array(Vector(bulk("master1"), bulk("master2")))))
-    assertEquals(Reply.run(Server.role, sentinel), Right(Role.Sentinel(Vector("master1", "master2"))))
+    assertEquals(Reply.decode(Server.role, sentinel).toEither, Right(Role.Sentinel(Vector("master1", "master2"))))
   }
 
   test("ROLE rejects an out-of-range replica port instead of wrapping it") {
     val wrapping =
       Frame.Array(Vector(bulk("slave"), bulk("127.0.0.1"), Frame.Integer(Int.MaxValue.toLong + 1L), bulk("connected"), Frame.Integer(0L)))
-    assert(Reply.run(Server.role, wrapping).isLeft, "a port above Int.MaxValue must not wrap to a valid-looking port")
+    assert(Reply.decode(Server.role, wrapping).toEither.isLeft, "a port above Int.MaxValue must not wrap to a valid-looking port")
     val tooLarge =
       Frame.Array(Vector(bulk("master"), Frame.Integer(0L), Frame.Array(Vector(Frame.Array(Vector(bulk("127.0.0.1"), bulk("70000"), bulk("0")))))))
-    assert(Reply.run(Server.role, tooLarge).isLeft, "a replica port outside 1..65535 must be a DecodeError")
+    assert(Reply.decode(Server.role, tooLarge).toEither.isLeft, "a replica port outside 1..65535 must be a DecodeError")
   }
 
   test("SLOWLOG GET decodes entries, defaulting client fields absent on old servers") {
@@ -59,23 +60,26 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
       )
     )
     assertEquals(
-      Reply.run(Server.slowLogGet(), withClient),
+      Reply.decode(Server.slowLogGet(), withClient).toEither,
       Right(Vector(SlowLogEntry(7L, Instant.ofEpochSecond(1700000000L), 150.micros, Vector("GET", "k"), "1.2.3.4:5", "app")))
     )
     val old        = Frame.Array(Vector(Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(10L), Frame.Integer(20L), Frame.Array(Vector(bulk("PING")))))))
-    assertEquals(Reply.run(Server.slowLogGet(), old), Right(Vector(SlowLogEntry(1L, Instant.ofEpochSecond(10L), 20.micros, Vector("PING"), "", ""))))
+    assertEquals(
+      Reply.decode(Server.slowLogGet(), old).toEither,
+      Right(Vector(SlowLogEntry(1L, Instant.ofEpochSecond(10L), 20.micros, Vector("PING"), "", "")))
+    )
   }
 
   test("LATENCY LATEST decodes event rows") {
     val reply = Frame.Array(Vector(Frame.Array(Vector(bulk("command"), Frame.Integer(1700000000L), Frame.Integer(5L), Frame.Integer(20L)))))
     assertEquals(
-      Reply.run(Server.latencyLatest, reply),
+      Reply.decode(Server.latencyLatest, reply).toEither,
       Right(Vector(LatencyEntry("command", Instant.ofEpochSecond(1700000000L), 5.millis, 20.millis)))
     )
   }
 
   test("WAITAOF decodes the [numlocal, numreplicas] pair; WAIT/WAITAOF ride the multiplexed connection and broadcast per master") {
-    assertEquals(Reply.run(Server.waitAof(1L, 0L, 1.second), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L)))), Right((1L, 2L)))
+    assertEquals(Reply.decode(Server.waitAof(1L, 0L, 1.second), Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L)))).toEither, Right((1L, 2L)))
     assert(!Server.waitAof(1L, 0L, 1.second).isBlocking)
     assert(!Server.waitReplicas(1L, 1.second).isBlocking)
     assert(Server.waitAof(1L, 0L, 1.second).allMasters)
@@ -109,7 +113,7 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
     val waitFold = fold(Server.waitReplicas(1L, 1.second))
     assertEquals(waitFold(Frame.Integer(2L), Frame.Integer(1L)), Frame.Integer(1L))
     assertEquals(waitFold(Frame.Integer(0L), Frame.Integer(3L)), Frame.Integer(0L))
-    assertEquals(Reply.run(Server.waitReplicas(1L, 1.second), Frame.Integer(1L)), Right(1L))
+    assertEquals(Reply.decode(Server.waitReplicas(1L, 1.second), Frame.Integer(1L)).toEither, Right(1L))
 
     val aofFold = fold(Server.waitAof(1L, 0L, 1.second))
     assertEquals(
@@ -118,22 +122,20 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
     )
   }
 
-  test("WAIT/WAITAOF folds pass a malformed reply through in either operand position, so it never hides behind a valid one") {
+  test("WAIT/WAITAOF folds fail on a malformed reply in either operand position, so it never hides behind a valid one") {
     val waitFold = fold(Server.waitReplicas(1L, 1.second))
     val badInt   = Frame.SimpleString("nonsense")
-    assertEquals(waitFold(Frame.Integer(2L), badInt), badInt)
-    assertEquals(waitFold(badInt, Frame.Integer(2L)), badInt)
-    assert(Reply.run(Server.waitReplicas(1L, 1.second), waitFold(Frame.Integer(2L), badInt)).isLeft)
+    intercept[DecodeError](waitFold(Frame.Integer(2L), badInt))
+    intercept[DecodeError](waitFold(badInt, Frame.Integer(2L)))
 
     val aofFold   = fold(Server.waitAof(1L, 0L, 1.second))
     val validPair = Frame.Array(Vector(Frame.Integer(1L), Frame.Integer(2L)))
     val badPair   = Frame.Array(Vector(Frame.Integer(1L)))
-    assertEquals(aofFold(validPair, badPair), badPair)
-    assertEquals(aofFold(badPair, validPair), badPair)
-    assert(Reply.run(Server.waitAof(1L, 0L, 1.second), aofFold(validPair, badPair)).isLeft)
+    intercept[DecodeError](aofFold(validPair, badPair))
+    intercept[DecodeError](aofFold(badPair, validPair))
   }
 
-  test("DBSIZE broadcasts per master and folds shard counts into the cluster total, with checked overflow and malformed passthrough") {
+  test("DBSIZE broadcasts per master and folds shard counts into the cluster total, with checked overflow and malformed replies rejected") {
     assert(Server.dbSize.allMasters)
     assert(
       Server.dbSize.requiresClusterWideTxResult,
@@ -141,12 +143,11 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
     )
     val sum    = fold(Server.dbSize)
     assertEquals(sum(Frame.Integer(10L), Frame.Integer(20L)), Frame.Integer(30L))
-    assertEquals(Reply.run(Server.dbSize, Frame.Integer(30L)), Right(30L))
+    assertEquals(Reply.decode(Server.dbSize, Frame.Integer(30L)).toEither, Right(30L))
     intercept[ArithmeticException](sum(Frame.Integer(Long.MaxValue), Frame.Integer(1L)))
     val badInt = Frame.SimpleString("nonsense")
-    assertEquals(sum(Frame.Integer(10L), badInt), badInt)
-    assertEquals(sum(badInt, Frame.Integer(10L)), badInt)
-    assert(Reply.run(Server.dbSize, sum(Frame.Integer(10L), badInt)).isLeft)
+    intercept[DecodeError](sum(Frame.Integer(10L), badInt))
+    intercept[DecodeError](sum(badInt, Frame.Integer(10L)))
   }
 
   test("MEMORY PURGE broadcasts per master, since purging one arbitrary master leaves every other one unpurged") {
@@ -161,8 +162,8 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
   }
 
   test("MEMORY USAGE decodes a present count and a missing key as None, and is keyed") {
-    assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Integer(64L)), Right(Some(64L)))
-    assertEquals(Reply.run(Server.memoryUsage("k"), Frame.Null), Right(None))
+    assertEquals(Reply.decode(Server.memoryUsage("k"), Frame.Integer(64L)).toEither, Right(Some(64L)))
+    assertEquals(Reply.decode(Server.memoryUsage("k"), Frame.Null).toEither, Right(None))
     assertEquals(Server.memoryUsage("k").keyIndices, Vector(1))
   }
 
@@ -184,13 +185,13 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds {
       )
     )
     assertEquals(
-      Reply.run(Server.commandInfo("get", "nope"), reply),
+      Reply.decode(Server.commandInfo("get", "nope"), reply).toEither,
       Right(Vector(CommandInfo("get", 2L, Set("readonly", "fast"), 1, 1, 1, Set("@read"))))
     )
   }
 
   test("COMMAND GETKEYSANDFLAGS decodes key/flag pairs") {
     val reply = Frame.Array(Vector(Frame.Array(Vector(bulk("k"), Frame.Array(Vector(bulk("RW"), bulk("access")))))))
-    assertEquals(Reply.run(Server.commandGetKeysAndFlags("SET", "k", "v"), reply), Right(Vector("k" -> Set("RW", "access"))))
+    assertEquals(Reply.decode(Server.commandGetKeysAndFlags("SET", "k", "v"), reply).toEither, Right(Vector("k" -> Set("RW", "access"))))
   }
 }

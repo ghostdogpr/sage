@@ -7,45 +7,53 @@ import java.util.Arrays
 import sage.Bytes
 import sage.SageException.DecodeError
 
-private[codec] object Primitives {
+private[sage] object Primitives {
 
-  private val True       = Bytes.utf8("1")
-  private val False      = Bytes.utf8("0")
   private val Zero       = Bytes.utf8("0")
+  private val One        = Bytes.utf8("1")
   private val MaxPreview = 64
 
   def encodeInt(value: Int): Bytes = encodeLong(value.toLong)
 
-  // digits come from the negative magnitude (`value % 10` is <= 0), so Long.MinValue, which has no positive counterpart, is safe
   def encodeLong(value: Long): Bytes =
     if (value == 0L) Zero
+    else if (value == 1L) One
     else {
-      val negative  = value < 0
-      var counter   = value
-      var digits    = 0
-      while (counter != 0L) {
-        counter /= 10
-        digits += 1
-      }
-      val start     = if (negative) 1 else 0
-      val out       = new Array[Byte](start + digits)
-      var i         = out.length - 1
-      var remaining = value
-      while (i >= start) {
-        val digit = if (negative) -(remaining % 10) else remaining % 10
-        out(i) = ('0' + digit).toByte
-        remaining /= 10
-        i -= 1
-      }
-      if (negative) out(0) = '-'
+      val start  = if (value < 0) 1 else 0
+      val digits = digitCount(value)
+      val out    = new Array[Byte](start + digits)
+      writeDigits(out, start, digits, value)
+      if (start == 1) out(0) = '-'
       Bytes.wrap(IArray.unsafeFromArray(out))
     }
 
-  def encodeBoolean(value: Boolean): Bytes = if (value) True else False
+  // digits come from the negative magnitude, so Long.MinValue, which has no positive counterpart, is safe
+  def digitCount(value: Long): Int = {
+    val magnitude = if (value < 0) value else -value
+    var digits    = 1
+    var floor     = -10L
+    while (digits < 19 && magnitude <= floor) {
+      digits += 1
+      floor *= 10
+    }
+    digits
+  }
+
+  def writeDigits(out: Array[Byte], start: Int, digits: Int, value: Long): Unit = {
+    var magnitude = if (value < 0) value else -value
+    var i         = start + digits - 1
+    while (i >= start) {
+      out(i) = ('0' - magnitude % 10).toByte
+      magnitude /= 10
+      i -= 1
+    }
+  }
+
+  def encodeBoolean(value: Boolean): Bytes = if (value) One else Zero
 
   def decodeBoolean(bytes: Bytes): Either[DecodeError, Boolean] =
-    if (bytes.sameBytes(True)) Right(true)
-    else if (bytes.sameBytes(False)) Right(false)
+    if (bytes.sameBytes(One)) Right(true)
+    else if (bytes.sameBytes(Zero)) Right(false)
     else Left(DecodeError("boolean (1 or 0)", preview(bytes)))
 
   def decodeUtf8(bytes: Bytes): Either[DecodeError, String] = {
@@ -68,9 +76,23 @@ private[codec] object Primitives {
   def decodeNumber[A](expected: String, parse: String => Option[A])(bytes: Bytes): Either[DecodeError, A] =
     parse(bytes.asUtf8String).toRight(DecodeError(expected, preview(bytes)))
 
-  // reject a leading '+' so "5"/"+5" don't decode to the same key
-  def parseInt(text: String): Option[Int]   = if (text.startsWith("+")) None else text.toIntOption
-  def parseLong(text: String): Option[Long] = if (text.startsWith("+")) None else text.toLongOption
+  // ASCII digits with an optional '-', no '+', leading zeros or "-0", so distinct keys never decode to the same number
+  def decodeLong(expected: String, min: Long, max: Long)(bytes: Bytes): Either[DecodeError, Long] = {
+    val a        = bytes.unsafeArray
+    val negative = a.length > 1 && a(0) == '-'
+    var i        = if (negative) 1 else 0
+    var ok       = i < a.length && (a(i) != '0' || a.length == 1)
+    var acc      = 0L // accumulates the negated value so Long.MinValue fits
+    while (ok && i < a.length) {
+      val digit = a(i) - '0'
+      ok = digit >= 0 && digit <= 9 && acc >= (Long.MinValue + digit) / 10
+      if (ok) acc = acc * 10 - digit
+      i += 1
+    }
+    val value    = if (negative) acc else -acc
+    if (ok && (negative || acc != Long.MinValue) && value >= min && value <= max) Right(value)
+    else Left(DecodeError(expected, preview(bytes)))
+  }
 
   def preview(bytes: Bytes): String = {
     // MaxPreview code points never need more than 4 bytes each, so decoding a bounded window avoids

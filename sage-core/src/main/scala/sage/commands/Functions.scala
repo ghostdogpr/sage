@@ -5,6 +5,8 @@ import scala.concurrent.duration.*
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.Args.Replace
+import sage.commands.KeyArgs.ScriptVerb
 import sage.protocol.Frame
 
 /**
@@ -49,7 +51,6 @@ final case class FunctionStats(runningScript: Option[RunningScript], engines: Ma
 private[sage] object Functions {
 
   private val Load        = Bytes.utf8("LOAD")
-  private val Replace     = Bytes.utf8("REPLACE")
   private val Delete      = Bytes.utf8("DELETE")
   private val Flush       = Bytes.utf8("FLUSH")
   private val Kill        = Bytes.utf8("KILL")
@@ -59,34 +60,29 @@ private[sage] object Functions {
   private val LibraryName = Bytes.utf8("LIBRARYNAME")
   private val WithCode    = Bytes.utf8("WITHCODE")
   private val Stats       = Bytes.utf8("STATS")
+  private val policyArg   = Args.keywords(RestorePolicy.values)
 
-  def fCall(function: String): Command[Frame] = fCallCommand("FCALL", function, Vector.empty, Vector.empty, readOnly = false)
+  def fCall(function: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.FCall, function, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def fCall[K](function: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    fCallCommand("FCALL", function, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = false)
+  def fCall[K](function: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.FCall, function, keys, Seq.empty[Bytes])
 
-  def fCall[K, V](function: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    fCallCommand("FCALL", function, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = false)
+  def fCall[K, V](function: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.FCall, function, keys, args)
 
-  def fCallRo(function: String): Command[Frame] = fCallCommand("FCALL_RO", function, Vector.empty, Vector.empty, readOnly = true)
+  def fCallRo(function: String): Command[Frame] = KeyArgs.scriptCall(ScriptVerb.FCallRo, function, Seq.empty[Bytes], Seq.empty[Bytes])
 
-  def fCallRo[K](function: String, keys: Seq[K])(using keyCodec: KeyCodec[K]): Command[Frame] =
-    fCallCommand("FCALL_RO", function, keys.iterator.map(keyCodec.encode).toVector, Vector.empty, readOnly = true)
+  def fCallRo[K](function: String, keys: Seq[K])(using KeyCodec[K]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.FCallRo, function, keys, Seq.empty[Bytes])
 
-  def fCallRo[K, V](function: String, keys: Seq[K], args: Seq[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Frame] =
-    fCallCommand("FCALL_RO", function, keys.iterator.map(keyCodec.encode).toVector, args.iterator.map(valueCodec.encode).toVector, readOnly = true)
-
-  private def fCallCommand(name: String, function: String, keys: Vector[Bytes], args: Vector[Bytes], readOnly: Boolean): Command[Frame] = {
-    val allArgs    = (Bytes.utf8(function) +: Bytes.utf8(keys.length.toString) +: keys) ++ args
-    val keyIndices = Vector.range(2, 2 + keys.length)
-    Command(name, keyIndices, allArgs, Decode.frame, Execution.Ordinary, isReadOnly = readOnly, cacheable = false)
-  }
+  def fCallRo[K, V](function: String, keys: Seq[K], args: Seq[V])(using KeyCodec[K], ValueCodec[V]): Command[Frame] =
+    KeyArgs.scriptCall(ScriptVerb.FCallRo, function, keys, args)
 
   def functionLoad(code: String, replace: Boolean = false): Command[String] =
     Command(
       "FUNCTION",
       Command.NoKeys,
-      (Load +: (if (replace) Vector(Replace) else Vector.empty)) :+ Bytes.utf8(code),
+      (Load +: Args.flag(replace, Replace)) :+ Bytes.utf8(code),
       Decode.utf8String,
       allMasters = true
     )
@@ -105,7 +101,7 @@ private[sage] object Functions {
     Command(
       "FUNCTION",
       Command.NoKeys,
-      Vector(Restore, payload) ++ policy.map(p => Bytes.utf8(p.toString.toUpperCase)).toVector,
+      Vector(Restore, payload) ++ policy.map(policyArg).toVector,
       Decode.ok,
       allMasters = true
     )
@@ -114,85 +110,59 @@ private[sage] object Functions {
     Command(
       "FUNCTION",
       Command.NoKeys,
-      List +: (libraryName.toVector.flatMap(name => Vector(LibraryName, Bytes.utf8(name))) ++ (if (withCode) Vector(WithCode) else Vector.empty)),
+      List +: (Args.optText(LibraryName, libraryName) ++ Args.flag(withCode, WithCode)),
       Decode.vector(decodeLibrary)
     )
 
   private val decodeStats: Frame => Either[DecodeError, FunctionStats] =
-    frame =>
-      Decode.fieldMap(frame).flatMap { fields =>
-        for {
-          running <- fields.get("running_script") match {
-                       case None | Some(Frame.Null) => Right(None)
-                       case Some(scriptFrame)       => decodeRunningScript(scriptFrame).map(Some(_))
-                     }
-          engines <- fields.get("engines").fold[Either[DecodeError, Map[String, EngineStats]]](Right(Map.empty))(decodeEngines)
-        } yield FunctionStats(running, engines)
-      }
+    Decode.fields { f =>
+      for {
+        running <- f.optional("running_script", decodeRunningScript)
+        engines <- f.requiredOr("engines", decodeEngines, Map.empty)
+      } yield FunctionStats(running, engines)
+    }
 
   val functionStats: Command[FunctionStats] = Command("FUNCTION", Command.NoKeys, Vector(Stats), decodeStats)
 
-  private def decodeLibrary(frame: Frame): Either[DecodeError, LibraryInfo] =
-    Decode.fieldMap(frame).flatMap { fields =>
+  private val decodeLibrary: Frame => Either[DecodeError, LibraryInfo] =
+    Decode.fields { f =>
       for {
-        name      <- requireString(fields, "library_name")
-        engine    <- requireString(fields, "engine")
-        functions <- fields.get("functions").fold[Either[DecodeError, Vector[FunctionInfo]]](Right(Vector.empty))(Decode.vector(decodeFunction))
-      } yield LibraryInfo(name, engine, functions, optionalString(fields, "library_code"))
+        name      <- f.required("library_name", Decode.text)
+        engine    <- f.required("engine", Decode.text)
+        functions <- f.optionalVector("functions", decodeFunction)
+        code      <- f.optional("library_code", Decode.text)
+      } yield LibraryInfo(name, engine, functions, code)
     }
 
-  private def decodeFunction(frame: Frame): Either[DecodeError, FunctionInfo] =
-    Decode.fieldMap(frame).flatMap { fields =>
-      requireString(fields, "name").map { name =>
-        FunctionInfo(name, optionalString(fields, "description"), flagSet(fields.get("flags")))
-      }
+  private val decodeFunction: Frame => Either[DecodeError, FunctionInfo] =
+    Decode.fields { f =>
+      for {
+        name        <- f.required("name", Decode.text)
+        description <- f.optional("description", Decode.text)
+      } yield FunctionInfo(name, description, flagSet(f.get("flags")))
     }
 
-  private def decodeRunningScript(frame: Frame): Either[DecodeError, RunningScript] =
-    Decode.fieldMap(frame).flatMap { fields =>
+  private val decodeRunningScript: Frame => Either[DecodeError, RunningScript] =
+    Decode.fields { f =>
       for {
-        name     <- requireString(fields, "name")
-        command  <- fields.get("command").fold[Either[DecodeError, Vector[String]]](Right(Vector.empty))(Decode.vector(Decode.utf8String))
-        duration <- fields.get("duration_ms").fold[Either[DecodeError, Long]](Right(0L))(Decode.long)
+        name     <- f.required("name", Decode.text)
+        command  <- f.optionalVector("command", Decode.utf8String)
+        duration <- f.requiredOr("duration_ms", Decode.long, 0L)
       } yield RunningScript(name, command, duration.millis)
     }
 
-  private def decodeEngines(frame: Frame): Either[DecodeError, Map[String, EngineStats]] =
-    Decode.fieldMap(frame).flatMap { engines =>
-      engines.foldLeft[Either[DecodeError, Map[String, EngineStats]]](Right(Map.empty)) { case (acc, (name, statsFrame)) =>
-        for {
-          map    <- acc
-          fields <- Decode.fieldMap(statsFrame)
-        } yield map + (name -> EngineStats(
-          fields.get("libraries_count").flatMap(asLong).getOrElse(0L),
-          fields.get("functions_count").flatMap(asLong).getOrElse(0L)
-        ))
-      }
-    }
-
-  private def requireString(fields: Map[String, Frame], key: String): Either[DecodeError, String] =
-    fields.get(key).flatMap(asString).toRight(DecodeError(s"'$key' field", s"map without '$key'"))
-
-  private def optionalString(fields: Map[String, Frame], key: String): Option[String] =
-    fields.get(key).flatMap(asString)
-
-  private def asString(frame: Frame): Option[String] =
-    frame match {
-      case Frame.BulkString(b)   => Some(b.asUtf8String)
-      case Frame.SimpleString(s) => Some(s)
-      case _                     => None
-    }
-
-  private def asLong(frame: Frame): Option[Long] =
-    frame match {
-      case Frame.Integer(v) => Some(v)
-      case _                => None
-    }
+  private val decodeEngines: Frame => Either[DecodeError, Map[String, EngineStats]] =
+    Decode.fieldValues(Decode.fields { stats =>
+      for {
+        libraries <- stats.requiredOr("libraries_count", Decode.long, 0L)
+        functions <- stats.requiredOr("functions_count", Decode.long, 0L)
+      } yield EngineStats(libraries, functions)
+    })
 
   private def flagSet(frame: Option[Frame]): Set[String] =
     frame match {
-      case Some(Frame.Set(elements))   => elements.flatMap(asString).toSet
-      case Some(Frame.Array(elements)) => elements.flatMap(asString).toSet
+      case Some(Frame.Set(elements))   => elements.flatMap(Decode.text(_).toOption).toSet
+      case Some(Frame.Array(elements)) => elements.flatMap(Decode.text(_).toOption).toSet
       case _                           => Set.empty
     }
 }

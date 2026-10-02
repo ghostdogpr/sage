@@ -8,7 +8,7 @@ import scala.concurrent.duration.*
 
 import Replies.bulk
 
-import sage.Bytes
+import sage.{Bytes, Message, PatternMessage}
 import sage.SageException.NotConnected
 import sage.client.{BackoffConfig, WatchdogConfig}
 import sage.commands.{Command, Connection}
@@ -99,21 +99,21 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   // Bytes uses reference equality for `==`. Destructure the delivery and compare its payload as text.
   private def assertChannel(delivery: Option[SubscriptionConnection.Delivery], channel: String, payload: String)(using munit.Location): Unit =
     delivery match {
-      case Some(SubscriptionConnection.Delivery.Channel(ch, p)) =>
+      case Some(Message(ch, p)) =>
         assertEquals(ch, channel)
         assertEquals(p.asUtf8String, payload)
-      case other                                                => fail(s"expected a channel delivery, got $other")
+      case other                => fail(s"expected a channel delivery, got $other")
     }
 
   private def assertPattern(delivery: Option[SubscriptionConnection.Delivery], pattern: String, channel: String, payload: String)(
     using munit.Location
   ): Unit =
     delivery match {
-      case Some(SubscriptionConnection.Delivery.Pattern(pat, ch, p)) =>
+      case Some(PatternMessage(pat, ch, p)) =>
         assertEquals(pat, pattern)
         assertEquals(ch, channel)
         assertEquals(p.asUtf8String, payload)
-      case other                                                     => fail(s"expected a pattern delivery, got $other")
+      case other                            => fail(s"expected a pattern delivery, got $other")
     }
 
   test("first subscribe establishes the connection and sends SUBSCRIBE, then delivers a message") {
@@ -370,7 +370,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       box.set(delivery)
       latch.countDown()
     }
-    sink.offer(SubscriptionConnection.Delivery.Channel("news", Bytes.utf8("hello")))
+    sink.offer(Message("news", Bytes.utf8("hello")))
     latch.await()
     assertChannel(box.get(), "news", "hello")
   }

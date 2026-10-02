@@ -202,7 +202,7 @@ object SageConfig {
     uri.split("://", 2) match {
       case Array(scheme, rest) =>
         for {
-          tls       <- scheme.toLowerCase match {
+          tls       <- scheme.toLowerCase(java.util.Locale.ROOT) match {
                          case "redis"  => Right(None)
                          case "rediss" => Right(Some(TlsConfig()))
                          case other    => fail[Option[TlsConfig]](s"unsupported scheme '$other' (expected redis or rediss)")

@@ -8,19 +8,15 @@ package sage.codec
 private[sage] object Doubles {
 
   def format(value: Double): String =
-    special(value == Double.PositiveInfinity, value == Double.NegativeInfinity, value.isNaN).getOrElse(value.toString)
+    if (value == Double.PositiveInfinity) "inf" else if (value == Double.NegativeInfinity) "-inf" else if (value.isNaN) "nan" else value.toString
 
-  def formatFloat(value: Float): String =
-    special(value == Float.PositiveInfinity, value == Float.NegativeInfinity, value.isNaN).getOrElse(value.toString)
+  def formatFloat(value: Float): String = if (value.isNaN || value.isInfinite) format(value.toDouble) else value.toString
 
   def parse(text: String): Option[Double] =
     parseWith(text)(Double.PositiveInfinity, Double.NegativeInfinity, Double.NaN, _.toDoubleOption)
 
   def parseFloat(text: String): Option[Float] =
     parseWith(text)(Float.PositiveInfinity, Float.NegativeInfinity, Float.NaN, _.toFloatOption)
-
-  private def special(posInf: Boolean, negInf: Boolean, nan: Boolean): Option[String] =
-    if (posInf) Some("inf") else if (negInf) Some("-inf") else if (nan) Some("nan") else None
 
   private def parseWith[A](text: String)(posInf: A, negInf: A, nan: A, fallback: String => Option[A]): Option[A] =
     text match {

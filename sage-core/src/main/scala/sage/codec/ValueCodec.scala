@@ -44,55 +44,53 @@ object ValueCodec {
   /**
     * Builds a codec from encode and decode functions. The decoder returns `Either` for invalid input.
     */
-  def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): ValueCodec[A] = instance(enc, dec)
-
-  /**
-    * UTF-8 text; decoding rejects malformed UTF-8.
-    */
-  given string: ValueCodec[String] = instance(Bytes.utf8, Primitives.decodeUtf8)
-
-  /**
-    * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
-    */
-  given int: ValueCodec[Int] = instance(Primitives.encodeInt, Primitives.decodeNumber("Int", Primitives.parseInt))
-
-  /**
-    * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
-    */
-  given long: ValueCodec[Long] = instance(Primitives.encodeLong, Primitives.decodeNumber("Long", Primitives.parseLong))
-
-  /**
-    * `Double` in Redis's number format, including `inf`/`-inf`/`nan`.
-    */
-  given double: ValueCodec[Double] =
-    instance(d => Bytes.utf8(Doubles.format(d)), Primitives.decodeNumber("Double", Doubles.parse))
-
-  /**
-    * `Float` in Redis's number format, including `inf`/`-inf`/`nan`.
-    */
-  given float: ValueCodec[Float] =
-    instance(f => Bytes.utf8(Doubles.formatFloat(f)), Primitives.decodeNumber("Float", Doubles.parseFloat))
-
-  /**
-    * `1`/`0` on the wire; decoding accepts only those two tokens.
-    */
-  given boolean: ValueCodec[Boolean] = instance(Primitives.encodeBoolean, Primitives.decodeBoolean)
-
-  /**
-    * Raw [[sage.Bytes]], passed through unchanged in both directions.
-    */
-  given bytes: ValueCodec[Bytes] = instance(identity, Right(_))
-
-  /**
-    * Raw `Array[Byte]`, copied at the boundary in both directions (see [[sage.Bytes.fromArray]]/[[sage.Bytes.toArray]]).
-    */
-  given byteArray: ValueCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
-
-  private def instance[A](enc: A => Bytes, dec: Bytes => Either[DecodeError, A]): ValueCodec[A] =
+  def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): ValueCodec[A] =
     new ValueCodec[A] {
 
       def encode(value: A): Bytes = enc(value)
 
       def decode(bytes: Bytes): Either[DecodeError, A] = dec(bytes)
     }
+
+  /**
+    * UTF-8 text; decoding rejects malformed UTF-8.
+    */
+  given string: ValueCodec[String] = from(Bytes.utf8)(Primitives.decodeUtf8)
+
+  /**
+    * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
+    */
+  given int: ValueCodec[Int] = from(Primitives.encodeInt)(Primitives.decodeLong("Int", Int.MinValue, Int.MaxValue)(_).map(_.toInt))
+
+  /**
+    * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
+    */
+  given long: ValueCodec[Long] = from(Primitives.encodeLong)(Primitives.decodeLong("Long", Long.MinValue, Long.MaxValue))
+
+  /**
+    * `Double` in Redis's number format, including `inf`/`-inf`/`nan`.
+    */
+  given double: ValueCodec[Double] =
+    from[Double](d => Bytes.utf8(Doubles.format(d)))(Primitives.decodeNumber("Double", Doubles.parse))
+
+  /**
+    * `Float` in Redis's number format, including `inf`/`-inf`/`nan`.
+    */
+  given float: ValueCodec[Float] =
+    from[Float](f => Bytes.utf8(Doubles.formatFloat(f)))(Primitives.decodeNumber("Float", Doubles.parseFloat))
+
+  /**
+    * `1`/`0` on the wire; decoding accepts only those two tokens.
+    */
+  given boolean: ValueCodec[Boolean] = from(Primitives.encodeBoolean)(Primitives.decodeBoolean)
+
+  /**
+    * Raw [[sage.Bytes]], passed through unchanged in both directions.
+    */
+  given bytes: ValueCodec[Bytes] = from[Bytes](identity)(Right(_))
+
+  /**
+    * Raw `Array[Byte]`, copied at the boundary in both directions (see [[sage.Bytes.fromArray]]/[[sage.Bytes.toArray]]).
+    */
+  given byteArray: ValueCodec[Array[Byte]] = from(Bytes.fromArray)(raw => Right(raw.toArray))
 }

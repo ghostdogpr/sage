@@ -9,7 +9,7 @@ import sage.protocol.Frames.{bulk, map}
 class FunctionsSpec extends munit.FunSuite {
 
   test("FCALL returns the raw frame and computes key indices") {
-    assertEquals(Reply.run(Functions.fCall("f", Seq("k"), Seq("a")), Frame.Integer(7L)), Right(Frame.Integer(7L)))
+    assertEquals(Reply.decode(Functions.fCall("f", Seq("k"), Seq("a")), Frame.Integer(7L)).toEither, Right(Frame.Integer(7L)))
     assertEquals(Functions.fCall("f", Seq("k1", "k2")).keyIndices, Vector(2, 3))
   }
 
@@ -44,7 +44,7 @@ class FunctionsSpec extends munit.FunSuite {
       )
     )
     assertEquals(
-      Reply.run(Functions.functionList(), reply),
+      Reply.decode(Functions.functionList(), reply).toEither,
       Right(Vector(LibraryInfo("mylib", "LUA", Vector(FunctionInfo("myfunc", None, Set("no-writes"))), None)))
     )
   }
@@ -53,7 +53,10 @@ class FunctionsSpec extends munit.FunSuite {
     val reply = Frame.Array(
       Vector(map("library_name" -> bulk("l"), "engine" -> bulk("LUA"), "functions" -> Frame.Array(Vector.empty), "library_code" -> bulk("#!lua")))
     )
-    assertEquals(Reply.run(Functions.functionList(withCode = true), reply), Right(Vector(LibraryInfo("l", "LUA", Vector.empty, Some("#!lua")))))
+    assertEquals(
+      Reply.decode(Functions.functionList(withCode = true), reply).toEither,
+      Right(Vector(LibraryInfo("l", "LUA", Vector.empty, Some("#!lua"))))
+    )
   }
 
   test("FUNCTION STATS decodes a running script and per-engine counts; null running_script is None") {
@@ -62,15 +65,15 @@ class FunctionsSpec extends munit.FunSuite {
       "engines"        -> map("LUA" -> map("libraries_count" -> Frame.Integer(2L), "functions_count" -> Frame.Integer(5L)))
     )
     assertEquals(
-      Reply.run(Functions.functionStats, reply),
+      Reply.decode(Functions.functionStats, reply).toEither,
       Right(FunctionStats(Some(RunningScript("f", Vector("FCALL", "f"), 12.millis)), Map("LUA" -> EngineStats(2L, 5L))))
     )
     val idle  = map("running_script" -> Frame.Null, "engines" -> Frame.Map(Vector.empty))
-    assertEquals(Reply.run(Functions.functionStats, idle), Right(FunctionStats(None, Map.empty)))
+    assertEquals(Reply.decode(Functions.functionStats, idle).toEither, Right(FunctionStats(None, Map.empty)))
   }
 
   test("FUNCTION DUMP decodes the opaque payload as bytes") {
     val payload = Bytes.utf8("\u0000binary")
-    assertEquals(Reply.run(Functions.functionDump, Frame.BulkString(payload)).map(_.asUtf8String), Right(payload.asUtf8String))
+    assertEquals(Reply.decode(Functions.functionDump, Frame.BulkString(payload)).toEither.map(_.asUtf8String), Right(payload.asUtf8String))
   }
 }

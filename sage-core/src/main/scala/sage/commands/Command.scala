@@ -1,5 +1,7 @@
 package sage.commands
 
+import scala.util.Try
+
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.protocol.{Frame, RespWriter}
@@ -15,18 +17,34 @@ enum Execution {
 
 /**
   * Selects how to combine replies from an `allMasters` command. `First` returns the first reply when every node should return the same value,
-  * such as the SHA from `SCRIPT LOAD`. `Concat` joins the array elements returned by each node, as required by `KEYS`. `Fold` combines replies
-  * two at a time with the supplied function. This setting is used only when `allMasters` is true.
+  * such as the SHA from `SCRIPT LOAD`, and fails if any other reply does not decode. `Concat` joins the array elements returned by each node,
+  * as required by `KEYS`. `Fold` combines replies two at a time with the supplied function. This setting is used only when `allMasters` is
+  * true.
   */
 enum BroadcastReduce {
   case First
   case Concat
   case Fold(combine: (Frame, Frame) => Frame)
+
+  // takes only the wrapped decoder, so a codec that throws on a dropped First reply fails as a DecodeError
+  private[sage] def reduce(first: Frame, rest: Vector[Frame], decode: Frame => Try[Any]): Frame =
+    this match {
+      case First         =>
+        rest.foreach(decode(_).get)
+        first
+      case Concat        =>
+        Frame.Array((first +: rest).flatMap {
+          case Frame.Array(elements) => elements
+          case Frame.Set(elements)   => elements
+          case other                 => throw DecodeError("array replies", Frame.describe(other))
+        })
+      case Fold(combine) => rest.foldLeft(first)(combine)
+    }
 }
 
 /**
   * Stores one server command, including its encoded arguments and reply decoder. `keyIndices` marks the argument positions used as keys for
-  * cluster routing. [[Reply.run]] handles top-level error frames before calling `decode`.
+  * cluster routing. [[Reply.decode]] handles top-level error frames before calling `decode`.
   *
   * `isReadOnly` marks side-effect-free reads for replica routing. `cacheable` is narrower: the result must depend only on the named keys'
   * current state, allowing server invalidations to cover every change. Time-varying reads (`TTL`, `OBJECT IDLETIME`) and non-deterministic
@@ -67,28 +85,12 @@ final case class Command[+Out](
   /**
     * Transforms the decoded result, leaving the wire encoding and routing metadata untouched.
     */
-  def map[B](f: Out => B): Command[B] = withDecode(frame => decode(frame).map(f))
+  def map[B](f: Out => B): Command[B] = copy[B](decode = frame => decode(frame).map(f))
 
   /**
     * Whether this command requires a dedicated connection because it blocks the connection it uses.
     */
   def isBlocking: Boolean = execution == Execution.Blocking
-
-  // rebuild by named fields to preserve their order and ensure future fields are copied explicitly.
-  private def withDecode[B](decode: Frame => Either[DecodeError, B]): Command[B] =
-    Command(
-      name = name,
-      keyIndices = keyIndices,
-      args = args,
-      decode = decode,
-      execution = execution,
-      isReadOnly = isReadOnly,
-      cacheable = cacheable,
-      allMasters = allMasters,
-      cursorBound = cursorBound,
-      broadcast = broadcast,
-      requiresClusterWideTxResult = requiresClusterWideTxResult
-    )
 
   /**
     * The command's key bytes in argument order. Client-side cache invalidations use these bytes to remove affected results.
@@ -107,9 +109,12 @@ final case class Command[+Out](
 
   /**
     * This command's wire form with decoding replaced by the raw reply frame, preserving routing metadata. The cluster runtime uses it to
-    * collect a broadcast's per-node replies and fold them before decoding once.
+    * collect a broadcast's per-node replies and combine them before decoding the result.
     */
-  def rawFrame: Command[Frame] = withDecode(frame => Right(frame))
+  def rawFrame: Command[Frame] = copy[Frame](decode = Decode.frame)
+
+  // the caller decodes the result, so First decodes only the replies it drops
+  private[sage] def reduceReplies(first: Frame, rest: Vector[Frame]): Frame = broadcast.reduce(first, rest, Reply.decode(this, _))
 }
 
 object Command {

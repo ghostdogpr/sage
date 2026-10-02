@@ -1,8 +1,7 @@
 package sage.client.internal
 
 import java.time.Instant
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
-import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.SSLException
 
 import scala.concurrent.duration.{Duration, FiniteDuration}
@@ -2195,9 +2194,7 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     */
   def cached[A](command: Command[A], ttl: FiniteDuration): F[A]
 
-  private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]
-
-  private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]
+  private[sage] def pipeline[R](p: Pipeline[R]): F[R]
 
   /**
     * Runs a fixed-arity batch of commands in one round-trip, yielding a result tuple that mirrors the argument tuple element-for-element
@@ -2217,13 +2214,13 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
     * Like the tuple [[pipeline]], but yields the per-position results, each slot a `Right`/`Left`, instead of failing on the first error.
     */
   def pipelineAttempt[T <: NonEmptyTuple](commands: T)(using Tuple.IsMappedBy[Command][T]): F[Tuple.Map[Tuple.InverseMap[T, Command], Attempt]] =
-    pipelineAttempt(Pipeline.fromTuple(commands))
+    pipeline(Pipeline.fromTupleAttempt(commands))
 
   /**
     * Like the `Seq` [[pipeline]], but yields the per-position results, each slot a `Right`/`Left`, instead of failing on the first error.
     */
   def pipelineAttempt[A](commands: Seq[Command[A]]): F[Vector[Attempt[A]]] =
-    pipelineAttempt(Pipeline.sequence(commands))
+    pipeline(Pipeline.sequenceAttempt(commands))
 
   /**
     * Opens a [[TransactionScope]] on a leased Dedicated Connection for `MULTI`/`EXEC`, optionally guarded by `WATCH`.
@@ -2297,8 +2294,7 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
         replicaAcknowledgement: Boolean
       ): F[Boolean]                                                                                                                = self.lockWrite(command, timeout, replicaAcknowledgement)
       def cached[A](command: Command[A], ttl: FiniteDuration): F[A]                                                                = self.cached(command, ttl)
-      private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out]                                                              = self.pipeline(p)
-      private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R]                                                         = self.pipelineAttempt(p)
+      private[sage] def pipeline[R](p: Pipeline[R]): F[R]                                                                          = self.pipeline(p)
       def transaction[A](body: TransactionScope[F, K2] => F[A]): F[A]                                                              = self.transaction(scope => body(scope.as[K2]))
       def subscribeChannels[V: ValueCodec](channel: String, rest: String*)                                                         = self.subscribeChannels(channel, rest*)
       def subscribePatterns[V: ValueCodec](pattern: String, rest: String*)                                                         = self.subscribePatterns(pattern, rest*)
@@ -2321,11 +2317,11 @@ object Client {
   private val defaults = SageConfig()
 
   // Server invalidations can keep a cached read current only when the command names at least one key. Reject keyless reads even if they are
-  // otherwise deterministic.
-  private[internal] def cacheable(command: Command[?]): Boolean = command.cacheable && command.keyIndices.nonEmpty
+  // otherwise deterministic, and reject key positions outside the arguments, since the cache cannot read those keys.
+  private[internal] def cacheable(command: Command[?]): Boolean = command.cacheable && command.keyIndices.nonEmpty && !command.hasMalformedKeys
 
   private[internal] def notCacheable(command: Command[?]): NotCacheable =
-    NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key")
+    NotCacheable(s"${command.name} is not cacheable: cached requires a cacheable command with at least one key within its arguments")
 
   // a closed transport may throw before registering its callback. Complete CIO.async with that synchronous failure.
   private[internal] def completing[A](complete: Try[A] => Unit)(submit: => Unit): Unit =
@@ -2542,13 +2538,13 @@ object Client {
   // certificate and hostname failures to TlsError so all expected connection failures remain SageException values.
   private def translateHandshake(error: Throwable): Throwable =
     error match {
-      case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase.contains("unknown command") =>
+      case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase(java.util.Locale.ROOT).contains("unknown command") =>
         UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: ${e.getMessage}")
-      case e: SSLException                                                                               =>
+      case e: SSLException                                                                                                      =>
         TlsError(s"TLS handshake failed: ${e.getMessage}")
-      case e: SageException                                                                              => e
+      case e: SageException                                                                                                     => e
       // a raw network error would otherwise escape the sealed hierarchy
-      case other                                                                                         =>
+      case other                                                                                                                =>
         val failed = ConnectionFailed(s"could not connect: $other")
         failed.initCause(other)
         failed
@@ -2559,7 +2555,7 @@ object Client {
     subscriptions: SubscriptionConnection,
     cachingEnabled: Boolean,
     events: Events
-  ) extends Client[CIO, String] {
+  ) extends LivePipelines {
 
     def run[A](command: Command[A]): CIO[A] =
       Client.withLeaseIfBlocking(command) { lease =>
@@ -2587,12 +2583,6 @@ object Client {
     private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
       executor.withLock(this, key, waitTimeout)(body)
 
-    private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): CIO[Out] =
-      submitPipeline(p).flatMap(TxSupport.collapseStrict(_, p.toOut))
-
-    private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): CIO[R] =
-      submitPipeline(p).map(p.toResults)
-
     // Release the transaction connection after success, failure, or interruption. Return it to the pool only after EXEC or UNWATCH has
     // cleared WATCH/MULTI state and no replies remain pending. Discard it when watched keys or commands may still be active.
     def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
@@ -2610,22 +2600,17 @@ object Client {
     private def releaseScope(scope: TxScope): CIO[Unit] =
       CIO.blocking(nodeClient.releaseTransaction(scope.conn, scope.sealAndReusable()))
 
-    private def submitPipeline[Out, R](p: Pipeline[Out, R]): CIO[Vector[Either[SageException, Any]]] =
-      if (p.commands.isEmpty)
-        CIO.value(Vector.empty)
-      else if (p.commands.exists(_.isBlocking))
-        CIO.fail(InvalidArgument("a Pipeline cannot carry blocking commands; run them individually on the client"))
-      else
-        CIO.async { complete =>
-          Client.submitBatchOnOne(
-            events,
-            p.commands,
-            Events.startSpans(events, p.commands),
-            nodeClient.submitAll,
-            complete,
-            onUnsent = () => ()
-          )
-        }
+    protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
+      CIO.async { complete =>
+        Client.submitBatchOnOne(
+          events,
+          p.commands,
+          Events.startSpans(events, p.commands),
+          nodeClient.submitAll,
+          complete,
+          onUnsent = () => ()
+        )
+      }
 
     def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
       CIO.blocking(channelMessages(subscriptions.subscribeChannels(channel +: rest.toVector)))
@@ -2674,14 +2659,14 @@ object Client {
   // a channel/shard delivery is a Message
   private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
     messages(raw) {
-      case SubscriptionConnection.Delivery.Channel(ch, payload) => Some(Message(ch, decodeOrThrow[V](payload)))
-      case _                                                    => None
+      case Message(ch, payload) => Some(Message(ch, decodeOrThrow[V](payload)))
+      case _                    => None
     }
 
   private[internal] def patternMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, PatternMessage[V]] =
     messages(raw) {
-      case SubscriptionConnection.Delivery.Pattern(pat, ch, payload) => Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))
-      case _                                                         => None
+      case PatternMessage(pat, ch, payload) => Some(PatternMessage(pat, ch, decodeOrThrow[V](payload)))
+      case _                                => None
     }
 
   // fail the stream on a bad payload rather than dropping it
@@ -2697,10 +2682,7 @@ object Client {
     }
 
   final private[internal] class TxScope(val conn: DedicatedConnection, onFault: Throwable => Unit = _ => (), events: Events = Events.disabled)
-    extends TransactionScope[CIO, String] {
-
-    // true after WATCH is attempted and false after EXEC or UNWATCH; prevents reuse while the server may still track watched keys
-    val armed = new AtomicBoolean(false)
+    extends LiveTransactionScope {
 
     private def faulting[A](complete: Try[A] => Unit): Try[A] => Unit = {
       case failure @ Failure(error) =>
@@ -2712,9 +2694,6 @@ object Client {
     // Coordinate submission with release under one lock. A command accepted before release is recorded as in flight before
     // [[sealAndReusable]] checks the connection, preventing the finalizer from recycling a busy connection. Commands submitted after release
     // are rejected, preventing an old transaction handle from using a connection that another transaction has borrowed.
-    private val lock     = new ReentrantLock()
-    private var released = false
-
     private def submitting[A](complete: Try[A] => Unit)(submit: => Unit): Unit = {
       lock.lock()
       try
@@ -2730,12 +2709,6 @@ object Client {
         released = true
         conn.isHealthy && conn.isQuiescent && !armed.get
       } finally lock.unlock()
-    }
-
-    private def isReleased: Boolean = {
-      lock.lock()
-      try released
-      finally lock.unlock()
     }
 
     def watch[K: KeyCodec](key: K, rest: K*): CIO[Unit] =
@@ -2767,34 +2740,12 @@ object Client {
         }
       }
 
-    private[sage] def exec[Out, R](p: Pipeline[Out, R]): CIO[Option[Out]] =
-      runExec(p).flatMap {
-        case None          => CIO.value(None)
-        case Some(results) => TxSupport.collapseStrict(results, p.toOut).map(Some(_))
+    protected def sendMultiExec[R](p: Pipeline[R]): CIO[Vector[Frame]] =
+      CIO.async[Vector[Frame]] { complete =>
+        val tracked = Events.trackSpan(events, Connection.multi, complete)
+        submitting(tracked)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(tracked)))
       }
 
-    private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): CIO[Option[R]] =
-      runExec(p).map(_.map(p.toResults))
-
-    // return None when EXEC reports a WATCH abort and Some with one decoded result per command; a queueing error fails the effect before execution
-    private def runExec[Out, R](p: Pipeline[Out, R]): CIO[Option[Vector[Either[SageException, Any]]]] =
-      if (isReleased)
-        CIO.fail(TxSupport.scopeReleasedError)
-      // skip MULTI/EXEC for an empty pipeline only when WATCH is inactive; watched keys still require EXEC to detect concurrent changes
-      else if (p.commands.isEmpty && !armed.get)
-        CIO.value(Some(Vector.empty))
-      else if (p.commands.exists(_.isBlocking))
-        CIO.fail(InvalidArgument("a Transaction cannot carry blocking commands; run them individually on the client"))
-      else
-        CIO
-          .async[Vector[Frame]] { complete =>
-            val tracked = Events.trackSpan(events, Connection.multi, complete)
-            submitting(tracked)(conn.submitRaw(Connection.multi +: p.commands :+ Connection.exec, faulting(tracked)))
-          }
-          .flatMap { frames =>
-            armed.set(false) // EXEC clears WATCH/MULTI state server-side whether it committed or aborted
-            TxSupport.execErrors(frames).foreach(onFault)
-            TxSupport.interpretExec(p.commands, frames)
-          }
+    protected def onExecReplies(frames: Vector[Frame]): Unit = TxSupport.execErrors(frames).foreach(onFault)
   }
 }
