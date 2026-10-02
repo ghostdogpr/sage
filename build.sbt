@@ -78,6 +78,13 @@ addCommandAlias("itKyo", "integrationTestsKyo/test")
 addCommandAlias("exampleKyo", "examplesKyo/run")
 
 addCommandAlias(
+  "mima",
+  "all core/mimaReportBinaryIssues opentelemetry/mimaReportBinaryIssues compatCe/mimaReportBinaryIssues " +
+    "clientZio/mimaReportBinaryIssues clientCe/mimaReportBinaryIssues clientOx/mimaReportBinaryIssues " +
+    "clientPekko/mimaReportBinaryIssues clientKyo/mimaReportBinaryIssues"
+)
+
+addCommandAlias(
   "docAll",
   "all core/doc opentelemetry/doc compatCe/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc"
 )
@@ -96,6 +103,7 @@ lazy val root = project
 lazy val core = (projectMatrix in file("sage-core"))
   .settings(name := "sage-core")
   .settings(commonSettings)
+  .settings(mimaSettings)
   .settings(parallelUnitTests)
   .defaultAxes(VirtualAxis.jvm, VirtualAxis.scalaVersionAxis(scala3Version, scala3Version))
   .customRow(
@@ -109,6 +117,7 @@ lazy val opentelemetry = (projectMatrix in file("sage-opentelemetry"))
   .dependsOn(core)
   .settings(name := "sage-opentelemetry")
   .settings(commonSettings)
+  .settings(mimaSettings)
   .settings(parallelUnitTests)
   .settings(
     libraryDependencies ++= Seq(
@@ -130,6 +139,7 @@ lazy val compatCe = project
   .in(file("sage-compat-ce"))
   .settings(name := "sage-compat-ce")
   .settings(commonSettings)
+  .settings(mimaSettings)
   .settings(
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-effect" % catsEffectVersion,
@@ -152,6 +162,7 @@ lazy val client = (projectMatrix in file("sage-client"))
   .enablePlugins(BuildInfoPlugin)
   .settings(name := "sage-client")
   .settings(commonSettings)
+  .settings(mimaSettings)
   .settings(parallelUnitTests)
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
@@ -277,6 +288,14 @@ lazy val commonSettings = Def.settings(
   ),
   libraryDependencies += "org.scalameta" %% "munit" % munitVersion % Test,
   Test / fork                            := true
+)
+
+lazy val mimaSettings = Def.settings(
+  // the unpublished Future anchor row has no previous release to compare against
+  mimaPreviousArtifacts := {
+    if (moduleName.value.endsWith("-future")) Set.empty
+    else previousStableVersion.value.map(organization.value %% moduleName.value % _).toSet
+  }
 )
 
 // Only for container-free cells: integration suites each boot their own container, so running them in

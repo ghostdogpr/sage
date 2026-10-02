@@ -43,6 +43,23 @@ jobs:
       - name: Run unit tests
         run: sbt testUnit
 
+  mima:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout current branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Setup Scala and Java
+        uses: coursier/setup-action@v3
+        with:
+          jvm: temurin:25
+          apps: sbt
+      - name: Cache scala dependencies
+        uses: coursier/cache-action@v8
+      - name: Check binary compatibility
+        run: sbt mima
+
   docs:
     runs-on: ubuntu-24.04
     steps:
@@ -111,7 +128,7 @@ jobs:
 
   publish:
     runs-on: ubuntu-24.04
-    needs: [lint, unit, integration]
+    needs: [lint, unit, mima, integration]
     if: github.event_name != 'pull_request'
     steps:
       - name: Checkout current branch
