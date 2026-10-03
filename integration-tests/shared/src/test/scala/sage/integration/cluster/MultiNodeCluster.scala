@@ -51,6 +51,8 @@ trait MultiNodeCluster(image: String, serverBinary: String, nodeCount: Int, repl
           "--cluster-announce-ip 127.0.0.1",
           // start a replica's initial sync immediately, not after the default 5s window, so it is a live copy before a failover
           "--repl-diskless-sync-delay 0",
+          // on an idle master, a replica's replication offset first moves with this PING (every 10s by default)
+          "--repl-ping-replica-period 1",
           "--save ''",
           "--appendonly no",
           "--protected-mode no",
@@ -87,7 +89,7 @@ trait MultiNodeCluster(image: String, serverBinary: String, nodeCount: Int, repl
     val create = Vector("redis-cli", "--cluster", "create") ++ ports.map(p => s"127.0.0.1:$p") ++
       Vector("--cluster-replicas", replicasPerMaster.toString, "--cluster-yes")
     awaitPortsUp.flatMap(_ => CIO.blocking(exec(container, create*))).flatMap(_ => awaitClusterOk) >>
-      // CLUSTER SLOTS lists a replica only once it has synced
+      // CLUSTER SLOTS lists a replica only once its replication offset is nonzero
       Eventually(100)(clusterTopology(basePort).satisfies(_.shards.forall(_.replicas.size == replicasPerMaster)))
   }
 }
