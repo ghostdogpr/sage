@@ -76,12 +76,12 @@ private[sage] object Primitives {
   def decodeNumber[A](expected: String, parse: String => Option[A])(bytes: Bytes): Either[DecodeError, A] =
     parse(bytes.asUtf8String).toRight(DecodeError(expected, preview(bytes)))
 
-  // ASCII digits with an optional '-', no '+', leading zeros or "-0", so distinct keys never decode to the same number
+  // ASCII digits with an optional '-'; a leading '+' is rejected so "5" and "+5" don't decode to the same key
   def decodeLong(expected: String, min: Long, max: Long)(bytes: Bytes): Either[DecodeError, Long] = {
     val a        = bytes.unsafeArray
     val negative = a.length > 1 && a(0) == '-'
     var i        = if (negative) 1 else 0
-    var ok       = i < a.length && (a(i) != '0' || a.length == 1)
+    var ok       = i < a.length
     var acc      = 0L // accumulates the negated value so Long.MinValue fits
     while (ok && i < a.length) {
       val digit = a(i) - '0'
