@@ -35,7 +35,7 @@ class PagedSpec extends munit.FunSuite {
 
   test("acrossTargets walks every target to its own zero cursor, then ends; empty targets end immediately") {
     val fetch: ScanTarget => ScanCursor => CIO[ScanPage[String]] = _ => _ => CIO.value(ScanPage(Vector("x"), None))
-    val step                                                     = Paged.acrossTargets(CIO.value(Vector(ScanTarget.any, ScanTarget.any)))(fetch)
+    val step                                                     = Paged.acrossTargets(CIO.value(Vector(SharedRunner.unavailable, SharedRunner.unavailable)))(fetch)
     val none                                                     = Paged.acrossTargets[String](CIO.value(Vector.empty[ScanTarget]))(fetch)
     for {
       begin  <- step(ScanStep.Begin).unsafeRun
@@ -46,13 +46,13 @@ class PagedSpec extends munit.FunSuite {
     } yield {
       assertEquals(begin.get._1, Vector.empty[String])
       begin.get._2 match {
-        case ScanStep.Visit(_, remaining) => assertEquals(remaining.length, 2)
-        case other                        => fail(s"expected Visit over two targets, got $other")
+        case ScanStep.Visit(_, _, rest) => assertEquals(rest.length, 1)
+        case other                      => fail(s"expected Visit over two targets, got $other")
       }
       assertEquals(visit1.get._1, Vector("x"))
       visit1.get._2 match {
-        case ScanStep.Visit(_, remaining) => assertEquals(remaining.length, 1)
-        case other                        => fail(s"expected Visit over the last target, got $other")
+        case ScanStep.Visit(_, _, rest) => assertEquals(rest.length, 0)
+        case other                      => fail(s"expected Visit over the last target, got $other")
       }
       assertEquals(visit2.get._1, Vector("x"))
       assertEquals(visit2.get._2, ScanStep.End)
@@ -77,7 +77,7 @@ class PagedSpec extends munit.FunSuite {
       assertEquals(page1, Some((full, Some(StreamRangeId.Exclusive(StreamId(3L, 0L))))))
       assertEquals(page2, Some((Vector(entry(4)), None)))
       assertEquals(end, None)
-      assertEquals(empty, None)
+      assertEquals(empty, Some((Vector.empty, None)))
     }
   }
 

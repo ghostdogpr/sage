@@ -15,7 +15,7 @@ sealed trait SageEvent
 object SageEvent {
 
   /**
-    * Reports a completed user command with its name, final node (`None` for standalone and all-master commands), client-observed duration, and
+    * Reports a completed user command with its name, final node (`None` for standalone, all-master and cross-slot split commands), client-observed duration, and
     * outcome. The duration includes cluster redirects and retries. A locally served cached read produces only [[Cache.Hit]]. A cache miss
     * produces [[Cache.Miss]] and a `CommandCompleted` after the server request finishes.
     */

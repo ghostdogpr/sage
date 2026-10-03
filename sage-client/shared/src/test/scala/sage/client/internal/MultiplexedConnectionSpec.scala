@@ -8,7 +8,7 @@ import Replies.bulk
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, DecodeError, NotConnected, ServerError}
-import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, CacheConfig, SageConfig, WatchdogConfig}
 import sage.commands.{Command, Connection, Strings}
 import sage.protocol.Frame
 
@@ -17,23 +17,69 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
   private val fixedBackoff = BackoffConfig(initialDelay = 1.milli, maxDelay = 1.milli, multiplier = 1.0)
   private val noWatchdog   = WatchdogConfig(enabled = false)
 
+  private val noCache = CacheConfig(enabled = false)
+
+  private val cachingConfig = SageConfig(
+    reconnect = fixedBackoff,
+    watchdog = noWatchdog,
+    connectTimeout = 1.second,
+    closeTimeout = Duration.Zero,
+    clientCache = CacheConfig(enabled = true, maxBytes = 1L << 20)
+  )
+
   private def make(
     autoWrite: Boolean = true,
     respond: Bytes => Seq[Frame] = _ => Nil,
     watchdog: WatchdogConfig = noWatchdog,
-    closeTimeout: FiniteDuration = Duration.Zero,
-    bootstrap: Vector[Command[?]] = Vector.empty
+    closeTimeout: FiniteDuration = Duration.Zero
   ): (MultiplexedConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, respond, autoWrite)
+      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(respond))
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, bootstrap, fixedBackoff, watchdog, 1.second, closeTimeout)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = watchdog, connectTimeout = 1.second, closeTimeout = closeTimeout),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
+    // the setup is written before the test takes control of writes
+    transports.foreach(_.autoWrite = autoWrite)
     (connection, scheduler, transports)
+  }
+
+  test("an interrupted handshake closes the connection it opened") {
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    // the reply to HELLO never comes, and the waiting thread is interrupted instead
+    val respond: Bytes => Seq[Frame]                    = payload => {
+      if (payload.asUtf8String.contains("HELLO")) Thread.currentThread().interrupt()
+      Nil
+    }
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      val transport = new FakeTransport(onFrame, onClosed, respond)
+      transports += transport
+      transport
+    }
+    val connection                                      = new MultiplexedConnection(
+      factory,
+      new ManualScheduler,
+      SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = noWatchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+      MultiplexedConnection.NodeRole.Master
+    )
+    @volatile var failure: Throwable                    = null
+    Thread
+      .ofVirtual()
+      .start { () =>
+        try connection.start(): Unit
+        catch { case e: Throwable => failure = e }
+      }
+      .join()
+    assert(failure.isInstanceOf[InterruptedException], String.valueOf(failure))
+    assertEquals(transports.map(_.closeCount).toVector, Vector(1))
   }
 
   test("matches replies to commands in FIFO order") {
@@ -167,7 +213,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val callbacks                   = Vector.tabulate(3)(i => (r: Try[Any]) => results(i) = r)
     val submitted                   = connection.submitAll(commands, callbacks)
     assert(submitted)
-    assertEquals(transports.head.written.length, 1) // one round-trip: the whole pipeline is one write, not three
+    assertEquals(transports.head.sent.length, 1) // one round-trip: the whole pipeline is one write, not three
     transports.head.emit(Frame.SimpleString("a"))
     transports.head.emit(Frame.SimpleString("b"))
     transports.head.emit(Frame.SimpleString("c"))
@@ -180,8 +226,8 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     connection.submitAll(commands, Vector.fill(2)((_: Try[Any]) => ()))
     transports.head.writeNext()
     val expected                    = Bytes.concat(commands.map(_.encode))
-    assertEquals(transports.head.written.length, 1)
-    assert(transports.head.written.head.sameBytes(expected))
+    assertEquals(transports.head.sent.length, 1)
+    assert(transports.head.sent.head.sameBytes(expected))
   }
 
   test("a batch returns false when not connected, submitting nothing") {
@@ -268,12 +314,17 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Nil))
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], backoff, noWatchdog, 1.second, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = backoff, watchdog = noWatchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
     import MultiplexedConnection.State
 
     scheduler.advance(11.seconds)
@@ -289,26 +340,31 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Nil))
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], backoff, noWatchdog, 1.second, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = backoff, watchdog = noWatchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
     import MultiplexedConnection.State
 
     // when a Live connection drops before the stable interval, keep the attempt count and increase the next backoff delay
     assertEquals(connection.currentState, State.Live)
-    transports.last.emit(Frame.SimpleString("stray")) // flap 1 -> attempt 1 -> 20ms
+    transports.last.emit(Frame.SimpleString("stray")) // flap 1 -> attempt 0 -> 10ms
     assertEquals(connection.currentState, State.Reconnecting)
-    scheduler.advance(19.millis)
-    assertEquals(connection.currentState, State.Reconnecting, "still backing off before the 20ms attempt-1 delay")
+    scheduler.advance(9.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "still backing off before the 10ms attempt-0 delay")
     scheduler.advance(1.milli)
     assertEquals(connection.currentState, State.Live)
 
-    transports.last.emit(Frame.SimpleString("stray")) // the second short-lived connection uses attempt 2 and a 40 ms delay
-    scheduler.advance(39.millis)
-    assertEquals(connection.currentState, State.Reconnecting, "the backoff doubled to 40ms rather than resetting to 10ms")
+    transports.last.emit(Frame.SimpleString("stray")) // the second short-lived connection uses attempt 1 and a 20 ms delay
+    scheduler.advance(19.millis)
+    assertEquals(connection.currentState, State.Reconnecting, "the backoff doubled to 20ms rather than resetting to 10ms")
     scheduler.advance(1.milli)
     assertEquals(connection.currentState, State.Live)
 
@@ -325,10 +381,11 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
   test("a socket dying in the establish->Live window is not published Live, and the reconnect loop recovers") {
     final class DyingAfterBootstrap(onFrame: Frame => Unit, onClosed: () => Unit) extends Transport {
       def start(): Unit                    = ()
+      // answers the setup, then drops the connection right after the last setup command
       def send(item: Transport.Item): Unit = {
         item.writeAttempted()
-        onFrame(Frame.SimpleString("PONG"))
-        onClosed()
+        Replies.withSetup(_ => Nil)(item.payload).foreach(onFrame)
+        if (item.payload.asUtf8String.contains("LIB-VER")) onClosed()
       }
       def close(): Unit                    = ()
     }
@@ -340,12 +397,17 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
         first = false
         new DyingAfterBootstrap(onFrame, onClosed)
       } else {
-        val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
+        val t = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Seq(Frame.SimpleString("PONG"))))
         healthy += t
         t
       }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = noWatchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
 
     assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
 
@@ -359,20 +421,21 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(afterRecovery, Some(Success("PONG")))
   }
 
-  test("isCurrent gates on liveness: a stamp is current only while Live, never during a reconnect window at the same generation") {
+  test("losing liveness retires the pool's dedicated connections, so one opened before a reconnect is not reused") {
     val (connection, scheduler, transports) = make()
-    val g                                   = connection.liveGeneration().getOrElse(fail("expected a live generation"))
-    assert(connection.isCurrent(g))
+    val dedicated                           = connection.pool.acquireForTransaction()
+    connection.pool.releaseTransaction(dedicated, reusable = true)
+    assertEquals(transports.size, 2)
 
-    transports.head.emit(Frame.SimpleString("PONG")) // stray frame -> discarded -> Reconnecting, generation not yet bumped
-    assertEquals(connection.currentState, MultiplexedConnection.State.Reconnecting)
-    assertEquals(connection.liveGeneration(), None)
-    assert(!connection.isCurrent(g), "the stamp must not read as current during a reconnect window, even at the same generation")
+    transports.head.emit(Frame.SimpleString("PONG")) // stray frame -> discarded -> Reconnecting
+    assert(!connection.isLive)
+    scheduler.advance(1.milli)                       // reconnects -> Live
+    assert(connection.isLive)
 
-    scheduler.advance(1.milli) // reconnects -> Live, generation bumps
-    assertEquals(connection.currentState, MultiplexedConnection.State.Live)
-    assert(!connection.isCurrent(g), "the old stamp stays stale once the generation bumps")
-    assert(connection.isCurrent(connection.liveGeneration().getOrElse(fail("expected a live generation"))))
+    val fresh = connection.pool.acquireForTransaction()
+    assert(fresh ne dedicated)
+    assertEquals(transports.size, 4)
+    connection.pool.releaseTransaction(fresh, reusable = true)
   }
 
   test("every reconnect attempt re-resolves the endpoint, honoring a repoint between attempts") {
@@ -383,14 +446,19 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       seen += endpoint
-      val reply: Bytes => Seq[Frame] = _ => if (healthy) Seq(Frame.SimpleString("PONG")) else Seq(Frame.SimpleError("LOADING"))
+      val reply: Bytes => Seq[Frame] = payload => if (healthy) Replies.withSetup(_ => Nil)(payload) else Seq(Frame.SimpleError("LOADING"))
       val transport                  = new FakeTransport(onFrame, onClosed, reply)
       transports += transport
       transport
     }
-    // use PING as the bootstrap command. It fails while the current endpoint is unhealthy, which makes every retry resolve the endpoint again.
+    // HELLO fails while the current endpoint is unhealthy, which makes every retry resolve the endpoint again.
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = noWatchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
     assertEquals(seen.toList, List("master-1"))
     assertEquals(connection.currentState, MultiplexedConnection.State.Live)
 
@@ -428,15 +496,20 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val scheduler                                       = new ManualScheduler
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      // generation 0 answers the bootstrap PING; later generations never reply, so establish() blocks until close() aborts it
+      // generation 0 answers the setup; later generations never reply, so establish() blocks until close() aborts it
       val first                      = transports.isEmpty
-      val reply: Bytes => Seq[Frame] = _ => if (first) Seq(Frame.SimpleString("PONG")) else Nil
+      val reply: Bytes => Seq[Frame] = if (first) Replies.withSetup(_ => Nil) else _ => Nil
       val transport                  = new FakeTransport(onFrame, onClosed, reply)
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 5.seconds, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = noWatchdog, connectTimeout = 5.seconds, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
 
     transports.head.emit(Frame.SimpleString("stray"))
     val reconnect = new Thread(() => scheduler.advance(1.milli)) // advance blocks inside establish() awaiting the bootstrap reply
@@ -459,7 +532,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
       if (head == null) {
-        head = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
+        head = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Seq(Frame.SimpleString("PONG"))))
         head
       } else {
         val transport = new ConnectingTransport(onClosed)
@@ -467,7 +540,12 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
         transport
       }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 5.seconds, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = noWatchdog, connectTimeout = 5.seconds, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
 
     head.emit(Frame.SimpleString("stray"))
     val reconnect = new Thread(() => scheduler.advance(1.milli)) // blocks inside ConnectingTransport.start()
@@ -515,18 +593,28 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) =>
       if (first) {
         first = false
+        // answers the setup, then drops the connection right after the last setup command
         new Transport {
-          def start(): Unit                    = onClosed()
-          def send(item: Transport.Item): Unit = ()
+          def start(): Unit                    = ()
+          def send(item: Transport.Item): Unit = {
+            item.writeAttempted()
+            Replies.withSetup(_ => Nil)(item.payload).foreach(onFrame)
+            if (item.payload.asUtf8String.contains("LIB-VER")) onClosed()
+          }
           def close(): Unit                    = ()
         }
       } else {
-        val t = new FakeTransport(onFrame, onClosed, _ => Nil, autoWrite = true)
+        val t = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Nil))
         live += t
         t
       }
     val connection                                      =
-      MultiplexedConnection.connect(factory, scheduler, Vector.empty[Command[?]], fixedBackoff, watchdog, 1.second, Duration.Zero)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        SageConfig(clientCache = noCache, reconnect = fixedBackoff, watchdog = watchdog, connectTimeout = 1.second, closeTimeout = Duration.Zero),
+        MultiplexedConnection.NodeRole.Master
+      ).start()
 
     scheduler.advance(1.milli)
     assertEquals(connection.currentState, MultiplexedConnection.State.Live)
@@ -534,6 +622,22 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     scheduler.advance(10.millis)
     assertEquals(live.head.written.count(_.asUtf8String.contains("PING")), 1)
+  }
+
+  test("a close interrupted while draining still closes the socket, returns normally and keeps the interrupt") {
+    val (connection, _, transports) = make(autoWrite = false, closeTimeout = 2.seconds)
+    connection.submit(Connection.ping(), _ => ())
+    @volatile var interruptedAfter  = false
+    Thread
+      .ofVirtual()
+      .start { () =>
+        Thread.currentThread().interrupt()
+        connection.close()
+        interruptedAfter = Thread.currentThread().isInterrupted
+      }
+      .join()
+    assertEquals(transports.head.closeCount, 1)
+    assert(interruptedAfter)
   }
 
   test("graceful drain lets an in-flight reply complete before close finishes") {
@@ -590,13 +694,20 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed)
+      // answer the CLIENT TRACKING setup write, so every cached connection's first write is that command
+      val transport =
+        new FakeTransport(onFrame, onClosed, Replies.withSetup(p => if (p.asUtf8String.contains("TRACKING")) Seq(Frame.SimpleString("OK")) else Nil))
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection
-        .connect(factory, scheduler, Vector.empty, fixedBackoff, noWatchdog, 1.second, Duration.Zero, cacheMaxBytes = 1L << 20, events = events)
+      new MultiplexedConnection(
+        factory,
+        scheduler,
+        cachingConfig,
+        MultiplexedConnection.NodeRole.Master,
+        events = events
+      ).start()
     (connection, scheduler, transports)
   }
 
@@ -608,21 +719,21 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val get                         = Strings.get[String, String]("foo")
 
     var first: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => first = Some(r))
-    assertEquals(transports.head.written.length, 1) // one batch: [CLIENT CACHING YES, GET foo]
-    transports.head.emit(Frame.SimpleString("OK"))  // CLIENT CACHING YES reply, discarded
+    connection.cachedSubmit(get, 60000L, r => first = Some(r), Events.untraced)
+    assertEquals(transports.head.sent.length, 2)   // CLIENT TRACKING, then one batch: [CLIENT CACHING YES, GET foo]
+    transports.head.emit(Frame.SimpleString("OK")) // CLIENT CACHING YES reply, discarded
     transports.head.emit(bulk("bar"))
     assertEquals(first, Some(Success(Some("bar"))))
 
     var second: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => second = Some(r))
+    connection.cachedSubmit(get, 60000L, r => second = Some(r), Events.untraced)
     assertEquals(second, Some(Success(Some("bar")))) // served locally
-    assertEquals(transports.head.written.length, 1)  // no new round-trip
+    assertEquals(transports.head.sent.length, 2)     // no new round-trip
 
     transports.head.emit(invalidationOf("foo"))
     var third: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => third = Some(r))
-    assertEquals(transports.head.written.length, 2) // evicted -> refetch
+    connection.cachedSubmit(get, 60000L, r => third = Some(r), Events.untraced)
+    assertEquals(transports.head.sent.length, 3) // evicted -> refetch
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("baz"))
     assertEquals(third, Some(Success(Some("baz"))))
@@ -632,16 +743,16 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val (connection, _, transports) = cachedConnection()
     val get                         = Strings.get[String, String]("foo")
 
-    connection.cachedSubmit(get, 60000L, _ => ())
+    connection.cachedSubmit(get, 60000L, _ => (), Events.untraced)
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("bar"))
-    assertEquals(transports.head.written.length, 1)
+    assertEquals(transports.head.sent.length, 2)
 
     transports.head.emit(Frame.Push(Vector(bulk("invalidate"), Frame.Null))) // FLUSHALL/tracking-drop form
 
     var afterFlush: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => afterFlush = Some(r))
-    assertEquals(transports.head.written.length, 2) // flushed -> refetch
+    connection.cachedSubmit(get, 60000L, r => afterFlush = Some(r), Events.untraced)
+    assertEquals(transports.head.sent.length, 3) // flushed -> refetch
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("baz"))
     assertEquals(afterFlush, Some(Success(Some("baz"))))
@@ -651,21 +762,21 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val (connection, scheduler, transports) = cachedConnection()
     val get                                 = Strings.get[String, String]("foo")
 
-    connection.cachedSubmit(get, 1000L, _ => ())
+    connection.cachedSubmit(get, 1000L, _ => (), Events.untraced)
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("bar"))
-    assertEquals(transports.head.written.length, 1)
+    assertEquals(transports.head.sent.length, 2)
 
-    scheduler.advance(1001.millis)                  // past the TTL
-    connection.cachedSubmit(get, 1000L, _ => ())
-    assertEquals(transports.head.written.length, 2) // expired -> refetch
+    scheduler.advance(1001.millis)               // past the TTL
+    connection.cachedSubmit(get, 1000L, _ => (), Events.untraced)
+    assertEquals(transports.head.sent.length, 3) // expired -> refetch
   }
 
   test("a reconnect flushes the cache: tracking state is connection-bound") {
     val (connection, scheduler, transports) = cachedConnection()
     val get                                 = Strings.get[String, String]("foo")
 
-    connection.cachedSubmit(get, 60000L, _ => ())
+    connection.cachedSubmit(get, 60000L, _ => (), Events.untraced)
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("bar"))
 
@@ -675,8 +786,8 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(transports.size, 2)
 
     var afterReconnect: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => afterReconnect = Some(r))
-    assertEquals(transports(1).written.length, 1) // fresh generation, empty cache -> refetch
+    connection.cachedSubmit(get, 60000L, r => afterReconnect = Some(r), Events.untraced)
+    assertEquals(transports(1).sent.length, 2) // fresh generation, empty cache -> refetch
     transports(1).emit(Frame.SimpleString("OK"))
     transports(1).emit(bulk("baz"))
     assertEquals(afterReconnect, Some(Success(Some("baz"))))
@@ -688,21 +799,22 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val (connection, _, transports) = cachedConnection(events)
     val get                         = Strings.get[String, String]("foo")
 
-    connection.cachedSubmit(get, 60000L, _ => ()) // miss -> fetch
+    tracedRead(connection, events, get)(_ => ()) // miss -> fetch
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("bar"))
     assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded"))
 
-    connection.cachedSubmit(get, 60000L, _ => ())                               // served locally
+    tracedRead(connection, events, get)(_ => ())                                // served locally
     assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded")) // unchanged: no span for a hit
   }
 
   test("a cached read that fails fast (not connected) settles a Failed span, like an ordinary command") {
     val tracer                              = new RecordingTracer
-    val (connection, _, _)                  = cachedConnection(Events(Vector.empty, Some(tracer)))
+    val events                              = Events(Vector.empty, Some(tracer))
+    val (connection, _, _)                  = cachedConnection(events)
     connection.close()
     var result: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(Strings.get[String, String]("foo"), 60000L, r => result = Some(r))
+    tracedRead(connection, events, Strings.get[String, String]("foo"))(r => result = Some(r))
     assert(result.exists(_.isFailure))
     assertEquals(tracer.log.head, "start:GET")
     assert(tracer.log.last.startsWith("settled:Failed"))
@@ -718,26 +830,22 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
       else Nil
     }
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, respond)
+      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(respond))
       transports += transport
       transport
     }
-    val connection                                      = MultiplexedConnection.connect(
+    val connection                                      = new MultiplexedConnection(
       factory,
       scheduler,
-      Vector(Connection.clientTrackingOnOptin),
-      fixedBackoff,
-      noWatchdog,
-      1.second,
-      Duration.Zero,
-      cacheMaxBytes = 1L << 20
-    )
+      cachingConfig,
+      MultiplexedConnection.NodeRole.Master
+    ).start()
     val get                                             = Strings.get[String, String]("foo")
 
     var first: Option[Try[Option[String]]]  = None
-    connection.cachedSubmit(get, 60000L, r => first = Some(r))
+    connection.cachedSubmit(get, 60000L, r => first = Some(r), Events.untraced)
     var second: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => second = Some(r))
+    connection.cachedSubmit(get, 60000L, r => second = Some(r), Events.untraced)
 
     assertEquals(first, Some(Success(Some("bar"))))
     assertEquals(second, Some(Success(Some("bar"))))
@@ -745,4 +853,8 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assert(!writes.exists(_.contains("CACHING")), "no CLIENT CACHING YES when tracking is unavailable")
     assertEquals(writes.count(_.contains("GET")), 2, "each cached read re-contacts the server: nothing is cached without tracking")
   }
+
+  // traces the read once per call, as the client runtimes do
+  private def tracedRead[A](connection: MultiplexedConnection, events: Events, command: Command[A])(callback: Try[A] => Unit): Unit =
+    connection.cachedSubmit(command, 60000L, callback, Events.fetchTracking(events))
 }

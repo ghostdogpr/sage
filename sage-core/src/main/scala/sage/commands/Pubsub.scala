@@ -3,7 +3,7 @@ package sage.commands
 import sage.{Bytes, Message, PatternMessage}
 import sage.SageException.DecodeError
 import sage.codec.ValueCodec
-import sage.protocol.{Frame, RespWriter}
+import sage.protocol.Frame
 
 /**
   * Pub/sub command definitions. `PUBLISH`, `SPUBLISH`, and `PUBSUB` use the usual request/reply flow. In a cluster, `SPUBLISH` uses its
@@ -55,21 +55,26 @@ private[sage] object Pubsub {
     case Pattern extends Kind("PSUBSCRIBE", "PUNSUBSCRIBE")
     case Shard   extends Kind("SSUBSCRIBE", "SUNSUBSCRIBE")
 
-    // a bare verb would act on every subscription of this kind, so an empty name list encodes nothing
-    def subscribeWire(names: Vector[String]): Option[Bytes]   =
-      Option.when(names.nonEmpty)(RespWriter.writeCommand(subscribeVerb, names.map(Bytes.utf8)))
-    def unsubscribeWire(names: Vector[String]): Option[Bytes] =
-      Option.when(names.nonEmpty)(RespWriter.writeCommand(unsubscribeVerb, names.map(Bytes.utf8)))
+    // one name per command, so the server answers it with exactly one confirmation push or one error reply
+    def subscribe(name: String): Command[Unit]    = Command(subscribeVerb, Command.NoKeys, Vector(Bytes.utf8(name)), _ => Right(()))
+    def unsubscribe(name: String): Command[Frame] = Command(unsubscribeVerb, Command.NoKeys, Vector(Bytes.utf8(name)), Decode.frame)
   }
+
+  // HELLO without arguments returns the connection's server information. It runs while the server is loading, stale or busy, and every
+  // connection may run it, since its setup did.
+  val helloInfo: Command[Frame] = Command("HELLO", Command.NoKeys, Vector.empty, Decode.frame)
 
   type Delivery = Message[Bytes] | PatternMessage[Bytes]
 
   /**
-    * A classified pub/sub push frame: a subscription confirmation or a delivery. Deliveries contain raw payload bytes, which are decoded to the
-    * subscriber's value type at the stream boundary.
+    * A classified pub/sub push frame: a confirmation, a shard channel unsubscription, or a delivery. Deliveries contain raw payload bytes,
+    * which are decoded to the subscriber's value type at the stream boundary.
     */
   enum Event {
-    case Subscribed
+    // the reply to a SUBSCRIBE, PSUBSCRIBE, SSUBSCRIBE, UNSUBSCRIBE or PUNSUBSCRIBE, which the server never sends on its own
+    case Confirmed
+    // the server sends this push to confirm an SUNSUBSCRIBE and also when it drops a shard channel whose slot moved
+    case ShardUnsubscribed(channel: String)
     // `subscription` is the channel or pattern under which the subscribers of `kind` are registered
     case Delivered(kind: Kind, subscription: String, delivery: Delivery)
   }
@@ -86,7 +91,8 @@ private[sage] object Pubsub {
         Some(Event.Delivered(Kind.Shard, channel, Message(channel, payload)))
       case Vector(Decode.Text("pmessage"), Decode.Text(pattern), Decode.Text(channel), Frame.BulkString(payload)) =>
         Some(Event.Delivered(Kind.Pattern, pattern, PatternMessage(pattern, channel, payload)))
-      case Vector(Decode.Text("subscribe" | "psubscribe" | "ssubscribe"), _, _)                                   => Some(Event.Subscribed)
+      case Vector(Decode.Text("subscribe" | "psubscribe" | "ssubscribe" | "unsubscribe" | "punsubscribe"), _, _)  => Some(Event.Confirmed)
+      case Vector(Decode.Text("sunsubscribe"), Decode.Text(channel), _)                                           => Some(Event.ShardUnsubscribed(channel))
       case _                                                                                                      => None
     }
 

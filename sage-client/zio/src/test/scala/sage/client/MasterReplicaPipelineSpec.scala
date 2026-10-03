@@ -13,7 +13,7 @@ import sage.{Bytes, CommandSpan, CommandTracer, Outcome, SageEvent, SageListener
 import sage.client.internal.{CountingScheduler, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Replies, Scheduler}
 import sage.client.internal.Replies.ok
 import sage.cluster.Node
-import sage.commands.{Command, Connection}
+import sage.commands.Command
 import sage.protocol.Frame
 
 class MasterReplicaPipelineSpec extends munit.FunSuite {
@@ -52,18 +52,21 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
     val readBatches = new ConcurrentLinkedQueue[(Node, Int)]()
     val readFailure = new AtomicReference(failure)
     val readReplies = new AtomicReference[Option[(Node, Vector[Frame])]](None)
+    val opened      = new ConcurrentLinkedQueue[(Node, FakeTransport)]()
+    val refuseHello = new java.util.concurrent.atomic.AtomicBoolean(false)
 
     val factory: Node => MultiplexedConnection.TransportFactory =
       node =>
         (onFrame, onClosed) => {
           var transport: FakeTransport = null
           transport = new FakeTransport(onFrame, onClosed, respondFor(node, () => transport.close()))
+          opened.add(node -> transport)
           transport
         }
 
     private def respondFor(node: Node, disconnect: () => Unit): Bytes => Seq[Frame] = payload => {
       val s = payload.asUtf8String
-      if (s.contains("HELLO")) Seq(Replies.hello)
+      if (s.contains("HELLO")) Seq(if (refuseHello.get()) Frame.SimpleError("ERR node is down") else Replies.hello)
       else if (s.contains("ROLE")) if (node == master) Seq(role) else Nil
       else {
         val reads  = occurrences(s, "PREAD")
@@ -123,13 +126,12 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
       new MasterReplicaLive(
         script.factory,
         scheduler,
-        Vector(Connection.hello(None)),
         SageConfig(readFrom = readFrom),
         Vector(master),
         MasterReplicaConfig(1.second),
         Events(Vector(listener), Some(tracer))
       )
-    live.bootstrapRoles()
+    live.start()
     Fixture(live, completions, tracer, latch, script)
   }
 
@@ -275,6 +277,19 @@ class MasterReplicaPipelineSpec extends munit.FunSuite {
         assertEquals(f.completions.asScala.toVector.map(_.node), Vector(Some(replica), Some(replica)))
         f.live.close.unsafeRun
       }
+  }
+
+  test("a pipeline whose master connection is down when it is sent fails unsent, attributing no node or span") {
+    val f = build(ReadFrom.Master)
+    f.script.refuseHello.set(true)
+    f.script.opened.asScala.foreach { case (_, transport) => transport.close() }
+    f.live.pipeline(Seq(readCmd, writeCmd)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[sage.SageException.NotConnected], s"an unsent batch must fail with NotConnected, got $error")
+      assert(f.latch.await(2, TimeUnit.SECONDS), "expected a completion per pipeline position")
+      assertEquals(f.completions.asScala.toVector.map(c => (c.name, c.node)), Vector("PREAD" -> None, "PWRITE" -> None))
+      assertEquals(f.tracer.routed.asScala.toVector.filter(r => r._1 == "PREAD" || r._1 == "PWRITE"), Vector.empty)
+      f.live.close.unsafeRun
+    }
   }
 
   test("a ReplicaPreferred read-only pipeline falls back when the replica disconnects after submission") {

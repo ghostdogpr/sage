@@ -19,18 +19,18 @@ final private[client] class ClientCache(maxBytes: Long) {
   import ClientCache.*
   import ClientCache.Acquire.*
 
-  private val lock                                   = new ReentrantLock()
+  private val lock            = new ReentrantLock()
   // accessOrder = true moves a read entry to the end of the map. Eviction then removes the least recently used entry first.
-  private val entries                                = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
-  private val reverse                                = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
-  private val pending                                = mutable.HashMap.empty[Key, InFlight]
-  private var bytesUsed: Long                        = 0L
-  @volatile private var epoch: CacheEpoch            = CacheEpoch.initial
-  @volatile private var rerouteWatermark: CacheEpoch = CacheEpoch.initial
+  private val entries         = new java.util.LinkedHashMap[Key, Entry](16, 0.75f, true)
+  private val reverse         = mutable.HashMap.empty[Key, mutable.HashSet[Key]]
+  private val pending         = mutable.HashMap.empty[Key, Fetching]
+  private var bytesUsed: Long = 0L
+  // a flush retires every hit handed out before it
+  @volatile private var epoch = 0L
 
   /**
     * Tries to serve `commandBytes` from the cache. [[Hit]] returns the stored frame. Decode it and complete the caller. [[Fetch]] means that
-    * this caller is the first to miss. Read from the server, then call [[store]] or [[fail]]. [[Wait]] means that another fetch is in flight
+    * this caller is the first to miss. Read from the server, then pass its ticket to [[store]] or [[fail]]. [[Wait]] means that another fetch is in flight
     * and now owns `waiter`. Do nothing for this caller. [[Fetch]] and [[Wait]] enqueue `waiter`; [[Hit]] does not.
     */
   def acquire(commandBytes: Bytes, trackedKeys: Vector[Bytes], now: Long, waiter: Try[Frame] => Unit): Acquire = {
@@ -43,42 +43,35 @@ final private[client] class ClientCache(maxBytes: Long) {
         removeEntry(key, entry)
       }
       pending.get(key) match {
-        case Some(inFlight) =>
-          inFlight.waiters += waiter
+        case Some(fetching) =>
+          fetching.waiters += waiter
           Wait
         case None           =>
-          val inFlight = new InFlight(trackedKeys.map(new Key(_)))
-          inFlight.waiters += waiter
-          pending.update(key, inFlight)
-          Fetch
+          val fetching = new Fetching(key, trackedKeys.map(new Key(_)))
+          fetching.waiters += waiter
+          pending.update(key, fetching)
+          Fetch(fetching)
       }
     } finally lock.unlock()
   }
 
-  def store(commandBytes: Bytes, trackedKeys: Vector[Bytes], frame: Frame, now: Long, ttlMillis: Long): Unit = {
-    val key                                              = new Key(commandBytes)
-    val size                                             = frameSize(frame) // walked outside the lock so a large reply can't stall acquire/invalidate
-    var waiters: mutable.ArrayBuffer[Try[Frame] => Unit] = null
+  // Waiters are read after the unlock: once the fetch leaves `pending`, no acquire can add to them.
+  def store(fetching: Fetching, frame: Frame, now: Long, ttlMillis: Long): Unit = {
+    val size = frameSize(frame) // walked outside the lock so a large reply can't stall acquire/invalidate
     lock.lock()
     try {
-      val inFlight = pending.remove(key)
-      waiters = inFlight.map(_.waiters).orNull
-      val dirty    = inFlight.exists(_.dirty)
-      // Reuse the Key objects created by the matching acquire. Create them here only when no matching fetch is recorded. An entry larger than
-      // the cache limit cannot be stored, so return its reply without caching it.
-      if (!dirty && size <= maxBytes)
-        insert(key, new Entry(frame, size, now + ttlMillis, inFlight.map(_.keys).getOrElse(trackedKeys.map(new Key(_)))))
+      pending.remove(fetching.key)
+      // An entry larger than the cache limit cannot be stored, so return its reply without caching it.
+      if (!fetching.dirty && size <= maxBytes) insert(fetching.key, new Entry(frame, size, now + ttlMillis, fetching.keys))
     } finally lock.unlock()
-    if (waiters != null) waiters.foreach(_.apply(Success(frame)))
+    fetching.waiters.foreach(_.apply(Success(frame)))
   }
 
-  def fail(commandBytes: Bytes, error: Throwable): Unit = {
-    val key                                              = new Key(commandBytes)
-    var waiters: mutable.ArrayBuffer[Try[Frame] => Unit] = null
+  def fail(fetching: Fetching, error: Throwable): Unit = {
     lock.lock()
-    try waiters = pending.remove(key).map(_.waiters).orNull
+    try pending.remove(fetching.key)
     finally lock.unlock()
-    if (waiters != null) waiters.foreach(_.apply(Failure(error)))
+    fetching.waiters.foreach(_.apply(Failure(error)))
   }
 
   def invalidate(redisKey: Bytes): Unit = {
@@ -91,39 +84,23 @@ final private[client] class ClientCache(maxBytes: Long) {
           if (entry != null) removeEntry(ck, entry)
         }
       }
-      pending.valuesIterator.foreach(inFlight => if (inFlight.keys.contains(tracked)) inFlight.dirty = true)
+      pending.valuesIterator.foreach(fetching => if (fetching.keys.contains(tracked)) fetching.dirty = true)
     } finally lock.unlock()
   }
 
   def flush(): Unit = {
     lock.lock()
     try {
-      clearEntries()
-      epoch = epoch.next
+      entries.clear()
+      reverse.clear()
+      bytesUsed = 0L
+      pending.valuesIterator.foreach(_.dirty = true)
+      epoch += 1
     } finally lock.unlock()
   }
 
-  def flushForReroute(): Unit = {
-    lock.lock()
-    try {
-      clearEntries()
-      val retired = epoch.next
-      // publish the watermark before the epoch, which readers check first. This prevents a reader from pairing the new epoch with the old watermark.
-      rerouteWatermark = retired
-      epoch = retired
-    } finally lock.unlock()
-  }
-
-  private def clearEntries(): Unit = {
-    entries.clear()
-    reverse.clear()
-    bytesUsed = 0L
-    pending.valuesIterator.foreach(_.dirty = true)
-  }
-
-  def isCurrent(stamped: CacheEpoch): Boolean = epoch == stamped
-
-  def rerouteRetired(stamped: CacheEpoch): Boolean = rerouteWatermark.isAfter(stamped)
+  // false once a flush has retired the hit; the caller looks the command up again
+  def isCurrent(hit: Hit): Boolean = hit.epoch == epoch
 
   private def insert(key: Key, entry: Entry): Unit = {
     val previous = entries.put(key, entry)
@@ -170,26 +147,18 @@ private[client] object ClientCache {
     }
   }
 
-  opaque type CacheEpoch = Long
-  object CacheEpoch {
-    val initial: CacheEpoch = 0L
-  }
-  extension (e: CacheEpoch) {
-    def next: CacheEpoch                    = e + 1L
-    def isAfter(other: CacheEpoch): Boolean = e > other
-  }
-
   enum Acquire {
-    case Hit(frame: Frame, epoch: CacheEpoch)
-    case Fetch
+    case Hit(frame: Frame, epoch: Long)
+    case Fetch(ticket: Fetching)
     case Wait
   }
 
   final private class Entry(val frame: Frame, val sizeBytes: Long, val expiresAt: Long, val keys: Vector[Key])
 
-  final private class InFlight(val keys: Vector[Key]) {
-    val waiters        = mutable.ArrayBuffer.empty[Try[Frame] => Unit]
-    var dirty: Boolean = false
+  // the in-flight server read that the first missing caller owns; guarded by the cache lock until it leaves `pending`
+  final class Fetching private[ClientCache] (private[ClientCache] val key: Key, private[ClientCache] val keys: Vector[Key]) {
+    private[ClientCache] val waiters        = mutable.ArrayBuffer.empty[Try[Frame] => Unit]
+    private[ClientCache] var dirty: Boolean = false
   }
 
   // approximate retained size: payload bytes plus a flat per-node overhead, enough to bound memory without walking object headers exactly

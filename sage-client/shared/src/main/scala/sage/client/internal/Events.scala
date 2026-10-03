@@ -125,7 +125,7 @@ private[client] object Events {
 
   private val noSpanFactory: () => CommandSpan = () => CommandSpan.noop
 
-  // Capture tracing context now and return a function that starts the span later. Cached reads call it only when a cache miss reaches the server.
+  // Capture tracing context now and return a function that starts the span later.
   def deferSpan(events: Events, command: Command[?]): () => CommandSpan =
     events.tracer match {
       case Some(t) =>
@@ -137,9 +137,6 @@ private[client] object Events {
   def startDeferred(factory: () => CommandSpan): CommandSpan =
     try factory()
     catch { case NonFatal(_) => CommandSpan.noop }
-
-  def startOrDefer(events: Events, command: Command[?], deferred: () => CommandSpan): CommandSpan =
-    if (deferred == null) startSpan(events, command) else startDeferred(deferred)
 
   def startSpans(events: Events, commands: Vector[Command[?]]): Vector[CommandSpan] =
     if (events.tracer.isEmpty) Vector.empty else commands.map(c => startSpan(events, c))
@@ -159,12 +156,48 @@ private[client] object Events {
     if (events.tracer.isEmpty) callback
     else new CommandEmit[A](command.name, System.nanoTime(), events, callback, startSpan(events, command), emitsEvent = false)
 
+  // Traces a cached read once it is sent to the server or fails, and returns the callback that completes it from then on.
+  trait Fetching {
+    def fetching[A](command: Command[?], callback: Try[A] => Unit): Try[A] => Unit
+
+    // Called before the cache lookup. Unless the lookup leads to `fetching`, the read reports only Cache.Hit, even when it fails.
+    def lookingUp(): Unit = ()
+  }
+
+  val untraced: Fetching = new Fetching {
+    def fetching[A](command: Command[?], callback: Try[A] => Unit): Try[A] => Unit = callback
+  }
+
+  // A standalone read is sent at most once, so it is tracked from its send like any command, and a local hit allocates nothing.
+  def fetchTracking(events: Events): Fetching =
+    if (!events.enabled) untraced
+    else
+      new Fetching {
+        def fetching[A](command: Command[?], callback: Try[A] => Unit): Try[A] => Unit = trackCommand(events, command, callback)
+      }
+
+  // Traces a cached read that redirects and retries may send several times. The tracing context is captured on the caller's thread.
+  inline def trackCached[A](events: Events, command: Command[?], callback: Try[A] => Unit)(inline use: (Try[A] => Unit, Fetching) => Unit): Unit =
+    if (!events.enabled) use(callback, untraced)
+    else {
+      val emit = cachedEmit(events, command, callback)
+      use(emit, emit)
+    }
+
+  private def cachedEmit[A](events: Events, command: Command[?], callback: Try[A] => Unit): (Try[A] => Unit) & Fetching =
+    new CachedEmit[A](command, events, callback, deferSpan(events, command))
+
   // Record the final routed node before the command completes. Ignore callbacks that do not track command events.
   def attributeNode(callback: AnyRef, node: Node): Unit =
     callback match {
       case emit: CommandEmit[?] => emit.at(node)
       case _                    => ()
     }
+
+  def completeAt[A](callback: Try[A] => Unit, node: Node)(result: Try[A]): Unit = {
+    attributeNode(callback, node)
+    callback(result)
+  }
 
   def abandonSpan(callback: AnyRef, error: Throwable): Unit =
     callback match {
@@ -186,7 +219,7 @@ private[client] object Events {
     try span.settled(outcome)
     catch { case NonFatal(_) => () }
 
-  final private class CommandEmit[A](
+  private class CommandEmit[A](
     name: String,
     startNanos: Long,
     events: Events,
@@ -195,21 +228,50 @@ private[client] object Events {
     emitsEvent: Boolean = true
   ) extends (Try[A] => Unit) {
 
-    @volatile private var node: Option[Node] = None
+    @volatile protected var node: Option[Node] = None
 
-    def at(n: Node): Unit = {
-      node = Some(n)
-      routeSpan(span, n)
-    }
+    protected def current: CommandSpan = span
 
-    def abandon(error: Throwable): Unit = settleSpan(span, Outcome.Failed(error))
+    // a later attempt replaces the node; the span is routed once, when it settles
+    def at(n: Node): Unit = node = Some(n)
+
+    def abandon(error: Throwable): Unit = settleSpan(current, Outcome.Failed(error))
 
     def apply(result: Try[A]): Unit = {
       val outcome = Outcome.of(result)
-      settleSpan(span, outcome)
+      node.foreach(routeSpan(current, _))
+      settleSpan(current, outcome)
       if (emitsEvent && events.emitsEvents)
         events.emit(SageEvent.CommandCompleted(name, node, FiniteDuration(System.nanoTime() - startNanos, NANOSECONDS), outcome))
       callback(result)
     }
+  }
+
+  // The span starts when the read is first sent or fails, so a read served locally reports nothing. Redirects and retries share the span.
+  final private class CachedEmit[A](command: Command[?], events: Events, callback: Try[A] => Unit, deferred: () => CommandSpan)
+    extends CommandEmit[A](command.name, System.nanoTime(), events, callback, CommandSpan.noop)
+    with Fetching {
+
+    @volatile private var started: CommandSpan = null
+    @volatile private var local                = false
+
+    override protected def current: CommandSpan = if (started == null) CommandSpan.noop else started
+
+    // the parts of a cross-slot read can start the span from several threads
+    private def start(): Unit = if (started == null) synchronized(if (started == null) started = startDeferred(deferred))
+
+    override def lookingUp(): Unit = local = true
+
+    def fetching[B](command: Command[?], callback: Try[B] => Unit): Try[B] => Unit = {
+      start()
+      callback
+    }
+
+    override def apply(result: Try[A]): Unit =
+      if (started == null && (result.isSuccess || local)) callback(result)
+      else {
+        start()
+        super.apply(result)
+      }
   }
 }

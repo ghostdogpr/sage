@@ -5,31 +5,31 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference, AtomicReferenceArray}
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 import sage.Bytes
 import sage.SageException.NotConnected
-import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
+import sage.client.{CacheConfig, SageConfig, WatchdogConfig}
 import sage.cluster.Node
-import sage.commands.Connection
 import sage.protocol.Frame
 
 class NodePoolSpec extends munit.FunSuite {
 
-  private def respond(payload: Bytes): Seq[Frame] =
-    if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello) else Nil
+  private def respond(payload: Bytes): Seq[Frame] = Replies.withSetup(_ => Nil)(payload)
 
   private def newPool(factory: Node => MultiplexedConnection.TransportFactory, events: Events = Events.disabled): NodePool =
     new NodePool(
       factory,
       Scheduler.real,
-      Vector(Connection.hello(None)),
-      BackoffConfig(),
-      WatchdogConfig(enabled = false),
-      1.second,
-      Duration.Zero,
-      DedicatedPoolConfig(),
-      events = events
+      SageConfig(
+        watchdog = WatchdogConfig(enabled = false),
+        connectTimeout = 1.second,
+        closeTimeout = Duration.Zero,
+        clientCache = CacheConfig(enabled = false)
+      ),
+      MultiplexedConnection.NodeRole.Master,
+      events
     )
 
   // for the nth connection attempt, signal `reached(n)` and wait for `release(n)` before opening the transport stored at `transport(n)`
@@ -52,7 +52,7 @@ class NodePoolSpec extends munit.FunSuite {
     def transport(i: Int): FakeTransport                        = opened.get(i)
   }
 
-  private def existingLive(pool: NodePool, node: Node): Option[NodeClient] = Option(pool.existing(node)).filter(_.isLive)
+  private def existingLive(pool: NodePool, node: Node): Option[MultiplexedConnection] = Option(pool.existing(node)).filter(_.isLive)
 
   private def awaitTrue(cond: => Boolean, clue: String): Unit = {
     val deadline = System.nanoTime() + 2.seconds.toNanos
@@ -87,13 +87,13 @@ class NodePoolSpec extends munit.FunSuite {
     val gated = new GatedFactory(1)
     val pool  = newPool(gated.factory)
 
-    val establisher  = new AtomicReference[Try[NodeClient]]()
+    val establisher  = new AtomicReference[Try[MultiplexedConnection]]()
     val establishing = new Thread(() => establisher.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
     gated.awaitReached(0)
 
     val waiters = (1 to 3).map { i =>
-      val result = new AtomicReference[Try[NodeClient]]()
+      val result = new AtomicReference[Try[MultiplexedConnection]]()
       val thread = new Thread(() => result.set(Try(pool.getOrEstablish(node))), s"waiter-$i")
       thread.start()
       (thread, result)
@@ -115,7 +115,7 @@ class NodePoolSpec extends munit.FunSuite {
       s"establisher: ${establisher.get()}"
     )
 
-    awaitTrue(gated.transport(0).closeCount > 0, "the discarded NodeClient was not closed")
+    awaitTrue(gated.transport(0).closeCount > 0, "the discarded MultiplexedConnection was not closed")
     assert(existingLive(pool, node).isEmpty, "the rejected node leaked into the pool")
     assert(!pool.candidatesByLiveness.contains(node), "the rejected node leaked into refresh candidates")
     pool.close()
@@ -126,7 +126,7 @@ class NodePoolSpec extends munit.FunSuite {
     val gated = new GatedFactory(1)
     val pool  = newPool(gated.factory)
 
-    val result       = new AtomicReference[Try[NodeClient]]()
+    val result       = new AtomicReference[Try[MultiplexedConnection]]()
     val establishing = new Thread(() => result.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
     gated.awaitReached(0)
@@ -145,14 +145,14 @@ class NodePoolSpec extends munit.FunSuite {
     val gated = new GatedFactory(2)
     val pool  = newPool(gated.factory)
 
-    val first       = new AtomicReference[Try[NodeClient]]()
+    val first       = new AtomicReference[Try[MultiplexedConnection]]()
     val firstThread = new Thread(() => first.set(Try(pool.getOrEstablish(node))), "attempt-1")
     firstThread.start()
     gated.awaitReached(0)
 
     pool.retain(_ => false) // clears attempt 1 from pending while its connect is still in flight
 
-    val second       = new AtomicReference[Try[NodeClient]]()
+    val second       = new AtomicReference[Try[MultiplexedConnection]]()
     val secondThread = new Thread(() => second.set(Try(pool.getOrEstablish(node))), "attempt-2")
     secondThread.start()
     gated.awaitReached(1) // a fresh attempt, since attempt 1 is no longer pending
@@ -184,7 +184,7 @@ class NodePoolSpec extends munit.FunSuite {
     val pool                                                    = newPool(factory)
     val node                                                    = Node("slow", 6379)
 
-    val result       = new AtomicReference[Try[NodeClient]]()
+    val result       = new AtomicReference[Try[MultiplexedConnection]]()
     val establishing = new Thread(() => result.set(Try(pool.getOrEstablish(node))), "establisher")
     establishing.start()
     awaitTrue(connecting.get() != null, "the establish never started")
@@ -196,6 +196,76 @@ class NodePoolSpec extends munit.FunSuite {
     assert(!establishing.isAlive, "close must abort the in-flight establishment, not wait out the connect")
     assert(connecting.get().wasClosed, "close must abort the establishing transport")
     assert(result.get() != null && result.get().isFailure, s"the aborted establisher should fail: ${result.get()}")
+  }
+
+  test("an interrupted owner fails a joined attempt with NotConnected instead of handing over its interrupt") {
+    val node    = Node("gated", 6379)
+    val gated   = new GatedFactory(1)
+    val pool    = newPool(gated.factory)
+    val owner   = new Thread(() => Try(pool.getOrEstablish(node)): Unit, "owner")
+    owner.start()
+    gated.awaitReached(0)
+    val outcome = new AtomicReference[String]("not run")
+    val joiner  = new Thread(
+      () =>
+        outcome.set(
+          try String.valueOf(pool.getOrEstablishOrNull(node))
+          catch { case e: Throwable => e.toString }
+        ),
+      "joiner"
+    )
+    joiner.start()
+    awaitTrue(pool.pendingWaiterCount(node) == 1, "the joiner never blocked on the owner's attempt")
+    owner.interrupt() // the owner is blocked opening its transport
+    joiner.join()
+    owner.join()
+    assertEquals(outcome.get(), "null")
+  }
+
+  test("a close on an interrupted thread closes every node and keeps the interrupt") {
+    val transports                   = new java.util.concurrent.ConcurrentLinkedQueue[FakeTransport]()
+    val pool                         = newPool { _ => (onFrame, onClosed) =>
+      val t = new FakeTransport(onFrame, onClosed, respond)
+      transports.add(t)
+      t
+    }
+    pool.getOrEstablish(Node("a", 6379)): Unit
+    pool.getOrEstablish(Node("b", 6379)): Unit
+    @volatile var failure: Throwable = null
+    @volatile var interruptedAfter   = false
+    Thread
+      .ofVirtual()
+      .start { () =>
+        Thread.currentThread().interrupt()
+        try pool.close()
+        catch { case e: Throwable => failure = e }
+        interruptedAfter = Thread.currentThread().isInterrupted
+      }
+      .join()
+    assertEquals(transports.asScala.toList.map(_.closeCount), List(1, 1))
+    assertEquals(failure, null)
+    assert(interruptedAfter, "close should keep the caller's interrupt")
+  }
+
+  test("a connection that fails to construct ends its attempt, so the next caller connects instead of waiting forever") {
+    val node                                                    = Node("n", 6379)
+    val broken                                                  = new java.util.concurrent.atomic.AtomicBoolean(true)
+    val factory: Node => MultiplexedConnection.TransportFactory = _ =>
+      if (broken.getAndSet(false)) throw new IllegalStateException("no transport")
+      else (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, respond)
+    val pool                                                    = newPool(factory)
+    intercept[IllegalStateException](pool.getOrEstablish(node))
+    val second                                                  = new AtomicReference[MultiplexedConnection]()
+    val caller                                                  = new Thread(() => second.set(pool.getOrEstablish(node)))
+    caller.start()
+    caller.join(2000)
+    if (caller.isAlive) {
+      pool.close()
+      caller.join()
+      fail("the next caller waited on the attempt that failed to construct its connection")
+    }
+    assert(second.get() != null && second.get().isLive)
+    pool.close()
   }
 
   test("a failed establishment reports the node and cause through ConnectFailed") {

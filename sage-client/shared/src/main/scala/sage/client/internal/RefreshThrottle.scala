@@ -5,146 +5,105 @@ import java.util.concurrent.locks.ReentrantLock
 import scala.concurrent.duration.*
 
 /**
-  * Coordinates discovery refreshes for the cluster and master-replica runtimes. Only one refresh runs at a time. [[apply]] waits for a current
-  * refresh to finish and then returns. Non-forced calls to `apply` and `trigger` within `minRefreshMs` of the previous refresh are skipped.
-  * `request` retains work until it can run. A forced call ignores the minimum interval. The first refresh can run immediately.
-  *
-  * It also starts and stops the optional background polling task.
+  * Coordinates discovery refreshes (`work`) for the cluster and master-replica runtimes. Only one refresh runs at a time. [[apply]] waits for a current
+  * refresh to finish and then returns. A non-forced call to `apply` within `minRefreshMs` of the previous refresh is skipped.
+  * `request` retains a refresh until it can run. A forced call ignores the minimum interval. The first refresh can run immediately.
+  * After [[stop]], no refresh starts, including one that was already queued.
   */
-final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: Long) {
+final private[client] class RefreshThrottle(scheduler: Scheduler, minRefreshMs: Long, work: () => Unit) {
+  import RefreshThrottle.Phase
 
-  private val lock                    = new ReentrantLock()
-  private val done                    = lock.newCondition()
-  // volatile so `throttled` can answer without the lock; every mutation still happens under it
-  @volatile private var refreshing    = false
-  @volatile private var lastRefreshMs = scheduler.nowMillis - minRefreshMs
-  private var ticker                  = null: Scheduler.Cancelable
-  private var stopped                 = false
-  private var requested: () => Unit   = null
-  private var requestScheduled        = false
+  private val lock                   = new ReentrantLock()
+  private val done                   = lock.newCondition()
+  private var lastRefreshMs          = scheduler.nowMillis - minRefreshMs
+  // volatile so a request already pending returns without the lock; every change still happens under it
+  @volatile private var phase: Phase = Phase.Idle
 
-  def apply(force: Boolean)(work: => Unit): Unit =
-    if (claim(force, wait = true)) run(work)
-
-  /**
-    * Schedules a non-forced refresh when no refresh is active and the minimum interval has passed. It returns immediately while another
-    * refresh is active, a retained request is already scheduled, or the interval has not passed. Routing may call this for every read when no
-    * replica is available. Taking a pre-created callback avoids allocating a new closure for each call that returns without scheduling work.
-    */
-  def trigger(work: () => Unit): Unit =
-    if (claim(force = false, wait = false))
-      try scheduler.after(Duration.Zero)(run(work()))
-      catch {
-        case error: Throwable =>
-          finish()
-          throw error
-      }
-
-  /**
-    * Retains a refresh request until it can run. Requests during a refresh or its minimum interval coalesce into one later refresh.
-    */
-  def request(work: () => Unit): Unit = {
+  private inline def locked[A](inline body: A): A = {
     lock.lock()
-    try
-      if (!stopped) {
-        requested = work
-        scheduleRequest()
-      }
+    try body
     finally lock.unlock()
   }
 
-  // Called under the mutex so concurrent confirmation failures share one scheduled refresh.
-  private def scheduleRequest(): Unit =
-    if (!refreshing && !requestScheduled && requested != null && !stopped) {
-      requestScheduled = true
-      val delayMillis = math.max(0L, minRefreshMs - (scheduler.nowMillis - lastRefreshMs))
-      try scheduler.after(delayMillis.millis)(runRequested())
-      catch {
-        case error: Throwable =>
-          requestScheduled = false
-          throw error
-      }
-    }
-
-  private def runRequested(): Unit = {
-    lock.lock()
-    val work = try {
-      requestScheduled = false
-      if (stopped || refreshing) null
-      else if (scheduler.nowMillis - lastRefreshMs < minRefreshMs) {
-        scheduleRequest()
-        null
-      } else {
-        val next = requested
-        requested = null
-        if (next != null) refreshing = true
-        next
-      }
-    } finally lock.unlock()
-    if (work != null) run(work())
-  }
+  // wait for any current refresh to finish before callers read `topologyRef`
+  def apply(force: Boolean): Unit =
+    if (claim(force)) run()
 
   /**
-    * Starts the background poll when an interval is configured; `tick` runs on the timer thread, so it must only queue work.
+    * Retains a refresh request until it can run. Requests during a refresh or its minimum interval coalesce into one later refresh. Routing
+    * may call this for every read when no replica is available.
     */
-  def startPolling(interval: Option[FiniteDuration])(tick: => Unit): Unit =
-    interval.foreach { period =>
-      val handle = scheduler.every(period)(tick)
-      lock.lock()
-      val keep   =
-        try
-          if (stopped) false
-          else {
-            ticker = handle
-            true
-          }
-        finally lock.unlock()
-      if (!keep) handle.cancel()
+  def request(): Unit =
+    phase match {
+      case Phase.Idle | Phase.Running(false) =>
+        locked(phase match {
+          case Phase.Idle           => schedule()
+          case Phase.Running(false) => phase = Phase.Running(again = true)
+          case _                    => ()
+        })
+      case _                                 => ()
     }
 
-  def stopPolling(): Unit = {
-    lock.lock()
-    val handle =
-      try {
-        stopped = true
-        requested = null
-        val current = ticker
-        ticker = null
-        current
-      } finally lock.unlock()
-    if (handle != null) handle.cancel()
+  // Must hold lock. A timer whose Scheduled phase was replaced does nothing when it fires.
+  private def schedule(): Unit = {
+    val mine        = Phase.Scheduled()
+    phase = mine
+    val delayMillis = math.max(0L, minRefreshMs - (scheduler.nowMillis - lastRefreshMs))
+    onThrow(scheduler.after(delayMillis.millis)(runScheduled(mine)))(_ => phase = Phase.Idle)
   }
 
-  private def claim(force: Boolean, wait: Boolean): Boolean = {
-    if (!force && !wait && throttled) return false
-    lock.lock()
-    try
-      if (refreshing && wait) {
-        while (refreshing) done.awaitUninterruptibly()
+  private def runScheduled(mine: Phase): Unit =
+    if (
+      locked((phase eq mine) && {
+        val due = scheduler.nowMillis - lastRefreshMs >= minRefreshMs
+        if (due) phase = Phase.Running(again = false) else schedule()
+        due
+      })
+    ) run()
+
+  def stop(): Unit = locked { phase = Phase.Stopped }
+
+  // a refresh claimed while one is scheduled keeps the scheduled one as a follow-up
+  private def claim(force: Boolean): Boolean =
+    locked(phase match {
+      case Phase.Stopped    => false
+      case Phase.Running(_) =>
+        while (phase.isRunning) done.awaitUninterruptibly()
         false
-      } else if (refreshing || (!wait && requestScheduled) || (!force && scheduler.nowMillis - lastRefreshMs < minRefreshMs)) false
-      else {
-        refreshing = true
-        true
-      }
-    finally lock.unlock()
-  }
+      case waiting          =>
+        val due = force || scheduler.nowMillis - lastRefreshMs >= minRefreshMs
+        if (due) phase = Phase.Running(again = waiting != Phase.Idle)
+        due
+    })
 
-  private def throttled: Boolean = refreshing || scheduler.nowMillis - lastRefreshMs < minRefreshMs
-
-  private def run(work: => Unit): Unit =
-    try work
+  // a refresh queued before stop must not open new connections
+  private def run(): Unit =
+    try if (phase != Phase.Stopped) work()
     finally finish()
 
-  private def finish(): Unit = {
-    lock.lock()
-    try {
-      // Record the completion time before publishing refreshing = false. Volatile write ordering ensures a lock-free throttled check that sees
-      // false also sees the updated completion time.
+  private def finish(): Unit =
+    locked {
       lastRefreshMs = scheduler.nowMillis
-      refreshing = false
       done.signalAll()
-      scheduleRequest()
-    } finally lock.unlock()
+      phase match {
+        case Phase.Running(true)  => schedule()
+        case Phase.Running(false) => phase = Phase.Idle
+        case _                    => ()
+      }
+    }
+}
+
+private object RefreshThrottle {
+
+  // Scheduled has an identity per timer; Running(again) records a request that arrived during the refresh
+  enum Phase {
+    case Idle, Stopped
+    case Scheduled()
+    case Running(again: Boolean)
+
+    def isRunning: Boolean = this match {
+      case Running(_) => true
+      case _          => false
+    }
   }
 }

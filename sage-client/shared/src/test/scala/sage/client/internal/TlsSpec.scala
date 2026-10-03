@@ -3,10 +3,12 @@ package sage.client.internal
 import java.net.{InetAddress, InetSocketAddress, Socket}
 import java.nio.file.{Files, Path}
 import java.security.KeyStore
+import java.security.cert.Certificate
 import javax.net.ssl.{KeyManagerFactory, SSLContext, SSLServerSocket, TrustManagerFactory}
 
 import sage.SageException.TlsError
-import sage.client.{TlsConfig, TrustSource}
+import sage.client.{SageConfig, TlsConfig, TrustSource}
+import sage.cluster.Node
 
 class TlsSpec extends munit.FunSuite {
 
@@ -14,7 +16,9 @@ class TlsSpec extends munit.FunSuite {
   // each test changes only the connection host.
   private lazy val material = certMaterial()
 
-  private def certMaterial(): (SSLContext, SSLContext) = {
+  private def certificate: Certificate = material._3
+
+  private def certMaterial(): (SSLContext, SSLContext, Certificate) = {
     val dir     = Files.createTempDirectory("sage-tls-unit")
     val store   = dir.resolve("server.p12")
     val pass    = "changeit".toCharArray
@@ -61,7 +65,7 @@ class TlsSpec extends munit.FunSuite {
     tmf.init(trust)
     val client = SSLContext.getInstance("TLS")
     client.init(null, tmf.getTrustManagers, null)
-    (server, client)
+    (server, client, ks.getCertificate("server"))
   }
 
   private def withServer(body: Int => Unit): Unit = {
@@ -99,5 +103,24 @@ class TlsSpec extends munit.FunSuite {
       intercept[TlsError](upgrade("sage-mismatch.invalid", port))
       ()
     }
+  }
+
+  test("a node's connections share the TLS context built for the node, so connecting after its trust file is gone succeeds") {
+    val pem     = Files.createTempFile("sage-tls-trust", ".pem")
+    val encoded = java.util.Base64.getMimeEncoder.encodeToString(certificate.getEncoded)
+    Files.writeString(pem, s"-----BEGIN CERTIFICATE-----\n$encoded\n-----END CERTIFICATE-----\n")
+    withServer { port =>
+      val factory   = Client.transports(SageConfig(tls = Some(TlsConfig(TrustSource.Pem(pem)))))(Node("localhost", port))
+      Files.delete(pem)
+      val transport = factory(_ => (), () => ())
+      try transport.start()
+      finally transport.close()
+    }
+  }
+
+  test("unusable trust material fails with TlsError before connecting, even to an unreachable node") {
+    val missing = Files.createTempFile("sage-tls-trust", ".pem")
+    Files.delete(missing)
+    intercept[TlsError](Client.transports(SageConfig(tls = Some(TlsConfig(TrustSource.Pem(missing)))))(Node("localhost", 1)))
   }
 }

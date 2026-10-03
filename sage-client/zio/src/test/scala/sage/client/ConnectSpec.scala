@@ -45,6 +45,14 @@ class ConnectSpec extends munit.FunSuite {
     }
   }
 
+  test("a server that accepts the socket but never answers HELLO fails connect with ConnectionFailed") {
+    val (factory, transport) = ScriptedTransport(_ => Nil)
+    Client.connectWith(factory, config = SageConfig(connectTimeout = 10.millis)).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[ConnectionFailed], s"expected ConnectionFailed, got $error")
+      assertEquals(transport().closeCount, 1)
+    }
+  }
+
   test("a server without RESP3 is rejected with UnsupportedServer and the connection is released") {
     val (factory, transport) = ScriptedTransport(_ => Seq(Frame.SimpleError("ERR unknown command 'HELLO'")))
     Client.connectWith(factory).unsafeRun.failed.map { error =>

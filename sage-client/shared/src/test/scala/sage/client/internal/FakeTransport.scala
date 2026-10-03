@@ -22,6 +22,9 @@ final class FakeTransport(
 
   def written: Vector[Bytes] = synchronized(writes.toVector)
 
+  // the writes after the connection setup
+  def sent: Vector[Bytes] = written.filterNot(Replies.isSetup)
+
   var closeCount: Int = 0
 
   def start(): Unit = ()

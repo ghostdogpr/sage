@@ -7,7 +7,8 @@ import scala.concurrent.duration.FiniteDuration
 import kyo.compat.*
 
 import sage.BlockTimeout
-import sage.commands.{ScanCursor, ScanPage, StreamEntry, StreamId, StreamRangeId, XAutoClaimResult}
+import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.*
 
 /**
   * Shared paging logic for streaming helpers such as `scanAll`, `xRangeAll`, and `xConsume`. Each builder accepts a `CIO` function that
@@ -26,51 +27,108 @@ private[sage] object Paged {
   // a finite poll lets xTail and xConsume check for cancellation between blocking reads.
   val defaultPoll: BlockTimeout = BlockTimeout.After(FiniteDuration(5, TimeUnit.SECONDS))
 
+  final case class Pages[S, A](init: S, step: Step[S, A])
+
+  // scan each target in sequence with its own node-local cursor. A cluster scan visits every master that owns slots.
+  def scanAll[K: KeyCodec](r: SharedRunner, pattern: Option[String], count: Option[Long], ofType: Option[RedisType]): Pages[ScanStep, K] =
+    Pages(ScanStep.Begin, acrossTargets(r.scanTargets)(target => cursor => target.run(Keys.scan[K](cursor, pattern, count, ofType))))
+
+  // HSCAN, SSCAN, or ZSCAN of one key
+  def scanKey[A](r: SharedRunner)(page: ScanCursor => Command[ScanPage[A]]): Pages[Option[ScanCursor], A] =
+    Pages(Some(ScanCursor.start), byCursor(cursor => r.run(page(cursor))))
+
+  def xRangeAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    r: SharedRunner,
+    key: K,
+    start: StreamRangeId,
+    end: StreamRangeId,
+    batch: Long
+  ): Pages[Option[StreamRangeId], StreamEntry[F, V]] =
+    Pages(Some(start), byRange(batch)(from => r.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
+
+  def xAutoClaimAll[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    r: SharedRunner,
+    key: K,
+    group: String,
+    consumer: String,
+    minIdle: FiniteDuration,
+    start: StreamId,
+    count: Option[Long]
+  ): Pages[Option[StreamId], StreamEntry[F, V]] =
+    Pages(Some(start), byAutoClaim(from => r.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
+
+  def xTail[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    r: SharedRunner,
+    key: K,
+    from: StreamId,
+    count: Option[Long],
+    block: BlockTimeout
+  ): Pages[StreamId, StreamEntry[F, V]] =
+    Pages(from, tail(last => r.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block))).map(_.flatMap(_._2))))
+
+  def xConsume[K: KeyCodec, F: KeyCodec, V: ValueCodec](
+    r: SharedRunner,
+    group: String,
+    consumer: String,
+    key: K,
+    count: Option[Long],
+    block: BlockTimeout
+  ): Pages[Either[StreamId, Unit], StreamEntry[F, V]] = {
+    def read(id: GroupReadId, block: Option[BlockTimeout]): CIO[Vector[StreamEntry[F, V]]] =
+      r.run(Streams.xReadGroup[K, F, V](group, consumer)((key, id))(count = count, block = block)).map(_.flatMap(_._2))
+    Pages(Left(StreamId.Zero), consume(after => read(GroupReadId.After(after), None), read(GroupReadId.New, Some(block))))
+  }
+
   /**
     * Pages through HSCAN, SSCAN, ZSCAN, or one SCAN target until the server returns a zero cursor. A filtered scan can return an empty page
     * with a non-zero cursor, so an empty page does not end iteration.
     */
-  def byCursor[A](fetch: ScanCursor => CIO[ScanPage[A]]): Step[Option[ScanCursor], A] = {
-    case None         => CIO.value(None)
-    case Some(cursor) => fetch(cursor).map(page => Some((page.items, page.next)))
-  }
+  def byCursor[A](fetch: ScanCursor => CIO[ScanPage[A]]): Step[Option[ScanCursor], A] =
+    resumable(cursor => fetch(cursor).map(page => (page.items, page.next)))
 
   /**
     * Scans every cluster target in turn, completing one node-local cursor before moving to the next. `Begin` discovers the targets, and an
     * empty target list ends the stream immediately.
     */
   def acrossTargets[A](scanTargets: CIO[Vector[ScanTarget]])(fetch: ScanTarget => ScanCursor => CIO[ScanPage[A]]): Step[ScanStep, A] = {
-    case ScanStep.Begin                    =>
-      scanTargets.map(targets => if (targets.isEmpty) None else Some((Vector.empty[A], ScanStep.Visit(ScanCursor.start, targets))))
-    case ScanStep.Visit(cursor, remaining) =>
-      fetch(remaining.head)(cursor).map { page =>
+    case ScanStep.Begin                       =>
+      scanTargets.map {
+        case target +: rest => Some((Vector.empty[A], ScanStep.Visit(ScanCursor.start, target, rest)))
+        case _              => None
+      }
+    case ScanStep.Visit(cursor, target, rest) =>
+      fetch(target)(cursor).map { page =>
         page.next match {
-          case Some(next) => Some((page.items, ScanStep.Visit(next, remaining)))
-          case None       => Some((page.items, if (remaining.tail.isEmpty) ScanStep.End else ScanStep.Visit(ScanCursor.start, remaining.tail)))
+          case Some(next) => Some((page.items, ScanStep.Visit(next, target, rest)))
+          case None       =>
+            rest match {
+              case next +: others => Some((page.items, ScanStep.Visit(ScanCursor.start, next, others)))
+              case _              => Some((page.items, ScanStep.End))
+            }
         }
       }
-    case ScanStep.End                      => CIO.value(None)
+    case ScanStep.End                         => CIO.value(None)
   }
 
   /**
     * XRANGE paging: advance past the last id each page; a short page (fewer than `batch`) or an empty page ends the stream.
     */
-  def byRange[F, V](batch: Long)(fetch: StreamRangeId => CIO[Vector[StreamEntry[F, V]]]): Step[Option[StreamRangeId], StreamEntry[F, V]] = {
-    case None       => CIO.value(None)
-    case Some(from) =>
-      fetch(from).map { entries =>
-        if (entries.isEmpty) None
-        else Some((entries, if (entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
-      }
-  }
+  def byRange[F, V](batch: Long)(fetch: StreamRangeId => CIO[Vector[StreamEntry[F, V]]]): Step[Option[StreamRangeId], StreamEntry[F, V]] =
+    resumable(from =>
+      fetch(from).map(entries => (entries, if (entries.isEmpty || entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))
+    )
 
   /**
     * Pages through XAUTOCLAIM until its cursor returns to `StreamId.Zero`. Entries whose data has already been deleted are omitted.
     */
-  def byAutoClaim[F, V](fetch: StreamId => CIO[XAutoClaimResult[F, V]]): Step[Option[StreamId], StreamEntry[F, V]] = {
-    case None       => CIO.value(None)
-    case Some(from) =>
-      fetch(from).map(result => Some((result.entries.filter(_.fields.nonEmpty), if (result.cursor == StreamId.Zero) None else Some(result.cursor))))
+  def byAutoClaim[F, V](fetch: StreamId => CIO[XAutoClaimResult[F, V]]): Step[Option[StreamId], StreamEntry[F, V]] =
+    resumable(from =>
+      fetch(from).map(result => (result.entries.filter(_.fields.nonEmpty), Option.when(result.cursor != StreamId.Zero)(result.cursor)))
+    )
+
+  private def resumable[C, A](fetch: C => CIO[(Vector[A], Option[C])]): Step[Option[C], A] = {
+    case None    => CIO.value(None)
+    case Some(c) => fetch(c).map(Some(_))
   }
 
   /**

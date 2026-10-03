@@ -10,7 +10,7 @@ import scala.util.{Success, Try}
 
 import sage.Bytes
 import sage.SageException.NotConnected
-import sage.client.{BackoffConfig, DedicatedPoolConfig, ReadFrom, WatchdogConfig}
+import sage.client.{CacheConfig, ReadFrom, SageConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.{Command, Connection, Execution}
 import sage.protocol.Frame
@@ -74,8 +74,7 @@ class ReadRoutingSpec extends munit.FunSuite {
     val refreshes                                                       = new AtomicInteger()
     private val transports                                              = new ConcurrentHashMap[Node, FakeTransport]()
     private def respond(node: Node)(payload: Bytes): Seq[Frame]         =
-      if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello)
-      else if (refusing(node)) Seq(Frame.SimpleError("LOADING the dataset is loading"))
+      if (refusing(node)) Seq(Frame.SimpleError("LOADING the dataset is loading"))
       else {
         val text  = payload.asUtf8String
         val pings = text.sliding("PING".length).count(_ == "PING")
@@ -85,7 +84,7 @@ class ReadRoutingSpec extends munit.FunSuite {
       (onFrame, onClosed) =>
         if (unreachable(node)) throw new IOException(s"unreachable $node")
         else {
-          val transport = new FakeTransport(onFrame, onClosed, respond(node))
+          val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(respond(node)))
           transports.put(node, transport)
           transport
         }
@@ -93,12 +92,13 @@ class ReadRoutingSpec extends munit.FunSuite {
       new NodePool(
         factory,
         scheduler,
-        Vector(Connection.hello(None)),
-        BackoffConfig(),
-        WatchdogConfig(enabled = false),
-        1.second,
-        Duration.Zero,
-        DedicatedPoolConfig()
+        SageConfig(
+          watchdog = WatchdogConfig(enabled = false),
+          connectTimeout = 1.second,
+          closeTimeout = Duration.Zero,
+          clientCache = CacheConfig(enabled = false)
+        ),
+        MultiplexedConnection.NodeRole.Master
       )
     val masterPool                                                      = newPool()
     val replicaPool                                                     = newPool()

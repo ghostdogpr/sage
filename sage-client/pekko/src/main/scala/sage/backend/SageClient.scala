@@ -13,7 +13,7 @@ import org.apache.pekko.stream.scaladsl.{Keep, Sink, Source}
 
 import sage.{Message, PatternMessage, SageException}
 import sage.client.SageConfig
-import sage.client.internal.{Client, LoweredClient, Paged, ScanStep, ScanTarget, Subscription}
+import sage.client.internal.{Client, LoweredClient, Paged, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -33,7 +33,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   ): Source[K, NotUsed] =
-    scanSourceAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
+    pagedSource(Paged.scanAll[K](client.runner, pattern, count, ofType))
 
   /**
     * Iterates over all HSCAN field/value pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -43,7 +43,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): Source[(F, V), NotUsed] =
-    scanSource(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
+    pagedSource(Paged.scanKey(client.runner)(cursor => Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
     * Iterates over all SSCAN members until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -53,7 +53,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): Source[V, NotUsed] =
-    scanSource(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
+    pagedSource(Paged.scanKey(client.runner)(cursor => Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
     * Iterates over all ZSCAN member/score pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -63,7 +63,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): Source[(V, Double), NotUsed] =
-    scanSource(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
+    pagedSource(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
   /**
     * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
@@ -74,9 +74,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     end: StreamRangeId = StreamRangeId.Max,
     batch: Long = 100L
   ): Source[StreamEntry[F, V], NotUsed] =
-    pagedSource[Option[StreamRangeId], StreamEntry[F, V]](Some(start))(
-      Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
-    )
+    pagedSource(Paged.xRangeAll[K, F, V](client.runner, key, start, end, batch))
 
   /**
     * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor until it returns to the start. Entries whose data
@@ -90,9 +88,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     start: StreamId = StreamId.Zero,
     count: Option[Long] = None
   ): Source[StreamEntry[F, V], NotUsed] =
-    pagedSource[Option[StreamId], StreamEntry[F, V]](Some(start))(
-      Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
-    )
+    pagedSource(Paged.xAutoClaimAll[K, F, V](client.runner, key, group, consumer, minIdle, start, count))
 
   /**
     * Follows a stream without a consumer group: replays every entry after `from`, then blocks for new entries forever. Cancel the `Source`
@@ -107,13 +103,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
     SageClient.boundedPoll(block, "xTail") match {
       case Left(e)     => Source.failed(e)
       case Right(poll) =>
-        pagedSource[StreamId, StreamEntry[F, V]](from)(
-          Paged.tail(last =>
-            CIO
-              .lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(poll))))
-              .map(_.flatMap(_._2))
-          )
-        )
+        pagedSource(Paged.xTail[K, F, V](client.runner, key, from, count, poll))
     }
 
   /**
@@ -133,7 +123,7 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
       case Right(poll) =>
         given Materializer     = SystemMaterializer(system).materializer
         given ExecutionContext = system.executionContext
-        val (killSwitch, done) = consumeSource[F, V](group, consumer, key, count, poll)
+        val (killSwitch, done) = pagedSource(Paged.xConsume[K, F, V](client.runner, group, consumer, key, count, poll))
           .viaMat(KillSwitches.single)(Keep.right)
           .mapAsync(1)(entry => handle(entry).flatMap(_ => client.run(Streams.xAck(key, group)(entry.id)).map(_ => ())))
           .toMat(Sink.ignore)(Keep.both)
@@ -163,36 +153,12 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): Source[Message[V], Future[Done]] =
     subscriptionSource(client.subscribeShardChannels[V](channel, rest*))
 
-  private def scanSource[A](fetch: ScanCursor => Future[ScanPage[A]]): Source[A, NotUsed] =
-    pagedSource[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
-
-  // scan each target with its own node-local cursor. A cluster has one target for every slot-owning master.
-  private def scanSourceAll[A](fetch: ScanTarget => ScanCursor => Future[ScanPage[A]]): Source[A, NotUsed] =
-    pagedSource[ScanStep, A](ScanStep.Begin)(
-      Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor)))
-    )
-
-  private def consumeSource[F: KeyCodec, V: ValueCodec](
-    group: String,
-    consumer: String,
-    key: K,
-    count: Option[Long],
-    block: BlockTimeout
-  ): Source[StreamEntry[F, V], NotUsed] =
-    pagedSource[Either[StreamId, Unit], StreamEntry[F, V]](Left(StreamId.Zero))(
-      Paged.consume(
-        drainPending = after =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map(_.flatMap(_._2)),
-        tailNew = CIO
-          .lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))))
-          .map(_.flatMap(_._2))
-      )
-    )
-
   // convert pages from the shared Paged helper into individual Source elements
-  private def pagedSource[S, A](init: S)(step: Paged.Step[S, A]): Source[A, NotUsed] =
+  private def pagedSource[S, A](pages: Paged.Pages[S, A]): Source[A, NotUsed] =
     Source
-      .unfoldAsync[S, Vector[A]](init)(s => step(s).unsafeRun.map(_.map { case (items, next) => (next, items) })(using ExecutionContext.parasitic))
+      .unfoldAsync[S, Vector[A]](pages.init)(s =>
+        pages.step(s).unsafeRun.map(_.map { case (items, next) => (next, items) })(using ExecutionContext.parasitic)
+      )
       .mapConcat(identity)
 
   // Open on materialization and close on cancellation, completion, or failure. Complete Future[Done] after the subscription open call finishes;

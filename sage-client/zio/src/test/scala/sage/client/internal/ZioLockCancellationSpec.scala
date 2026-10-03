@@ -11,10 +11,10 @@ import sage.SageException
 import sage.backend.SageClient
 
 class ZioLockCancellationSpec extends LockCancellationSpec {
-  override protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
+  override protected def tryWithLock[A](commands: SharedRunner, lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
     CIO.lift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).tryWithLock("key")(body.lower.refineToOrDie[SageException]))
 
-  override protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
+  override protected def withLock[A](commands: SharedRunner, lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
     CIO.lift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).withLock("key", wait)(body.lower.refineToOrDie[SageException]))
 
   test("a body defect ends the scope and releases ownership") {

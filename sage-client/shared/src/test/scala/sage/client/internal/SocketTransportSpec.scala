@@ -1,9 +1,9 @@
 package sage.client.internal
 
-import java.io.InputStream
-import java.net.{ServerSocket, Socket}
+import java.io.{InputStream, IOException}
+import java.net.{InetAddress, ServerSocket, Socket}
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{CountDownLatch, Semaphore, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.concurrent.duration.*
@@ -31,9 +31,10 @@ class SocketTransportSpec extends munit.FunSuite {
     onFrame: Frame => Unit = _ => (),
     beforeStart: SocketTransport => Unit = _ => ()
   )(body: (SocketTransport, Socket) => Unit): Unit = {
-    val server = new ServerSocket(0)
+    // A wildcard bind can share its port with another process's loopback listener, which then takes the connection.
+    val server = new ServerSocket(0, 50, InetAddress.getLoopbackAddress)
     try {
-      val transport = SocketTransport.connect("127.0.0.1", server.getLocalPort, 5.seconds, identity, onFrame, onClosed)
+      val transport = SocketTransport.connect(server.getInetAddress.getHostAddress, server.getLocalPort, 5.seconds, identity, onFrame, onClosed)
       beforeStart(transport)
       transport.start()
       val peer      = server.accept()
@@ -79,6 +80,60 @@ class SocketTransportSpec extends munit.FunSuite {
       assert(!transport.reader.isAlive)
       assert(!transport.writer.isAlive)
       assertEquals(item.drops, 0)
+    }
+  }
+
+  test("send on an interrupted thread queues the item instead of throwing") {
+    withTransport(onClosed = () => ()) { (transport, peer) =>
+      val item                         = new RecordingItem("PING\r\n")
+      @volatile var failure: Throwable = null
+      val sender                       = Thread.ofVirtual().start { () =>
+        Thread.currentThread().interrupt()
+        try transport.send(item)
+        catch { case e: Throwable => failure = e }
+      }
+      sender.join()
+      assertEquals(failure, null)
+      assertEquals(readExactly(peer.getInputStream, 6), "PING\r\n")
+      assertEquals(item.writeAttempts, 1)
+      transport.close()
+    }
+  }
+
+  test("close on an interrupted thread still waits for the I/O threads, drops queued items and runs onClosed") {
+    @volatile var closedCount = 0
+    val inWrite               = new CountDownLatch(1)
+    val release               = new Semaphore(0)
+    withTransport(onClosed = () => closedCount += 1) { (transport, _) =>
+      transport.send(new Transport.Item {
+        val payload: Bytes         = Bytes.utf8("PING\r\n")
+        def writeAttempted(): Unit = {
+          inWrite.countDown()
+          release.acquireUninterruptibly()
+        }
+        def dropped(): Unit        = ()
+      })
+      assert(inWrite.await(5, TimeUnit.SECONDS), "the writer should reach the first write")
+      val queued                       = new RecordingItem("PING\r\n")
+      transport.send(queued)
+      @volatile var failure: Throwable = null
+      @volatile var interruptedAfter   = false
+      val closer                       = Thread.ofVirtual().start { () =>
+        Thread.currentThread().interrupt()
+        try transport.close()
+        catch { case e: Throwable => failure = e }
+        interruptedAfter = Thread.currentThread().isInterrupted
+      }
+      awaitUntil(closer.getState == Thread.State.WAITING || !closer.isAlive, "close to wait for the writer or return")
+      release.release()
+      closer.join()
+      awaitUntil(!transport.writer.isAlive, "the writer to exit")
+      assertEquals(closedCount, 1)
+      assertEquals(queued.drops, 1)
+      assertEquals(failure, null)
+      assert(interruptedAfter, "close should restore the caller's interrupt")
+      assert(!transport.reader.isAlive)
+      assert(!transport.writer.isAlive)
     }
   }
 
@@ -163,6 +218,35 @@ class SocketTransportSpec extends munit.FunSuite {
         awaitUntil(closedCount == 1, "onClosed after a writer-initiated teardown")
       } finally release.countDown()
       transport.close()
+    }
+  }
+
+  test("a reader that closes the transport while the writer tears it down does not deadlock") {
+    @volatile var closedCount                   = 0
+    @volatile var transportRef: SocketTransport = null
+    val inOnFrame                               = new CountDownLatch(1)
+    withTransport(
+      onClosed = () => closedCount += 1,
+      onFrame = _ => {
+        inOnFrame.countDown()
+        // the writer's teardown interrupts the reader before joining it; a READONLY reply then closes the transport from the reader
+        val deadline = System.nanoTime() + 5.seconds.toNanos
+        while (!Thread.currentThread().isInterrupted && System.nanoTime() < deadline) Thread.onSpinWait()
+        transportRef.close()
+      },
+      beforeStart = transportRef = _
+    ) { (transport, peer) =>
+      peer.getOutputStream.write("+OK\r\n".getBytes(StandardCharsets.UTF_8))
+      peer.getOutputStream.flush()
+      assert(inOnFrame.await(5, TimeUnit.SECONDS), "reader should reach frame delivery")
+      transport.send(new Transport.Item {
+        val payload: Bytes         = Bytes.utf8("PING\r\n")
+        def writeAttempted(): Unit = throw new IOException("write failed")
+        def dropped(): Unit        = ()
+      })
+      awaitUntil(closedCount == 1, "onClosed after both I/O threads stop")
+      assert(!transport.reader.isAlive)
+      assert(!transport.writer.isAlive)
     }
   }
 

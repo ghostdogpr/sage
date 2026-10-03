@@ -32,7 +32,7 @@ Sage enables server-assisted client tracking. When a cached key changes, the ser
 A read is cacheable when its result depends only on the current value of its keys. The server can then invalidate the result whenever one of those keys changes. Reads that vary with time (`TTL`, `OBJECT IDLETIME`) or are non-deterministic (`SRANDMEMBER`) are read-only but not cacheable because a key change cannot reliably invalidate them.
 
 ::: warning
-`cached` rejects writes and keyless reads with `NotCacheable`. The server cannot invalidate a keyless read when data changes, which could leave a stale value in the cache.
+`cached` rejects writes, keyless reads, and blocking commands with `NotCacheable`. The server cannot invalidate a keyless read when data changes, which could leave a stale value in the cache. A blocking command would hold the shared connection that cached reads use.
 :::
 
 Tune cache sizing and behavior through `clientCache` on [`SageConfig`](/configuration).

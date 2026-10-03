@@ -13,10 +13,10 @@ import sage.backend.SageClient
 class OxLockCancellationSpec extends LockCancellationSpec {
   private given ExecutionContext = munitExecutionContext
 
-  override protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
+  override protected def tryWithLock[A](commands: SharedRunner, lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
     CIO.deferLift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).tryWithLock("key")(body.lower))
 
-  override protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
+  override protected def withLock[A](commands: SharedRunner, lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
     CIO.deferLift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).withLock("key", wait)(body.lower))
 
   test("a body control exception ends the scope and releases ownership") {

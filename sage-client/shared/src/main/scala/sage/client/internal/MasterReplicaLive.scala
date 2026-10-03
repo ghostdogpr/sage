@@ -1,26 +1,24 @@
 package sage.client.internal
 
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.locks.ReentrantLock
 
-import scala.concurrent.duration.*
+import scala.annotation.tailrec
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
+import RoutedClient.DispatchMode
 import kyo.compat.*
 
-import sage.{CommandSpan, Message, Outcome, PatternMessage, SageEvent, SageException}
+import sage.{SageEvent, SageException}
 import sage.SageException.{ConnectionFailed, ConnectionLost, NotConnected, TimedOut}
-import sage.client.{MasterReplicaConfig, ReadFrom, SageConfig}
+import sage.client.{MasterReplicaConfig, SageConfig}
 import sage.cluster.Node
-import sage.codec.ValueCodec
-import sage.commands.{Command, Connection, Pipeline, Role, Server}
-import sage.ratelimit.Decision
+import sage.commands.{Command, Pipeline, Role, Server}
 
 /**
   * The runtime for a non-cluster deployment with one master and its replicas. It discovers their roles by sending `ROLE` to the seed nodes.
   * Writes, blocking reads, transactions, and `cached` reads go to the master. Other read-only commands use replicas according to the
-  * [[ReadFrom]] policy, including its fallback behavior. Standalone, master-replica, and cluster deployments use the same `Client` type; the
+  * [[sage.client.ReadFrom]] policy, including its fallback behavior. Standalone, master-replica, and cluster deployments use the same `Client` type; the
   * configured topology chooses the runtime.
   *
   * The runtime refreshes roles after a command is lost during reconnection, a presumed master returns `READONLY`, a read cannot reach any
@@ -31,48 +29,36 @@ import sage.ratelimit.Decision
 final private[client] class MasterReplicaLive(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
   scheduler: Scheduler,
-  bootstrap: Vector[Command[?]],
   config: SageConfig,
   seeds: Vector[Node],
   masterReplica: MasterReplicaConfig,
   events: Events = Events.disabled
-) extends LivePipelines {
+) extends RoutedClient(
+    nodeFactory,
+    scheduler,
+    MultiplexedConnection.NodeRole.Replica,
+    config,
+    masterReplica.minRefreshInterval,
+    masterReplica.topologyRefreshInterval,
+    events
+  ) {
 
-  private val readFrom       = config.readFrom
-  private val cachingEnabled = config.clientCache.enabled
+  // null until discover installs the first topology
+  private val topologyRef = new AtomicReference[MasterReplicaLive.ResolvedTopology](null)
 
-  // only the master multiplexed connection caches: cached reads run on the master, replicas and dedicated connections never serve them
-  private val masterPool  = pool(caching = true)
-  private val replicaPool = pool(caching = false)
+  // resolve the master for every connection attempt so subscriptions move to the promoted master after failover.
+  private val subscribedOn = new SubscriptionConnection.Following(nodeFactory, () => Option(topologyRef.get()).map(_.master))
 
-  private def pool(caching: Boolean): NodePool = {
-    val cached        = caching && cachingEnabled
-    val poolBootstrap = if (cached) bootstrap :+ Connection.clientTrackingOnOptin else bootstrap
-    val cacheMaxBytes = if (cached) config.clientCache.maxBytes else 0L
-    new NodePool(
-      nodeFactory,
-      scheduler,
-      poolBootstrap,
-      config.reconnect,
-      config.watchdog,
-      config.connectTimeout,
-      config.closeTimeout,
-      config.dedicatedPool,
-      cacheMaxBytes,
-      events,
-      dedicatedBootstrap = Some(bootstrap)
-    )
-  }
-
-  private val masterNodeRef    = new AtomicReference[Node](null)
-  private val replicasRef      = new AtomicReference[Vector[Node]](Vector.empty)
-  private val reads            = new ReadRouting(masterPool, replicaPool, scheduler, readFrom, () => triggerRefresh())
-  @volatile private var closed = false
-
-  private val subLock                                         = new ReentrantLock()
-  @volatile private var subscriptions: SubscriptionConnection = null
-
-  private val refreshThrottle = new RefreshThrottle(scheduler, masterReplica.minRefreshInterval.toMillis)
+  // master-replica mode uses one subscription connection for all shard channels, as standalone mode does.
+  private val subscriptions = new SubscriptionConnection(
+    subscribedOn.factory,
+    scheduler,
+    config,
+    // subscriptions use a separate socket. Wait for master discovery before opening it; a pooled connection is not required.
+    () => !closed && topologyRef.get() != null,
+    // request an immediate refresh. If another refresh is active, wait for it; a later reconnect requests discovery again if the master changed.
+    SubscriptionConnection.OnLoss.Reconnect(() => refreshThrottle(force = true), events, () => subscribedOn.node)
+  )
 
   // --- discovery -----------------------------------------------------------------------------------------------------------------------
 
@@ -80,15 +66,7 @@ final private[client] class MasterReplicaLive(
   // addresses returned by ROLE.
   private val pinnedToSeeds = seeds.sizeIs > 1
 
-  private[client] def bootstrapRoles(): Unit =
-    resolveTopology(seeds) match {
-      case Right(topology) =>
-        installTopology(topology)
-        startRefreshPoll()
-      case Left(error)     =>
-        closeAll()
-        throw error
-    }
+  protected def discover(): Either[Throwable, Unit] = resolveTopology(seeds).map(installTopology)
 
   private def resolveTopology(discoveredCandidates: => Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] =
     if (pinnedToSeeds) resolvePinned()
@@ -96,250 +74,124 @@ final private[client] class MasterReplicaLive(
 
   // request ROLE from every supplied endpoint. Omit endpoints that cannot be reached, but report their connection failures through events.
   private def resolvePinned(): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
-    var lastError: Throwable = NotConnected()
-    val roles                = seeds.flatMap { seed =>
-      try probeRole(seed).map(seed -> _)
-      catch {
-        case NonFatal(error) =>
-          lastError = error
-          None
-      }
-    }
+    val probed = seeds.map(seed => seed -> probeRole(seed))
+    val roles  = probed.collect { case (node, Success(role)) => node -> role }
     roles.collectFirst { case (node, _: Role.Master) => node } match {
       case Some(master)          =>
         Right(MasterReplicaLive.ResolvedTopology(master, roles.collect { case (node, role) if role.isConnectedReplica => node }))
-      case None if roles.isEmpty => Left(lastError)
+      case None if roles.isEmpty => Left(probed.collect { case (_, Failure(error)) => error }.lastOption.getOrElse(NotConnected()))
       case None                  => Left(ConnectionFailed("no supplied endpoint reports the master role"))
     }
   }
 
   // contact candidates until one answers ROLE, then use its advertised master and replica addresses
-  private def resolveDiscovered(candidates: Vector[Node]): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
-    var lastError: Throwable = NotConnected()
-    val it                   = candidates.iterator
-    while (it.hasNext) {
-      val seed = it.next()
-      try
+  @tailrec private def resolveDiscovered(
+    candidates: Vector[Node],
+    lastError: Throwable = NotConnected()
+  ): Either[Throwable, MasterReplicaLive.ResolvedTopology] =
+    candidates match {
+      case seed +: rest =>
         resolveFrom(seed) match {
-          case Some(topology) => return Right(topology)
-          case None           => ()
+          case Success(Some(topology)) => Right(topology)
+          case Success(None)           => resolveDiscovered(rest, lastError)
+          case Failure(error)          => resolveDiscovered(rest, error)
         }
-      catch { case NonFatal(error) => lastError = error }
+      case _            => Left(lastError)
     }
-    Left(lastError)
-  }
 
   // probes a node's ROLE; a master answers with its replica list, a replica points at its master (followed once), a sentinel is skipped
-  private def resolveFrom(node: Node): Option[MasterReplicaLive.ResolvedTopology] =
+  private def resolveFrom(node: Node): Try[Option[MasterReplicaLive.ResolvedTopology]] =
     probeRole(node).flatMap {
-      case Role.Master(_, replicas)       => Some(MasterReplicaLive.ResolvedTopology(node, replicas.map(r => Node(r.host, r.port))))
+      case Role.Master(_, replicas)       => Success(Some(MasterReplicaLive.ResolvedTopology(node, replicas.map(r => Node(r.host, r.port)))))
       case Role.Replica(host, port, _, _) =>
         val master = Node(host, port)
-        probeRole(master).collect { case Role.Master(_, replicas) =>
-          MasterReplicaLive.ResolvedTopology(master, replicas.map(r => Node(r.host, r.port)))
+        probeRole(master).map {
+          case Role.Master(_, replicas) => Some(MasterReplicaLive.ResolvedTopology(master, replicas.map(r => Node(r.host, r.port))))
+          case _                        => None
         }
-      case _: Role.Sentinel               => None
+      case _: Role.Sentinel               => Success(None)
     }
 
   // use an existing live connection for ROLE when possible. Otherwise, open a temporary connection and close it after the probe.
-  private def probeRole(node: Node): Option[Role] = {
-    val pooled = pooledFor(node)
-    if (pooled != null) {
-      val reply = askRole(pooled)
-      if (!lostConnection(reply)) return interpretRole(node, reply)
-    }
-    val nc     = connectForProbe(node)
-    try interpretRole(node, askRole(nc))
-    finally nc.close()
-  }
-
-  private def pooledFor(node: Node): NodeClient = {
-    val master = masterPool.existing(node)
-    val nc     = if (master != null) master else replicaPool.existing(node)
-    if (nc != null && nc.isLive) nc else null
-  }
-
-  private def askRole(nc: NodeClient): Option[Try[Role]] =
-    Bootstrap.awaitReply[Role](config.connectTimeout.toMillis)(callback => nc.submit(Server.role, asking = false, callback))
-
-  private def interpretRole(node: Node, reply: Option[Try[Role]]): Option[Role] =
-    reply match {
-      case Some(Success(role))  => Some(role)
-      case Some(Failure(error)) =>
-        reportProbeFailure(node, error)
-        None
-      case None                 =>
-        reportProbeFailure(node, TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms"))
-        None
-    }
-
-  private def lostConnection(reply: Option[Try[Role]]): Boolean =
-    reply match {
-      case Some(Failure(error)) =>
-        Fault.categorize(error) match {
-          case Fault.Lost(_) => true
-          case _             => false
-        }
-      case _                    => false
-    }
-
-  private def connectForProbe(node: Node): NodeClient = {
+  private def probeRole(node: Node): Try[Role] = {
+    val pooled = pooledFor(node).map(askRole).filterNot(lostConnection)
     // a refresh can outlive the start of close, and a closed client must not open a new socket
-    if (closed) throw NotConnected()
-    try
-      NodeClient.connect(
-        nodeFactory(node),
-        scheduler,
-        bootstrap,
-        config.reconnect,
-        config.watchdog,
-        config.connectTimeout,
-        config.closeTimeout,
-        config.dedicatedPool,
-        node = node,
-        events = Events.disabled
+    if (pooled.isEmpty && closed) Failure(NotConnected())
+    else {
+      val reply = pooled.getOrElse(
+        Try(new MultiplexedConnection(nodeFactory(node), scheduler, config, MultiplexedConnection.NodeRole.Replica, Some(node)).start())
+          .flatMap(nc =>
+            try askRole(nc)
+            finally nc.close()
+          )
       )
-    catch {
-      case NonFatal(error) =>
-        reportProbeFailure(node, error)
-        throw error
+      reply.failed.foreach(reportProbeFailure(node, _))
+      reply
     }
   }
+
+  private def pooledFor(node: Node): Option[MultiplexedConnection] =
+    Option(masterPool.existing(node)).orElse(Option(replicaPool.existing(node))).filter(_.isLive)
+
+  private def askRole(nc: MultiplexedConnection): Try[Role] =
+    Bootstrap.awaitReply[Role](config.connectTimeout.toMillis, TimedOut(s"ROLE timed out after ${config.connectTimeout.toMillis}ms"))(
+      nc.submit(Server.role, _)
+    )
+
+  private def lostConnection(reply: Try[Role]): Boolean =
+    reply.failed.toOption.map(Fault.categorize).exists {
+      case Fault.Lost(_) => true
+      case _             => false
+    }
 
   private def reportProbeFailure(node: Node, error: Throwable): Unit =
     events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
 
-  private val rediscoverWork: () => Unit = () => rediscover()
-
-  private def triggerRefresh(): Unit = refreshThrottle.trigger(rediscoverWork)
-
-  private def startRefreshPoll(): Unit = refreshThrottle.startPolling(masterReplica.topologyRefreshInterval)(triggerRefresh())
-
-  // request an immediate refresh. If another refresh is active, wait for it; a later reconnect requests discovery again if the master changed.
-  private def refreshRolesBeforeRehome(): Unit = refreshThrottle(force = true)(rediscover())
-
-  // a re-discovery queued before close must not probe ROLE on a connection the close cannot reach
-  private def rediscover(): Unit =
-    if (!closed) resolveTopology((Option(masterNodeRef.get()).toVector ++ replicasRef.get() ++ seeds).distinct).foreach(installTopology)
+  protected def rediscover(): Unit =
+    resolveTopology((Option(topologyRef.get()).toVector.flatMap(t => t.master +: t.replicas) ++ seeds).distinct).foreach(installTopology)
 
   private def installTopology(topology: MasterReplicaLive.ResolvedTopology): Unit = {
-    masterNodeRef.set(topology.master)
-    replicasRef.set(topology.replicas)
+    topologyRef.set(topology)
     replicaPool.retain(topology.replicas.toSet.contains)
     masterPool.retain(_ == topology.master)
     reads.retain(_ == topology.master)
+    // a demoted master still receives PUBLISH through replication, so only a node outside the topology loses the subscription
+    subscribedOn.retain(node => node == topology.master || topology.replicas.contains(node))
   }
 
   // --- routing -------------------------------------------------------------------------------------------------------------------------
 
-  def run[A](command: Command[A]): CIO[A] = {
-    def body(lease: DedicatedPool.Lease): CIO[A] =
-      CIO.async[A] { complete =>
-        val tracked = Events.trackCommand(events, command, complete)
-        Client.completing(tracked) {
-          if (readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) sendRead(command, tracked)
-          else sendMaster(command, tracked, lease)
-        }
-      }
-    Client.withLeaseIfBlocking(command)(body)
-  }
-
-  override private[sage] def lockWrite(
-    command: Command[Boolean],
-    timeout: FiniteDuration,
-    replicaAcknowledgement: Boolean
-  ): CIO[Boolean] =
-    Client.withLockLease(timeout, scheduler) { (lease, deadlineMillis) =>
-      CIO.async { complete =>
-        val tracked = Events.trackCommand(events, command, complete)
-        Client.completing(tracked) {
-          onMaster(tracked) { (nc, _, cb) =>
-            val replication = new LockReplication(
-              scheduler,
-              replicasRef.get().size,
-              deadlineMillis,
-              () => refreshThrottle.request(rediscoverWork),
-              replicaAcknowledgement
-            )
-            nc.submitLockWrite(
-              command,
-              asking = false,
-              cb,
-              lease,
-              replication
-            )
+  // Submit to the master and add its node to the result. Start role discovery if the server is no longer the master.
+  protected def route[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease, mode: DispatchMode): Unit =
+    if (closed) complete(Failure(NotConnected()))
+    else if (mode == DispatchMode.ReplicaRead) {
+      val topology = topologyRef.get()
+      walkRead(command, reads.candidatesFor(topology.master, topology.replicas), topology.master, complete)
+    } else {
+      val node = topologyRef.get().master
+      masterPool.withClient(node) {
+        triggerRefresh()
+        complete(Failure(NotConnected()))
+      } { nc =>
+        submitOn(
+          nc,
+          node,
+          command,
+          lease,
+          mode,
+          asking = false,
+          result => {
+            result match {
+              case Failure(e) if isOwnershipFault(e) => triggerRefresh()
+              case _                                 => ()
+            }
+            Events.completeAt(complete, node)(result)
           }
-        }
+        )
       }
     }
 
-  def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A] =
-    if (!Client.cacheable(command)) CIO.fail(Client.notCacheable(command))
-    else if (!cachingEnabled)
-      CIO.async[A] { complete =>
-        val tracked = Events.trackCommand(events, command, complete)
-        Client.completing(tracked)(sendMaster(command, tracked))
-      }
-    else
-      CIO.async[A] { complete =>
-        val deferred = Events.deferSpan(events, command)
-        Client.completing(complete)(sendMasterCached(command, ttl.toMillis, complete, deferred))
-      }
-
-  private def sendMaster[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease = null): Unit =
-    onMaster(complete)((nc, _, cb) => nc.submit[A](command, asking = false, cb, lease))
-
-  private def sendMasterCached[A](command: Command[A], ttlMillis: Long, complete: Try[A] => Unit, deferred: () => CommandSpan): Unit =
-    // if no master is available, cachedSubmit is not called. Complete its deferred span here.
-    onMaster(complete, onDown = () => Events.settleSpan(Events.startDeferred(deferred), Outcome.Failed(NotConnected()))) { (nc, _, cb) =>
-      nc.cachedSubmit[A](command, ttlMillis, cb, deferred)
-    }
-
-  // Submit on the master and add its node to the result. Start role discovery if the server is no longer the master. Call onDown when the
-  // operation ends before submit is called.
-  private def onMaster[A](complete: Try[A] => Unit, onDown: () => Unit = () => ())(submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit = {
-    if (closed) {
-      onDown()
-      complete(Failure(NotConnected()))
-      return
-    }
-    val node     = masterNodeRef.get()
-    val existing = masterPool.existing(node)
-    if (existing != null) submitMaster(existing, node, complete, submit)
-    else
-      scheduler.offload {
-        val nc = masterPool.getOrEstablishOrNull(node)
-        if (nc == null) {
-          triggerRefresh()
-          onDown()
-          complete(Failure(NotConnected()))
-        } else submitMaster(nc, node, complete, submit)
-      }
-  }
-
-  private def submitMaster[A](nc: NodeClient, node: Node, complete: Try[A] => Unit, submit: (NodeClient, Node, Try[A] => Unit) => Unit): Unit =
-    submit(
-      nc,
-      node,
-      {
-        case s @ Success(_) =>
-          Events.attributeNode(complete, node)
-          complete(s)
-        case f @ Failure(e) =>
-          if (isOwnershipFault(e)) triggerRefresh()
-          Events.attributeNode(complete, node)
-          complete(f)
-      }
-    )
-
-  private def sendRead[A](command: Command[A], complete: Try[A] => Unit): Unit = {
-    if (closed) {
-      complete(Failure(NotConnected()))
-      return
-    }
-    val master = masterNodeRef.get()
-    walkRead(command, reads.candidatesFor(master, replicasRef.get()), master, complete)
-  }
+  protected def replicaCount(master: Node): Int = topologyRef.get().replicas.size
 
   private def walkRead[A](command: Command[A], candidates: Vector[Node], master: Node, complete: Try[A] => Unit): Unit =
     reads.walk(command, candidates, master, complete)((node, error, rest) => onReadFault(ReadRoute(node, master, rest), error, command, complete))
@@ -350,39 +202,27 @@ final private[client] class MasterReplicaLive(
     command: Command[A],
     complete: Try[A] => Unit
   ): Unit =
-    handleReadFaults(route, Vector(error), RetryExecution.Inline)(
+    handleReadFaults(route, Vector(error))(
       remaining => walkRead(command, remaining, route.master, complete),
-      () => {
-        Events.attributeNode(complete, route.node)
-        complete(Failure(error))
-      }
+      () => Events.completeAt(complete, route.node)(Failure(error))
     )
 
   final private case class ReadRoute(node: Node, master: Node, remaining: Vector[Node])
 
-  private enum RetryExecution {
-    case Inline, Offloaded
-  }
-
-  private def handleReadFaults(route: ReadRoute, errors: Vector[Throwable], retryExecution: RetryExecution)(
+  private def handleReadFaults(route: ReadRoute, errors: Vector[Throwable])(
     retry: Vector[Node] => Unit,
     settle: () => Unit
   ): Unit = {
     val ownershipFault = route.node == route.master && errors.exists(isOwnershipFault)
     if (ownershipFault) triggerRefresh()
-    if (errors.exists(servesNoRead)) {
-      def continue(): Unit =
-        if (route.remaining.nonEmpty) retry(route.remaining)
-        else {
-          // an ownership fault already requested the same throttled refresh above
-          if (!ownershipFault) triggerRefresh()
-          settle()
-        }
-      retryExecution match {
-        case RetryExecution.Inline    => continue()
-        case RetryExecution.Offloaded => scheduler.offload(continue())
+    if (errors.exists(servesNoRead))
+      if (route.remaining.nonEmpty) retry(route.remaining)
+      else {
+        // an ownership fault already requested the same throttled refresh above
+        if (!ownershipFault) triggerRefresh()
+        settle()
       }
-    } else settle()
+    else settle()
   }
 
   private def isOwnershipFault(error: Throwable): Boolean = Fault.categorize(error) match {
@@ -400,16 +240,16 @@ final private[client] class MasterReplicaLive(
 
   protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
     CIO.async { complete =>
-      val spans           = Events.startSpans(events, p.commands)
-      // route the whole pipeline to a replica only when every command is eligible. Otherwise, route the whole pipeline to the master.
-      val useReplica      = readFrom != ReadFrom.Master && p.commands.forall(ReadRouting.replicaEligible)
-      val master          = masterNodeRef.get()
-      val refreshOnUnsent = () => triggerRefresh()
-      if (useReplica) {
-        val batch                                              = new Client.TrackedBatch(events, p.commands, spans, complete)
-        def failUnsent(): Unit                                 =
-          // without a submission, a connection error cannot trigger role discovery. Refresh roles before failing the batch.
-          batch.failUnsent(refreshOnUnsent)
+      val spans              = Events.startSpans(events, p.commands)
+      val topology           = topologyRef.get()
+      val master             = topology.master
+      val batch              = new Client.TrackedBatch(events, p.commands, spans, complete)
+      // without a submission, a connection error cannot trigger role discovery. Refresh roles before failing the batch.
+      def failUnsent(): Unit = {
+        triggerRefresh()
+        batch.failUnsent()
+      }
+      if (pipelineMode(p.commands) == DispatchMode.ReplicaRead) {
         def submitOn(picked: Option[ReadRouting.Picked]): Unit =
           picked match {
             case Some(ReadRouting.Picked(node, nc, rest)) =>
@@ -417,8 +257,8 @@ final private[client] class MasterReplicaLive(
               val attempt   = new TxSupport.IndexedCollector[Try[Any]](
                 p.commands.length,
                 results =>
-                  handleReadFaults(route, results.collect { case Failure(error) => error }, RetryExecution.Offloaded)(
-                    remaining => reads.pickOne(remaining, master)(submitOn),
+                  handleReadFaults(route, results.collect { case Failure(error) => error })(
+                    remaining => scheduler.offload(reads.pickOne(remaining, master)(submitOn)),
                     () => batch.settleAll(node, results)
                   )
               )
@@ -429,54 +269,19 @@ final private[client] class MasterReplicaLive(
                 else failUnsent()
             case None                                     => failUnsent()
           }
-        reads.pickOne(reads.candidatesFor(master, replicasRef.get()), master)(submitOn)
-      } else {
-        def submitOn(picked: Option[(Node, NodeClient)]): Unit = {
-          val submit = picked match {
-            case Some((_, nc)) => nc.submitAll
-            case None          => (_: Vector[Command[?]], _: Vector[Try[Any] => Unit]) => false
-          }
-          Client.submitBatchOnOne(
-            events,
-            p.commands,
-            spans,
-            submit,
-            complete,
-            onUnsent = refreshOnUnsent,
-            node = picked.map(_._1)
-          )
-        }
-        val existing                                           = masterPool.existing(master)
-        if (existing != null) submitOn(Some((master, existing)))
-        else
-          scheduler.offload {
-            val nc = masterPool.getOrEstablishOrNull(master)
-            submitOn(Option(nc).map(master -> _))
-          }
-      }
+        reads.pickOne(reads.candidatesFor(master, topology.replicas), master)(submitOn)
+      } else
+        masterPool.withClient(master)(failUnsent())(nc => if (!nc.submitAll(p.commands, batch.callbacks(Some(master)))) failUnsent())
     }
 
   // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
 
-  def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
-    CIO.acquireReleaseWith(acquireScope)(releaseScope)(lease => CIO.unit.flatMap(_ => body(lease.scope)))
-
-  private def refreshOnTxFault(error: Throwable): Unit = if (isOwnershipFault(error)) triggerRefresh()
-
-  private def acquireScope: CIO[MasterReplicaLive.TxLease] =
+  protected def openTransaction: CIO[LiveTransactionScope] =
     CIO.blocking {
-      val nc =
-        try masterPool.getOrEstablish(masterNodeRef.get())
-        catch {
-          case e: SageException =>
-            triggerRefresh()
-            throw e
-          case NonFatal(_)      =>
-            triggerRefresh()
-            throw ConnectionLost(mayHaveExecuted = false)
-        }
-      try new MasterReplicaLive.TxLease(new Client.TxScope(nc.acquireForTransaction(), refreshOnTxFault, events), nc)
-      catch {
+      try {
+        val nc = masterPool.getOrEstablish(topologyRef.get().master)
+        new Client.TxScope(nc.pool.acquireForTransaction(), nc.pool.releaseTransaction, p => if (p == RefreshPolicy.Forced) triggerRefresh(), events)
+      } catch {
         case e: TimedOut      => throw e
         case e: SageException =>
           triggerRefresh()
@@ -487,106 +292,12 @@ final private[client] class MasterReplicaLive(
       }
     }
 
-  private def releaseScope(lease: MasterReplicaLive.TxLease): CIO[Unit] =
-    CIO.blocking(lease.nc.releaseTransaction(lease.scope.conn, lease.scope.sealAndReusable()))
-
   // --- pub/sub (on the master) ---------------------------------------------------------------------------------------------------------
 
-  private def subs(): SubscriptionConnection = {
-    var s = subscriptions
-    if (s == null) {
-      subLock.lock()
-      try {
-        if (subscriptions == null) {
-          // resolve the master for every connection attempt so subscriptions move to the promoted master after failover.
-          val rehomingFactory: MultiplexedConnection.TransportFactory =
-            (onFrame, onClosed) => nodeFactory(masterNodeRef.get())(onFrame, onClosed)
-          subscriptions = new SubscriptionConnection(
-            rehomingFactory,
-            bootstrap,
-            scheduler,
-            config.reconnect,
-            config.watchdog,
-            config.connectTimeout.toMillis,
-            config.pubsub.bufferSize,
-            // subscriptions use a separate socket. Wait for master discovery before opening it; a pooled connection is not required.
-            () => !closed && masterNodeRef.get() != null,
-            onReconnect = () => refreshRolesBeforeRehome(),
-            events = events
-          )
-        }
-        s = subscriptions
-      } finally subLock.unlock()
-    }
-    s
-  }
-
-  def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
-    CIO.blocking(Client.channelMessages(subs().subscribeChannels(channel +: rest.toVector)))
-
-  def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]] =
-    CIO.blocking(Client.patternMessages(subs().subscribePatterns(pattern +: rest.toVector)))
-
-  // master-replica mode uses one subscription connection for all shard channels, as standalone mode does.
-  def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
-    CIO.blocking(Client.channelMessages(subs().subscribeShard(channel +: rest.toVector)))
-
-  // --- scan / lifecycle ----------------------------------------------------------------------------------------------------------------
-
-  def scanTargets: CIO[Vector[ScanTarget]]                      = CIO.value(Vector(ScanTarget.any))
-  def runOn[A](target: ScanTarget, command: Command[A]): CIO[A] = run(command)
-
-  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
-    executor.evalSha(this, subject, cost, peek)
-
-  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
-    executor.tryWithLock(this, key)(body)
-
-  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
-    executor.withLock(this, key, waitTimeout)(body)
-
-  def close: CIO[Unit] = CIO.blocking(closeAll())
-
-  private def closeAll(): Unit = {
-    closed = true
-    refreshThrottle.stopPolling()
-    val s = subscriptions
-    if (s != null) s.close()
-    masterPool.close()
-    replicaPool.close()
-    events.close()
-  }
+  protected def pubsub: SubscriptionConnection.PubSub = subscriptions
 }
 
 private[client] object MasterReplicaLive {
 
   final private[client] case class ResolvedTopology(master: Node, replicas: Vector[Node])
-
-  final private[client] class TxLease(val scope: Client.TxScope, val nc: NodeClient)
-
-  def connect(
-    config: SageConfig,
-    seeds: Vector[Node],
-    masterReplica: MasterReplicaConfig,
-    scheduler: Scheduler,
-    translate: Throwable => Throwable
-  ): CIO[Client[CIO, String]] =
-    CIO.blocking[Client[CIO, String]] {
-      val bootstrap                                               = Bootstrap.commands(config.auth, config.database, config.clientName)
-      val factory: Node => MultiplexedConnection.TransportFactory = node => {
-        val upgrade = Tls.buildUpgrade(config.tls, node.host, node.port)
-        (onFrame, onClosed) => SocketTransport.connect(node.host, node.port, config.connectTimeout, upgrade, onFrame, onClosed)
-      }
-      val events                                                  = Events(config.listeners, config.tracer)
-      val live                                                    =
-        new MasterReplicaLive(factory, scheduler, bootstrap, config, seeds, masterReplica, events)
-      try {
-        live.bootstrapRoles()
-        live
-      } catch {
-        case NonFatal(error) =>
-          events.close()
-          throw translate(error)
-      }
-    }
 }

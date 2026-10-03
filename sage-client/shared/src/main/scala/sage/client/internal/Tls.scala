@@ -18,9 +18,9 @@ private[client] object Tls {
   private val plaintext: Socket => Socket = socket => socket
 
   /**
-    * Builds the `SSLContext` once for a client and reports invalid trust configuration as a [[TlsError]]. The returned function wraps a
-    * connected socket in an `SSLSocket` and performs the TLS handshake. The existing connection timeout and close behavior still apply.
-    * `host` must match the socket destination because it is used for SNI and hostname verification.
+    * Builds the `SSLContext` once, reading any trust file now, and reports invalid trust configuration as a [[TlsError]]. The returned
+    * function wraps a connected socket in an `SSLSocket` and performs the TLS handshake. The existing connection timeout and close behavior
+    * still apply. `host` must match the socket destination because it is used for SNI and hostname verification.
     */
   def buildUpgrade(tls: Option[TlsConfig], host: String, port: Int): Socket => Socket =
     tls match {

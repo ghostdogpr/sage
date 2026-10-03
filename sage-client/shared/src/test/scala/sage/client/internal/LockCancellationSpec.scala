@@ -18,10 +18,10 @@ abstract class LockCancellationSpec extends munit.FunSuite {
   override val munitTimeout      = 10.seconds
   private given ExecutionContext = munitExecutionContext
 
-  protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
+  protected def tryWithLock[A](commands: SharedRunner, lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
     new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).tryWithLock(commands, "key")(body)
 
-  protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
+  protected def withLock[A](commands: SharedRunner, lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
     new LockExecutor[String](lease, "cancel", replicaAcknowledgement = true).withLock(commands, "key", wait)(body)
 
   protected def runner(
@@ -29,8 +29,8 @@ abstract class LockCancellationSpec extends munit.FunSuite {
     renewals: AtomicInteger,
     stallRelease: Boolean,
     releaseCompleted: () => Unit = () => ()
-  ): CommandRunner[CIO, String] =
-    new CommandRunner[CIO, String] {
+  ): SharedRunner =
+    new SharedRunner {
       def run[A](command: Command[A]): CIO[A] = CIO.defer(()).flatMap { _ =>
         command.args(4).asUtf8String match {
           case "renew"   => renewals.incrementAndGet()
@@ -80,7 +80,7 @@ abstract class LockCancellationSpec extends munit.FunSuite {
     val bodyStarted      = new AtomicBoolean(false)
     val bodyStopped      = new AtomicBoolean(false)
     val cleanupCompleted = Promise[Unit]()
-    val commands         = new CommandRunner[CIO, String] {
+    val commands         = new SharedRunner {
       def run[A](command: Command[A]): CIO[A] =
         command
           .decode(Frame.Integer(if (command.args(4).asUtf8String == "renew" && bodyStarted.get()) 0 else 1))
@@ -108,29 +108,33 @@ abstract class LockCancellationSpec extends munit.FunSuite {
   }
 
   test("a contended acquisition can be cancelled before its wait timeout") {
-    val busy = new CommandRunner[CIO, String] {
+    val busy = new SharedRunner {
       def run[A](command: Command[A]): CIO[A] = command.decode(Frame.Integer(0)).fold(CIO.fail(_), CIO.value(_))
     }
     CIO.timeout(100.millis)(withLock(busy, 3.seconds, 30.seconds)(CIO.unit)).unsafeRun.map(result => assertEquals(result, None))
   }
+
+  test("a key-type view keeps the runner of the client it wraps") {
+    val client = new LockTestClient(SharedRunner.unavailable)
+    assert(client.as[Array[Byte]].runner eq client)
+  }
 }
 
-final class LockTestClient(runner: CommandRunner[CIO, String]) extends Client[CIO, String] {
+final class LockTestClient(commands: SharedRunner) extends Client[CIO, String] with SharedRunner {
   private def unsupported[A]: CIO[A] = CIO.fail(new AssertionError("unexpected client operation in a lock test"))
 
-  def run[A](command: Command[A]): CIO[A]                                                                                        = runner.run(command)
+  def run[A](command: Command[A]): CIO[A]                                                                                        = commands.run(command)
   def cached[A](command: Command[A], ttl: FiniteDuration): CIO[A]                                                                = unsupported
   private[sage] def pipeline[R](p: Pipeline[R]): CIO[R]                                                                          = unsupported
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A]                                                      = unsupported
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]]                       = unsupported
   def subscribePatterns[V: ValueCodec](pattern: String, rest: String*): CIO[Subscription[CIO, PatternMessage[V]]]                = unsupported
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]]                  = unsupported
-  private[sage] def scanTargets: CIO[Vector[ScanTarget]]                                                                         = unsupported
-  private[sage] def runOn[A](target: ScanTarget, command: Command[A]): CIO[A]                                                    = unsupported
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] = unsupported
   private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]]                     =
     executor.tryWithLock(this, key)(body)
   private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A]   =
     executor.withLock(this, key, waitTimeout)(body)
+  override private[sage] def runner: SharedRunner                                                                                = this
   def close: CIO[Unit]                                                                                                           = CIO.unit
 }

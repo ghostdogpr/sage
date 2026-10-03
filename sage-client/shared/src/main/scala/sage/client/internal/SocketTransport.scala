@@ -46,17 +46,13 @@ final private[client] class SocketTransport private (
   private[internal] val writer: Thread = Thread.ofVirtual().name(s"sage-writer-$id").unstarted(() => writeLoop())
 
   def start(): Unit = {
-    try {
+    onThrow {
       socket.setTcpNoDelay(true)
       socket.connect(new InetSocketAddress(host, port), connectTimeoutMillis) // resolves the hostname here, fresh on every attempt
       socket.setSoTimeout(connectTimeoutMillis)                               // bound a TLS handshake's reads like the connect
       ioSocket = upgrade(socket)
       socket.setSoTimeout(0)                                                  // steady state: blocking reads with no timeout
-    } catch {
-      case NonFatal(error) =>
-        terminate()
-        throw error
-    }
+    }(_ => terminate())
     val launched = locked {
       if (closed.get()) false
       else {
@@ -70,15 +66,20 @@ final private[client] class SocketTransport private (
   }
 
   def send(item: Transport.Item): Unit = {
-    queue.put(item)
+    // offer, unlike put, does not throw for an interrupted caller
+    queue.offer(item): Unit
     // terminate may empty the queue just before this item is added. Check closed after the add so this item is failed as well.
     if (closed.get()) drainQueue()
   }
 
+  // An I/O thread closing from a callback returns without waiting for the other I/O thread, which may own teardown and be joining it.
   def close(): Unit = {
     terminate()
-    if (Thread.currentThread() ne reader) reader.join()
-    if (Thread.currentThread() ne writer) writer.join()
+    val current = Thread.currentThread()
+    if ((current ne reader) && (current ne writer)) {
+      join(reader)
+      join(writer)
+    }
   }
 
   private def readLoop(): Unit = {
@@ -177,19 +178,25 @@ final private[client] class SocketTransport private (
         case _: IOException => ()
       }
       if (locked(threadsStarted)) {
-        if (Thread.currentThread() ne writer) {
-          writer.interrupt()
-          writer.join()
-        }
+        if (Thread.currentThread() ne writer) writer.interrupt()
+        join(writer)
         // Stop the reader before onClosed; otherwise, an in-flight reply can race cleanup of the consumer's pending commands (#94).
         // Interrupting releases a reader waiting for backpressure before the join.
-        if (Thread.currentThread() ne reader) {
-          reader.interrupt()
-          reader.join()
-        }
+        if (Thread.currentThread() ne reader) reader.interrupt()
+        join(reader)
       }
       drainQueue()
       onClosed()
+    }
+
+  // Waits even when the caller is interrupted, so the cleanup that follows always runs, then restores the interrupt.
+  private def join(thread: Thread): Unit =
+    if (Thread.currentThread() ne thread) {
+      var interrupted = false
+      while (thread.isAlive)
+        try thread.join()
+        catch { case _: InterruptedException => interrupted = true }
+      if (interrupted) Thread.currentThread().interrupt()
     }
 
   private def drainQueue(): Unit = {

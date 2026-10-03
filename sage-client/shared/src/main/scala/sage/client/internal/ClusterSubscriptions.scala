@@ -3,43 +3,35 @@ package sage.client.internal
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
-import scala.util.control.NonFatal
+import scala.util.Try
 
 import SubscriptionConnection.{Kind, RawSubscription, Sink}
 
 import sage.Bytes
 import sage.SageException.NotConnected
-import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.client.SageConfig
 import sage.cluster.{ClusterTopology, Node, Slot}
-import sage.commands.Command
 
 /**
   * Manages pub/sub subscriptions in a cluster. Classic channel and pattern subscriptions share one connection to an arbitrary master
-  * because `PUBLISH` broadcasts across the cluster. If that node becomes unavailable, the manager chooses another master. Shard channel
-  * subscriptions use one connection per owning node, created when first needed and closed after its last subscription ends.
+  * because `PUBLISH` broadcasts across the cluster. If that node becomes unavailable or leaves the cluster, the connection reconnects to
+  * another master. Shard channel subscriptions use one connection per owning node, created when first needed and closed after its last
+  * subscription ends.
   *
-  * Cluster subscription connections do not reconnect themselves. When one closes, the manager refreshes the topology and assigns its
-  * subscribers to the current owner. It also performs this reconciliation after topology changes discovered by commands. Each
-  * `SSUBSCRIBE` contains channels from one slot to avoid `CROSSSLOT` errors.
+  * Shard connections do not reconnect themselves. When one closes, the manager refreshes the topology and assigns its subscribers to the
+  * current owner. It also performs this reconciliation after topology changes discovered by commands.
   */
 final private[client] class ClusterSubscriptions(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
-  bootstrap: Vector[Command[?]],
   scheduler: Scheduler,
-  reconnect: BackoffConfig,
-  watchdog: WatchdogConfig,
-  connectTimeoutMillis: Long,
-  bufferSize: Int,
+  config: SageConfig,
   topologyOf: () => ClusterTopology,
   refresh: () => Unit,
-  pickMaster: () => Option[Node]
-) {
+  pickMaster: () => Option[Node],
+  events: Events
+) extends SubscriptionConnection.PubSub {
 
   private val lock = new ReentrantLock()
-
-  // --- classic state (guarded by lock) ---
-  private var classicConn: SubscriptionConnection = null
-  private val classicSubs                         = mutable.LinkedHashSet.empty[ClassicSub]
 
   // --- sharded state (guarded by lock) ---
   private val shardConns = mutable.HashMap.empty[Node, SubscriptionConnection]
@@ -47,242 +39,129 @@ final private[client] class ClusterSubscriptions(
 
   private var closed = false
 
+  // Retries wait at most four initial delays, so a subscription resumes soon after a long failover ends. They refresh the topology at most
+  // once per that delay.
+  private val retryBackoff = config.reconnect.copy(maxDelay = config.reconnect.maxDelay.min(config.reconnect.initialDelay * 4))
+  private val retryRefresh = new RefreshThrottle(scheduler, retryBackoff.maxDelay.toMillis, refresh)
+
+  // one retry reconciles every subscription, including those placed while it waits
+  private val retries = new Reconnects(scheduler, retryBackoff, lock)
+
   private inline def locked[A](inline body: A): A = {
     lock.lock()
     try body
     finally lock.unlock()
   }
 
-  // run one pass at a time while using the outer lock to update its state. If schedule is called during a pass, run one more pass afterward.
-  final private class CoalescedPass(body: () => Unit) {
-    private var running = false
-    private var queued  = false
-
-    def schedule(): Unit = {
-      val go = locked {
-        if (closed) false
-        else if (running) {
-          queued = true
-          false
-        } else {
-          running = true
-          true
-        }
-      }
-      if (go) scheduler.offload(run())
-    }
-
-    private def run(): Unit =
-      try body()
-      finally {
-        val again = locked {
-          if (!closed && queued) {
-            queued = false
-            true
-          } else {
-            running = false
-            false
-          }
-        }
-        if (again) scheduler.offload(run())
-      }
-  }
-
-  // refresh first so a replacement for the failed master is chosen from the current topology.
-  private val classicRehome  = new CoalescedPass(() => {
-    refresh()
-    rehomeClassic()
-  })
-  private val shardReconcile = new CoalescedPass(() => reconcileShard())
+  // one pass at a time; a request during a pass runs one more pass afterward
+  private val shardReconcile = new RefreshThrottle(scheduler, 0L, () => reconcileShard())
 
   // --- classic (channels / patterns) -------------------------------------------------------------------------------------------------------
 
-  def subscribeChannels(channels: Vector[String]): RawSubscription = classic(channels, Kind.Channel)
+  private val classicOn = new SubscriptionConnection.Following(nodeFactory, pickMaster)
 
-  def subscribePatterns(patterns: Vector[String]): RawSubscription = classic(patterns, Kind.Pattern)
+  // Each attempt connects to the master picked at that time. After a loss, every reconnect attempt refreshes the topology first.
+  private val classic = new SubscriptionConnection(
+    classicOn.factory,
+    scheduler,
+    config.copy(reconnect = retryBackoff),
+    isLive = () => true,
+    SubscriptionConnection.OnLoss.Reconnect(() => retryRefresh(force = false), events, () => classicOn.node, immediately = true)
+  )
 
-  private def classic(names: Vector[String], kind: Kind): RawSubscription = {
-    val sink = new Sink(names, kind, bufferSize)
-    val sub  = ClassicSub(sink, names, kind)
-    try {
-      val conn =
-        locked {
-          if (closed) throw NotConnected()
-          classicSubs += sub
-          ensureClassicConn()
-        }
-      conn.attach(sink, names, kind)
-    } catch {
-      case e: Throwable =>
-        locked(classicSubs -= sub)
-        sink.terminate()
-        throw e
-    }
-    new RawSubscription(sink, () => closeClassic(sub))
-  }
+  def subscribeChannels(channels: Vector[String]): RawSubscription = classic.owned(channels, Kind.Channel, failIfUnconfirmed = false)
 
-  // must hold lock
-  private def ensureClassicConn(): SubscriptionConnection = {
-    if (classicConn == null)
-      pickMaster() match {
-        case Some(node) => classicConn = newConnection(node, () => onClassicTerminated())
-        case None       => throw NotConnected()
-      }
-    classicConn
-  }
+  def subscribePatterns(patterns: Vector[String]): RawSubscription = classic.owned(patterns, Kind.Pattern, failIfUnconfirmed = false)
 
-  private def closeClassic(sub: ClassicSub): Unit = {
-    val (conn, teardown) =
-      locked {
-        classicSubs -= sub
-        val c        = classicConn
-        val teardown = classicSubs.isEmpty
-        if (teardown) classicConn = null
-        (c, teardown)
-      }
-    if (conn != null) {
-      conn.detach(sub.sink, sub.names, sub.kind)
-      sub.sink.terminate()
-      if (teardown) conn.close()
-    } else sub.sink.terminate()
-  }
-
-  private def onClassicTerminated(): Unit = {
-    locked { classicConn = null }
-    classicRehome.schedule()
-  }
-
-  private def rehomeClassic(): Unit = {
-    val subs = locked(if (closed || classicSubs.isEmpty) Vector.empty[ClassicSub] else classicSubs.toVector)
-    if (subs.nonEmpty) {
-      val conn = locked {
-        if (closed || classicSubs.isEmpty) null
-        else {
-          if (classicConn == null) pickMaster().foreach(node => classicConn = newConnection(node, () => onClassicTerminated()))
-          classicConn
-        }
-      }
-      if (conn == null) scheduleRehomeRetry() // a master is not available yet; retry when the topology may contain one
-      else {
-        // When attachment fails during establishment, it resets the connection to Idle and rethrows without calling onTerminated. Ignoring
-        // that failure would leave every classic subscription on the dead connection. Drop the connection and retry here.
-        var failed = false
-        subs.foreach { sub =>
-          try {
-            conn.attach(sub.sink, sub.names, sub.kind)
-            // if the subscription closed while attach was running, closeClassic could not detach it yet. Detach it here after attach finishes.
-            if (!locked(classicSubs.contains(sub))) { conn.detach(sub.sink, sub.names, sub.kind): Unit }
-          } catch { case NonFatal(_) => failed = true }
-        }
-        if (failed) {
-          // Attachment may have restored some subscriptions on this connection. Close it before retrying to avoid duplicate delivery and an
-          // unused open socket.
-          locked(if (classicConn eq conn) classicConn = null)
-          conn.shutdown()
-          scheduleRehomeRetry()
-        }
-      }
-    }
-  }
-
-  private def scheduleRehomeRetry(): Unit =
-    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(classicRehome.schedule())
+  // `redis-cli --cluster del-node` resets a removed node without stopping it, so PUBLISH stops reaching it while the connection stays open
+  def retain(listed: Node => Boolean): Unit = classicOn.retain(listed)
 
   // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
-  // ensure/get both yield nothing once closed, so no connection is created during teardown
-  private val conns: Placement.Conns = new Placement.Conns {
-    def ensure(node: Node): Option[Placement.ShardConn] = locked(if (closed) None else Some(ensureShardConn(node)))
-    def get(node: Node): Option[Placement.ShardConn]    = locked(shardConns.get(node))
-  }
-
   def subscribeShard(channels: Vector[String]): RawSubscription = {
-    val sink = new Sink(channels, Kind.Shard, bufferSize)
-    val sub  = ShardSub(sink, channels)
+    val sink = new Sink(channels, Kind.Shard, config.pubsub.bufferSize)
+    val sub  = ShardSub(sink)
     locked {
       if (closed) throw NotConnected()
       shardSubs += sub
     }
-    // if placement fails, closeShard detaches any completed subscriptions and terminates the sink
-    try place(sub)
-    catch {
-      case e: Throwable =>
-        closeShard(sub)
-        throw e
-    }
+    // Keep channels with an unowned slot or an unreachable owner pending and retry them. If the owner refuses a channel, closeShard detaches
+    // any completed subscriptions and terminates the sink.
+    onThrow {
+      // a slot with no owner is usually mid-failover, and a refresh may already name its new owner
+      val topo = topologyOf()
+      if (channels.exists(channel => topo.nodeForSlot(Slot.of(Bytes.utf8(channel))).isEmpty)) refresh()
+      if (!reconcile(sub, planFor(sub.channels))) { sink.failure.foreach(throw _); scheduleRetry() }
+    }(_ => closeShard(sub))
     new RawSubscription(sink, () => closeShard(sub))
   }
 
-  // if the initial connection attempt fails, cancel the whole subscription. Keep channels with an unowned slot pending and retry them.
-  private def place(sub: ShardSub): Unit = {
-    if (hasUnownedSlot(sub.channels)) refresh()
-    sub.placement.place(planFor(sub.channels), conns)
-    if (!sub.placement.fullyPlaced) scheduleRetry()
+  // Evaluates the plan under the subscription's lock, so a plan from an older topology cannot replace a newer one. No connection is created
+  // once the manager is closed.
+  private def reconcile(sub: ShardSub, planned: => ClusterSubscriptions.Plan): Boolean = {
+    sub.lock.lock()
+    try
+      ClusterSubscriptions.reconcile(sub.sink, planned, locked(shardConns.toVector), node => locked(Option.unless(closed)(ensureShardConn(node))))
+    finally sub.lock.unlock()
   }
 
-  // Group channels by owning node and then by slot, with one SSUBSCRIBE for each group. Omit an unowned slot from this attempt; the caller
-  // refreshes the topology before each retry.
-  private def planFor(channels: Vector[String]): Placement.Plan = {
-    val topo   = topologyOf()
-    val byNode = mutable.HashMap.empty[Node, mutable.HashMap[Slot, mutable.ArrayBuffer[String]]]
-    channels.foreach { channel =>
-      val slot = Slot.of(Bytes.utf8(channel))
-      topo.nodeForSlot(slot).foreach { node =>
-        byNode.getOrElseUpdate(node, mutable.HashMap.empty).getOrElseUpdate(slot, mutable.ArrayBuffer.empty) += channel
-      }
-    }
-    byNode.iterator.map { case (node, slots) => node -> slots.valuesIterator.map(_.toVector).toVector }.toMap
-  }
-
-  private def hasUnownedSlot(channels: Vector[String]): Boolean = {
+  // Group channels by owning node. Omit a channel whose slot is unowned from this attempt; the caller refreshes the topology before each retry.
+  private def planFor(channels: Vector[String]): ClusterSubscriptions.Plan = {
     val topo = topologyOf()
-    channels.exists(channel => topo.nodeForSlot(Slot.of(Bytes.utf8(channel))).isEmpty)
+    channels.groupBy(channel => topo.nodeForSlot(Slot.of(Bytes.utf8(channel)))).collect { case (Some(node), names) => node -> names }
   }
 
   // must hold lock
   private def ensureShardConn(node: Node): SubscriptionConnection =
-    shardConns.getOrElseUpdate(node, newConnection(node, () => onShardConnTerminated(node)))
+    shardConns.getOrElseUpdate(
+      node, {
+        // a dropped channel is not a failure, so it re-homes without backoff
+        val report =
+          SubscriptionConnection.OnLoss.Report(onShardConnTerminated(node, _), () => scheduler.offload(refreshAndReconcile()), () => scheduleRetry())
+        new SubscriptionConnection(nodeFactory(node), scheduler, config, () => true, report)
+      }
+    )
 
-  private def onShardConnTerminated(node: Node): Unit = {
-    locked(shardConns.remove(node))
-    // A dropped connection can mean that the slot migrated. The server sends sunsubscribe and then disconnects. Refresh because the stale
-    // topology still names the disconnected owner, which planFor would not consider unowned. Reconcile after the refresh finds the new owner.
-    scheduler.offload {
-      refresh()
-      shardReconcile.schedule()
-    }
+  // a connection that reports its loss late must not remove the connection that replaced it
+  private def forget(node: Node, conn: SubscriptionConnection): Unit = locked(if (shardConns.get(node).contains(conn)) shardConns -= node)
+
+  private def onShardConnTerminated(node: Node, conn: SubscriptionConnection): Unit = {
+    forget(node, conn)
+    scheduleRetry(immediately = true)
   }
 
-  def onTopologyChanged(): Unit = shardReconcile.schedule()
+  def onTopologyChanged(): Unit = shardReconcile.request()
 
-  // Assign each subscription to the current owners of its channels. Refresh at most once per pass and retry incomplete work after transient
-  // failover errors.
+  // Assign each subscription to the current owners of its channels, and retry incomplete work after transient failover errors.
   private def reconcileShard(): Unit = {
     val subs = locked(if (closed) Vector.empty else shardSubs.toVector)
     if (subs.nonEmpty) {
-      if (subs.exists(sub => hasUnownedSlot(sub.channels))) refresh()
       var incomplete = false
       subs.foreach { sub =>
-        val failed = sub.placement.reconcile(planFor(sub.channels), conns)
+        val placed = sub.sink.failure.isEmpty && Try(reconcile(sub, planFor(sub.channels))).getOrElse(false)
         // If the subscription closed during this pass, closeShard may have detached it before reconcile attached it again. Reconcile with an
-        // empty plan to remove those attachments.
-        if (!locked(shardSubs.contains(sub))) { sub.placement.reconcile(Map.empty, conns): Unit }
-        // The plan omits an unowned slot, and reconcile does not treat that omission as a failure. Check fullyPlaced and retry while a requested
-        // channel remains unattached.
-        else if (failed || !sub.placement.fullyPlaced) incomplete = true
+        // empty plan to remove those attachments, as for a subscription the owner refused.
+        if (!locked(shardSubs.contains(sub)) || sub.sink.failure.nonEmpty) { reconcile(sub, Map.empty): Unit }
+        else if (!placed) incomplete = true
       }
       evictEmptyShardConns()
-      if (incomplete) scheduleRetry()
+      if (incomplete) scheduleRetry() else locked(retries.live())
     }
   }
 
-  // an incomplete placement (owner unreachable, or a Slot still unowned mid-failover) retries after a short delay until it converges
-  private def scheduleRetry(): Unit =
-    if (!locked(closed)) scheduler.after(reconnect.initialDelay)(shardReconcile.schedule())
+  // A lost shard connection or an incomplete placement (owner unreachable, or a slot still unowned mid-failover) retries with backoff. A
+  // retry refreshes first unless another refreshed within the retry delay, because the topology still names the old owner until a refresh
+  // or failover replaces it. With `immediately`, the first retry after a stable period does not wait.
+  private def scheduleRetry(immediately: Boolean = false): Unit = locked(retries.schedule(!closed, _ => (), immediately)(refreshAndReconcile()))
+
+  private def refreshAndReconcile(): Unit = {
+    retryRefresh(force = false)
+    shardReconcile.request()
+  }
 
   private def closeShard(sub: ShardSub): Unit = {
     locked(shardSubs -= sub)
-    sub.placement.reconcile(Map.empty, conns) // detach every placement; the empty plan leaves the ledger empty
+    reconcile(sub, Map.empty): Unit // detach every placement
     sub.sink.terminate()
     evictEmptyShardConns()
   }
@@ -290,47 +169,58 @@ final private[client] class ClusterSubscriptions(
   private def evictEmptyShardConns(): Unit = {
     val candidates = locked(shardConns.iterator.collect { case (node, conn) if conn.isEmpty => node -> conn }.toVector)
     candidates.foreach { case (node, conn) =>
-      if (conn.closeIfEmpty()) locked(if (shardConns.get(node).contains(conn)) shardConns -= node)
+      if (conn.closeIfEmpty()) forget(node, conn)
     }
   }
 
   // --- shared ------------------------------------------------------------------------------------------------------------------------------
 
-  private def newConnection(node: Node, onTerminated: () => Unit): SubscriptionConnection =
-    new SubscriptionConnection(
-      nodeFactory(node),
-      bootstrap,
-      scheduler,
-      reconnect,
-      watchdog,
-      connectTimeoutMillis,
-      bufferSize,
-      isLive = () => true,
-      cluster = true,
-      onTerminated = onTerminated
-    )
-
   def close(): Unit = {
-    val (classic, shard) =
+    val shard =
       locked {
         closed = true
-        val c = classicConn
-        classicConn = null
         val s = shardConns.values.toVector
         shardConns.clear()
         // terminate sinks before closing connections. This releases any reader waiting because of backpressure before close waits for it.
-        (classicSubs.toVector.map(_.sink) ++ shardSubs.toVector.map(_.sink)).foreach(_.terminate())
-        classicSubs.clear()
+        shardSubs.foreach(_.sink.terminate())
         shardSubs.clear()
-        (c, s)
+        s
       }
-    if (classic != null) classic.close()
+    shardReconcile.stop()
+    classic.close()
     shard.foreach(_.close())
   }
 
-  final private case class ClassicSub(sink: Sink, names: Vector[String], kind: Kind)
+  final private class ShardSub(val sink: Sink) {
+    def channels: Vector[String] = sink.names
+    val lock                     = new ReentrantLock()
+  }
+}
 
-  final private class ShardSub(val sink: Sink, val channels: Vector[String]) {
-    val placement = new Placement(sink, channels)
+private[internal] object ClusterSubscriptions {
+
+  type Plan = Map[Node, Vector[String]]
+
+  // what reconciliation needs of a shard connection; [[SubscriptionConnection]] is the production one
+  trait ShardConn {
+    def attach(sink: Sink, names: Vector[String]): Unit
+    def detach(sink: Sink, names: Vector[String]): Unit
+    def namesOf(sink: Sink): Vector[String]
+  }
+
+  // Detaches what `sink` holds outside the plan on the `current` connections, attaches every planned node's channels, and returns true when
+  // every requested channel is attached. The caller omits unowned slots from the plan and retries until this holds.
+  def reconcile(sink: Sink, plan: Plan, current: Vector[(Node, ShardConn)], ensure: Node => Option[ShardConn]): Boolean = {
+    current.foreach { case (node, conn) =>
+      val keep = plan.getOrElse(node, Vector.empty).toSet
+      val gone = conn.namesOf(sink).filterNot(keep)
+      if (gone.nonEmpty) conn.detach(sink, gone)
+    }
+    // a concurrent eviction, a refused channel or a failure to create the connection leaves the channels pending for a retry
+    val attached = plan.iterator.flatMap { case (node, names) =>
+      Try(ensure(node)).toOption.flatten.filter(conn => Try(conn.attach(sink, names)).isSuccess).iterator.flatMap(_.namesOf(sink))
+    }.toSet
+    // count distinct attached channels across all nodes. Counting each node separately could hide a missing channel when another is recorded twice.
+    attached.size >= sink.names.distinct.size
   }
 }

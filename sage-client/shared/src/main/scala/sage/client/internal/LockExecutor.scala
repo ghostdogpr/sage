@@ -8,18 +8,19 @@ import scala.concurrent.duration.*
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{InvalidArgument, LockLost, ServerError, TimedOut}
+import sage.SageException.{DecodeError, InvalidArgument, LockLost, TimedOut}
 import sage.client.BackoffConfig
 import sage.codec.KeyCodec
+import sage.commands.*
 
 final private[client] class LockExecutor[K](
   leaseDuration: FiniteDuration,
   namespace: String,
   replicaAcknowledgement: Boolean
-)(using KeyCodec[K]) {
-  import LockCommands.Operation
+)(using codec: KeyCodec[K]) {
+  import LockExecutor.Operation
 
-  private val commands          = new LockCommands[K](leaseDuration, namespace)
+  private val namespaced        = SingleKeyScript.namespaced(namespace)
   // The usable lease accounts for millisecond rounding, scheduling, clock drift, and time spent waiting for replies.
   private val leaseNanos        = leaseDuration.toMillis * 1000000L
   private val usableNanos       = leaseNanos - leaseNanos / 10L
@@ -32,7 +33,7 @@ final private[client] class LockExecutor[K](
     def remainingAt(nowNanos: Long): Long = durationNanos - (nowNanos - startedAtNanos)
   }
 
-  final private class Attempt(val key: Bytes) {
+  final private class Attempt(val runner: SharedRunner, val key: Bytes) {
     val token: String   = UUID.randomUUID().toString
     val stopped         = new AtomicBoolean(false)
     val mayOwn          = new AtomicBoolean(false)
@@ -40,16 +41,37 @@ final private[client] class LockExecutor[K](
     val releaseDeadline = new AtomicReference[Deadline]()
   }
 
-  def tryWithLock[A](runner: CommandRunner[CIO, String], key: K)(body: => CIO[A]): CIO[Option[A]] = {
+  private[internal] def key(value: K): Bytes = namespaced(codec.encode(value))
+
+  private[internal] def command(key: Bytes, token: String, operation: Operation, cached: Boolean): Command[Boolean] =
+    Command(
+      LockExecutor.compiled.verb(cached),
+      SingleKeyScript.KeyIndices,
+      Vector(
+        LockExecutor.compiled.reference(cached),
+        SingleKeyScript.NumKeys,
+        key,
+        Bytes.utf8(token),
+        Bytes.utf8(operation.wireName),
+        Bytes.utf8(leaseDuration.toMillis.toString)
+      ),
+      _.asLong.flatMap {
+        case 0 => Right(false)
+        case 1 => Right(true)
+        case n => Left(DecodeError("lock result 0 or 1", n.toString))
+      }
+    )
+
+  def tryWithLock[A](runner: SharedRunner, key: K)(body: => CIO[A]): CIO[Option[A]] = {
     val bodyThunk = () => body
-    validate(None).flatMap(_ => attempt(runner, commands.key(key), None)(bodyThunk))
+    validate(None).flatMap(_ => attempt(runner, this.key(key), None)(bodyThunk))
   }
 
-  def withLock[A](runner: CommandRunner[CIO, String], key: K, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] = {
+  def withLock[A](runner: SharedRunner, key: K, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] = {
     val bodyThunk = () => body
     validate(Some(waitTimeout)).flatMap { _ =>
       CIO.nowMonotonic.flatMap { started =>
-        val encoded                  = commands.key(key)
+        val encoded                  = this.key(key)
         val wait                     = Deadline(started.toNanos, waitTimeout.toNanos)
         def loop(retry: Int): CIO[A] = attempt(runner, encoded, Some(wait))(bodyThunk).flatMap {
           case Some(value) => CIO.value(value)
@@ -88,32 +110,28 @@ final private[client] class LockExecutor[K](
   }
 
   private def eval(
-    runner: CommandRunner[CIO, String],
     state: Attempt,
     operation: Operation,
     confirmationDeadline: Option[Deadline] = None
   ): CIO[Boolean] = {
     def run(cached: Boolean): CIO[Boolean] = {
-      val command = commands.command(state.key, state.token, operation, cached)
+      val command = this.command(state.key, state.token, operation, cached)
       confirmationDeadline match {
-        case None           => runner.run(command)
+        case None           => state.runner.run(command)
         case Some(deadline) =>
           CIO.nowMonotonic.flatMap { now =>
             val remaining = math.min(operationTimeout.toNanos, deadline.remainingAt(now.toNanos))
             if (remaining <= 0L) CIO.fail(TimedOut("distributed lock write timed out"))
-            else runner.lockWrite(command, remaining.nanos, replicaAcknowledgement)
+            else state.runner.lockWrite(command, remaining.nanos, replicaAcknowledgement)
           }
       }
     }
-    run(cached = true).recover {
-      case ServerError("NOSCRIPT", _) => run(cached = false)
-      case other                      => CIO.fail(other)
-    }
+    Client.withScriptFallback(run)
   }
 
-  private def attempt[A](runner: CommandRunner[CIO, String], key: Bytes, wait: Option[Deadline])(body: () => CIO[A]): CIO[Option[A]] =
+  private def attempt[A](runner: SharedRunner, key: Bytes, wait: Option[Deadline])(body: () => CIO[A]): CIO[Option[A]] =
     // Allocate only local state during acquisition so a contended or unresponsive server never masks cancellation of the wait loop.
-    CIO.acquireReleaseWith(CIO.defer(new Attempt(key)))(cleanup(runner, _)) { state =>
+    CIO.acquireReleaseWith(CIO.defer(new Attempt(runner, key)))(cleanup) { state =>
       val budget = wait.fold(CIO.value(operationTimeout.toNanos))(remainingWait)
       budget.flatMap { waitRemaining =>
         CIO.nowMonotonic.flatMap { started =>
@@ -121,7 +139,7 @@ final private[client] class LockExecutor[K](
           val deadline = Deadline(started.toNanos, waitRemaining)
           CIO
             .timeoutWithError(waitRemaining.nanos)(TimedOut("distributed lock acquisition timed out"))(
-              acquire(runner, state, deadline, retry = 0)
+              acquire(state, deadline, retry = 0)
             )
             .flatMap {
               case false =>
@@ -129,28 +147,28 @@ final private[client] class LockExecutor[K](
                 CIO.value(None)
               case true  =>
                 val checkWait = wait.fold(CIO.unit)(remainingWait(_).unit)
-                checkWait.flatMap(_ => runWithAcquiredLock(runner, state)(body)).map(Some(_))
+                checkWait.flatMap(_ => runWithAcquiredLock(state)(body)).map(Some(_))
             }
         }
       }
     }
 
-  private def runWithAcquiredLock[A](runner: CommandRunner[CIO, String], state: Attempt)(body: () => CIO[A]): CIO[A] =
+  private def runWithAcquiredLock[A](state: Attempt)(body: () => CIO[A]): CIO[A] =
     remainingLease(state).flatMap { _ =>
       val work = CIO.defer(()).flatMap(_ => body()).flatMap(value => remainingLease(state).map(_ => value))
       // Returning errors as values lets the race stop on either body failure or lock loss.
-      CIO.race(work.liftToTry, renew[A](runner, state).liftToTry).flatMap(CIO.get(_)).flatMap { value =>
-        release(runner, state).map(_ => value)
+      CIO.race(work.liftToTry, renew[A](state).liftToTry).flatMap(CIO.get(_)).flatMap { value =>
+        release(state).map(_ => value)
       }
     }
 
-  private def release(runner: CommandRunner[CIO, String], state: Attempt): CIO[Unit] = {
+  private def release(state: Attempt): CIO[Unit] = {
     state.stopped.set(true)
     remainingLease(state).flatMap { remaining =>
       remainingRelease(state).flatMap { releaseRemaining =>
         CIO
           .timeoutWithError(math.min(remaining, releaseRemaining).nanos)(LockLost("distributed lock release timed out"))(
-            eval(runner, state, Operation.Release)
+            eval(state, Operation.Release)
           )
           .flatMap { released =>
             state.mayOwn.set(false)
@@ -162,41 +180,40 @@ final private[client] class LockExecutor[K](
   }
 
   private def acquire(
-    runner: CommandRunner[CIO, String],
     state: Attempt,
     deadline: Deadline,
     retry: Int
   ): CIO[Boolean] =
     CIO.nowMonotonic.flatMap { started =>
       state.renewedAt.set(started.toNanos)
-      eval(runner, state, Operation.Acquire, Some(deadline)).recover {
+      eval(state, Operation.Acquire, Some(deadline)).recover {
         case error if retryableFailure(error) =>
           CIO.nowMonotonic.flatMap { now =>
             val remaining = deadline.remainingAt(now.toNanos)
             if (remaining <= 0L) CIO.fail(TimedOut("distributed lock acquisition timed out"))
-            else retryAfter(remaining, failureBackoff, retry)(acquire(runner, state, deadline, _))
+            else retryAfter(remaining, failureBackoff, retry)(acquire(state, deadline, _))
           }
         case error                            => CIO.fail(error)
       }
     }
 
-  private def renew[A](runner: CommandRunner[CIO, String], state: Attempt): CIO[A] =
+  private def renew[A](state: Attempt): CIO[A] =
     remainingLease(state).flatMap { beforeDelay =>
       // Acquisition confirmation can leave less than the usual renewal delay. Wake by the midpoint of the remaining conservative lease.
       val delay = math.min(renewalDelay.toNanos, math.max(1L, beforeDelay / 2L)).nanos
       CIO.sleep(delay).flatMap { _ =>
         if (state.stopped.get()) CIO.never
         else
-          renewAttempt(runner, state, retry = 0).flatMap(_ => renew[A](runner, state))
+          renewAttempt(state, retry = 0).flatMap(_ => renew[A](state))
       }
     }
 
-  private def renewAttempt(runner: CommandRunner[CIO, String], state: Attempt, retry: Int): CIO[Unit] =
+  private def renewAttempt(state: Attempt, retry: Int): CIO[Unit] =
     remainingLease(state).flatMap { remaining =>
       CIO.nowMonotonic.flatMap { started =>
         CIO
           .timeoutWithError(remaining.nanos)(LockLost("distributed lock renewal timed out"))(
-            eval(runner, state, Operation.Renew, Some(Deadline(started.toNanos, remaining)))
+            eval(state, Operation.Renew, Some(Deadline(started.toNanos, remaining)))
           )
           .flatMap { renewed =>
             if (!renewed) CIO.fail(LockLost("distributed lock ownership was lost during renewal"))
@@ -206,14 +223,13 @@ final private[client] class LockExecutor[K](
               }
           }
           .recover {
-            case error if retryableFailure(error) => retryRenewal(runner, state, retry, error)
+            case error if retryableFailure(error) => retryRenewal(state, retry, error)
             case error                            => renewalFailed(error)
           }
       }
     }
 
   private def retryRenewal(
-    runner: CommandRunner[CIO, String],
     state: Attempt,
     retry: Int,
     lastError: Throwable
@@ -222,7 +238,7 @@ final private[client] class LockExecutor[K](
       retryAfter(remaining, failureBackoff, retry) { nextRetry =>
         CIO.defer(()).flatMap { _ =>
           if (state.stopped.get()) CIO.never
-          else retryRemainingLease(state, lastError).flatMap(_ => renewAttempt(runner, state, nextRetry))
+          else retryRemainingLease(state, lastError).flatMap(_ => renewAttempt(state, nextRetry))
         }
       }
     }
@@ -231,7 +247,7 @@ final private[client] class LockExecutor[K](
     remainingLease(state).recover { case _ => renewalFailed(lastError) }
 
   private def retryAfter[A](remainingNanos: Long, config: BackoffConfig, retry: Int)(next: Int => CIO[A]): CIO[A] = {
-    val delay = math.min(remainingNanos, Backoff.jitteredMillis(config, retry, Scheduler.real).millis.toNanos)
+    val delay = math.min(remainingNanos, Scheduler.real.backoffMillis(config, retry).millis.toNanos)
     CIO.sleep(delay.nanos).flatMap(_ => next(if (retry < Int.MaxValue) retry + 1 else retry))
   }
 
@@ -251,14 +267,40 @@ final private[client] class LockExecutor[K](
       CIO.fail(lost)
   }
 
-  private def cleanup(runner: CommandRunner[CIO, String], state: Attempt): CIO[Unit] = CIO.defer(()).flatMap { _ =>
+  private def cleanup(state: Attempt): CIO[Unit] = CIO.defer(()).flatMap { _ =>
     // Future/Pekko cannot cancel the losing race branch. This flag also stops their renewal loop after the scope has finished.
     state.stopped.set(true)
     if (!state.mayOwn.get()) CIO.unit
     else
       remainingRelease(state).flatMap { remaining =>
         if (remaining <= 0) CIO.unit
-        else CIO.timeout(remaining.nanos)(eval(runner, state, Operation.Release)).unit.recover(_ => CIO.unit)
+        else CIO.timeout(remaining.nanos)(eval(state, Operation.Release)).unit.recover(_ => CIO.unit)
       }
   }
+}
+
+private[client] object LockExecutor {
+  enum Operation(val wireName: String) {
+    case Acquire extends Operation("acquire")
+    case Renew   extends Operation("renew")
+    case Release extends Operation("release")
+  }
+
+  val script: String =
+    """local token = ARGV[1]
+      |local operation = ARGV[2]
+      |if operation == 'acquire' then
+      |  if redis.call('SET', KEYS[1], token, 'NX', 'PX', ARGV[3]) then return 1 end
+      |  if redis.call('GET', KEYS[1]) == token then return redis.call('PEXPIRE', KEYS[1], ARGV[3]) end
+      |  return 0
+      |end
+      |if operation ~= 'renew' and operation ~= 'release' then
+      |  return redis.error_reply('SAGE invalid lock operation')
+      |end
+      |if redis.call('GET', KEYS[1]) ~= token then return 0 end
+      |if operation == 'renew' then return redis.call('PEXPIRE', KEYS[1], ARGV[3]) end
+      |return redis.call('DEL', KEYS[1])
+      |""".stripMargin
+
+  val compiled = SingleKeyScript(script)
 }

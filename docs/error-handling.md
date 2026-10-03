@@ -9,16 +9,16 @@ Every Sage failure is a `SageException` in a sealed hierarchy that you can match
 | `ProtocolError(message)` | Malformed RESP3 on the wire; the connection is discarded. |
 | `DecodeError(expected, actual)` | A reply was well-formed but not the shape a decoder or codec required (the built-in codecs decode strictly). |
 | `ServerError(code, detail)` | An error reply from the server. `code` is the leading token (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`, the generic `ERR`, …). |
-| `ConnectionFailed(message)` | The initial connection could not be established (host unreachable, connection refused, or connect timeout). Distinct from `ConnectionLost`, which is a live connection dropping. |
+| `ConnectionFailed(message)` | The initial connection could not be established: the host is unreachable, the connection is refused or times out, the server does not answer `HELLO` within `connectTimeout`, or it closes the socket during setup. Distinct from `ConnectionLost`, which is a live connection dropping. |
 | `ConnectionLost(mayHaveExecuted)` | The connection dropped around this command. |
 | `NotConnected()` | The client was never started, or has been closed. |
 | `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |
 | `TlsError(message)` | TLS could not be established (rejected certificate or unusable trust material). |
 | `CrossSlot(message)` | An unsupported multi-key command or a transaction touched keys in more than one cluster slot. `MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, and `TOUCH` are transparently split outside transactions. |
-| `TimedOut(message)` | A pooled connection wait exceeded `dedicatedPool.acquireTimeout`, a topology probe exceeded `connectTimeout`, or distributed lock acquisition exceeded its wait, lease, or replica confirmation budget. |
+| `TimedOut(message)` | A pooled connection wait exceeded `dedicatedPool.acquireTimeout`, a topology probe exceeded `connectTimeout` (a master-replica `connect` fails this way when its `ROLE` probes time out), or distributed lock acquisition exceeded its wait, lease, or replica confirmation budget. |
 | `LockLost(message)` | A distributed lock expired, changed owner, or could not confirm renewal or release within its deadline. Acquisition can raise this before the body starts if the granting master changes role or the lease expires. Sage attempts to cancel a running body. Cancellation depends on the backend and cannot undo completed work. |
 | `TransactionDiscarded(message)` | A transaction was discarded server-side (`EXECABORT`); nothing ran. |
-| `NotCacheable(message)` | `cached` was given a command that cannot be safely cached. |
+| `NotCacheable(message)` | `cached` was given a command that cannot be safely cached: a write, a keyless or time-varying read, or a blocking command. |
 | `InvalidArgument(message)` | A programming error, rejected before any server call: an invalid configuration or rate-limit policy, a blocking command inside a pipeline or transaction, or a command a cluster client cannot route as written. |
 
 Regular commands have no per-command timeout. Use your backend's timeout combinator to bound their duration. See [Distributed locks](/distributed-locks) for lock deadlines and cancellation behavior.

@@ -171,9 +171,9 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
       program.unsafeRun
     }
   }
-  // The scanTargets method lists the slot-owning masters, and runOn keeps each page on the node that created its cursor. This fixture has one
-  // master for all slots, so one target is expected.
-  test("scanAll sweeps every slot-owning master via node-pinned runOn") {
+  // scanTargets returns one target per slot-owning master, and each target runs every page on the node that created its cursor. This fixture
+  // has one master for all slots, so one target is expected.
+  test("scanAll sweeps every slot-owning master through node-pinned scan targets") {
     withContainers { server =>
       val host       = server.host
       val port       = server.mappedPort(6379)
@@ -184,17 +184,17 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
       def writeKeys(client: Client[CIO, String], i: Int): CIO[Unit] =
         if (i > 50) CIO.value(()) else client.set(s"cscan:$i", i.toString).flatMap(_ => writeKeys(client, i + 1))
 
-      def scanNode(client: Client[CIO, String], target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
-        client.runOn(target, Commands.scan[String](cursor, pattern = Some("cscan:*"), count = Some(10L))).flatMap { page =>
+      def scanNode(target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
+        target.run(Commands.scan[String](cursor, pattern = Some("cscan:*"), count = Some(10L))).flatMap { page =>
           page.next match {
-            case Some(next) => scanNode(client, target, next, found ++ page.items)
+            case Some(next) => scanNode(target, next, found ++ page.items)
             case None       => CIO.value(found ++ page.items)
           }
         }
 
-      def sweep(client: Client[CIO, String], targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
+      def sweep(targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
         targets match {
-          case head +: tail => scanNode(client, head, ScanCursor.start, found).flatMap(sweep(client, tail, _))
+          case head +: tail => scanNode(head, ScanCursor.start, found).flatMap(sweep(tail, _))
           case _            => CIO.value(found)
         }
 
@@ -203,10 +203,10 @@ abstract class ClusterSuite(image: String, serverBinary: String, supportsNumbere
           connectAndUse(clustered) { client =>
             for {
               _       <- writeKeys(client, 1)
-              targets <- client.scanTargets
-              found   <- sweep(client, targets, Set.empty[String])
+              targets <- client.runner.scanTargets
+              found   <- sweep(targets, Set.empty[String])
             } yield {
-              assert(targets.forall(_.node.isDefined), s"cluster scan targets must be node-pinned: $targets")
+              assert(targets.nonEmpty && !targets.contains(client.runner), s"cluster scan targets must be node-pinned: $targets")
               assertEquals(found, expected)
             }
           }

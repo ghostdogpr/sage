@@ -31,15 +31,11 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
     timeout: FiniteDuration,
     replicaAcknowledgement: Boolean
   ): CIO[Boolean] =
-    underlying.lockWrite(command, timeout, replicaAcknowledgement)
+    underlying.runner.lockWrite(command, timeout, replicaAcknowledgement)
 
-  private val lockRunner: CommandRunner[CIO, String] = new CommandRunner[CIO, String] {
-    def run[A](command: Command[A]): CIO[A] = lockCommand(command)
-    override private[sage] def lockWrite(
-      command: Command[Boolean],
-      timeout: FiniteDuration,
-      replicaAcknowledgement: Boolean
-    ): CIO[Boolean]                         =
+  private val lockRunner: SharedRunner = new SharedRunner {
+    def run[A](command: Command[A]): CIO[A]                                                                                   = lockCommand(command)
+    override def lockWrite(command: Command[Boolean], timeout: FiniteDuration, replicaAcknowledgement: Boolean): CIO[Boolean] =
       confirmedLockCommand(command, timeout, replicaAcknowledgement)
   }
 
@@ -64,9 +60,7 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
   final def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]] =
     lower(underlying.subscribeShardChannels[V](channel, rest*).map(lowerSub))
 
-  final private[sage] def scanTargets: F[Vector[ScanTarget]] = lower(underlying.scanTargets)
-
-  final private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = lower(underlying.runOn(target, command))
+  final override private[sage] def runner: SharedRunner = underlying.runner
 
   final private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
     lower(underlying.rateLimitAcquire(executor, subject, cost, peek))
