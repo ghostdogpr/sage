@@ -1,9 +1,7 @@
 package kyo.compat
 
-import scala.annotation.nowarn
 import scala.concurrent.Future as ScalaFuture
 import scala.concurrent.duration.FiniteDuration
-import scala.concurrent.duration.NANOSECONDS
 
 import cats.effect.IO
 import cats.syntax.parallel.*
@@ -124,10 +122,7 @@ object CIO {
       * Reifies failure as `Try`; the resulting `CIO` always succeeds.
       */
     inline def liftToTry: CIO[scala.util.Try[A]] =
-      lift(self.lower.attempt.map {
-        case Right(a) => scala.util.Success(a)
-        case Left(t)  => scala.util.Failure(t)
-      })
+      lift(self.lower.attempt.map(_.toTry))
 
     /**
       * Discards the success value; failure propagates.
@@ -144,11 +139,8 @@ object CIO {
     /**
       * Rewrites the error value through `f`.
       */
-    @nowarn("msg=anonymous")
     inline def mapError(inline f: Throwable => Throwable): CIO[A] =
-      lift(self.lower.adaptError { case t =>
-        f(t)
-      })
+      lift(self.lower.handleErrorWith(t => IO.raiseError(f(t))))
 
     /**
       * Transforms the success value with a pure function.
@@ -185,13 +177,13 @@ object CIO {
     * Reads a monotonic timestamp expressed as a `FiniteDuration` since a backend-defined origin, suitable for measuring intervals.
     */
   inline def nowMonotonic: CIO[FiniteDuration] =
-    lift(IO.monotonic.map(d => FiniteDuration(d.toNanos, NANOSECONDS)))
+    lift(IO.monotonic)
 
   /**
     * Runs `c` with a deadline; resolves to `None` if `d` elapses first.
     */
   inline def timeout[A](inline d: FiniteDuration)(inline c: CIO[A]): CIO[Option[A]] =
-    lift(c.lower.map(Option(_)).timeoutTo(d, IO.none[A]))
+    lift(c.lower.map(Some(_)).timeoutTo(d, IO.none[A]))
 
   /**
     * Runs `c` with a deadline; fails with `e` if `d` elapses first.
@@ -216,6 +208,12 @@ object CIO {
   ): CIO[A] =
     lift(IO.race(a.lower, b.lower).map(_.merge))
 
+  private inline def parTraverse[A, B](list: List[A], inline concurrency: Int)(f: A => IO[B]): IO[List[B]] =
+    if (concurrency == Int.MaxValue) list.parTraverse(f) else IO.parTraverseN(concurrency)(list)(f)
+
+  private inline def parTraverseDiscard[A](list: List[A], inline concurrency: Int)(f: A => IO[Any]): IO[Unit] =
+    if (concurrency == Int.MaxValue) list.parTraverse_(f) else IO.parTraverseN_(concurrency)(list)(f)
+
   /**
     * Parallel map. `concurrency` caps the number of in-flight elements, is unbounded by default, and must be positive when bounded.
     */
@@ -223,13 +221,7 @@ object CIO {
     inline coll: Iterable[A],
     inline concurrency: Int = Int.MaxValue
   )(f: A => CIO[B]): CIO[CChunk[B]] =
-    lift {
-      val list = coll.toList
-      val io   =
-        if (concurrency == Int.MaxValue) list.parTraverse(a => f(a).lower)
-        else IO.parTraverseN(concurrency)(list)(a => f(a).lower)
-      io.map(lst => CChunk.lift(lst.toVector))
-    }
+    lift(parTraverse(coll.toList, concurrency)(a => f(a).lower).map(lst => CChunk.lift(lst.toVector)))
 
   /**
     * Parallel map that passes the element index to `f`; same concurrency semantics as `foreach`.
@@ -238,13 +230,7 @@ object CIO {
     inline coll: Iterable[A],
     inline concurrency: Int = Int.MaxValue
   )(f: (Int, A) => CIO[B]): CIO[CChunk[B]] =
-    lift {
-      val list = coll.toList.zipWithIndex
-      val io   =
-        if (concurrency == Int.MaxValue) list.parTraverse { case (a, i) => f(i, a).lower }
-        else IO.parTraverseN(concurrency)(list) { case (a, i) => f(i, a).lower }
-      io.map(lst => CChunk.lift(lst.toVector))
-    }
+    foreach(coll.toList.zipWithIndex, concurrency)((a, i) => f(i, a))
 
   /**
     * Runs `f` for its effects on each element and discards the results; same concurrency semantics as `foreach`.
@@ -253,27 +239,16 @@ object CIO {
     inline coll: Iterable[A],
     inline concurrency: Int = Int.MaxValue
   )(f: A => CIO[Any]): CIO[Unit] =
-    lift {
-      val list = coll.toList
-      if (concurrency == Int.MaxValue) list.parTraverse_(a => f(a).lower)
-      else IO.parTraverseN_(concurrency)(list)(a => f(a).lower)
-    }
+    lift(parTraverseDiscard(coll.toList, concurrency)(a => f(a).lower))
 
   /**
     * Filters the collection with an effectful predicate; same concurrency semantics as `foreach`.
     */
-  @nowarn("msg=anonymous")
   inline def filter[A](
     inline coll: Iterable[A],
     inline concurrency: Int = Int.MaxValue
   )(p: A => CIO[Boolean]): CIO[CChunk[A]] =
-    lift {
-      val list = coll.toList
-      if (concurrency == Int.MaxValue) list.parFilterA(a => p(a).lower).map(lst => CChunk.lift(lst.toVector))
-      else
-        IO.parTraverseN(concurrency)(list)(a => p(a).lower.map(b => a -> b))
-          .map(pairs => CChunk.lift(pairs.collect { case (a, true) => a }.toVector))
-    }
+    lift(parTraverse(coll.toList, concurrency)(a => p(a).lower.map(a -> _)).map(pairs => CChunk.lift(pairs.filter(_._2).map(_._1).toVector)))
 
   /**
     * Sequences an `Iterable[CIO[A]]`; same concurrency semantics as `foreach`.
@@ -282,11 +257,7 @@ object CIO {
     inline coll: Iterable[CIO[A]],
     inline concurrency: Int = Int.MaxValue
   ): CIO[CChunk[A]] =
-    lift {
-      val list = coll.toList.map(_.lower)
-      if (concurrency == Int.MaxValue) list.parSequence.map(lst => CChunk.lift(lst.toVector))
-      else IO.parSequenceN(concurrency)(list).map(lst => CChunk.lift(lst.toVector))
-    }
+    foreach(coll, concurrency)(identity)
 
   /**
     * Sequences and discards the results; same concurrency semantics as `foreach`.
@@ -295,11 +266,7 @@ object CIO {
     inline coll: Iterable[CIO[Any]],
     inline concurrency: Int = Int.MaxValue
   ): CIO[Unit] =
-    lift {
-      val list = coll.toList.map(_.lower)
-      if (concurrency == Int.MaxValue) list.parSequence_
-      else IO.parSequenceN_(concurrency)(list)
-    }
+    foreachDiscard(coll, concurrency)(identity)
 
   /**
     * Bridges a one-shot completion callback into `CIO`; `register` receives a `Try[A] => Unit`.
@@ -307,11 +274,7 @@ object CIO {
   inline def async[A](inline register: ((scala.util.Try[A] => Unit) => Unit)): CIO[A] =
     lift(IO.async[A] { k =>
       IO.delay {
-        val cb: scala.util.Try[A] => Unit = {
-          case scala.util.Success(a) => k(Right(a))
-          case scala.util.Failure(e) => k(Left(e))
-        }
-        register(cb)
+        register(t => k(t.toEither))
         // A cancel token makes callback waiting cancelable even when the external operation cannot be stopped.
         Some(IO.unit)
       }

@@ -200,6 +200,8 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
       "io.circe" %% "circe-parser"  % circeVersion % Test,
       "io.circe" %% "circe-generic" % circeVersion % Test
     ),
+    // a test step that lost its `>>` would otherwise compile as a discarded statement
+    Test / scalacOptions += "-Wnonunit-statement",
     // the Future anchor rows compile but don't boot containers
     Test / testOptions += {
       val isAnchor     = moduleName.value.endsWith("-future")

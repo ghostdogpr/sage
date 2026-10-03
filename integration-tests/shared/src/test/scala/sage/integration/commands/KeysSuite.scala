@@ -6,353 +6,189 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
-import sage.client.internal.Client
+import sage.client.internal.Paged
 import sage.commands.*
-import sage.integration.{Images, ServerSuite}
-import sage.integration.Ttls.{expiresWithin, remaining}
+import sage.integration.BothServersSuite
+import sage.integration.Ttls.expiresWithin
 
-abstract class KeysSuite(image: String) extends ServerSuite(image) {
+class KeysSuite extends BothServersSuite {
 
-  test("COPY copies and only overwrites with replace") {
-    withClient { client =>
-      for {
-        _         <- client.set("keys-copy-src", "v1")
-        _         <- client.set("keys-copy-taken", "v2")
-        fresh     <- client.copy("keys-copy-src", "keys-copy-dst")
-        ontoTaken <- client.copy("keys-copy-src", "keys-copy-taken")
-        replaced  <- client.copy("keys-copy-src", "keys-copy-taken", replace = true)
-        copied    <- client.get[String]("keys-copy-dst")
-      } yield {
-        assertEquals(fresh, true)
-        assertEquals(ontoTaken, false)
-        assertEquals(replaced, true)
-        assertEquals(copied, Some("v1"))
-      }
-    }
+  clientTest("COPY copies and only overwrites with replace") { client =>
+    client.set("keys-copy-src", "v1") >>
+      client.set("keys-copy-taken", "v2") >>
+      client.copy("keys-copy-src", "keys-copy-dst").is(true) >>
+      client.copy("keys-copy-src", "keys-copy-taken").is(false) >>
+      client.copy("keys-copy-src", "keys-copy-taken", replace = true).is(true) >>
+      client.get[String]("keys-copy-dst").is(Some("v1"))
   }
 
-  test("EXISTS TOUCH DEL UNLINK count the keys they hit") {
-    withClient { client =>
-      for {
-        _       <- client.mSet(("keys-cnt-a", "1"), ("keys-cnt-b", "2"), ("keys-cnt-c", "3"))
-        present <- client.exists("keys-cnt-a", "keys-cnt-b", "keys-cnt-c", "keys-cnt-missing")
-        touched <- client.touch("keys-cnt-a", "keys-cnt-b")
-        deleted <- client.del("keys-cnt-a", "keys-cnt-b")
-        removed <- client.unlink("keys-cnt-c", "keys-cnt-missing")
-      } yield {
-        assertEquals(present, 3L)
-        assertEquals(touched, 2L)
-        assertEquals(deleted, 2L)
-        assertEquals(removed, 1L)
-      }
-    }
+  clientTest("EXISTS TOUCH DEL UNLINK count the keys they hit") { client =>
+    client.mSet(("keys-cnt-a", "1"), ("keys-cnt-b", "2"), ("keys-cnt-c", "3")) >>
+      client.exists("keys-cnt-a", "keys-cnt-b", "keys-cnt-c", "keys-cnt-missing").is(3L) >>
+      client.touch("keys-cnt-a", "keys-cnt-b").is(2L) >>
+      client.del("keys-cnt-a", "keys-cnt-b").is(2L) >>
+      client.unlink("keys-cnt-c", "keys-cnt-missing").is(1L)
   }
 
-  test("EXPIRE sets a ttl and PERSIST clears it") {
-    withClient { client =>
-      for {
-        _         <- client.set("keys-expire", "v")
-        applied   <- client.expire("keys-expire", 60.seconds)
-        ttl       <- client.ttl("keys-expire")
-        persisted <- client.persist("keys-expire")
-        cleared   <- client.ttl("keys-expire")
-        missing   <- client.expire("keys-expire-missing", 60.seconds)
-      } yield {
-        assertEquals(applied, true)
-        assert(expiresWithin(ttl, 60.seconds))
-        assertEquals(persisted, true)
-        assertEquals(cleared, Ttl.NoExpiry)
-        assertEquals(missing, false)
-      }
-    }
+  clientTest("EXPIRE sets a ttl and PERSIST clears it") { client =>
+    client.set("keys-expire", "v") >>
+      client.expire("keys-expire", 60.seconds).is(true) >>
+      client.ttl("keys-expire").satisfies(expiresWithin(_, 60.seconds)) >>
+      client.persist("keys-expire").is(true) >>
+      client.ttl("keys-expire").is(Ttl.NoExpiry) >>
+      client.expire("keys-expire-missing", 60.seconds).is(false)
   }
 
-  test("a sub-second duration takes the millisecond path end to end") {
-    withClient { client =>
-      for {
-        _   <- client.set("keys-pexpire", "v")
-        _   <- client.expire("keys-pexpire", 90500.millis)
-        ttl <- client.pTtl("keys-pexpire")
-      } yield assert(remaining(ttl).exists(r => r > 89.seconds && r <= 90500.millis))
-    }
+  clientTest("a sub-second duration takes the millisecond path end to end") { client =>
+    client.set("keys-pexpire", "v") >>
+      client.expire("keys-pexpire", 90500.millis) >>
+      client.pTtl("keys-pexpire").satisfies(expiresWithin(_, 90500.millis, above = 89.seconds))
   }
 
-  test("EXPIRE conditions guard against the current ttl") {
-    withClient { client =>
-      for {
-        _          <- client.set("keys-cond", "v")
-        noExpiry   <- client.expire("keys-cond", 60.seconds, ExpireCondition.IfNoExpiry)
-        notLonger  <- client.expire("keys-cond", 30.seconds, ExpireCondition.IfGreater)
-        longer     <- client.expire("keys-cond", 120.seconds, ExpireCondition.IfGreater)
-        shorter    <- client.expire("keys-cond", 60.seconds, ExpireCondition.IfLess)
-        hasExpiry  <- client.expire("keys-cond", 90.seconds, ExpireCondition.IfHasExpiry)
-        notWithout <- client.expire("keys-cond", 30.seconds, ExpireCondition.IfNoExpiry)
-      } yield {
-        assertEquals(noExpiry, true)
-        assertEquals(notLonger, false)
-        assertEquals(longer, true)
-        assertEquals(shorter, true)
-        assertEquals(hasExpiry, true)
-        assertEquals(notWithout, false)
-      }
-    }
+  clientTest("EXPIRE conditions guard against the current ttl") { client =>
+    client.set("keys-cond", "v") >>
+      client.expire("keys-cond", 60.seconds, ExpireCondition.IfNoExpiry).is(true) >>
+      client.expire("keys-cond", 30.seconds, ExpireCondition.IfGreater).is(false) >>
+      client.expire("keys-cond", 120.seconds, ExpireCondition.IfGreater).is(true) >>
+      client.expire("keys-cond", 60.seconds, ExpireCondition.IfLess).is(true) >>
+      client.expire("keys-cond", 90.seconds, ExpireCondition.IfHasExpiry).is(true) >>
+      client.expire("keys-cond", 30.seconds, ExpireCondition.IfNoExpiry).is(false)
   }
 
-  test("EXPIREAT and EXPIRETIME round-trip an absolute deadline") {
-    withClient { client =>
-      val deadline = Instant.ofEpochSecond(Instant.now().getEpochSecond + 3600)
-      for {
-        _        <- client.set("keys-at", "v")
-        applied  <- client.expireAt("keys-at", deadline)
-        seconds  <- client.expireTime("keys-at")
-        millis   <- client.pExpireTime("keys-at")
-        _        <- client.set("keys-at-plain", "v")
-        noExpiry <- client.expireTime("keys-at-plain")
-        noKey    <- client.expireTime("keys-at-missing")
-      } yield {
-        assertEquals(applied, true)
-        assertEquals(seconds, ExpiryTime.At(deadline))
-        assertEquals(millis, ExpiryTime.At(deadline))
-        assertEquals(noExpiry, ExpiryTime.NoExpiry)
-        assertEquals(noKey, ExpiryTime.NoKey)
-      }
-    }
+  clientTest("EXPIREAT and EXPIRETIME round-trip an absolute deadline") { client =>
+    val deadline = Instant.ofEpochSecond(Instant.now().getEpochSecond + 3600)
+    client.set("keys-at", "v") >>
+      client.expireAt("keys-at", deadline).is(true) >>
+      client.expireTime("keys-at").is(ExpiryTime.At(deadline)) >>
+      client.pExpireTime("keys-at").is(ExpiryTime.At(deadline)) >>
+      client.set("keys-at-plain", "v") >>
+      client.expireTime("keys-at-plain").is(ExpiryTime.NoExpiry) >>
+      client.expireTime("keys-at-missing").is(ExpiryTime.NoKey)
   }
 
-  test("TTL distinguishes a missing key from a key without expiry") {
-    withClient { client =>
-      for {
-        noKey    <- client.ttl("keys-ttl-missing")
-        _        <- client.set("keys-ttl-plain", "v")
-        noExpiry <- client.pTtl("keys-ttl-plain")
-      } yield {
-        assertEquals(noKey, Ttl.NoKey)
-        assertEquals(noExpiry, Ttl.NoExpiry)
-      }
-    }
+  clientTest("TTL distinguishes a missing key from a key without expiry") { client =>
+    client.ttl("keys-ttl-missing").is(Ttl.NoKey) >>
+      client.set("keys-ttl-plain", "v") >>
+      client.pTtl("keys-ttl-plain").is(Ttl.NoExpiry)
   }
 
-  test("KEYS returns the keys matching a pattern") {
-    withClient { client =>
-      for {
-        _       <- client.mSet(("keys-glob:1", "a"), ("keys-glob:2", "b"), ("keys-other", "c"))
-        matched <- client.keys("keys-glob:*")
-      } yield assertEquals(matched.toSet, Set("keys-glob:1", "keys-glob:2"))
-    }
+  clientTest("KEYS returns the keys matching a pattern") { client =>
+    client.mSet(("keys-glob:1", "a"), ("keys-glob:2", "b"), ("keys-other", "c")) >>
+      client.keys("keys-glob:*").map(_.toSet).is(Set("keys-glob:1", "keys-glob:2"))
   }
 
-  test("RANDOMKEY returns a key once data exists") {
-    withClient { client =>
-      for {
-        _      <- client.set("keys-random", "v")
-        random <- client.randomKey
-      } yield assert(random.isDefined)
-    }
+  clientTest("RANDOMKEY returns a key once data exists") { client =>
+    client.set("keys-random", "v") >>
+      client.randomKey.satisfies(_.isDefined)
   }
 
-  test("RENAME moves a key and RENAMENX refuses an occupied destination") {
-    withClient { client =>
-      for {
-        _        <- client.set("keys-ren-a", "v")
-        _        <- client.set("keys-ren-taken", "w")
-        _        <- client.rename("keys-ren-a", "keys-ren-b")
-        moved    <- client.get[String]("keys-ren-b")
-        refused  <- client.renameNx("keys-ren-b", "keys-ren-taken")
-        accepted <- client.renameNx("keys-ren-b", "keys-ren-c")
-      } yield {
-        assertEquals(moved, Some("v"))
-        assertEquals(refused, false)
-        assertEquals(accepted, true)
-      }
-    }
+  clientTest("RENAME moves a key and RENAMENX refuses an occupied destination") { client =>
+    client.set("keys-ren-a", "v") >>
+      client.set("keys-ren-taken", "w") >>
+      client.rename("keys-ren-a", "keys-ren-b") >>
+      client.get[String]("keys-ren-b").is(Some("v")) >>
+      client.renameNx("keys-ren-b", "keys-ren-taken").is(false) >>
+      client.renameNx("keys-ren-b", "keys-ren-c").is(true)
   }
 
-  test("TYPE reports the key's type and None for a missing key") {
-    withClient { client =>
-      for {
-        _       <- client.set("keys-type-str", "v")
-        _       <- client.lPush("keys-type-list", "v")
-        str     <- client.typeOf("keys-type-str")
-        list    <- client.typeOf("keys-type-list")
-        missing <- client.typeOf("keys-type-missing")
-      } yield {
-        assertEquals(str, Some(RedisType.String))
-        assertEquals(list, Some(RedisType.List))
-        assertEquals(missing, None)
-      }
-    }
+  clientTest("TYPE reports the key's type and None for a missing key") { client =>
+    client.set("keys-type-str", "v") >>
+      client.lPush("keys-type-list", "v") >>
+      client.typeOf("keys-type-str").is(Some(RedisType.String)) >>
+      client.typeOf("keys-type-list").is(Some(RedisType.List)) >>
+      client.typeOf("keys-type-missing").is(None)
   }
 
-  test("SCAN visits every key, terminating on the zero cursor rather than an empty page") {
-    withClient { client =>
-      val pairs = (1 to 100).map(i => (s"keys-scan:$i", "v")).toVector
-      for {
-        _     <- client.mSet(pairs.head, pairs.tail*)
-        found <- scanAll(client, pattern = Some("keys-scan:*"), count = Some(10L), ofType = None)
-      } yield assertEquals(found, pairs.map(_._1).toSet)
-    }
+  clientTest("SCAN visits every key, terminating on the zero cursor rather than an empty page") { client =>
+    val first = ("keys-scan:0", "v")
+    val rest  = (1 to 99).map(i => (s"keys-scan:$i", "v"))
+    client.mSet(first, rest*) >>
+      drain(Paged.scanAll[String](client.runner, Some("keys-scan:*"), Some(10L), None)).is((first +: rest).map(_._1).toSet)
   }
 
-  test("SCAN filters by type") {
-    withClient { client =>
-      for {
-        _     <- client.set("keys-scant-str", "v")
-        _     <- client.lPush("keys-scant-list", "v")
-        found <- scanAll(client, pattern = Some("keys-scant-*"), count = None, ofType = Some(RedisType.List))
-      } yield assertEquals(found, Set("keys-scant-list"))
-    }
+  clientTest("SCAN filters by type") { client =>
+    client.set("keys-scant-str", "v") >>
+      client.lPush("keys-scant-list", "v") >>
+      drain(Paged.scanAll[String](client.runner, Some("keys-scant-*"), None, Some(RedisType.List))).is(Set("keys-scant-list"))
   }
 
-  test("SORT orders a list numerically and alphabetically, with LIMIT and DESC") {
-    withClient { client =>
-      for {
-        _       <- client.rPush("keys-sort", "3", "1", "2")
-        numeric <- client.sort[String]("keys-sort")
-        desc    <- client.sort[String]("keys-sort", order = SortOrder.Desc, limit = Some(Limit(0L, 2L)))
-        alpha   <- client.sort[String]("keys-sort", alpha = true, order = SortOrder.Desc)
-      } yield {
-        assertEquals(numeric, Vector(Some("1"), Some("2"), Some("3")))
-        assertEquals(desc, Vector(Some("3"), Some("2")))
-        assertEquals(alpha, Vector(Some("3"), Some("2"), Some("1")))
-      }
-    }
+  clientTest("SORT orders a list numerically and alphabetically, with LIMIT and DESC") { client =>
+    client.rPush("keys-sort", "3", "1", "2") >>
+      client.sort[String]("keys-sort").is(Vector(Some("1"), Some("2"), Some("3"))) >>
+      client.sort[String]("keys-sort", order = SortOrder.Desc, limit = Some(Limit(0L, 2L))).is(Vector(Some("3"), Some("2"))) >>
+      client.sort[String]("keys-sort", alpha = true, order = SortOrder.Desc).is(Vector(Some("3"), Some("2"), Some("1")))
   }
 
-  test("SORT BY/GET sorts by external weights and projects external values, nil for missing") {
-    withClient { client =>
-      for {
-        _   <- client.rPush("keys-sortby", "1", "2", "3")
-        _   <- client.mSet(("keys-w-1", "30"), ("keys-w-2", "10"), ("keys-w-3", "20"))
-        _   <- client.mSet(("keys-d-1", "A"), ("keys-d-3", "C"))
-        got <- client.sort[String]("keys-sortby", by = Some("keys-w-*"), get = Vector("keys-d-*", "#"))
-      } yield assertEquals(got, Vector(None, Some("2"), Some("C"), Some("3"), Some("A"), Some("1")))
-    }
+  clientTest("SORT BY/GET sorts by external weights and projects external values, nil for missing") { client =>
+    client.rPush("keys-sortby", "1", "2", "3") >>
+      client.mSet(("keys-w-1", "30"), ("keys-w-2", "10"), ("keys-w-3", "20")) >>
+      client.mSet(("keys-d-1", "A"), ("keys-d-3", "C")) >>
+      client
+        .sort[String]("keys-sortby", by = Some("keys-w-*"), get = Vector("keys-d-*", "#"))
+        .is(Vector(None, Some("2"), Some("C"), Some("3"), Some("A"), Some("1")))
   }
 
-  test("SORT_RO reads without storing; SORT STORE writes the result and returns the count") {
-    withClient { client =>
-      for {
-        _      <- client.rPush("keys-sortstore", "b", "a", "c")
-        ro     <- client.sortRo[String]("keys-sortstore", alpha = true)
-        stored <- client.sortStore("keys-sortstore-dst", "keys-sortstore", alpha = true)
-        dst    <- client.lRange[String]("keys-sortstore-dst", 0L, -1L)
-      } yield {
-        assertEquals(ro, Vector(Some("a"), Some("b"), Some("c")))
-        assertEquals(stored, 3L)
-        assertEquals(dst, Vector("a", "b", "c"))
-      }
-    }
+  clientTest("SORT_RO reads without storing; SORT STORE writes the result and returns the count") { client =>
+    client.rPush("keys-sortstore", "b", "a", "c") >>
+      client.sortRo[String]("keys-sortstore", alpha = true).is(Vector(Some("a"), Some("b"), Some("c"))) >>
+      client.sortStore("keys-sortstore-dst", "keys-sortstore", alpha = true).is(3L) >>
+      client.lRange[String]("keys-sortstore-dst", 0L, -1L).is(Vector("a", "b", "c"))
   }
 
-  test("MOVE relocates a key out of the current database") {
-    withClient { client =>
-      for {
-        _     <- client.set("keys-move", "v")
-        moved <- client.move("keys-move", 1)
-        gone  <- client.exists("keys-move")
-        again <- client.move("keys-move", 1)
-      } yield {
-        assertEquals(moved, true)
-        assertEquals(gone, 0L)
-        assertEquals(again, false)
-      }
-    }
+  clientTest("MOVE relocates a key out of the current database") { client =>
+    client.set("keys-move", "v") >>
+      client.move("keys-move", 1).is(true) >>
+      client.exists("keys-move").is(0L) >>
+      client.move("keys-move", 1).is(false)
   }
 
-  test("DUMP and RESTORE round-trip a value through its serialized form") {
-    withClient { client =>
-      for {
-        _        <- client.set("keys-dump", "payload")
-        dumped   <- client.dump("keys-dump")
-        restored <- dumped.fold(CIO.value(()))(bytes => client.restore("keys-restore", bytes))
-        value    <- client.get[String]("keys-restore")
-        replaced <- dumped.fold(CIO.value(false))(bytes => client.restore("keys-restore", bytes, replace = true).map(_ => true))
-        missing  <- client.dump("keys-dump-missing")
-      } yield {
-        assert(dumped.isDefined)
-        assertEquals(value, Some("payload"))
-        assertEquals(replaced, true)
-        assertEquals(missing, None)
-      }
-    }
+  clientTest("DUMP and RESTORE round-trip a value through its serialized form") { client =>
+    for {
+      _     <- client.set("keys-dump", "payload")
+      bytes <- client.dump("keys-dump").flatMap(required("DUMP", _))
+      _     <- client.restore("keys-restore", bytes)
+      _     <- client.get[String]("keys-restore").is(Some("payload"))
+      _     <- client.restore("keys-restore", bytes, replace = true)
+      _     <- client.dump("keys-dump-missing").is(None)
+    } yield ()
   }
 
-  test("MIGRATE reports NOKEY when the source key is absent") {
-    withClient { client =>
-      for {
-        result <- client.migrate("localhost", 6379, 0, 1.second)("keys-migrate-ghost")
-      } yield assertEquals(result, MigrateResult.NoKey)
-    }
+  clientTest("MIGRATE reports NOKEY when the source key is absent") { client =>
+    client.migrate("localhost", 6379, 0, 1.second)("keys-migrate-ghost").is(MigrateResult.NoKey)
   }
 
-  test("OBJECT exposes encoding, refcount, and idle time; None for a missing key") {
-    withClient { client =>
-      for {
-        _        <- client.set("keys-object", "12345")
-        encoding <- client.objectEncoding("keys-object")
-        refCount <- client.objectRefCount("keys-object")
-        idle     <- client.objectIdleTime("keys-object")
-        missEnc  <- client.objectEncoding("keys-object-missing")
-        missRef  <- client.objectRefCount("keys-object-missing")
-        missIdle <- client.objectIdleTime("keys-object-missing")
-      } yield {
-        assertEquals(encoding, Some("int"))
-        assert(refCount.exists(_ >= 1L))
-        assert(idle.exists(_ >= Duration.Zero))
-        assertEquals(missEnc, None)
-        assertEquals(missRef, None)
-        assertEquals(missIdle, None)
-      }
-    }
+  clientTest("OBJECT exposes encoding, refcount, and idle time; None for a missing key") { client =>
+    client.set("keys-object", "12345") >>
+      client.objectEncoding("keys-object").is(Some("int")) >>
+      client.objectRefCount("keys-object").satisfies(_.exists(_ >= 1L)) >>
+      client.objectIdleTime("keys-object").satisfies(_.exists(_ >= Duration.Zero)) >>
+      client.objectEncoding("keys-object-missing").is(None) >>
+      client.objectRefCount("keys-object-missing").is(None) >>
+      client.objectIdleTime("keys-object-missing").is(None)
   }
 
-  test("OBJECT FREQ reports access frequency under an LFU policy, None for a missing key") {
-    withClient { client =>
-      for {
-        _       <- client.configSet("maxmemory-policy" -> "allkeys-lfu")
-        _       <- client.set("keys-freq", "v")
-        freq    <- client.objectFreq("keys-freq")
-        missing <- client.objectFreq("keys-freq-missing")
-        _       <- client.configSet("maxmemory-policy" -> "noeviction")
-      } yield {
-        assert(freq.exists(_ >= 0L))
-        assertEquals(missing, None)
-      }
-    }
+  clientTest("OBJECT FREQ reports access frequency under an LFU policy, None for a missing key") { client =>
+    client.configSet("maxmemory-policy" -> "allkeys-lfu") >>
+      client.set("keys-freq", "v") >>
+      client.objectFreq("keys-freq").satisfies(_.exists(_ >= 0L)) >>
+      client.objectFreq("keys-freq-missing").is(None) >>
+      client.configSet("maxmemory-policy" -> "noeviction")
   }
 
-  test("FLUSHALL empties the keyspace") {
-    withClient { client =>
-      for {
-        _      <- client.set("keys-flush", "v")
-        before <- client.exists("keys-flush")
-        _      <- client.flushAll()
-        after  <- client.exists("keys-flush")
-      } yield {
-        assertEquals(before, 1L)
-        assertEquals(after, 0L)
-      }
-    }
+  clientTest("FLUSHALL empties the keyspace") { client =>
+    client.set("keys-flush", "v") >>
+      client.exists("keys-flush").is(1L) >>
+      client.flushAll() >>
+      client.exists("keys-flush").is(0L)
   }
 
-  private def scanAll(
-    client: Client[CIO, String],
-    pattern: Option[String],
-    count: Option[Long],
-    ofType: Option[RedisType]
-  ): CIO[Set[String]] = {
-    def loop(cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
-      client.scan(cursor, pattern, count, ofType).flatMap { page =>
-        val collected = found ++ page.items
-        page.next match {
-          case Some(next) => loop(next, collected)
-          case None       => CIO.value(collected)
-        }
-      }
-    loop(ScanCursor.start, Set.empty)
+  // DELIFEQ exists only on Valkey.
+  valkeyTest("DELIFEQ deletes only when the current value matches") { client =>
+    client.set("vk-lock", "token-1") >>
+      client.delIfEq("vk-lock", "other").is(false) >>
+      client.exists("vk-lock").is(1L) >>
+      client.delIfEq("vk-lock", "token-1").is(true) >>
+      client.exists("vk-lock").is(0L) >>
+      client.delIfEq("vk-lock-absent", "x").is(false)
   }
 }
-
-class RedisKeysSuite extends KeysSuite(Images.redis)
-
-class ValkeyKeysSuite extends KeysSuite(Images.valkey)

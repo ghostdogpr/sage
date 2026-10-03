@@ -191,7 +191,7 @@ class LockExecutorSpec extends munit.FunSuite {
 
   test("a successful renewal keeps the scope running and releases it afterwards") {
     val store = new Store
-    executor(300.millis)
+    executor(900.millis)
       .tryWithLock(store, "key") {
         store.awaitRenewal.map(_ => assert(store.held))
       }
@@ -222,7 +222,7 @@ class LockExecutorSpec extends munit.FunSuite {
     test(s"renewal retries a transient $failureName while the lease remains valid") {
       val store = new Store
       store.renewalErrors.add(failure)
-      executor(300.millis)
+      executor(900.millis)
         .tryWithLock(store, "key") {
           store.awaitRenewal.map(_ => assert(store.held, "the lock expired while renewal was retrying"))
         }

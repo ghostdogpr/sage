@@ -4,83 +4,19 @@ import cats.effect.IO
 import cats.effect.kernel.Ref
 
 /**
-  * Uses `cats.effect.kernel.Ref[IO, Long]`. Cats Effect has no `Frame` or `Trace` to propagate. `lift` and `lower` return the existing Cats
-  * Effect ref. Cats Effect does not provide a specialized atomic long. Arithmetic uses `Ref[Long]` updates, and `compareAndSet` uses
-  * `Ref.modify`.
+  * Uses `cats.effect.kernel.Ref[IO, Long]` through [[CAtomicRef]], which provides every operation.
   */
-opaque type CAtomicLong = Ref[IO, Long]
+type CAtomicLong = CAtomicRef[Long]
 
 object CAtomicLong {
 
   /**
     * Allocates a fresh atomic long initialized to `v`.
     */
-  inline def init(inline v: Long): CIO[CAtomicLong] =
-    CIO.lift(Ref.of[IO, Long](v))
+  inline def init(inline v: Long): CIO[CAtomicLong] = CAtomicRef.init(v)
 
   /**
     * Wraps a native `cats.effect.kernel.Ref[IO, Long]` as a `CAtomicLong`. The conversion is the identity on the carrier.
     */
-  inline def lift(inline u: Ref[IO, Long]): CAtomicLong = u
-
-  extension (inline self: CAtomicLong) {
-
-    /**
-      * Unwraps to the native `cats.effect.kernel.Ref[IO, Long]`. The conversion is the identity on the carrier.
-      */
-    inline def lower: Ref[IO, Long] = self
-
-    /**
-      * Reads the current value.
-      */
-    inline def get: CIO[Long] = CIO.lift(self.get)
-
-    /**
-      * Atomically sets the value to `v`.
-      */
-    inline def set(inline v: Long): CIO[Unit] = CIO.lift(self.set(v))
-
-    /**
-      * Atomically sets the value to `v` and returns the previous value.
-      */
-    inline def getAndSet(inline v: Long): CIO[Long] = CIO.lift(self.getAndSet(v))
-
-    /**
-      * Atomically increments by 1 and returns the new value.
-      */
-    inline def incrementAndGet: CIO[Long] = CIO.lift(self.updateAndGet(_ + 1L))
-
-    /**
-      * Atomically increments by 1 and returns the previous value.
-      */
-    inline def getAndIncrement: CIO[Long] = CIO.lift(self.getAndUpdate(_ + 1L))
-
-    /**
-      * Atomically decrements by 1 and returns the new value.
-      */
-    inline def decrementAndGet: CIO[Long] = CIO.lift(self.updateAndGet(_ - 1L))
-
-    /**
-      * Atomically decrements by 1 and returns the previous value.
-      */
-    inline def getAndDecrement: CIO[Long] = CIO.lift(self.getAndUpdate(_ - 1L))
-
-    /**
-      * Atomically adds `delta` and returns the new value.
-      */
-    inline def addAndGet(inline delta: Long): CIO[Long] = CIO.lift(self.updateAndGet(_ + delta))
-
-    /**
-      * Atomically adds `delta` and returns the previous value.
-      */
-    inline def getAndAdd(inline delta: Long): CIO[Long] = CIO.lift(self.getAndUpdate(_ + delta))
-
-    /**
-      * Atomic compare-and-set: replaces `expected` with `updated` iff the current value equals `expected`.
-      */
-    inline def compareAndSet(inline expected: Long, inline updated: Long): CIO[Boolean] =
-      CIO.lift(self.modify(cur => if (cur == expected) (updated, true) else (cur, false)))
-
-  }
-
+  inline def lift(inline u: Ref[IO, Long]): CAtomicLong = CAtomicRef.lift(u)
 }

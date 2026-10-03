@@ -45,9 +45,7 @@ object CLocal {
       * Reads the current value, applies `f`, installs the result for the duration of `c`, then reverts.
       */
     inline def update[B](inline f: A => A)(inline c: CIO[B]): CIO[B] =
-      CIO.lift(self.get.flatMap { cur =>
-        self.set(f(cur)).bracket(_ => c.lower)(_ => self.set(cur))
-      })
+      CIO.lift(self.get.flatMap(cur => self.let(f(cur))(c).lower))
 
   }
 }

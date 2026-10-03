@@ -50,10 +50,7 @@ object CPromise {
       * Suspends until the promise is completed and returns its value.
       */
     inline def get: CIO[A] =
-      CIO.lift(self.get.flatMap {
-        case Success(a) => IO.pure(a)
-        case Failure(e) => IO.raiseError(e)
-      })
+      CIO.lift(self.get.flatMap(IO.fromTry))
 
     /**
       * Returns the current state without blocking: `None` if pending, `Some(Try)` if completed.

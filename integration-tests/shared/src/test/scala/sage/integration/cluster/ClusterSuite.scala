@@ -1,329 +1,136 @@
 package sage.integration.cluster
 
-import scala.concurrent.ExecutionContext
-import scala.concurrent.duration.*
-
 import com.dimafeng.testcontainers.GenericContainer
-import com.dimafeng.testcontainers.munit.TestContainerForAll
+import com.dimafeng.testcontainers.lifecycle.and
 import kyo.compat.*
+import munit.{Location, TestOptions}
 
-import sage.{Bytes, Message}
-import sage.SageException.{DecodeError, ServerError}
+import sage.Message
+import sage.SageException.ServerError
 import sage.client.{Endpoint, SageConfig, Topology}
-import sage.client.internal.{Client, ScanTarget}
-import sage.commands.{Command, Commands, FlushMode, ScanCursor}
-import sage.integration.{ContainerClient, Eventually, Images}
-import sage.protocol.Frame
+import sage.client.internal.{Client, Paged}
+import sage.commands.{Commands, FlushMode}
+import sage.integration.{BothServersSuite, Eventually, Images}
+import sage.protocol.Frames
 
 /**
   * Drives the cluster runtime against a real cluster-enabled server. One node owns all 16384 slots, with `cluster-announce` pointed at the
   * testcontainers-mapped host port so the address the node reports in `CLUSTER SLOTS` is reachable from the test. This exercises topology
   * discovery, the `CLUSTER SLOTS` decoder against real wire output, and single-key routing; redirects and failover need multiple nodes.
   */
-abstract class ClusterSuite(image: String, serverBinary: String, supportsNumberedDatabases: Boolean = false)
-  extends munit.FunSuite
-  with TestContainerForAll
-  with ContainerClient {
+class ClusterSuite extends BothServersSuite {
 
-  override val containerDef: GenericContainer.Def[GenericContainer] = {
-    val numberedDatabases = if (supportsNumberedDatabases) Seq("--cluster-databases", "16") else Seq.empty
-    GenericContainer.Def(image, exposedPorts = Seq(6379), command = Seq(serverBinary, "--cluster-enabled", "yes") ++ numberedDatabases)
+  override protected def redisDef: GenericContainer.Def[GenericContainer]  = serverDef(Images.redis, command = Seq("--cluster-enabled", "yes"))
+  override protected def valkeyDef: GenericContainer.Def[GenericContainer] =
+    serverDef(Images.valkey, command = Seq("--cluster-enabled", "yes", "--cluster-databases", "16"))
+
+  override def afterContainersStart(containers: Containers): Unit = containers match {
+    case redis and valkey => prepare(formCluster(redis) >> formCluster(valkey))
   }
-
-  given ExecutionContext = munitExecutionContext
-
-  private def admin(name: String, args: String*): Command[Unit] =
-    Command(name, Command.NoKeys, args.toVector.map(Bytes.utf8), _ => Right(()))
-
-  private val clusterInfo: Command[String] =
-    Command(
-      "CLUSTER",
-      Command.NoKeys,
-      Vector(Bytes.utf8("INFO")),
-      {
-        case Frame.BulkString(bytes)        => Right(bytes.asUtf8String)
-        case Frame.VerbatimString(_, bytes) => Right(bytes.asUtf8String)
-        case other                          => Left(DecodeError("bulk or verbatim string", Frame.describe(other)))
-      }
-    )
 
   // a single node owning every slot, announcing the host-mapped endpoint so the address it reports is reachable from the test
-  private def formSingleNodeCluster(admin0: Client[CIO, String], host: String, port: Int): CIO[Unit] =
-    for {
-      _    <- admin0.run(admin("CONFIG", "SET", "cluster-announce-ip", host))
-      _    <- admin0.run(admin("CONFIG", "SET", "cluster-announce-port", port.toString))
-      // idempotent across tests sharing one container: only claim the slots if they are not already assigned
-      info <- admin0.run(clusterInfo)
-      _    <- if (info.contains("cluster_state:ok")) CIO.value(()) else admin0.run(admin("CLUSTER", "ADDSLOTSRANGE", "0", "16383"))
-      _    <- awaitClusterOk(admin0, 50)
-    } yield ()
-
-  private def awaitClusterOk(admin0: Client[CIO, String], attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts)(() => admin0.run(clusterInfo))(_.contains("cluster_state:ok"))(info => s"cluster did not converge: $info")
-
-  private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
-    Eventually.value(attempts)(() => client.cached(Commands.get[String, String](key), 1.minute))(_.contains(expected))
-
-  // one shared container per suite, so the cluster is formed once and all routing exercised in a single test
-  test("single-key commands, pipelines, and transactions route against a real cluster") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { client =>
-            for {
-              _      <- client.set("greeting", "hello")
-              value  <- client.get[String]("greeting")
-              count  <- client.incr("counter")
-              _      <- client.set("{t}a", "1")
-              _      <- client.set("{t}b", "2")
-              piped  <- client.pipeline((Commands.get[String, String]("{t}a"), Commands.get[String, String]("{t}b")))
-              commit <- client.transaction(tx => tx.exec(Vector(Commands.incr[String]("{t}c"), Commands.incr[String]("{t}c"))))
-            } yield {
-              assertEquals(value, Some("hello"))
-              assertEquals(count, 1L)
-              assertEquals(piped, (Some("1"), Some("2")))
-              assertEquals(commit, Some(Vector(1L, 2L)))
-            }
-          }
-        }
-      program.unsafeRun
+  private def formCluster(server: GenericContainer): CIO[Unit] =
+    connectAndUse(configOf(server)) { admin0 =>
+      admin0.configSet("cluster-announce-ip" -> server.host, "cluster-announce-port" -> server.mappedPort(6379).toString) >>
+        admin0.run(admin("CLUSTER", "ADDSLOTSRANGE", "0", "16383")) >>
+        Eventually(50)(admin0.clusterInfo.satisfies(_.contains("cluster_state:ok")))
     }
+
+  private def clusterConfig(server: GenericContainer, database: Int = 0): SageConfig =
+    SageConfig(topology = Topology.Cluster(Vector(Endpoint(server.host, server.mappedPort(6379)))), database = database)
+
+  private def clusterTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
+    serverTest(options)(server => connectAndUse(clusterConfig(server))(body))
+
+  // one shared container per server, so each cluster is formed once and all routing exercised in a single test
+  clusterTest("single-key commands, pipelines, and transactions route against a real cluster") { client =>
+    client.set("greeting", "hello") >>
+      client.get[String]("greeting").is(Some("hello")) >>
+      client.incr("counter").is(1L) >>
+      client.set("{t}a", "1") >>
+      client.set("{t}b", "2") >>
+      client.pipeline((Commands.get[String, String]("{t}a"), Commands.get[String, String]("{t}b"))).is((Some("1"), Some("2"))) >>
+      client.transaction(tx => tx.exec(Vector(Commands.incr[String]("{t}c"), Commands.incr[String]("{t}c")))).is(Some(Vector(1L, 2L)))
   }
 
-  test("supported cross-slot commands are transparently split and merged against a real cluster") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-      val keyA       = "{mget-a}value"
-      val keyB       = "{mget-b}value"
-      val missingA   = "{mget-a}missing"
-      val missingB   = "{mget-b}missing"
-      val msetA      = "{mset-a}value"
-      val msetB      = "{mset-b}value"
+  clusterTest("supported cross-slot commands are transparently split and merged against a real cluster") { client =>
+    val keyA     = "{mget-a}value"
+    val keyB     = "{mget-b}value"
+    val missingA = "{mget-a}missing"
+    val missingB = "{mget-b}missing"
+    val msetA    = "{mset-a}value"
+    val msetB    = "{mset-b}value"
 
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { client =>
-            for {
-              _         <- client.set(keyA, "a")
-              _         <- client.set(keyB, "b")
-              values    <- client.mGet[String](keyA, keyB, missingA, keyB)
-              piped     <- client.pipeline((Commands.mGet[String, String](keyA, keyB), Commands.get[String, String](keyA)))
-              exists    <- client.exists(keyA, keyB, missingA, keyB)
-              touched   <- client.touch(keyA, keyB, missingA)
-              _         <- client.mSet(msetA -> "set-a", msetB -> "set-b")
-              setValues <- client.mGet[String](msetA, msetB)
-              deleted   <- client.del(keyA, missingB)
-              unlinked  <- client.unlink(keyB, missingA)
-            } yield {
-              assertEquals(values, Vector(Some("a"), Some("b"), None, Some("b")))
-              assertEquals(piped, (Vector(Some("a"), Some("b")), Some("a")))
-              assertEquals(exists, 3L)
-              assertEquals(touched, 2L)
-              assertEquals(setValues, Vector(Some("set-a"), Some("set-b")))
-              assertEquals(deleted, 1L)
-              assertEquals(unlinked, 1L)
-            }
-          }
-        }
-      program.unsafeRun
-    }
+    client.set(keyA, "a") >>
+      client.set(keyB, "b") >>
+      client.mGet[String](keyA, keyB, missingA, keyB).is(Vector(Some("a"), Some("b"), None, Some("b"))) >>
+      client
+        .pipeline((Commands.mGet[String, String](keyA, keyB), Commands.get[String, String](keyA)))
+        .is((Vector(Some("a"), Some("b")), Some("a"))) >>
+      client.exists(keyA, keyB, missingA, keyB).is(3L) >>
+      client.touch(keyA, keyB, missingA).is(2L) >>
+      client.mSet(msetA -> "set-a", msetB -> "set-b") >>
+      client.mGet[String](msetA, msetB).is(Vector(Some("set-a"), Some("set-b"))) >>
+      client.del(keyA, missingB).is(1L) >>
+      client.unlink(keyB, missingA).is(1L)
   }
 
   // Sharded and classic pub/sub against a real (single-node) cluster: SSUBSCRIBE/SPUBLISH route by slot and coexist with classic SUBSCRIBE.
   // Resubscription on slot migration needs multiple nodes and is covered deterministically by ClusterClientSpec.
-  test("sharded and classic pub/sub coexist on a cluster client") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { client =>
-            for {
-              shard    <- client.subscribeShardChannels[String]("orders")
-              classic  <- client.subscribeChannels[String]("news")
-              sCount   <- client.sPublish("orders", "placed")
-              cCount   <- client.publish("news", "hello")
-              sMsg     <- shard.next
-              cMsg     <- classic.next
-              channels <- client.pubsubShardChannels()
-              _        <- shard.close
-              _        <- classic.close
-            } yield {
-              assertEquals(sCount, 1L)
-              assertEquals(cCount, 1L)
-              assertEquals(sMsg, Some(Message("orders", "placed")))
-              assertEquals(cMsg, Some(Message("news", "hello")))
-              assert(channels.contains("orders"), channels)
-            }
-          }
-        }
-      program.unsafeRun
+  clusterTest("sharded and classic pub/sub coexist on a cluster client") { client =>
+    withSubscription(client.subscribeShardChannels[String]("orders")) { shard =>
+      withSubscription(client.subscribeChannels[String]("news")) { classic =>
+        client.sPublish("orders", "placed").is(1L) >>
+          client.publish("news", "hello").is(1L) >>
+          shard.next.is(Some(Message("orders", "placed"))) >>
+          classic.next.is(Some(Message("news", "hello"))) >>
+          client.pubsubShardChannels().satisfies(_.contains("orders"))
+      }
     }
   }
   // scanTargets returns one target per slot-owning master, and each target runs every page on the node that created its cursor. This fixture
   // has one master for all slots, so one target is expected.
-  test("scanAll sweeps every slot-owning master through node-pinned scan targets") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-      val expected   = (1 to 50).map(i => s"cscan:$i").toSet
+  clusterTest("scanAll sweeps every slot-owning master through node-pinned scan targets") { client =>
+    val expected = (1 to 50).map(i => s"cscan:$i").toSet
 
-      def writeKeys(client: Client[CIO, String], i: Int): CIO[Unit] =
-        if (i > 50) CIO.value(()) else client.set(s"cscan:$i", i.toString).flatMap(_ => writeKeys(client, i + 1))
-
-      def scanNode(target: ScanTarget, cursor: ScanCursor, found: Set[String]): CIO[Set[String]] =
-        target.run(Commands.scan[String](cursor, pattern = Some("cscan:*"), count = Some(10L))).flatMap { page =>
-          page.next match {
-            case Some(next) => scanNode(target, next, found ++ page.items)
-            case None       => CIO.value(found ++ page.items)
-          }
-        }
-
-      def sweep(targets: Vector[ScanTarget], found: Set[String]): CIO[Set[String]] =
-        targets match {
-          case head +: tail => scanNode(head, ScanCursor.start, found).flatMap(sweep(tail, _))
-          case _            => CIO.value(found)
-        }
-
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { client =>
-            for {
-              _       <- writeKeys(client, 1)
-              targets <- client.runner.scanTargets
-              found   <- sweep(targets, Set.empty[String])
-            } yield {
-              assert(targets.nonEmpty && !targets.contains(client.runner), s"cluster scan targets must be node-pinned: $targets")
-              assertEquals(found, expected)
-            }
-          }
-        }
-      program.unsafeRun
-    }
+    CIO.foreachDiscard(1 to 50)(i => client.set(s"cscan:$i", i.toString)) >>
+      client.runner.scanTargets.satisfies(targets => targets.nonEmpty && !targets.contains(client.runner)) >>
+      drain(Paged.scanAll[String](client.runner, Some("cscan:*"), Some(10L), None)).is(expected)
   }
 
   // SCRIPT LOAD and FUNCTION LOAD run on every master, allowing key-routed EVALSHA and FCALL to find them. This fixture has one master for
   // all slots, so the broadcast has one target. Multi-master clusters use the same dispatch logic.
-  test("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-      val library    =
-        """#!lua name=clib
-          |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)
-          |""".stripMargin
+  clusterTest("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve") { client =>
+    val library =
+      """#!lua name=clib
+        |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)
+        |""".stripMargin
 
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { client =>
-            for {
-              sha   <- client.scriptLoad("return redis.call('get', KEYS[1])")
-              _     <- client.set("bcast-key", "v")
-              eval  <- client.evalSha(sha, Seq("bcast-key"))
-              _     <- client.functionFlush(Some(FlushMode.Sync))
-              name  <- client.functionLoad(library)
-              fcall <- client.fCall("clib_get", Seq("bcast-key"))
-            } yield {
-              assertEquals(sha.length, 40)
-              assertEquals(name, "clib")
-              eval match {
-                case Frame.BulkString(b) => assertEquals(b.asUtf8String, "v")
-                case other               => fail(s"expected bulk string, got $other")
-              }
-              fcall match {
-                case Frame.BulkString(b) => assertEquals(b.asUtf8String, "v")
-                case other               => fail(s"expected bulk string, got $other")
-              }
-            }
-          }
-        }
-      program.unsafeRun
+    for {
+      sha <- client.scriptLoad("return redis.call('get', KEYS[1])")
+      _   <- client.set("bcast-key", "v")
+      _   <- client.evalSha(sha, Seq("bcast-key")).is(Frames.bulk("v"))
+      _   <- client.functionFlush(Some(FlushMode.Sync))
+      _   <- client.functionLoad(library).is("clib")
+      _   <- client.fCall("clib_get", Seq("bcast-key")).is(Frames.bulk("v"))
+    } yield assertEquals(sha.length, 40)
+  }
+
+  serverTest("a cluster cached read is served locally and a server-side write evicts it via invalidation") { server =>
+    connectAndUse(clusterConfig(server))(reader => connectAndUse(clusterConfig(server))(cachedReadIsInvalidated(reader, _, "csc:cluster")))
+  }
+
+  onValkey("a numbered database is selected on a Valkey cluster connection") { server =>
+    val key = "cluster-numbered-database"
+    connectAndUse(configOf(server))(_.set(key, "database-0")).flatMap { _ =>
+      connectAndUse(clusterConfig(server, database = 2))(client =>
+        client.set(key, "database-2").flatMap(_ => client.get[String](key).is(Some("database-2")))
+      )
+        .flatMap(_ => connectAndUse(configOf(server))(_.get[String](key).is(Some("database-0"))))
     }
   }
 
-  test("a cluster cached read is served locally and a server-side write evicts it via invalidation") {
-    withContainers { server =>
-      val host       = server.host
-      val port       = server.mappedPort(6379)
-      val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-      val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))))
-
-      val program =
-        connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-          connectAndUse(clustered) { reader =>
-            connectAndUse(clustered) { writer =>
-              for {
-                _       <- writer.set("csc:cluster", "v1")
-                first   <- reader.cached(Commands.get[String, String]("csc:cluster"), 1.minute)
-                hit     <- reader.cached(Commands.get[String, String]("csc:cluster"), 1.minute)
-                _       <- writer.set("csc:cluster", "v2")
-                evicted <- awaitCached(reader, "csc:cluster", "v2", attempts = 50)
-              } yield {
-                assertEquals(first, Some("v1"))
-                assertEquals(hit, Some("v1"))
-                assertEquals(evicted, Some("v2"))
-              }
-            }
-          }
-        }
-      program.unsafeRun
-    }
+  onRedis("an unsupported cluster server rejects a numbered database during bootstrap") { server =>
+    failsWith[ServerError](connectAndUse(clusterConfig(server, database = 2))(_ => CIO.unit))
   }
-
-  if (supportsNumberedDatabases)
-    test("a numbered database is selected on a Valkey cluster connection") {
-      withContainers { server =>
-        val host       = server.host
-        val port       = server.mappedPort(6379)
-        val standalone = SageConfig(topology = Topology.Standalone(Endpoint(host, port)))
-        val clustered  = SageConfig(topology = Topology.Cluster(Vector(Endpoint(host, port))), database = 2)
-        val key        = "cluster-numbered-database"
-
-        val program =
-          connectAndUse(standalone)(formSingleNodeCluster(_, host, port)).flatMap { _ =>
-            connectAndUse(standalone)(_.set(key, "database-0")).flatMap { _ =>
-              connectAndUse(clustered) { client =>
-                client.set(key, "database-2").flatMap(_ => client.get[String](key)).map(value => assertEquals(value, Some("database-2")))
-              }.flatMap { _ =>
-                connectAndUse(standalone)(_.get[String](key)).map(value => assertEquals(value, Some("database-0")))
-              }
-            }
-          }
-        program.unsafeRun
-      }
-    }
-
-  if (!supportsNumberedDatabases)
-    test("an unsupported cluster server rejects a numbered database during bootstrap") {
-      withContainers { server =>
-        val endpoint  = Endpoint(server.host, server.mappedPort(6379))
-        val clustered = SageConfig(topology = Topology.Cluster(Vector(endpoint)), database = 2)
-
-        val attempted: CIO[Unit] = connectAndUse(clustered)(_ => CIO.value(()))
-        val program: CIO[Unit]   = attempted.fold(
-          _ => CIO.fail(new AssertionError("expected the cluster connection to reject database 2")),
-          error => CIO.value(assert(error.isInstanceOf[ServerError], s"expected the server's SELECT error, got $error"))
-        )
-        program.unsafeRun
-      }
-    }
 }
-
-class RedisClusterSuite extends ClusterSuite(Images.redis, "redis-server")
-
-class ValkeyClusterSuite extends ClusterSuite(Images.valkey, "valkey-server", supportsNumberedDatabases = true)

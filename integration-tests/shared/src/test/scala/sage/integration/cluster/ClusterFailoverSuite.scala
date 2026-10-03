@@ -1,19 +1,16 @@
 package sage.integration.cluster
 
-import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
-import scala.util.Try
 
 import com.dimafeng.testcontainers.FixedHostPortGenericContainer
-import com.dimafeng.testcontainers.munit.TestContainerForEach
+import com.dimafeng.testcontainers.munit.TestContainersForEach
 import kyo.compat.*
 
 import sage.Bytes
-import sage.client.{ClusterConfig, Endpoint, SageConfig, Topology}
 import sage.client.internal.Client
-import sage.cluster.Slot
+import sage.cluster.{Node, Slot}
 import sage.commands.{Commands, Connection}
-import sage.integration.{ContainerClient, Eventually, Images}
+import sage.integration.{Eventually, Images}
 
 /**
   * Drives cluster failover recovery against a real multi-node cluster: three masters and their replicas in one container. When a master
@@ -23,94 +20,44 @@ import sage.integration.{ContainerClient, Eventually, Images}
   *
   * The fixed host ports are 7100-7105; see [[MultiNodeCluster]] for why a multi-node cluster cannot use mapped random ports.
   */
-abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
-  extends munit.FunSuite
-  with TestContainerForEach
-  with ContainerClient
-  with MultiNodeCluster {
+abstract class ClusterFailoverSuite(image: String, serverBinary: String)
+  extends MultiNodeCluster(image, serverBinary, nodeCount = 6, replicasPerMaster = 1)
+  with TestContainersForEach {
 
-  protected val ports: Seq[Int] = 7100 to 7105
-  private val victim            = 7100 // redis-cli --cluster-create makes the first nodes masters, so 7100 is a master with a replica to promote
+  private val victim = basePort // redis-cli --cluster-create makes the first nodes masters, so 7100 is a master with a replica to promote
 
-  override protected val replicasPerMaster: Option[Int] = Some(1)
-
-  // start the replica's initial sync immediately, not after the default 5s window, so it is a live copy before the failover
-  override protected val extraServerFlags: Vector[String] = Vector("--repl-diskless-sync-delay 0")
-
-  override val containerDef: FixedHostPortGenericContainer.Def = clusterContainerDef
-
-  given ExecutionContext = munitExecutionContext
-
-  // forming a six-node cluster and waiting out an election runs past munit's 30s default on a loaded CI box
-  override def munitTimeout: Duration = 120.seconds
-
-  private def parseKeys(out: String): Vector[String] =
-    out.split("\n").iterator.map(_.trim).filter(_.nonEmpty).toVector
-
-  private def victimReplicaPort(container: FixedHostPortGenericContainer): Int = {
-    val nodes = clusterNodes(container, victim)
-    val myId  =
-      nodes.collectFirst { case node if node.isMyself => node.id }.getOrElse(throw new RuntimeException(s"victim $victim has no myself line"))
-    nodes
-      .collectFirst { case node if node.isReplica && node.masterId == myId => node.port }
-      .getOrElse(throw new RuntimeException(s"no replica found for victim $victim among ${nodes.map(_.port)}"))
-  }
-
-  // The replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
-  // write, so it would not cover writes the cluster client sent on its own routed connections; reading the replica directly proves recovery.
-  private def awaitReplicated(container: FixedHostPortGenericContainer, replicaPort: Int, expected: Set[String], attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts)(() => CIO.blocking(parseKeys(cli(container, replicaPort, "keys", "*")).toSet))(expected.subsetOf)(have =>
-      s"victim's replica did not catch up; missing ${(expected -- have).take(5)}"
-    )
+  private def crashVictim(onVictim: Vector[String]): CIO[Int] =
+    for {
+      topology <- clusterTopology(victim)
+      replica  <- required(s"a replica of victim $victim", topology.replicasForMaster(Node("127.0.0.1", victim)).headOption)
+      // The replication barrier: poll the victim's own replica until it holds every victim-owned key. WAIT keys off the calling connection's last
+      // write, so it would not cover writes the cluster client sent on its own routed connections; reading the replica directly proves recovery.
+      _        <- Eventually(100)(onNode(replica.port)(_.keys("*")).satisfies(keys => onVictim.toSet.subsetOf(keys.toSet)))
+      _        <- shutdown(node(victim))
+    } yield replica.port
 
   // `cluster_state:ok` flips before every node will actually serve writes, so a freshly formed cluster can briefly answer CLUSTERDOWN; retry
   // each write across that warm-up window, as a real application would, so the failover the test means to exercise is not masked by a startup race
-  private def writeKey(client: Client[CIO, String], key: String, attempts: Int): CIO[Unit] =
-    client
-      .set(key, key)
-      .fold(
-        _ => CIO.value(()),
-        error => if (attempts <= 0) CIO.fail(error) else CIO.sleep(200.millis).flatMap(_ => writeKey(client, key, attempts - 1))
-      )
+  private def seedVictim(client: Client[CIO, String], prefix: String): CIO[(String, Vector[String])] =
+    inSequence((1 to 30).map(i => s"$prefix:$i"))(key => Eventually.succeeds(150, 200.millis)(client.set(key, key)))
+      .flatMap(_ => onNode(victim)(_.keys("*")))
+      .flatMap {
+        case keys @ (probe +: _) => CIO.value((probe, keys))
+        case _                   => CIO.fail(new AssertionError("no keys landed on the victim master; cannot prove failover recovery"))
+      }
 
-  private def writeAll(client: Client[CIO, String], keys: Vector[String]): CIO[Unit] =
-    keys.foldLeft(CIO.value(()))((acc, key) => acc.flatMap(_ => writeKey(client, key, 150)))
+  // retries a transport error, but stops at once on the stale value: retrying a stale success would let it slip through behind a later refresh
+  private def awaitRead(read: CIO[Option[String]], expected: String, stale: Option[String]): CIO[Unit] =
+    Eventually
+      .succeeds(150, 200.millis)(read.map(_.filter(v => v == expected || stale.contains(v))).flatMap(required("a fresh or stale read", _)))
+      .is(expected)
 
-  // retries a transport error, but fails at once on a `reject` value: retrying a stale success would let it slip through behind a later refresh
-  private def awaitReadEquals(read: () => CIO[Option[String]], expected: String, reject: Option[String], attempts: Int): CIO[Boolean] =
-    read().fold(
-      {
-        case Some(v) if v == expected      => CIO.value(true)
-        case Some(v) if reject.contains(v) => CIO.value(false)
-        case _ if attempts <= 0            => CIO.value(false)
-        case _                             => CIO.sleep(200.millis).flatMap(_ => awaitReadEquals(read, expected, reject, attempts - 1))
-      },
-      _ => if (attempts <= 0) CIO.value(false) else CIO.sleep(200.millis).flatMap(_ => awaitReadEquals(read, expected, reject, attempts - 1))
-    )
-
-  private def recoverKey(client: Client[CIO, String], key: String, attempts: Int): CIO[Boolean] =
-    awaitReadEquals(() => client.get[String](key), key, None, attempts)
-
-  private def recoverCached(client: Client[CIO, String], key: String, expected: String, stale: String, attempts: Int): CIO[Boolean] =
-    awaitReadEquals(() => client.cached(Commands.get[String, String](key), 1.minute), expected, Some(stale), attempts)
-
-  private def recoverAll(client: Client[CIO, String], keys: Vector[String]): CIO[Boolean] =
-    keys.foldLeft(CIO.value(true))((acc, key) => acc.flatMap(ok => if (!ok) CIO.value(false) else recoverKey(client, key, 150)))
+  private def recoverAll(client: Client[CIO, String], keys: Vector[String]): CIO[Unit] =
+    inSequence(keys)(key => awaitRead(client.get[String](key), key, None))
 
   // retries until the node accepts the write (e.g. a replica once it is promoted to master)
-  private def writeDirect(container: FixedHostPortGenericContainer, port: Int, key: String, value: String, attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts, 200.millis)(() => CIO.blocking(cli(container, port, "set", key, value)))(_.contains("OK"))(out =>
-      s"could not write $key on $port: $out"
-    )
-
-  private def masterId(container: FixedHostPortGenericContainer, port: Int): String = cli(container, port, "cluster", "myid").trim
-
-  private def masterPortsExcludingVictim(container: FixedHostPortGenericContainer): Vector[Int] =
-    clusterNodes(container, victim).filter(_.isMaster).map(_.port).filter(_ != victim)
-
-  // Query the node directly because its own CLUSTER NODES entry contains the `myself` flag.
-  private def ownSlotCount(container: FixedHostPortGenericContainer, port: Int): Int =
-    clusterNodes(container, port).collectFirst { case node if node.isMyself => node.ownedSlotCount }.getOrElse(0)
+  private def writeDirect(port: Int, key: String, value: String): CIO[Unit] =
+    Eventually.succeeds(150, 200.millis)(onNode(port)(_.set(key, value)).unit)
 
   private def reshard(container: FixedHostPortGenericContainer, fromId: String, toId: String, slots: Int): String =
     exec(
@@ -128,145 +75,63 @@ abstract class ClusterFailoverSuite(val image: String, val serverBinary: String)
       "--cluster-yes"
     )
 
-  private def replicationWaits(container: FixedHostPortGenericContainer, port: Int): Long =
-    cli(container, port, "info", "commandstats").linesIterator
-      .find(_.startsWith("cmdstat_wait:calls="))
-      .fold(0L)(_.stripPrefix("cmdstat_wait:calls=").takeWhile(_ != ',').toLong)
-
-  test("distributed locks confirm acquisition and renewal on each master's replica") {
-    withContainers { container =>
-      val config = SageConfig(topology = Topology.Cluster(Vector(Endpoint("127.0.0.1", ports.head))))
-      formCluster(container).flatMap { _ =>
-        connectAndUse(config) { client =>
-          val keys = Vector("orders", "delta", "epsilon").map(tag => s"replicated-lock:{$tag}")
-          CIO.blocking(clusterNodes(container, ports.head)).flatMap { nodes =>
-            val owners = keys.map(key => nodes.find(_.owns(Slot.of(Bytes.utf8(s"4:lock:$key")).value)).get)
-            assertEquals(owners.map(_.port).distinct.size, 3)
-            keys.zip(owners).foldLeft(CIO.unit) { case (previous, (key, owner)) =>
-              previous.flatMap { _ =>
-                val replica       = nodes.find(node => node.isReplica && node.masterId == owner.id).get
-                val replicaConfig = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", replica.port)))
-                connectAndUse(replicaConfig) { reader =>
-                  for {
-                    _           <- reader.run(Connection.readonly)
-                    // Initial replica synchronization can finish after the cluster starts accepting writes.
-                    _           <- Eventually.converges(100, 100.millis)(() => reader.run(Commands.role))(_.isConnectedReplica)(_ =>
-                                     "cluster replica did not connect"
-                                   )
-                    waitsBefore <- CIO.blocking(replicationWaits(container, owner.port))
-                    _           <- client.lock[String](900.millis).withLock(key, 5.seconds) {
-                                     for {
-                                       before     <- reader.exists(s"4:lock:$key")
-                                       _          <-
-                                         Eventually.converges(30, 50.millis)(() => CIO.blocking(replicationWaits(container, owner.port)))(_ >= waitsBefore + 2)(
-                                           waits => s"acquisition and renewal did not both wait for replication: $waits"
-                                         )
-                                       after      <- reader.exists(s"4:lock:$key")
-                                       waitsAfter <- CIO.blocking(replicationWaits(container, owner.port))
-                                     } yield {
-                                       assertEquals(before, 1L)
-                                       assertEquals(after, 1L)
-                                       assert(waitsAfter >= waitsBefore + 2, "acquisition and renewal did not wait for replication")
-                                     }
-                                   }
-                  } yield ()
-                }
-              }
-            }
-          }
+  clusterTest("distributed locks confirm acquisition and renewal on each master's replica") { (_, client) =>
+    val keys = Vector("orders", "delta", "epsilon").map(tag => s"replicated-lock:{$tag}")
+    clusterTopology(basePort).flatMap { topology =>
+      val placed = keys.flatMap(key =>
+        topology.nodeForSlot(Slot.of(Bytes.utf8(s"4:lock:$key"))).flatMap(owner => topology.replicasForMaster(owner).headOption.map((key, owner, _)))
+      )
+      assertEquals(placed.map(_._2).distinct.size, 3)
+      inSequence(placed) { (key, owner, replica) =>
+        onNode(replica.port) { reader =>
+          for {
+            _ <- reader.run(Connection.readonly)
+            // Initial replica synchronization can finish after the cluster starts accepting writes.
+            _ <- Eventually(100)(reader.run(Commands.role).satisfies(_.isConnectedReplica))
+            _ <- awaitCalls(onNode(owner.port)(_.info("commandstats")), "wait", 2)(replicated =>
+                   client.lock[String](900.millis).withLock(key, 5.seconds) {
+                     reader.exists(s"4:lock:$key").is(1L) >> replicated >> reader.exists(s"4:lock:$key").is(1L)
+                   }
+                 )
+          } yield ()
         }
-      }.unsafeRun
+      }
     }
   }
 
-  test("the client recovers reads after a master crashes and its replica is promoted") {
-    withContainers { container =>
-      val seeds  = ports.map(p => Endpoint("127.0.0.1", p)).toVector
-      // short refresh interval so the topology refresh keeps pace with the caller's retries during the election
-      val config = SageConfig(topology = Topology.Cluster(seeds, ClusterConfig(minRefreshInterval = 500.millis)))
-      val keys   = (1 to 30).map(i => s"failover:$i").toVector
-
-      val program =
-        formCluster(container).flatMap { _ =>
-          connectAndUse(config) { client =>
-            for {
-              _           <- writeAll(client, keys)
-              // reading the failed node's keys proves that the client connected to the promoted replica.
-              onVictim    <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
-              replicaPort <- CIO.blocking(victimReplicaPort(container))
-              _           <- awaitReplicated(container, replicaPort, onVictim.toSet, 100)
-              _           <- CIO.blocking(Try(cli(container, victim, "shutdown", "nosave")))
-              recovered   <- recoverAll(client, onVictim)
-            } yield {
-              assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove failover recovery")
-              assert(recovered, "client did not recover the victim master's keys after its replica was promoted")
-            }
-          }
-        }
-      program.unsafeRun
-    }
+  clusterTest("the client recovers reads after a master crashes and its replica is promoted") { (_, client) =>
+    for {
+      // reading the failed node's keys proves that the client connected to the promoted replica.
+      (_, onVictim) <- seedVictim(client, "failover")
+      _             <- crashVictim(onVictim)
+      _             <- recoverAll(client, onVictim)
+    } yield ()
   }
 
-  test("a cached read follows MOVED to the new owner after its slot is resharded off its master") {
-    withContainers { container =>
-      val seeds  = ports.map(p => Endpoint("127.0.0.1", p)).toVector
-      val config = SageConfig(topology = Topology.Cluster(seeds, ClusterConfig(minRefreshInterval = 500.millis)))
-      val keys   = (1 to 30).map(i => s"reshard:$i").toVector
-
-      val program =
-        formCluster(container).flatMap { _ =>
-          connectAndUse(config) { client =>
-            for {
-              _         <- writeAll(client, keys)
-              onVictim  <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
-              probe      = onVictim.head
-              first     <- client.cached(Commands.get[String, String](probe), 1.minute)
-              dest      <- CIO.blocking(masterPortsExcludingVictim(container).head)
-              fromId    <- CIO.blocking(masterId(container, victim))
-              toId      <- CIO.blocking(masterId(container, dest))
-              moved     <- CIO.blocking(ownSlotCount(container, victim))
-              _         <- CIO.blocking(reshard(container, fromId, toId, moved))
-              _         <- awaitClusterOk(container, 60)
-              _         <- writeDirect(container, dest, probe, "reshard-fresh", 50)
-              recovered <- recoverCached(client, probe, "reshard-fresh", probe, 150)
-            } yield {
-              assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove reshard recovery")
-              assertEquals(first, Some(probe))
-              assert(recovered, "cached read did not observe the resharded slot's new owner's current value")
-            }
-          }
-        }
-      program.unsafeRun
-    }
+  clusterTest("a cached read follows MOVED to the new owner after its slot is resharded off its master") { (container, client) =>
+    for {
+      (probe, _) <- seedVictim(client, "reshard")
+      _          <- client.cached(Commands.get[String, String](probe), 1.minute).is(Some(probe))
+      topology   <- clusterTopology(victim)
+      dest       <- required("another master", topology.masters.find(_.port != victim))
+      owned       = (0 until Slot.Count).flatMap(Slot.at).count(topology.nodeForSlot(_).exists(_.port == victim))
+      fromId     <- onNode(victim)(_.clusterMyId)
+      toId       <- onNode(dest.port)(_.clusterMyId)
+      _          <- CIO.blocking(reshard(container, fromId, toId, owned))
+      _          <- awaitClusterOk
+      _          <- writeDirect(dest.port, probe, "reshard-fresh")
+      _          <- awaitRead(client.cached(Commands.get[String, String](probe), 1.minute), "reshard-fresh", Some(probe))
+    } yield ()
   }
 
-  test("a cached read recovers from the promoted master after a failover, never serving the dead master's entry") {
-    withContainers { container =>
-      val seeds  = ports.map(p => Endpoint("127.0.0.1", p)).toVector
-      val config = SageConfig(topology = Topology.Cluster(seeds, ClusterConfig(minRefreshInterval = 500.millis)))
-      val keys   = (1 to 30).map(i => s"cachedfailover:$i").toVector
-
-      val program =
-        formCluster(container).flatMap { _ =>
-          connectAndUse(config) { client =>
-            for {
-              _           <- writeAll(client, keys)
-              onVictim    <- CIO.blocking(parseKeys(cli(container, victim, "keys", "*")))
-              probe        = onVictim.head
-              _           <- client.cached(Commands.get[String, String](probe), 1.minute)
-              replicaPort <- CIO.blocking(victimReplicaPort(container))
-              _           <- awaitReplicated(container, replicaPort, onVictim.toSet, 100)
-              _           <- CIO.blocking(Try(cli(container, victim, "shutdown", "nosave")))
-              _           <- writeDirect(container, replicaPort, probe, "failover-fresh", 150)
-              recovered   <- recoverCached(client, probe, "failover-fresh", probe, 150)
-            } yield {
-              assert(onVictim.nonEmpty, "no keys landed on the victim master; cannot prove cached failover recovery")
-              assert(recovered, "cached read did not observe the promoted master's current value after the victim crashed")
-            }
-          }
-        }
-      program.unsafeRun
-    }
+  clusterTest("a cached read recovers from the promoted master after a failover, never serving the dead master's entry") { (_, client) =>
+    for {
+      (probe, onVictim) <- seedVictim(client, "cachedfailover")
+      _                 <- client.cached(Commands.get[String, String](probe), 1.minute)
+      replicaPort       <- crashVictim(onVictim)
+      _                 <- writeDirect(replicaPort, probe, "failover-fresh")
+      _                 <- awaitRead(client.cached(Commands.get[String, String](probe), 1.minute), "failover-fresh", Some(probe))
+    } yield ()
   }
 }
 

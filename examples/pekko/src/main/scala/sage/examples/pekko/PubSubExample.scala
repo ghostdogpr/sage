@@ -4,7 +4,6 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 
 import org.apache.pekko.actor.typed.ActorSystem
-import org.apache.pekko.stream.{Materializer, SystemMaterializer}
 import org.apache.pekko.stream.scaladsl.{Keep, Sink}
 
 import sage.*
@@ -17,8 +16,7 @@ import sage.backend.*
   */
 object PubSubExample {
 
-  def run(client: SageClient)(using system: ActorSystem[?], ec: ExecutionContext): Future[Unit] = {
-    given Materializer        = SystemMaterializer(system).materializer
+  def run(client: SageClient)(using ActorSystem[?], ExecutionContext): Future[Unit] = {
     val (confirmed, received) =
       client.subscribe[String]("news").take(3).toMat(Sink.seq)(Keep.both).run()
     for {

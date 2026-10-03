@@ -22,13 +22,13 @@ object Clients {
     case other       => throw new IllegalArgumentException(s"unknown client: $other")
   }
 
-  def buildTopology(host: String, port: Int, topology: String): BenchClient = {
+  def buildTopology(host: String, port: Int, name: String, topology: String): BenchClient = {
     val endpoint = Endpoint(host, port)
-    topology match {
-      case "standalone"     => new SageZioBench(Topology.Standalone(endpoint))
-      case "cluster"        => new SageZioBench(Topology.Cluster(Vector(endpoint)))
-      case "master-replica" => new SageZioBench(Topology.MasterReplica(Vector(endpoint)))
-      case other            => throw new IllegalArgumentException(s"unknown topology: $other")
+    (name, topology) match {
+      case ("sage-zio", "standalone")     => new SageZioBench(Topology.Standalone(endpoint))
+      case ("sage-zio", "cluster")        => new SageZioBench(Topology.Cluster(Vector(endpoint)))
+      case ("sage-zio", "master-replica") => new SageZioBench(Topology.MasterReplica(Vector(endpoint)))
+      case other                          => throw new IllegalArgumentException(s"unknown client and topology: $other")
     }
   }
 }
@@ -39,39 +39,14 @@ private object Run {
     Unsafe.unsafe(implicit u => runtime.unsafe.run(z).getOrThrowFiberFailure())
 }
 
-final class SageZioBench(topology: Topology) extends BenchClient {
+final class SageZioBench(topology: Topology) extends SageBench[IO[SageException, *]] {
 
-  private val client: SageClient =
-    Run(SageClient.connect(SageConfig(topology = topology)))
+  protected val client: SageClient = Run(SageClient.connect(SageConfig(topology = topology)))
 
-  def name: String = "sage-zio"
+  protected def run[A](effect: IO[SageException, A]): Unit = Run(effect): Unit
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit =
-    Run(
-      ZIO.foreachDiscard(0 until count)(i => client.set(s"$prefix:$i", value)) *>
-        ZIO.foreachDiscard(0 until fields)(i => client.hSet(hashKey, (s"f$i", value)))
-    )
-
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    Run(
-      ZIO
-        .foreachPar(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreach(g.toList)(k => client.get[String](k)))
-        .map(_.flatten.flatten.map(_.length.toLong).sum)
-    )
-
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long =
-    Run(
-      ZIO
-        .foreachParDiscard(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreachDiscard(g.toList)(k => client.set(k, value)))
-        .as(keys.length.toLong)
-    )
-
-  def mget(keys: Array[String]): Long =
-    Run(client.mGet[String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum))
-
-  def hgetall(key: String): Long = Run(client.hGetAll[String, String](key).map(_.size.toLong))
-
-  def close(): Unit = Run(client.close)
+  protected def inLanes[A](work: Payloads.Workload)(perKey: String => IO[SageException, A]): IO[SageException, Unit] =
+    ZIO.foreachParDiscard(work.lanes)(ZIO.foreachDiscard(_)(perKey))
 }
 
 final class ZioRedisBench(host: String, port: Int) extends BenchClient {
@@ -99,32 +74,15 @@ final class ZioRedisBench(host: String, port: Int) extends BenchClient {
       )
     )
 
-  def name: String = "zio-redis"
+  def getAll(work: Payloads.Workload): Unit =
+    Run(ZIO.foreachParDiscard(work.lanes)(g => ZIO.foreachDiscard(g)(k => redis.get(k).returning[String])))
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit =
-    Run(
-      ZIO.foreachDiscard(0 until count)(i => redis.set(s"$prefix:$i", value)) *>
-        ZIO.foreachDiscard(0 until fields)(i => redis.hSet(hashKey, (s"f$i", value)))
-    )
+  def setAll(work: Payloads.Workload, value: String): Unit =
+    Run(ZIO.foreachParDiscard(work.lanes)(g => ZIO.foreachDiscard(g)(k => redis.set(k, value))))
 
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    Run(
-      ZIO
-        .foreachPar(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreach(g.toList)(k => redis.get(k).returning[String]))
-        .map(_.flatten.flatten.map(_.length.toLong).sum)
-    )
+  def mget(): Unit = Run(redis.mGet(Payloads.Keys.first, Payloads.Keys.rest*).returning[String].unit)
 
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long =
-    Run(
-      ZIO
-        .foreachParDiscard(Payloads.groups(keys, concurrency).toList)(g => ZIO.foreachDiscard(g.toList)(k => redis.set(k, value)))
-        .as(keys.length.toLong)
-    )
-
-  def mget(keys: Array[String]): Long =
-    Run(redis.mGet(keys.head, keys.tail*).returning[String].map(_.flatten.map(_.length.toLong).sum))
-
-  def hgetall(key: String): Long = Run(redis.hGetAll(key).returning[String, String].map(_.size.toLong))
+  def hgetall(): Unit = Run(redis.hGetAll(Payloads.HashKey).returning[String, String].unit)
 
   def close(): Unit = Run(scope.close(Exit.unit))
 }

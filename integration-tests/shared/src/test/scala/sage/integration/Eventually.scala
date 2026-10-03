@@ -1,47 +1,34 @@
 package sage.integration
 
 import scala.concurrent.duration.*
+import scala.util.Failure
 
 import kyo.compat.*
 
 /**
-  * Polling for state a server reaches on its own schedule. The action is passed as a thunk. A by-name `CIO` parameter would erase to the same
-  * JVM signature as the effect value used by the Future and Ox cells, leading to runtime casts.
+  * Polling for state a server reaches on its own schedule. Each attempt runs the same `CIO` value again.
   */
 object Eventually {
 
   /**
-    * Runs `action` up to `attempts` times, `interval` apart, yielding the first result `holds` accepts or the last one seen.
+    * Runs `check` up to `attempts` times, `interval` apart, until no assertion in it fails, and returns its result. Any other failure, such as a
+    * command error, fails at once.
     */
-  def value[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: () => CIO[A])(holds: A => Boolean): CIO[A] =
-    action().flatMap { seen =>
-      if (holds(seen) || attempts <= 1) CIO.value(seen)
-      else CIO.sleep(interval).flatMap(_ => value(attempts - 1, interval)(action)(holds))
+  def apply[A](attempts: Int, interval: FiniteDuration = 100.millis)(check: CIO[A]): CIO[A] =
+    retry(attempts, interval)(check) {
+      case _: AssertionError => true
+      case _                 => false
     }
 
   /**
-    * Like [[value]], but fails with `orFail`'s message when the state never arrives.
+    * Runs `action` up to `attempts` times, `interval` apart, until it succeeds, and returns its result. Otherwise fails with the last failure.
     */
-  def converges[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: () => CIO[A])(holds: A => Boolean)(
-    orFail: A => String
-  ): CIO[Unit] =
-    value(attempts, interval)(action)(holds).flatMap { seen =>
-      if (holds(seen)) CIO.value(()) else CIO.fail(new RuntimeException(orFail(seen)))
+  def succeeds[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: CIO[A]): CIO[A] =
+    retry(attempts, interval)(action)(_ => true)
+
+  private def retry[A](attempts: Int, interval: FiniteDuration)(action: CIO[A])(retries: Throwable => Boolean): CIO[A] =
+    action.liftToTry.flatMap {
+      case Failure(error) if attempts > 1 && retries(error) => CIO.sleep(interval).flatMap(_ => retry(attempts - 1, interval)(action)(retries))
+      case result                                           => CIO.get(result)
     }
-
-  /**
-    * Polls until two consecutive results satisfy `changed`.
-    */
-  def changes[A](attempts: Int, interval: FiniteDuration = 100.millis)(action: () => CIO[A])(changed: (A, A) => Boolean)(
-    orFail: A => String
-  ): CIO[Unit] = {
-    def loop(remaining: Int, previous: A): CIO[Unit] =
-      if (remaining <= 0) CIO.fail(new RuntimeException(orFail(previous)))
-      else
-        CIO.sleep(interval).flatMap(_ => action()).flatMap { current =>
-          if (changed(previous, current)) CIO.unit else loop(remaining - 1, current)
-        }
-
-    action().flatMap(loop(attempts - 1, _))
-  }
 }

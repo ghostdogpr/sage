@@ -65,4 +65,38 @@ object CAtomicRef {
 
   }
 
+  extension [A](inline self: CAtomicRef[A])(using n: Numeric[A]) {
+
+    /**
+      * Atomically increments by 1 and returns the new value.
+      */
+    inline def incrementAndGet: CIO[A] = CIO.lift(self.updateAndGet(n.plus(_, n.one)))
+
+    /**
+      * Atomically increments by 1 and returns the previous value.
+      */
+    inline def getAndIncrement: CIO[A] = CIO.lift(self.getAndUpdate(n.plus(_, n.one)))
+
+    /**
+      * Atomically decrements by 1 and returns the new value.
+      */
+    inline def decrementAndGet: CIO[A] = CIO.lift(self.updateAndGet(n.minus(_, n.one)))
+
+    /**
+      * Atomically decrements by 1 and returns the previous value.
+      */
+    inline def getAndDecrement: CIO[A] = CIO.lift(self.getAndUpdate(n.minus(_, n.one)))
+
+    /**
+      * Atomically adds `delta` and returns the new value.
+      */
+    inline def addAndGet(inline delta: A): CIO[A] = CIO.lift(self.updateAndGet(n.plus(_, delta)))
+
+    /**
+      * Atomically adds `delta` and returns the previous value.
+      */
+    inline def getAndAdd(inline delta: A): CIO[A] = CIO.lift(self.getAndUpdate(n.plus(_, delta)))
+
+  }
+
 }

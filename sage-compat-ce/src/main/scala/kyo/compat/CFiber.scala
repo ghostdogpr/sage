@@ -4,6 +4,7 @@ import java.util.concurrent.CancellationException
 
 import cats.effect.FiberIO
 import cats.effect.IO
+import cats.effect.Outcome
 
 /**
   * Underlying carrier is `cats.effect.FiberIO[A]`. Cats Effect has no `Frame` / `Trace` to propagate. `lift` and `lower` are identity since
@@ -38,28 +39,17 @@ object CFiber {
       * Joins the fiber and returns its result. Cancellation fails with `CancellationException`.
       */
     inline def get: CIO[A] =
-      CIO.lift(
-        self.join.flatMap {
-          case cats.effect.Outcome.Succeeded(ioa) => ioa
-          case cats.effect.Outcome.Errored(t)     => IO.raiseError(t)
-          case cats.effect.Outcome.Canceled()     => IO.raiseError(new CancellationException("CFiber.interrupt"))
-        }
-      )
+      CIO.lift(self.join.flatMap {
+        case Outcome.Succeeded(ioa) => ioa
+        case Outcome.Errored(t)     => IO.raiseError(t)
+        case Outcome.Canceled()     => IO.raiseError(new CancellationException("CFiber.interrupt"))
+      })
 
     /**
       * Registers `cb` to fire when the fiber completes; success and failure are reified as `scala.util.Try`, and `Outcome.Canceled` is
       * translated to `Failure(CancellationException)` before the callback runs.
       */
     inline def onComplete(cb: scala.util.Try[A] => CIO[Unit]): CIO[Unit] =
-      CIO.lift(
-        self.join
-          .flatMap {
-            case cats.effect.Outcome.Succeeded(ioa) => ioa.flatMap(a => cb(scala.util.Success(a)).lower)
-            case cats.effect.Outcome.Errored(t)     => cb(scala.util.Failure(t)).lower
-            case cats.effect.Outcome.Canceled()     => cb(scala.util.Failure(new CancellationException("CFiber.interrupt"))).lower
-          }
-          .start
-          .void
-      )
+      CIO.lift(get.lower.attempt.flatMap(r => cb(r.toTry).lower).start.void)
   }
 }

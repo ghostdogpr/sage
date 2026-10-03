@@ -21,77 +21,29 @@ object Clients {
   }
 }
 
-final class SageCeBench(host: String, port: Int) extends BenchClient {
+final class SageCeBench(host: String, port: Int) extends SageBench[IO] {
 
-  private val client: SageClient =
+  protected val client: SageClient =
     SageClient.connect(SageConfig(topology = Topology.Standalone(Endpoint(host, port)))).unsafeRunSync()
 
-  def name: String = "sage-ce"
+  protected def run[A](effect: IO[A]): Unit = effect.unsafeRunSync(): Unit
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
-    val sets = (0 until count).toList.traverse_(i => client.set(s"$prefix:$i", value))
-    val hash = (0 until fields).map(i => (s"f$i", value)).toList match {
-      case h :: t => client.hSet(hashKey, h, t*).void
-      case Nil    => IO.unit
-    }
-    (sets *> hash).unsafeRunSync()
-  }
-
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .parTraverse(_.toList.traverse(client.get[String]))
-      .map(_.flatten.flatten.map(_.length.toLong).sum)
-      .unsafeRunSync()
-
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long =
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .parTraverse_(_.toList.traverse_(client.set(_, value)))
-      .as(keys.length.toLong)
-      .unsafeRunSync()
-
-  def mget(keys: Array[String]): Long =
-    client.mGet[String](keys.head, keys.tail*).map(_.flatten.map(_.length.toLong).sum).unsafeRunSync()
-
-  def hgetall(key: String): Long = client.hGetAll[String, String](key).map(_.size.toLong).unsafeRunSync()
-
-  def close(): Unit = client.close.unsafeRunSync()
+  protected def inLanes[A](work: Payloads.Workload)(perKey: String => IO[A]): IO[Unit] = work.lanes.parTraverse_(_.traverse_(perKey))
 }
 
 final class Redis4catsBench(host: String, port: Int) extends BenchClient {
 
   private val (redis, release) = Redis[IO].utf8(s"redis://$host:$port").allocated.unsafeRunSync()
 
-  def name: String = "redis4cats"
+  def getAll(work: Payloads.Workload): Unit =
+    work.lanes.parTraverse_(_.traverse_(redis.get)).unsafeRunSync()
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
-    val sets = (0 until count).toList.traverse_(i => redis.set(s"$prefix:$i", value))
-    val hash = (0 until fields).toList.traverse_(i => redis.hSet(hashKey, s"f$i", value))
-    (sets *> hash).unsafeRunSync()
-  }
+  def setAll(work: Payloads.Workload, value: String): Unit =
+    work.lanes.parTraverse_(_.traverse_(redis.set(_, value))).unsafeRunSync()
 
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .parTraverse(_.toList.traverse(redis.get))
-      .map(_.flatten.flatten.map(_.length.toLong).sum)
-      .unsafeRunSync()
+  def mget(): Unit = redis.mGet(Payloads.Keys.set).void.unsafeRunSync()
 
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long =
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .parTraverse_(_.toList.traverse_(redis.set(_, value)))
-      .as(keys.length.toLong)
-      .unsafeRunSync()
-
-  def mget(keys: Array[String]): Long = redis.mGet(keys.toSet).map(_.values.map(_.length.toLong).sum).unsafeRunSync()
-
-  def hgetall(key: String): Long = redis.hGetAll(key).map(_.size.toLong).unsafeRunSync()
+  def hgetall(): Unit = redis.hGetAll(Payloads.HashKey).void.unsafeRunSync()
 
   def close(): Unit = release.unsafeRunSync()
 }
