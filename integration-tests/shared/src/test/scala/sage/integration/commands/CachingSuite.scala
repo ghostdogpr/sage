@@ -1,60 +1,16 @@
 package sage.integration.commands
 
-import scala.concurrent.Future
 import scala.concurrent.duration.*
 
-import kyo.compat.*
-
 import sage.SageException.NotCacheable
-import sage.client.internal.Client
 import sage.commands.Commands
-import sage.integration.{Eventually, Images, ServerSuite}
+import sage.integration.BothServersSuite
 
-abstract class CachingSuite(image: String) extends ServerSuite(image) {
+class CachingSuite extends BothServersSuite {
 
-  // a reader (whose cache we observe) plus a writer on a separate connection, so a write is a genuine server-side change
-  private def withReaderAndWriter[A](body: (Client[CIO, String], Client[CIO, String]) => CIO[A]): Future[A] =
-    withContainers { server =>
-      val config = configOf(server)
-      connectAndUse(config)(reader => connectAndUse(config)(writer => body(reader, writer))).unsafeRun
-    }
+  clientsTest("a repeated cached read is served locally and a server-side write evicts it via invalidation")(cachedReadIsInvalidated(_, _, "csc:key"))
 
-  // a cached read does not contact the server again. Poll until the invalidation message from an external write has been processed.
-  private def awaitCached(client: Client[CIO, String], key: String, expected: String, attempts: Int): CIO[Option[String]] =
-    Eventually.value(attempts)(() => client.cached(Commands.get[String, String](key), 1.minute))(_.contains(expected))
-
-  test("a repeated cached read is served locally and a server-side write evicts it via invalidation") {
-    withReaderAndWriter { (reader, writer) =>
-      for {
-        _       <- writer.set("csc:key", "v1")
-        first   <- reader.cached(Commands.get[String, String]("csc:key"), 1.minute) // fetch + cache
-        cached  <- reader.cached(Commands.get[String, String]("csc:key"), 1.minute) // local hit
-        _       <- writer.set("csc:key", "v2")                                      // server-side write -> invalidation push
-        evicted <- awaitCached(reader, "csc:key", "v2", attempts = 50)
-      } yield {
-        assertEquals(first, Some("v1"))
-        assertEquals(cached, Some("v1"))
-        assertEquals(evicted, Some("v2"))
-      }
-    }
-  }
-
-  test("cached rejects a non-read-only command with NotCacheable") {
-    withClient { client =>
-      client
-        .cached(Commands.set[String, String]("csc:write", "v"), 1.minute)
-        .fold(
-          _ => CIO.value(false),
-          {
-            case _: NotCacheable => CIO.value(true)
-            case _               => CIO.value(false)
-          }
-        )
-        .map(rejected => assert(rejected, "expected cached on SET to fail with NotCacheable"))
-    }
+  clientTest("cached rejects a non-read-only command with NotCacheable") { client =>
+    failsWith[NotCacheable](client.cached(Commands.set[String, String]("csc:write", "v"), 1.minute))
   }
 }
-
-class RedisCachingSuite extends CachingSuite(Images.redis)
-
-class ValkeyCachingSuite extends CachingSuite(Images.valkey)

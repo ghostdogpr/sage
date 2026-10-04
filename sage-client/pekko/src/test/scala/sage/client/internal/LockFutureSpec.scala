@@ -39,12 +39,11 @@ class LockFutureSpec extends munit.FunSuite {
             }
           ),
       Scheduler.real,
-      Vector(Connection.hello()),
       SageConfig(dedicatedPool = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 200.millis), closeTimeout = Duration.Zero),
       Vector(master),
       MasterReplicaConfig()
     )
-    live.bootstrapRoles()
+    live.start()
     val client    = new SageClient.Lowered(live)
     val checked   = for {
       error <- client
@@ -67,7 +66,7 @@ class LockFutureSpec extends munit.FunSuite {
     val continued   = Promise[Int]()
     val bodyStarted = new AtomicBoolean(false)
     val released    = new AtomicBoolean(false)
-    val commands    = new CommandRunner[CIO, String] {
+    val commands    = new SharedRunner {
       def run[A](command: Command[A]): CIO[A] = CIO.defer(()).flatMap { _ =>
         val reply = command.args(4).asUtf8String match {
           case "renew"   => if (bodyStarted.get()) 0L else 1L

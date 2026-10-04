@@ -6,7 +6,8 @@ import scala.concurrent.duration.FiniteDuration
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{Doubles, KeyCodec, ValueCodec}
+import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.Args.{Get, Nx, Xx}
 import sage.protocol.Frame
 
 /**
@@ -84,9 +85,6 @@ enum IncrExpiry {
 
 private[sage] object Strings {
 
-  private val Get          = Bytes.utf8("GET")
-  private val Nx           = Bytes.utf8("NX")
-  private val Xx           = Bytes.utf8("XX")
   private val KeepTtl      = Bytes.utf8("KEEPTTL")
   private val Persist      = Bytes.utf8("PERSIST")
   private val Len          = Bytes.utf8("LEN")
@@ -111,7 +109,7 @@ private[sage] object Strings {
     Command("DECR", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def decrBy[K](key: K, decrement: Long)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("DECRBY", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(decrement.toString)), Decode.long)
+    Command("DECRBY", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(decrement)), Decode.long)
 
   def get[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command.read("GET", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
@@ -126,7 +124,7 @@ private[sage] object Strings {
     Command.read(
       "GETRANGE",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(end.toString)),
+      Vector(keyCodec.encode(key), Args.long(start), Args.long(end)),
       Decode.value
     )
 
@@ -134,21 +132,19 @@ private[sage] object Strings {
     Command("INCR", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def incrBy[K](key: K, increment: Long)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("INCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(increment.toString)), Decode.long)
+    Command("INCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(increment)), Decode.long)
 
   def incrByFloat[K](key: K, increment: Double)(using keyCodec: KeyCodec[K]): Command[Double] =
-    Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(Doubles.format(increment))), Decode.double)
+    Command("INCRBYFLOAT", Command.FirstKey, Vector(keyCodec.encode(key), Args.double(increment)), Decode.double)
 
-  def mGet[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[V]]] = {
-    val keys = (first +: rest).iterator.map(keyCodec.encode).toVector
-    Command.read("MGET", keys.indices.toVector, keys, Decode.vector(Decode.optionalValue))
-  }
+  def mGet[K, V](first: K, rest: K*)(using KeyCodec[K], ValueCodec[V]): Command[Vector[Option[V]]] =
+    KeyArgs.allKeys("MGET", first +: rest.toVector, Decode.vector(Decode.optionalValue), readOnly = true)
 
   def mSet[K, V](first: (K, V), rest: (K, V)*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Unit] =
-    Command("MSET", msetKeyIndices(rest.size + 1), msetArgs(first +: rest.toVector), Decode.ok)
+    Command("MSET", msetKeyIndices(rest.size + 1), Args.pairs(first +: rest.toVector), Decode.ok)
 
   def mSetNx[K, V](first: (K, V), rest: (K, V)*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] =
-    Command("MSETNX", msetKeyIndices(rest.size + 1), msetArgs(first +: rest.toVector), Decode.flag)
+    Command("MSETNX", msetKeyIndices(rest.size + 1), Args.pairs(first +: rest.toVector), Decode.flag)
 
   /**
     * False when `condition` made the server skip the write.
@@ -163,11 +159,7 @@ private[sage] object Strings {
       "SET",
       Command.FirstKey,
       Vector(keyCodec.encode(key), valueCodec.encode(value)) ++ conditionArgs(condition) ++ setExpiryArgs(expiry),
-      decode = {
-        case Frame.SimpleString("OK") => Right(true)
-        case Frame.Null               => Right(false)
-        case other                    => Left(DecodeError("simple string 'OK' or null", Frame.describe(other)))
-      }
+      Decode.okOrNull
     )
 
   /**
@@ -190,7 +182,7 @@ private[sage] object Strings {
     Command(
       "SETRANGE",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(offset.toString), valueCodec.encode(value)),
+      Vector(keyCodec.encode(key), Args.long(offset), valueCodec.encode(value)),
       Decode.long
     )
 
@@ -210,8 +202,8 @@ private[sage] object Strings {
       "LCS",
       Vector(0, 1),
       Vector(keyCodec.encode(key1), keyCodec.encode(key2), Idx) ++
-        minMatchLen.toVector.flatMap(n => Vector(MinMatchLen, Bytes.utf8(n.toString))) ++
-        (if (withMatchLen) Vector(WithMatchLen) else Vector.empty),
+        Args.optLong(MinMatchLen, minMatchLen) ++
+        Args.flag(withMatchLen, WithMatchLen),
       lcsMatches
     )
 
@@ -229,11 +221,11 @@ private[sage] object Strings {
     rest: (K, V)*
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Boolean] = {
     val pairs = first +: rest.toVector
-    val data  = msetArgs(pairs)
+    val data  = Args.pairs(pairs)
     Command(
       "MSETEX",
       Vector.tabulate(pairs.size)(i => 1 + i * 2),
-      (Bytes.utf8(pairs.size.toString) +: data) ++ conditionArgs(condition) ++ setExpiryArgs(expiry),
+      (Args.long(pairs.size) +: data) ++ conditionArgs(condition) ++ setExpiryArgs(expiry),
       Decode.flag
     )
   }
@@ -249,8 +241,8 @@ private[sage] object Strings {
     Command(
       "INCREX",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ByInt, Bytes.utf8(increment.toString)) ++
-        incrExArgs(saturate, lowerBound.map(_.toString), upperBound.map(_.toString), expiry),
+      Vector(keyCodec.encode(key), ByInt, Args.long(increment)) ++
+        incrExArgs(saturate, Args.optLong(LBound, lowerBound) ++ Args.optLong(UBound, upperBound), expiry),
       incrExResultLong
     )
 
@@ -265,22 +257,19 @@ private[sage] object Strings {
     Command(
       "INCREX",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), ByFloat, Bytes.utf8(Doubles.format(increment))) ++
-        incrExArgs(saturate, lowerBound.map(Doubles.format), upperBound.map(Doubles.format), expiry),
+      Vector(keyCodec.encode(key), ByFloat, Args.double(increment)) ++
+        incrExArgs(saturate, Args.opt(LBound, lowerBound)(Args.double) ++ Args.opt(UBound, upperBound)(Args.double), expiry),
       incrExResultDouble
     )
 
-  private def incrExArgs(saturate: Boolean, lowerBound: Option[String], upperBound: Option[String], expiry: IncrExpiry): Vector[Bytes] =
-    (if (saturate) Vector(Saturate) else Vector.empty) ++
-      lowerBound.toVector.flatMap(x => Vector(LBound, Bytes.utf8(x))) ++
-      upperBound.toVector.flatMap(x => Vector(UBound, Bytes.utf8(x))) ++
-      incrExpiryArgs(expiry)
+  private def incrExArgs(saturate: Boolean, bounds: Vector[Bytes], expiry: IncrExpiry): Vector[Bytes] =
+    Args.flag(saturate, Saturate) ++ bounds ++ incrExpiryArgs(expiry)
 
   private def incrExpiryArgs(expiry: IncrExpiry): Vector[Bytes] =
     expiry match {
       case IncrExpiry.Keep                     => Vector.empty
-      case IncrExpiry.In(duration, onlyNoTtl)  => TimeArgs.relative(duration) ++ (if (onlyNoTtl) Vector(Enx) else Vector.empty)
-      case IncrExpiry.At(timestamp, onlyNoTtl) => TimeArgs.absolute(timestamp) ++ (if (onlyNoTtl) Vector(Enx) else Vector.empty)
+      case IncrExpiry.In(duration, onlyNoTtl)  => TimeArgs.relative(duration) ++ Args.flag(onlyNoTtl, Enx)
+      case IncrExpiry.At(timestamp, onlyNoTtl) => TimeArgs.absolute(timestamp) ++ Args.flag(onlyNoTtl, Enx)
       case IncrExpiry.Persist                  => Vector(Persist)
     }
 
@@ -293,50 +282,29 @@ private[sage] object Strings {
       case DelexCondition.IfDigestNe(hash) => Vector(IfDne, Bytes.utf8(hash))
     }
 
-  private val matchRange: Frame => Either[DecodeError, MatchRange] = {
+  private val matchRange: Frame => Either[DecodeError, MatchRange] = Decode.shape("match range [start, end]") {
     case Frame.Array(Vector(Frame.Integer(start), Frame.Integer(end))) => Right(MatchRange(start, end))
-    case other                                                         => Left(DecodeError("match range [start, end]", Frame.describe(other)))
   }
 
-  private val lcsMatch: Frame => Either[DecodeError, LcsMatch] = {
-    case Frame.Array(Vector(a, b))                     =>
-      for {
-        ar <- matchRange(a)
-        br <- matchRange(b)
-      } yield LcsMatch(ar, br, None)
-    case Frame.Array(Vector(a, b, Frame.Integer(len))) =>
-      for {
-        ar <- matchRange(a)
-        br <- matchRange(b)
-      } yield LcsMatch(ar, br, Some(len))
-    case other                                         => Left(DecodeError("lcs match", Frame.describe(other)))
+  private val lcsMatch: Frame => Either[DecodeError, LcsMatch] = Decode.shape("lcs match") {
+    case Frame.Array(Vector(a, b))                     => matchRange(a).flatMap(ar => matchRange(b).map(LcsMatch(ar, _, None)))
+    case Frame.Array(Vector(a, b, Frame.Integer(len))) => matchRange(a).flatMap(ar => matchRange(b).map(LcsMatch(ar, _, Some(len))))
   }
 
-  private val lcsMatches: Frame => Either[DecodeError, LcsMatches] = {
-    case Frame.Map(entries) =>
-      val lookup = entries.collect { case (Frame.BulkString(name), value) => name.asUtf8String -> value }.toMap
+  private val lcsMatches: Frame => Either[DecodeError, LcsMatches] =
+    Decode.fields { f =>
       for {
-        matchesFrame <- lookup.get("matches").toRight(DecodeError("lcs idx 'matches' field", "map without 'matches'"))
-        lenFrame     <- lookup.get("len").toRight(DecodeError("lcs idx 'len' field", "map without 'len'"))
-        matches      <- Decode.vector(lcsMatch)(matchesFrame)
-        len          <- Decode.long(lenFrame)
+        matches <- f.required("matches", Decode.vector(lcsMatch))
+        len     <- f.required("len", Decode.long)
       } yield LcsMatches(matches, len)
-    case other              => Left(DecodeError("lcs idx map", Frame.describe(other)))
-  }
+    }
 
-  private val incrExResultLong: Frame => Either[DecodeError, IncrExResult[Long]] = {
+  private val incrExResultLong: Frame => Either[DecodeError, IncrExResult[Long]] = Decode.shape("INCREX [value, applied] integers") {
     case Frame.Array(Vector(Frame.Integer(value), Frame.Integer(applied))) => Right(IncrExResult(value, applied))
-    case other                                                             => Left(DecodeError("INCREX [value, applied] integers", Frame.describe(other)))
   }
 
-  private val incrExResultDouble: Frame => Either[DecodeError, IncrExResult[Double]] = {
-    case Frame.Array(Vector(valueFrame, appliedFrame)) =>
-      for {
-        value   <- Decode.score(valueFrame)
-        applied <- Decode.score(appliedFrame)
-      } yield IncrExResult(value, applied)
-    case other                                         => Left(DecodeError("INCREX [value, applied] doubles", Frame.describe(other)))
-  }
+  private val incrExResultDouble: Frame => Either[DecodeError, IncrExResult[Double]] =
+    Decode.array2(Decode.double, Decode.double, "INCREX [value, applied] doubles")(IncrExResult(_, _))
 
   private def conditionArgs(condition: SetCondition): Vector[Bytes] =
     condition match {
@@ -360,9 +328,6 @@ private[sage] object Strings {
       case GetExpiry.At(timestamp) => TimeArgs.absolute(timestamp)
       case GetExpiry.Persist       => Vector(Persist)
     }
-
-  private def msetArgs[K, V](pairs: Vector[(K, V)])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Vector[Bytes] =
-    pairs.flatMap { case (key, value) => Vector(keyCodec.encode(key), valueCodec.encode(value)) }
 
   private def msetKeyIndices(pairs: Int): Vector[Int] = Vector.tabulate(pairs)(_ * 2)
 }

@@ -1,144 +1,33 @@
 package sage.integration
 
-import scala.concurrent.duration.*
-
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
+import kyo.compat.*
+import munit.{Location, TestOptions}
 
 import sage.*
 import sage.backend.*
 
-class CeSmokeSuite extends ServerSuite(Images.redis) {
+class CeSmokeSuite extends SmokeSuite {
 
-  private def withNativeClient(body: SageClient => IO[Unit]): Unit =
-    withContainers(server => SageClient.resource(configOf(server)).use(body).unsafeRunSync())
+  private def nativeTest(options: TestOptions)(body: SageClient => IO[Unit])(using Location): Unit =
+    test(options)(withContainers(server => SageClient.resource(configOf(server)).use(body).unsafeRunSync()))
 
-  test("a distributed lock scopes native effects and skips contended bodies") {
-    withNativeClient { client =>
-      val locks     = client.lock[String]()
-      var evaluated = false
-      for {
-        busy     <- locks.withLock("native-lock", 2.seconds) {
-                      locks.tryWithLock("native-lock") {
-                        evaluated = true
-                        client.ping()
-                      }
-                    }
-        acquired <- locks.tryWithLock("native-lock")(client.ping())
-      } yield {
-        assertEquals(busy, None)
-        assertEquals(acquired, Some("PONG"))
-        assert(!evaluated)
-      }
-    }
+  private val lift: [A] => IO[A] => CIO[A] = [A] => (io: IO[A]) => CIO.lift(io)
+
+  nativeTest("a distributed lock scopes native effects and skips contended bodies")(lockScopesNativeEffects(_)(lift).lower)
+
+  nativeTest("scanAll streams every key as a native fs2 Stream") { client =>
+    scanAllFindsEveryKey(client)(lift)(client.scanAll(pattern = Some("scan-*"), count = Some(10L)).compile.toVector).lower
   }
 
-  test("an end user connects and round-trips with native Cats Effect") {
-    withNativeClient { client =>
+  nativeTest("subscribe delivers published messages as a native fs2 Stream") { client =>
+    client.subscribeResource[String]("smoke").use { stream =>
       for {
-        pong   <- client.ping()
-        _      <- (1 to 50).toList.parTraverse_(i => client.set(s"key-$i", s"value-$i"))
-        values <- (1 to 50).toList.parTraverse(i => client.get[String](s"key-$i"))
-      } yield {
-        assertEquals(pong, "PONG")
-        assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
-      }
-    }
-  }
-
-  test("a pipeline returns a typed tuple natively, surfacing failures per position") {
-    withNativeClient { client =>
-      for {
-        _       <- client.set("pipe:a", "x")
-        _       <- client.set("pipe:n", 10)
-        out     <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)))
-        _       <- client.set("pipe:str", "hello")
-        attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")))
-      } yield {
-        assertEquals(out, (Some("x"), 15L))
-        assert(attempt._1 == Right(Some("hello")), attempt._1)
-        assert(attempt._2.isLeft, attempt._2)
-      }
-    }
-  }
-
-  test("a transaction commits atomically with native Cats Effect, guarded by WATCH") {
-    withNativeClient { client =>
-      for {
-        _   <- client.set("tx:n", 1)
-        out <- client.transaction { tx =>
-                 for {
-                   _   <- tx.watch("tx:n")
-                   _   <- tx.get[Int]("tx:n")
-                   res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)))
-                 } yield res
-               }
-      } yield assertEquals(out, Some((2L, 6L)))
-    }
-  }
-
-  test("scanAll streams every key as a native fs2 Stream") {
-    withNativeClient { client =>
-      for {
-        _    <- (1 to 50).toList.parTraverse_(i => client.set(s"scan-$i", "v"))
-        keys <- client.scanAll(pattern = Some("scan-*"), count = Some(10L)).compile.toVector
-      } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
-    }
-  }
-
-  test("subscribe delivers published messages as a native fs2 Stream") {
-    withNativeClient { client =>
-      client.subscribeResource[String]("smoke").use { stream =>
-        for {
-          _        <- (1 to 3).toList.traverse_(i => client.publish("smoke", s"m$i"))
-          messages <- stream.take(3).compile.toVector
-        } yield {
-          assertEquals(messages.map(_.channel).toSet, Set("smoke"))
-          assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
-        }
-      }
-    }
-  }
-
-  test("hScanAll streams every field/value pair as a native fs2 Stream") {
-    withNativeClient { client =>
-      for {
-        _     <- (1 to 50).toList.parTraverse_(i => client.hSet("hscan", (s"f$i", s"v$i")))
-        pairs <- client.hScanAll[String, String]("hscan", count = Some(10L)).compile.toVector
-      } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
-    }
-  }
-
-  test("sScanAll streams every member as a native fs2 Stream") {
-    withNativeClient { client =>
-      for {
-        _       <- (1 to 50).toList.parTraverse_(i => client.sAdd("sscan", s"m$i"))
-        members <- client.sScanAll[String]("sscan", count = Some(10L)).compile.toVector
-      } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
-    }
-  }
-
-  test("zScanAll streams every member/score pair as a native fs2 Stream") {
-    withNativeClient { client =>
-      for {
-        _     <- (1 to 50).toList.parTraverse_(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
-        pairs <- client.zScanAll[String]("zscan", count = Some(10L)).compile.toVector
-      } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
-    }
-  }
-
-  test("client.rateLimiter admits up to capacity then denies") {
-    withNativeClient { client =>
-      val rl = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = 1.hour))
-      for {
-        first  <- rl.tryAcquire("smoke")
-        second <- rl.tryAcquire("smoke")
-        denied <- rl.tryAcquire("smoke")
-      } yield {
-        assert(first.isAllowed && second.isAllowed, "the first two are admitted")
-        assert(!denied.isAllowed, "the third is denied once the bucket empties")
-      }
+        _        <- (1 to 3).toList.traverse_(i => client.publish("smoke", s"m$i"))
+        messages <- stream.take(3).compile.toVector
+      } yield assertEquals(messages.toList, List("m1", "m2", "m3").map(Message("smoke", _)))
     }
   }
 }

@@ -65,20 +65,20 @@ class RateLimiterSpec extends munit.FunSuite {
     assert(command.args.head.sameBytes(Bytes.utf8("9:ratelimit:u")))
   }
 
-  test("evalSha builds an EVALSHA command carrying the script sha") {
-    val command = limiter.evalSha("u", 1)
+  test("a cached eval builds an EVALSHA command carrying the script sha") {
+    val command = limiter.eval(cached = true, "u", 1, peek = false)
     assertEquals(command.name, "EVALSHA")
-    assertEquals(command.args.head.asUtf8String, RateLimiter.sha)
+    assertEquals(command.args.head.asUtf8String, RateLimiter.compiled.sha)
     assertEquals(command.keyIndices, Vector(2))
   }
 
-  test("evalScript is a keyed EVAL carrying the script body, and sha is a 40-char hex digest") {
-    val command = limiter.evalScript("u", 1, peek = false)
+  test("an uncached eval is a keyed EVAL carrying the script body, and sha is a 40-char hex digest") {
+    val command = limiter.eval(cached = false, "u", 1, peek = false)
     assertEquals(command.name, "EVAL")
     assertEquals(command.args.head.asUtf8String, RateLimiter.script)
     assertEquals(command.keyIndices, Vector(2))
-    assertEquals(RateLimiter.sha.length, 40)
-    assert(RateLimiter.sha.forall(c => c.isDigit || ('a' to 'f').contains(c)))
+    assertEquals(RateLimiter.compiled.sha.length, 40)
+    assert(RateLimiter.compiled.sha.forall(c => c.isDigit || ('a' to 'f').contains(c)))
   }
 
   test("a Decision reports whether it admitted and how many tokens are left") {

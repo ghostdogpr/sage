@@ -6,6 +6,8 @@ import scala.concurrent.duration.*
 
 import sage.Bytes
 import sage.SageException.DecodeError
+import sage.codec.Primitives
+import sage.commands.Args.{Count, Get}
 import sage.protocol.Frame
 
 /**
@@ -17,7 +19,8 @@ enum FlushMode {
 }
 
 object FlushMode {
-  private[commands] def args(mode: Option[FlushMode]): Vector[Bytes] = mode.map(m => Bytes.utf8(m.toString.toUpperCase)).toVector
+  private val word                                                   = Args.keywords(FlushMode.values)
+  private[commands] def args(mode: Option[FlushMode]): Vector[Bytes] = mode.map(word).toVector
 }
 
 /**
@@ -106,7 +109,6 @@ enum CommandFilterBy {
   */
 private[sage] object Server {
 
-  private val Get             = Bytes.utf8("GET")
   private val Set             = Bytes.utf8("SET")
   private val Usage           = Bytes.utf8("USAGE")
   private val Samples         = Bytes.utf8("SAMPLES")
@@ -116,7 +118,6 @@ private[sage] object Server {
   private val Latest          = Bytes.utf8("LATEST")
   private val Reset           = Bytes.utf8("RESET")
   private val Histogram       = Bytes.utf8("HISTOGRAM")
-  private val Count           = Bytes.utf8("COUNT")
   private val ListCmd         = Bytes.utf8("LIST")
   private val GetKeys         = Bytes.utf8("GETKEYS")
   private val GetKeysAndFlags = Bytes.utf8("GETKEYSANDFLAGS")
@@ -125,17 +126,16 @@ private[sage] object Server {
   private val Module          = Bytes.utf8("MODULE")
   private val AclCat          = Bytes.utf8("ACLCAT")
   private val PatternWord     = Bytes.utf8("PATTERN")
-  private val ClInfo          = Bytes.utf8("INFO")
   private val ClNodes         = Bytes.utf8("NODES")
   private val ClMyId          = Bytes.utf8("MYID")
   private val ClKeySlot       = Bytes.utf8("KEYSLOT")
   private val ClCountKeys     = Bytes.utf8("COUNTKEYSINSLOT")
 
   def configGet(parameter: String, rest: String*): Command[Map[String, String]] =
-    Command("CONFIG", Command.NoKeys, Get +: (parameter +: rest).iterator.map(Bytes.utf8).toVector, decodeStringMap)
+    Command("CONFIG", Command.NoKeys, Get +: (parameter +: rest).iterator.map(Bytes.utf8).toVector, Decode.fieldValues(Decode.text))
 
   def configSet(setting: (String, String), rest: (String, String)*): Command[Unit] =
-    Command("CONFIG", Command.NoKeys, Set +: (setting +: rest).flatMap { case (k, v) => Vector(Bytes.utf8(k), Bytes.utf8(v)) }.toVector, Decode.ok)
+    Command("CONFIG", Command.NoKeys, Set +: Args.pairs(setting +: rest.toVector), Decode.ok)
 
   def info(sections: String*): Command[String] =
     Command("INFO", Command.NoKeys, sections.iterator.map(Bytes.utf8).toVector, Decode.text)
@@ -156,39 +156,32 @@ private[sage] object Server {
       "TIME",
       Command.NoKeys,
       Vector.empty,
-      {
-        case Frame.Array(Vector(Frame.BulkString(sec), Frame.BulkString(micros))) =>
-          for {
-            s <- sec.asUtf8String.toLongOption.toRight(DecodeError("epoch seconds", sec.asUtf8String))
-            u <- micros.asUtf8String.toLongOption.toRight(DecodeError("microseconds", micros.asUtf8String))
-          } yield Instant.ofEpochSecond(s, u * 1000L)
-        case other                                                                => Left(DecodeError("TIME [seconds, microseconds]", Frame.describe(other)))
-      }
+      Decode.array2(Decode.decimal("epoch seconds"), Decode.decimal("microseconds"), "TIME [seconds, microseconds]")((s, u) =>
+        Instant.ofEpochSecond(s, u * 1000L)
+      )
     )
 
-  private val decodeRole: Frame => Either[DecodeError, Role] = {
-    case Frame.Array(Frame.BulkString(kind) +: rest) =>
-      kind.asUtf8String match {
-        case "master"   =>
-          rest match {
-            case Frame.Integer(offset) +: replicasFrame +: _ => decodeReplicas(replicasFrame).map(Role.Master(offset, _))
-            case other                                       => Left(DecodeError("master role [offset, replicas]", other.map(Frame.describe).mkString(", ")))
-          }
-        case "slave"    =>
-          rest match {
-            case Vector(Frame.BulkString(host), Frame.Integer(port), Frame.BulkString(state), Frame.Integer(offset)) =>
-              decodePort(port).map(Role.Replica(host.asUtf8String, _, state.asUtf8String, offset))
-            case other                                                                                               =>
-              Left(DecodeError("replica role [host, port, state, offset]", other.map(Frame.describe).mkString(", ")))
-          }
-        case "sentinel" =>
-          rest.headOption match {
-            case Some(masters) => Decode.vector(Decode.utf8String)(masters).map(Role.Sentinel(_))
-            case None          => Left(DecodeError("sentinel role [masterNames]", "empty"))
-          }
-        case other      => Left(DecodeError("role master|slave|sentinel", other))
-      }
-    case other                                       => Left(DecodeError("ROLE array", Frame.describe(other)))
+  private val decodeRole: Frame => Either[DecodeError, Role] = Decode.shape("ROLE array") { case Frame.Array(Frame.BulkString(kind) +: rest) =>
+    kind.asUtf8String match {
+      case "master"   =>
+        rest match {
+          case Frame.Integer(offset) +: replicasFrame +: _ => decodeReplicas(replicasFrame).map(Role.Master(offset, _))
+          case other                                       => Left(DecodeError("master role [offset, replicas]", other.map(Frame.describe).mkString(", ")))
+        }
+      case "slave"    =>
+        rest match {
+          case Vector(Frame.BulkString(host), Frame.Integer(port), Frame.BulkString(state), Frame.Integer(offset)) =>
+            decodePort(port).map(Role.Replica(host.asUtf8String, _, state.asUtf8String, offset))
+          case other                                                                                               =>
+            Left(DecodeError("replica role [host, port, state, offset]", other.map(Frame.describe).mkString(", ")))
+        }
+      case "sentinel" =>
+        rest.headOption match {
+          case Some(masters) => Decode.vector(Decode.utf8String)(masters).map(Role.Sentinel(_))
+          case None          => Left(DecodeError("sentinel role [masterNames]", "empty"))
+        }
+      case other      => Left(DecodeError("role master|slave|sentinel", other))
+    }
   }
 
   val role: Command[Role] = Command("ROLE", Command.NoKeys, Vector.empty, decodeRole)
@@ -199,38 +192,35 @@ private[sage] object Server {
   def flushDb(mode: Option[FlushMode] = None): Command[Unit]  =
     Command("FLUSHDB", Command.NoKeys, FlushMode.args(mode), Decode.ok, allMasters = true)
 
-  private val waitAofMin: (Frame, Frame) => Frame = (a, b) =>
-    (a, b) match {
-      case (Frame.Array(Vector(Frame.Integer(l1), Frame.Integer(r1))), Frame.Array(Vector(Frame.Integer(l2), Frame.Integer(r2)))) =>
-        Frame.Array(Vector(Frame.Integer(math.min(l1, l2)), Frame.Integer(math.min(r1, r2))))
-      case (Frame.Array(Vector(Frame.Integer(_), Frame.Integer(_))), bad)                                                         => bad
-      case (bad, _)                                                                                                               => bad
-    }
-
   // WAIT and WAITAOF interpret an encoded timeout of 0 as an unlimited wait. Encode Duration.Zero as 0. Round every other duration, including
-  // a negative one, up to at least 1 ms so a sub-millisecond timeout remains finite. This matches BlockTimeout.millisWire.
-  private def waitTimeoutMillis(timeout: FiniteDuration): Long =
-    if (timeout == Duration.Zero) 0L else Math.max(1L, Math.ceilDiv(timeout.toNanos, 1000000L))
+  // a negative one, up to at least 1 ms so a sub-millisecond timeout remains finite.
+  private def waitTimeout(timeout: FiniteDuration): Bytes =
+    BlockTimeout.millisWire(if (timeout == Duration.Zero) BlockTimeout.Forever else BlockTimeout.After(timeout))
 
   def waitReplicas(numReplicas: Long, timeout: FiniteDuration): Command[Long] =
     Command(
       "WAIT",
       Command.NoKeys,
-      Vector(Bytes.utf8(numReplicas.toString), Bytes.utf8(waitTimeoutMillis(timeout).toString)),
+      Vector(Args.long(numReplicas), waitTimeout(timeout)),
       Decode.long,
       allMasters = true,
       broadcast = BroadcastReduce.Fold(Merge.min)
     )
 
+  private val waitAofReply = Decode.shape("WAITAOF [numlocal, numreplicas]") {
+    case Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas))) => Right((local, replicas))
+  }
+
+  private val waitAofMin = Merge.typed[(Long, Long)](waitAofReply, (l, r) => Frame.Array(Vector(Frame.Integer(l), Frame.Integer(r)))) {
+    case ((l1, r1), (l2, r2)) => (math.min(l1, l2), math.min(r1, r2))
+  }
+
   def waitAof(numLocal: Long, numReplicas: Long, timeout: FiniteDuration): Command[(Long, Long)] =
     Command(
       "WAITAOF",
       Command.NoKeys,
-      Vector(numLocal, numReplicas, waitTimeoutMillis(timeout)).map(n => Bytes.utf8(n.toString)),
-      {
-        case Frame.Array(Vector(Frame.Integer(local), Frame.Integer(replicas))) => Right((local, replicas))
-        case other                                                              => Left(DecodeError("WAITAOF [numlocal, numreplicas]", Frame.describe(other)))
-      },
+      Vector(Args.long(numLocal), Args.long(numReplicas), waitTimeout(timeout)),
+      waitAofReply,
       allMasters = true,
       broadcast = BroadcastReduce.Fold(waitAofMin)
     )
@@ -239,21 +229,21 @@ private[sage] object Server {
     Command(
       "MEMORY",
       Vector(1),
-      Vector(Usage, keyCodec.encode(key)) ++ samples.toVector.flatMap(n => Vector(Samples, Bytes.utf8(n.toString))),
+      Vector(Usage, keyCodec.encode(key)) ++ Args.optLong(Samples, samples),
       Decode.optionalLong
     )
 
   val memoryPurge: Command[Unit] = Command("MEMORY", Command.NoKeys, Vector(Purge), Decode.ok, allMasters = true)
 
   def slowLogGet(count: Option[Long] = None): Command[Vector[SlowLogEntry]] =
-    Command("SLOWLOG", Command.NoKeys, Get +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeSlowLog))
+    Command("SLOWLOG", Command.NoKeys, Get +: count.map(n => Args.long(n)).toVector, Decode.vector(decodeSlowLog))
 
   val slowLogLen: Command[Long]   = Command("SLOWLOG", Command.NoKeys, Vector(SlowLen), Decode.long)
   val slowLogReset: Command[Unit] = Command("SLOWLOG", Command.NoKeys, Vector(Reset), Decode.ok)
 
   // `count` of -1 returns every entry of the type
   def commandLogGet(count: Long, logType: CommandLogType): Command[Vector[CommandLogEntry]] =
-    Command("COMMANDLOG", Command.NoKeys, Vector(Get, Bytes.utf8(count.toString), CommandLogType.wire(logType)), Decode.vector(decodeCommandLog))
+    Command("COMMANDLOG", Command.NoKeys, Vector(Get, Args.long(count), CommandLogType.wire(logType)), Decode.vector(decodeCommandLog))
 
   def commandLogLen(logType: CommandLogType): Command[Long] =
     Command("COMMANDLOG", Command.NoKeys, Vector(SlowLen, CommandLogType.wire(logType)), Decode.long)
@@ -263,6 +253,11 @@ private[sage] object Server {
 
   def latencyHistory(event: String): Command[Vector[(Instant, FiniteDuration)]] =
     Command("LATENCY", Command.NoKeys, Vector(History, Bytes.utf8(event)), Decode.vector(decodeLatencyHistory))
+
+  private val decodeLatencyLatest: Frame => Either[DecodeError, LatencyEntry] = Decode.shape("latency latest [event, ts, latest, max]") {
+    case Frame.Array(Vector(Frame.BulkString(event), Frame.Integer(ts), Frame.Integer(latest), Frame.Integer(max))) =>
+      Right(LatencyEntry(event.asUtf8String, Instant.ofEpochSecond(ts), latest.millis, max.millis))
+  }
 
   val latencyLatest: Command[Vector[LatencyEntry]] = Command("LATENCY", Command.NoKeys, Vector(Latest), Decode.vector(decodeLatencyLatest))
 
@@ -293,7 +288,7 @@ private[sage] object Server {
 
   // --- cluster introspection (read-only; operator/mutation commands are deliberately not exposed) ----------------------------------------
 
-  val clusterInfo: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClInfo), Decode.text)
+  val clusterInfo: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(Info), Decode.text)
   val clusterNodes: Command[String] = Command("CLUSTER", Command.NoKeys, Vector(ClNodes), Decode.text)
   val clusterMyId: Command[String]  = Command("CLUSTER", Command.NoKeys, Vector(ClMyId), Decode.text)
 
@@ -301,20 +296,9 @@ private[sage] object Server {
     Command("CLUSTER", Command.NoKeys, Vector(ClKeySlot, Bytes.utf8(key)), Decode.long)
 
   def clusterCountKeysInSlot(slot: Int): Command[Long] =
-    Command("CLUSTER", Command.NoKeys, Vector(ClCountKeys, Bytes.utf8(slot.toString)), Decode.long)
+    Command("CLUSTER", Command.NoKeys, Vector(ClCountKeys, Args.long(slot)), Decode.long)
 
   // --- decoders --------------------------------------------------------------------------------------------------------------------------
-
-  private val decodeStringMap: Frame => Either[DecodeError, Map[String, String]] =
-    frame =>
-      Decode.fieldMap(frame).flatMap { fields =>
-        fields.foldLeft[Either[DecodeError, Map[String, String]]](Right(Map.empty)) { case (acc, (name, valueFrame)) =>
-          for {
-            map   <- acc
-            value <- Decode.text(valueFrame)
-          } yield map + (name -> value)
-        }
-      }
 
   private def filterByArgs(filterBy: Option[CommandFilterBy]): Vector[Bytes] =
     filterBy match {
@@ -327,81 +311,47 @@ private[sage] object Server {
   private def decodePort(value: Long): Either[DecodeError, Int] =
     if (value >= 1L && value <= 65535L) Right(value.toInt) else Left(DecodeError("port in 1..65535", value.toString))
 
-  private def decodeReplicas(frame: Frame): Either[DecodeError, Vector[ReplicaNode]] =
-    Decode.vector {
-      case Frame.Array(Vector(Frame.BulkString(host), Frame.BulkString(port), Frame.BulkString(offset))) =>
-        for {
-          p <- port.asUtf8String.toLongOption.toRight(DecodeError("replica port", port.asUtf8String)).flatMap(decodePort)
-          o <- offset.asUtf8String.toLongOption.toRight(DecodeError("replica offset", offset.asUtf8String))
-        } yield ReplicaNode(host.asUtf8String, p, o)
-      case other                                                                                         => Left(DecodeError("replica [host, port, offset]", Frame.describe(other)))
-    }(frame)
+  private val decodeReplicas: Frame => Either[DecodeError, Vector[ReplicaNode]] = Decode.vector(Decode.shape("replica [host, port, offset]") {
+    case Frame.Array(Vector(Frame.BulkString(host), Frame.BulkString(port), Frame.BulkString(offset))) =>
+      for {
+        p <- Primitives.decodeLong("replica port in 1..65535", 1L, 65535L)(port)
+        o <- Primitives.decodeLong("replica offset", Long.MinValue, Long.MaxValue)(offset)
+      } yield ReplicaNode(host.asUtf8String, p.toInt, o)
+  })
 
-  // SLOWLOG GET and COMMANDLOG GET share this trailing [clientAddr, clientName] shape, absent on servers older than 4.0
-  private def clientFields(tail: Vector[Frame]): (String, String) = {
-    val addr = tail.headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
-    val name = tail.drop(1).headOption.collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
-    (addr, name)
+  // SLOWLOG GET and COMMANDLOG GET entries: [id, timestamp, metric, args, clientAddr, clientName]; the client fields are absent on servers
+  // older than 4.0
+  private def logEntry[A](label: String)(build: (Long, Instant, Long, Vector[String], String, String) => A): Frame => Either[DecodeError, A] =
+    Decode.shape(label) { case Frame.Array(Frame.Integer(id) +: Frame.Integer(ts) +: Frame.Integer(metric) +: argsFrame +: tail) =>
+      Decode.vector(Decode.utf8String)(argsFrame).map { command =>
+        def client(i: Int) = tail.lift(i).collect { case Frame.BulkString(b) => b.asUtf8String }.getOrElse("")
+        build(id, Instant.ofEpochSecond(ts), metric, command, client(0), client(1))
+      }
+    }
+
+  private val decodeSlowLog: Frame => Either[DecodeError, SlowLogEntry] =
+    logEntry("slowlog entry")((id, ts, micros, command, addr, name) => SlowLogEntry(id, ts, micros.micros, command, addr, name))
+
+  private val decodeCommandLog: Frame => Either[DecodeError, CommandLogEntry] = logEntry("commandlog entry")(CommandLogEntry(_, _, _, _, _, _))
+
+  private val decodeLatencyHistory: Frame => Either[DecodeError, (Instant, FiniteDuration)] = Decode.shape("latency history [ts, latency]") {
+    case Frame.Array(Vector(Frame.Integer(ts), Frame.Integer(latency))) => Right((Instant.ofEpochSecond(ts), latency.millis))
   }
 
-  private def decodeSlowLog(frame: Frame): Either[DecodeError, SlowLogEntry] =
-    frame match {
-      case Frame.Array(Frame.Integer(id) +: Frame.Integer(ts) +: Frame.Integer(micros) +: argsFrame +: tail) =>
-        Decode.vector(Decode.utf8String)(argsFrame).map { command =>
-          val (addr, name) = clientFields(tail)
-          SlowLogEntry(id, Instant.ofEpochSecond(ts), micros.micros, command, addr, name)
-        }
-      case other                                                                                             => Left(DecodeError("slowlog entry", Frame.describe(other)))
-    }
-
-  private def decodeCommandLog(frame: Frame): Either[DecodeError, CommandLogEntry] =
-    frame match {
-      case Frame.Array(Frame.Integer(id) +: Frame.Integer(ts) +: Frame.Integer(metric) +: argsFrame +: tail) =>
-        Decode.vector(Decode.utf8String)(argsFrame).map { command =>
-          val (addr, name) = clientFields(tail)
-          CommandLogEntry(id, Instant.ofEpochSecond(ts), metric, command, addr, name)
-        }
-      case other                                                                                             => Left(DecodeError("commandlog entry", Frame.describe(other)))
-    }
-
-  private def decodeLatencyLatest(frame: Frame): Either[DecodeError, LatencyEntry] =
-    frame match {
-      case Frame.Array(Vector(Frame.BulkString(event), Frame.Integer(ts), Frame.Integer(latest), Frame.Integer(max))) =>
-        Right(LatencyEntry(event.asUtf8String, Instant.ofEpochSecond(ts), latest.millis, max.millis))
-      case other                                                                                                      =>
-        Left(DecodeError("latency latest [event, ts, latest, max]", Frame.describe(other)))
-    }
-
-  private def decodeLatencyHistory(frame: Frame): Either[DecodeError, (Instant, FiniteDuration)] =
-    frame match {
-      case Frame.Array(Vector(Frame.Integer(ts), Frame.Integer(latency))) => Right((Instant.ofEpochSecond(ts), latency.millis))
-      case other                                                          => Left(DecodeError("latency history [ts, latency]", Frame.describe(other)))
-    }
-
   private val decodeHistograms: Frame => Either[DecodeError, Map[String, CommandHistogram]] = {
-    case Frame.Map(entries) =>
-      entries.foldLeft[Either[DecodeError, Map[String, CommandHistogram]]](Right(Map.empty)) { case (acc, (nameFrame, statsFrame)) =>
-        for {
-          map  <- acc
-          name <- Decode.utf8String(nameFrame)
-          hist <- decodeHistogram(statsFrame)
-        } yield map + (name -> hist)
-      }
-    case other              => Left(DecodeError("latency histogram map", Frame.describe(other)))
+    val entry = Decode.pair(Decode.utf8String, decodeHistogram).tupled
+    Decode.shape("latency histogram map") { case Frame.Map(entries) => Decode.mapEntries(entries)(entry) }
   }
 
   private def decodeHistogram(frame: Frame): Either[DecodeError, CommandHistogram] =
-    frame match {
-      case Frame.Map(entries) =>
-        val fields  = entries.collect { case (Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap
-        val calls   = fields.get("calls").collect { case Frame.Integer(n) => n }.getOrElse(0L)
-        val buckets = fields.get("histogram_usec") match {
-          case Some(Frame.Map(bs)) =>
-            bs.collect { case (Frame.Integer(bucket), Frame.Integer(count)) => bucket -> count }.toMap
-          case _                   => Map.empty[Long, Long]
-        }
-        Right(CommandHistogram(calls, buckets))
-      case other              => Left(DecodeError("command histogram map", Frame.describe(other)))
+    Decode.fieldMap(frame).map { fields =>
+      val calls   = fields.get("calls").collect { case Frame.Integer(n) => n }.getOrElse(0L)
+      val buckets = fields.get("histogram_usec") match {
+        case Some(Frame.Map(bs)) =>
+          bs.collect { case (Frame.Integer(bucket), Frame.Integer(count)) => bucket -> count }.toMap
+        case _                   => Map.empty[Long, Long]
+      }
+      CommandHistogram(calls, buckets)
     }
 
   // a server may frame a flag list as a RESP3 Set or an Array
@@ -411,40 +361,25 @@ private[sage] object Server {
       case other               => Decode.vector(Decode.text)(other)
     }
 
-  private def decodeKeyAndFlags(frame: Frame): Either[DecodeError, (String, Set[String])] =
-    frame match {
-      case Frame.Array(Vector(Frame.BulkString(key), flagsFrame)) =>
-        stringSeq(flagsFrame).map(flags => key.asUtf8String -> flags.toSet)
-      case other                                                  => Left(DecodeError("[key, [flags]]", Frame.describe(other)))
-    }
-
-  // COMMAND INFO yields one element per requested name; an unknown name is a null element, dropped here
-  private val decodeCommandInfos: Frame => Either[DecodeError, Vector[CommandInfo]] = {
-    case Frame.Array(elements) =>
-      elements.foldLeft[Either[DecodeError, Vector[CommandInfo]]](Right(Vector.empty)) { (acc, element) =>
-        acc.flatMap { infos =>
-          element match {
-            case Frame.Null => Right(infos)
-            case other      => decodeCommandInfo(other).map(infos :+ _)
-          }
-        }
-      }
-    case other                 => Left(DecodeError("COMMAND INFO array", Frame.describe(other)))
+  private val decodeKeyAndFlags: Frame => Either[DecodeError, (String, Set[String])] = Decode.shape("[key, [flags]]") {
+    case Frame.Array(Vector(Frame.BulkString(key), flagsFrame)) => stringSeq(flagsFrame).map(flags => key.asUtf8String -> flags.toSet)
   }
 
-  private def decodeCommandInfo(frame: Frame): Either[DecodeError, CommandInfo] =
-    frame match {
-      case Frame.Array(
-            Frame.BulkString(name) +: Frame.Integer(arity) +: flagsFrame +: Frame.Integer(firstKey) +: Frame.Integer(lastKey) +: Frame.Integer(
-              step
-            ) +: tail
-          ) =>
-        for {
-          flags <- stringSeq(flagsFrame)
-          acl   <- tail.headOption.fold[Either[DecodeError, Vector[String]]](Right(Vector.empty))(stringSeq)
-        } yield CommandInfo(name.asUtf8String, arity, flags.toSet, firstKey.toInt, lastKey.toInt, step.toInt, acl.toSet)
-      case other =>
-        Left(DecodeError("command info entry", Frame.describe(other)))
-    }
+  // COMMAND INFO yields one element per requested name; an unknown name is a null element, dropped here
+  private val decodeCommandInfos: Frame => Either[DecodeError, Vector[CommandInfo]] = Decode.shape("COMMAND INFO array") {
+    case Frame.Array(elements) => Decode.each(elements)(Decode.nullable(decodeCommandInfo)).map(_.flatten)
+  }
+
+  private val decodeCommandInfo: Frame => Either[DecodeError, CommandInfo] = Decode.shape("command info entry") {
+    case Frame.Array(
+          Frame.BulkString(name) +: Frame.Integer(arity) +: flagsFrame +: Frame.Integer(firstKey) +: Frame.Integer(lastKey) +: Frame.Integer(
+            step
+          ) +: tail
+        ) =>
+      for {
+        flags <- stringSeq(flagsFrame)
+        acl   <- tail.headOption.fold[Either[DecodeError, Vector[String]]](Right(Vector.empty))(stringSeq)
+      } yield CommandInfo(name.asUtf8String, arity, flags.toSet, firstKey.toInt, lastKey.toInt, step.toInt, acl.toSet)
+  }
 
 }

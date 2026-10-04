@@ -16,11 +16,6 @@ private[sage] object Slot {
     */
   def at(index: Int): Option[Slot] = if (index >= 0 && index < Count) Some(index) else None
 
-  /**
-    * Wrap an index already known in range (a hash modulo, a validated bound). Unchecked: out-of-range breaks topology lookup.
-    */
-  private[sage] def unsafe(index: Int): Slot = index
-
   def of(key: Bytes): Slot = {
     val bytes = key.unsafeArray // read-only; CRC16 never mutates
     val open  = indexOf(bytes, '{'.toByte, 0)

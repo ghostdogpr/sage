@@ -8,7 +8,7 @@ import Replies.bulk
 
 import sage.Bytes
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
-import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, CacheConfig, DedicatedPoolConfig, SageConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.{BlockTimeout, Connection, Lists, Server}
 import sage.protocol.Frame
@@ -17,32 +17,28 @@ class DedicatedPoolSpec extends munit.FunSuite {
 
   private val popReply: Frame = Frame.Array(Vector(bulk("k"), bulk("v")))
 
-  // HELLO always answers so the bootstrap succeeds; the blocking command's reply is the test's to script
-  private def replyWith(blocking: Seq[Frame]): Bytes => Seq[Frame] =
-    payload => if (payload.asUtf8String.contains("HELLO")) Seq(Replies.hello) else blocking
+  // the setup always succeeds; the blocking command's reply is the test's to script
+  private def replyWith(blocking: Seq[Frame]): Bytes => Seq[Frame] = Replies.withSetup(_ => blocking)
 
   private def make(
     respond: Bytes => Seq[Frame],
     isLive: () => Boolean = () => true,
-    liveGeneration: () => Option[MultiplexedConnection.Generation] = () => Some(MultiplexedConnection.Generation.initial),
     config: DedicatedPoolConfig = DedicatedPoolConfig()
   ): (DedicatedPool, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
-    val scheduler                                              = new ManualScheduler
-    val transports                                             = mutable.ArrayBuffer.empty[FakeTransport]
-    val factory: MultiplexedConnection.TransportFactory        = (onFrame, onClosed) => {
+    val scheduler                                       = new ManualScheduler
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       val transport = new FakeTransport(onFrame, onClosed, respond)
       transports += transport
       transport
     }
-    // mirrors the real MultiplexedConnection: a generation is current when the connection is live and the recorded generation matches
-    val isCurrent: MultiplexedConnection.Generation => Boolean = g => liveGeneration().contains(g)
-    val pool                                                   =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, liveGeneration, isCurrent, config, 1000L)
+    val pool                                            = new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, config, 1000L)
     (pool, scheduler, transports)
   }
 
   private val lockWrite =
-    new LockCommands[String](3.seconds, "lock").command(Bytes.utf8("key"), "owner", LockCommands.Operation.Acquire, cached = true)
+    new LockExecutor[String](3.seconds, "lock", replicaAcknowledgement = true)
+      .command(Bytes.utf8("key"), "owner", LockExecutor.Operation.Acquire, cached = true)
 
   private def replication(
     scheduler: Scheduler,
@@ -148,7 +144,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
     var result: Option[Try[Boolean]]  = None
     pool.useLockWrite(lockWrite, true, r => result = Some(r), new DedicatedPool.Lease, replication(scheduler, 1, 100L))
     scheduler.advance(Duration.Zero)
-    assert(transports.head.written.last.sameBytes(Bytes.concat(Vector(Connection.asking.encode, lockWrite.encode))))
+    val wire                          = Bytes.concat(transports.head.written).asUtf8String
+    assert(wire.endsWith(Bytes.concat(Vector(Connection.asking.encode, lockWrite.encode)).asUtf8String), wire)
     transports.head.emit(Replies.ok)
     transports.head.emit(Frame.Integer(1))
     transports.head.emit(Replies.masterRole(Node("replica", 6380)))
@@ -177,21 +174,36 @@ class DedicatedPoolSpec extends munit.FunSuite {
   }
 
   test("a stalled confirmation leaves ordinary commands free and cancellation releases the pool slot") {
-    val (pool, scheduler, transports) = make(replyWith(Nil), config = DedicatedPoolConfig(maxConnections = 1))
-    val shared                        = MultiplexedConnection.connect(
-      (onFrame, onClosed) => new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG"))),
+    val scheduler                                       = new ManualScheduler
+    // the first connection is the multiplexed one; the rest are the pool's dedicated connections
+    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+    var created                                         = 0
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      created += 1
+      if (created == 1) new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Seq(Frame.SimpleString("PONG"))))
+      else {
+        val transport = new FakeTransport(onFrame, onClosed, replyWith(Nil))
+        transports += transport
+        transport
+      }
+    }
+    val node                                            = new MultiplexedConnection(
+      factory,
       scheduler,
-      Vector.empty,
-      BackoffConfig(),
-      WatchdogConfig(enabled = false),
-      1.second,
-      Duration.Zero
-    )
-    val node                          = new NodeClient(shared, pool)
-    val lease                         = new DedicatedPool.Lease
-    var result: Option[Try[Boolean]]  = None
-    var refreshed                     = false
-    node.submitLockWrite(
+      SageConfig(
+        reconnect = BackoffConfig(),
+        watchdog = WatchdogConfig(enabled = false),
+        connectTimeout = 1.second,
+        closeTimeout = Duration.Zero,
+        clientCache = CacheConfig(enabled = false),
+        dedicatedPool = DedicatedPoolConfig(maxConnections = 1)
+      ),
+      MultiplexedConnection.NodeRole.Master
+    ).start()
+    val lease                                           = new DedicatedPool.Lease
+    var result: Option[Try[Boolean]]                    = None
+    var refreshed                                       = false
+    node.pool.useLockWrite(
       lockWrite,
       false,
       r => result = Some(r),
@@ -201,15 +213,15 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     transports.head.emit(Frame.Integer(1))
     transports.head.emit(Replies.masterRole(Node("replica", 6380)))
-    var ping: Option[Try[String]]     = None
-    node.submit(Connection.ping(), false, r => ping = Some(r))
+    var ping: Option[Try[String]]                       = None
+    node.submit(Connection.ping(), r => ping = Some(r))
     assertEquals(ping, Some(Success("PONG")))
     assertEquals(result, None)
     lease.cancel()
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
     assert(refreshed)
-    node.submitLockWrite(lockWrite, false, _ => (), new DedicatedPool.Lease, replication(scheduler, 0, 100L))
+    node.pool.useLockWrite(lockWrite, false, _ => (), new DedicatedPool.Lease, replication(scheduler, 0, 100L))
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 2)
     assertEquals(transports.head.closeCount, 1)
@@ -225,6 +237,19 @@ class DedicatedPoolSpec extends munit.FunSuite {
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Success(Some(("k", "v")))))
     assertEquals(transports.size, 1)
+  }
+
+  test("a socket that closes before the setup reply fails the blocking command as never sent") {
+    val scheduler                                       = new ManualScheduler
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      lazy val transport: FakeTransport = new FakeTransport(onFrame, onClosed, _ => { transport.close(); Nil })
+      transport
+    }
+    val pool                                            = new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
+    var result: Option[Try[Option[(String, String)]]]   = None
+    pool.use(blPop, r => result = Some(r))
+    scheduler.advance(Duration.Zero)
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = false))))
   }
 
   test("a released connection is reused rather than reopened") {
@@ -385,12 +410,12 @@ class DedicatedPoolSpec extends munit.FunSuite {
       transports += t
       t
     }
-    val conn                                            = DedicatedConnection.create(factory, 1000L)
-    conn.establish(Vector(Connection.hello()))
+    val conn                                            = new DedicatedConnection(factory, new ManualScheduler)
+    conn.handshake(Vector(Connection.hello()), 1000L)
     transports.head.autoWrite = false // keep the command in the queue so transport teardown reports it as unsent
 
     var healthyWhenFailed: Option[Boolean] = None
-    conn.submit(blPop, _ => healthyWhenFailed = Some(conn.isHealthy))
+    conn.submit(blPop, _ => healthyWhenFailed = Some(!conn.isDead))
     transports.head.close()
     assertEquals(healthyWhenFailed, Some(false))
   }
@@ -420,51 +445,48 @@ class DedicatedPoolSpec extends munit.FunSuite {
     assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
   }
 
-  test("an idle connection from a previous generation is discarded rather than reused") {
-    var live                          = Option(MultiplexedConnection.Generation.initial)
-    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), liveGeneration = () => live)
+  test("an idle connection opened before a liveness loss is discarded rather than reused") {
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)))
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
 
-    live = Some(MultiplexedConnection.Generation.initial.next) // the multiplexed connection reconnected (e.g. failover) under the pool
+    pool.onLivenessLost() // the multiplexed connection reconnected (e.g. failover) under the pool
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 2)
   }
 
-  test("a connection built across a reconnect is admitted under the new generation, not discarded") {
-    var live                                          = Option(MultiplexedConnection.Generation.initial)
-    var bumped                                        = false
-    // the multiplexed connection reconnects (generation bumps) while the first dedicated connection is running its HELLO bootstrap
+  test("a connection built across a reconnect is admitted, not discarded") {
+    var lose: () => Unit                              = () => ()
+    // the multiplexed connection reconnects while the first dedicated connection is running its HELLO bootstrap
     val respond: Bytes => Seq[Frame]                  = payload =>
       if (payload.asUtf8String.contains("HELLO")) {
-        if (!bumped) {
-          bumped = true
-          live = Some(MultiplexedConnection.Generation.initial.next)
-        }
+        lose()
+        lose = () => ()
         Seq(Replies.hello)
       } else Seq(popReply)
-    val (pool, scheduler, transports)                 = make(respond, liveGeneration = () => live)
+    val (pool, scheduler, transports)                 = make(respond)
+    lose = () => pool.onLivenessLost()
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r))
     scheduler.advance(Duration.Zero)
     assertEquals(result, Some(Success(Some(("k", "v")))))
-    // recording the generation after establishment makes the connection current. The pool keeps it and does not retry.
+    // the liveness loss preceded admission, so the pool keeps the connection and reuses it
+    pool.use(blPop, _ => ())
+    scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
   }
 
   test("an idle connection is not reused when the connection leaves Live between lease and acquire") {
     var live                          = true
-    val gen                           = MultiplexedConnection.Generation.initial
-    val (pool, scheduler, transports) =
-      make(replyWith(Seq(popReply)), isLive = () => live, liveGeneration = () => if (live) Some(gen) else None)
+    val (pool, scheduler, transports) = make(replyWith(Seq(popReply)), isLive = () => live)
     pool.use(blPop, _ => ())
     scheduler.advance(Duration.Zero)
-    assertEquals(transports.size, 1) // established and returned to idle at generation `gen`
+    assertEquals(transports.size, 1)
 
     // The lease check observes Live, but the multiplexed connection starts reconnecting before the offloaded acquire runs. The idle connection
-    // has the same generation but is no longer live, so the pool refuses it.
+    // was not retired but is no longer live, so the pool refuses it.
     var result: Option[Try[Option[(String, String)]]] = None
     pool.use(blPop, r => result = Some(r))
     live = false
@@ -475,10 +497,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
 
   test("an exhausted pool fails fast NotConnected, not TimedOut, when the connection is not live") {
     var live                          = true
-    val gen                           = MultiplexedConnection.Generation.initial
     val config                        = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 50.millis, idleTimeout = Duration.Inf)
-    val (pool, scheduler, transports) =
-      make(replyWith(Nil), isLive = () => live, liveGeneration = () => if (live) Some(gen) else None, config = config)
+    val (pool, scheduler, transports) = make(replyWith(Nil), isLive = () => live, config = config)
     pool.use(blPop, _ => ()) // the only slot is held by a BLPOP that is still waiting for a reply
     scheduler.advance(Duration.Zero)
     assertEquals(transports.size, 1)
@@ -555,17 +575,21 @@ class DedicatedPoolSpec extends munit.FunSuite {
       transports += t
       t
     }
-    val connection                                      = MultiplexedConnection.connect(
+    val config                                          = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 10.seconds, idleTimeout = Duration.Inf)
+    val connection                                      = new MultiplexedConnection(
       factory,
       scheduler,
-      Vector(Connection.hello()),
-      BackoffConfig(1.milli, 1.milli, 1.0),
-      WatchdogConfig(enabled = false),
-      1.second,
-      Duration.Zero
-    )
-    val config                                          = DedicatedPoolConfig(maxConnections = 1, acquireTimeout = 10.seconds, idleTimeout = Duration.Inf)
-    val pool                                            = DedicatedPool.forConnection(factory, Vector(Connection.hello()), scheduler, connection, config, 1000L)
+      SageConfig(
+        reconnect = BackoffConfig(1.milli, 1.milli, 1.0),
+        watchdog = WatchdogConfig(enabled = false),
+        connectTimeout = 1.second,
+        closeTimeout = Duration.Zero,
+        clientCache = CacheConfig(enabled = false),
+        dedicatedPool = config
+      ),
+      MultiplexedConnection.NodeRole.Master
+    ).start()
+    val pool                                            = connection.pool
 
     val held = pool.acquireForTransaction()
 
@@ -591,9 +615,8 @@ class DedicatedPoolSpec extends munit.FunSuite {
       connecting.set(transport)
       transport
     }
-    val gen                                             = MultiplexedConnection.Generation.initial
     val pool                                            =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, () => Some(gen), _ == gen, DedicatedPoolConfig(), 1000L)
+      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
 
     pool.use(blPop, _ => ())
     val establishing = new Thread(() => scheduler.advance(Duration.Zero)) // blocks inside ConnectingTransport.start()

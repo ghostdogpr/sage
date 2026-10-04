@@ -3,112 +3,61 @@ package sage.integration.commands
 import kyo.compat.*
 
 import sage.commands.ScanCursor
-import sage.integration.{Images, ServerSuite}
+import sage.integration.BothServersSuite
 
-abstract class SetsSuite(image: String) extends ServerSuite(image) {
+class SetsSuite extends BothServersSuite {
 
-  test("SADD SCARD SMEMBERS SISMEMBER SMISMEMBER and SREM manage membership") {
-    withClient { client =>
-      for {
-        added   <- client.sAdd("set-basic", "a", "b", "c")
-        dup     <- client.sAdd("set-basic", "a")
-        card    <- client.sCard("set-basic")
-        members <- client.sMembers[String]("set-basic")
-        isA     <- client.sIsMember("set-basic", "a")
-        isZ     <- client.sIsMember("set-basic", "z")
-        multi   <- client.sMisMember("set-basic", "a", "z", "c")
-        removed <- client.sRem("set-basic", "a", "z")
-        after   <- client.sMembers[String]("set-basic")
-      } yield {
-        assertEquals(added, 3L)
-        assertEquals(dup, 0L)
-        assertEquals(card, 3L)
-        assertEquals(members, Set("a", "b", "c"))
-        assertEquals(isA, true)
-        assertEquals(isZ, false)
-        assertEquals(multi, Vector(true, false, true))
-        assertEquals(removed, 1L)
-        assertEquals(after, Set("b", "c"))
-      }
+  clientTest("SADD SCARD SMEMBERS SISMEMBER SMISMEMBER and SREM manage membership") { client =>
+    client.sAdd("set-basic", "a", "b", "c").is(3L) >>
+      client.sAdd("set-basic", "a").is(0L) >>
+      client.sCard("set-basic").is(3L) >>
+      client.sMembers[String]("set-basic").is(Set("a", "b", "c")) >>
+      client.sIsMember("set-basic", "a").is(true) >>
+      client.sIsMember("set-basic", "z").is(false) >>
+      client.sMisMember("set-basic", "a", "z", "c").is(Vector(true, false, true)) >>
+      client.sRem("set-basic", "a", "z").is(1L) >>
+      client.sMembers[String]("set-basic").is(Set("b", "c"))
+  }
+
+  clientTest("SPOP and SRANDMEMBER draw members, with and without a count") { client =>
+    for {
+      _      <- client.sAdd("set-draw", "a", "b", "c", "d")
+      _      <- client.sPop[String]("set-draw").satisfies(_.exists(Set("a", "b", "c", "d")))
+      popTwo <- client.sPopCount[String]("set-draw", 2L)
+      _      <- client.sRandMember[String]("set-draw").satisfies(_.isDefined)
+      _      <- client.sRandMemberCount[String]("set-draw", -5L).map(_.size).is(5)
+      _      <- client.sPop[String]("set-missing").is(None)
+    } yield {
+      assertEquals(popTwo.size, 2)
+      assert(popTwo.subsetOf(Set("a", "b", "c", "d")))
     }
   }
 
-  test("SPOP and SRANDMEMBER draw members, with and without a count") {
-    withClient { client =>
-      for {
-        _        <- client.sAdd("set-draw", "a", "b", "c", "d")
-        popOne   <- client.sPop[String]("set-draw")
-        popTwo   <- client.sPopCount[String]("set-draw", 2L)
-        rndOne   <- client.sRandMember[String]("set-draw")
-        rndDup   <- client.sRandMemberCount[String]("set-draw", -5L)
-        emptyPop <- client.sPop[String]("set-missing")
-      } yield {
-        assert(popOne.exists(Set("a", "b", "c", "d")))
-        assertEquals(popTwo.size, 2)
-        assert(popTwo.subsetOf(Set("a", "b", "c", "d")))
-        assert(rndOne.isDefined)
-        assertEquals(rndDup.size, 5)
-        assertEquals(emptyPop, None)
-      }
-    }
+  clientTest("SMOVE relocates a member between sets") { client =>
+    client.sAdd("set-src", "x", "y") >>
+      client.sAdd("set-dst", "z") >>
+      client.sMove("set-src", "set-dst", "x").is(true) >>
+      client.sMove("set-src", "set-dst", "nope").is(false) >>
+      client.sMembers[String]("set-src").is(Set("y")) >>
+      client.sMembers[String]("set-dst").is(Set("x", "z"))
   }
 
-  test("SMOVE relocates a member between sets") {
-    withClient { client =>
-      for {
-        _      <- client.sAdd("set-src", "x", "y")
-        _      <- client.sAdd("set-dst", "z")
-        moved  <- client.sMove("set-src", "set-dst", "x")
-        absent <- client.sMove("set-src", "set-dst", "nope")
-        src    <- client.sMembers[String]("set-src")
-        dst    <- client.sMembers[String]("set-dst")
-      } yield {
-        assertEquals(moved, true)
-        assertEquals(absent, false)
-        assertEquals(src, Set("y"))
-        assertEquals(dst, Set("x", "z"))
-      }
-    }
+  clientTest("SDIFF SINTER SUNION and their STORE forms combine sets, SINTERCARD counts") { client =>
+    client.sAdd("ops-a", "1", "2", "3") >>
+      client.sAdd("ops-b", "2", "3", "4") >>
+      client.sDiff[String]("ops-a", "ops-b").is(Set("1")) >>
+      client.sInter[String]("ops-a", "ops-b").is(Set("2", "3")) >>
+      client.sUnion[String]("ops-a", "ops-b").is(Set("1", "2", "3", "4")) >>
+      client.sInterCard("ops-a", "ops-b")().is(2L) >>
+      client.sInterCard("ops-a", "ops-b")(limit = Some(1L)).is(1L) >>
+      client.sDiffStore("ops-diff", "ops-a", "ops-b").is(1L) >>
+      client.sInterStore("ops-inter", "ops-a", "ops-b").is(2L) >>
+      client.sUnionStore("ops-union", "ops-a", "ops-b").is(4L) >>
+      client.sMembers[String]("ops-union").is(Set("1", "2", "3", "4"))
   }
 
-  test("SDIFF SINTER SUNION and their STORE forms combine sets, SINTERCARD counts") {
-    withClient { client =>
-      for {
-        _       <- client.sAdd("ops-a", "1", "2", "3")
-        _       <- client.sAdd("ops-b", "2", "3", "4")
-        diff    <- client.sDiff[String]("ops-a", "ops-b")
-        inter   <- client.sInter[String]("ops-a", "ops-b")
-        union   <- client.sUnion[String]("ops-a", "ops-b")
-        card    <- client.sInterCard("ops-a", "ops-b")()
-        cardLim <- client.sInterCard("ops-a", "ops-b")(limit = Some(1L))
-        diffN   <- client.sDiffStore("ops-diff", "ops-a", "ops-b")
-        interN  <- client.sInterStore("ops-inter", "ops-a", "ops-b")
-        unionN  <- client.sUnionStore("ops-union", "ops-a", "ops-b")
-        stored  <- client.sMembers[String]("ops-union")
-      } yield {
-        assertEquals(diff, Set("1"))
-        assertEquals(inter, Set("2", "3"))
-        assertEquals(union, Set("1", "2", "3", "4"))
-        assertEquals(card, 2L)
-        assertEquals(cardLim, 1L)
-        assertEquals(diffN, 1L)
-        assertEquals(interN, 2L)
-        assertEquals(unionN, 4L)
-        assertEquals(stored, Set("1", "2", "3", "4"))
-      }
-    }
-  }
-
-  test("SSCAN streams members") {
-    withClient { client =>
-      for {
-        _    <- client.sAdd("set-scan", "a", "b", "c")
-        page <- client.sScan[String]("set-scan", ScanCursor.start)
-      } yield assertEquals(page.items.toSet, Set("a", "b", "c"))
-    }
+  clientTest("SSCAN streams members") { client =>
+    client.sAdd("set-scan", "a", "b", "c") >>
+      client.sScan[String]("set-scan", ScanCursor.start).map(_.items.toSet).is(Set("a", "b", "c"))
   }
 }
-
-class RedisSetsSuite extends SetsSuite(Images.redis)
-
-class ValkeySetsSuite extends SetsSuite(Images.valkey)

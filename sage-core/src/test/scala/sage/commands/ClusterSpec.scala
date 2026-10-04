@@ -1,7 +1,7 @@
 package sage.commands
 
 import sage.SageException.DecodeError
-import sage.cluster.{Node, Shard, Slot, SlotRange}
+import sage.cluster.{Node, Slot, SlotRange}
 import sage.protocol.Frame
 import sage.protocol.Frames.bulk
 
@@ -11,9 +11,11 @@ class ClusterSpec extends munit.FunSuite {
   private def node(host: String, port: Int, id: String): Frame =
     Frame.Array(Vector(bulk(host), int(port.toLong), bulk(id)))
 
-  private def run(frame: Frame): Either[DecodeError, Vector[Shard]] = Cluster.slots.decode(frame)
+  private val queried = Node("10.9.9.9", 7000)
 
-  test("decodes a range into a Shard with master and replicas") {
+  private def run(frame: Frame): Either[DecodeError, Vector[SlotRange]] = Cluster.slots(queried).decode(frame)
+
+  test("decodes a range with its master and replicas") {
     val reply = Frame.Array(
       Vector(
         Frame.Array(Vector(int(0), int(5460), node("10.0.0.1", 6379, "m1"), node("10.0.0.2", 6379, "r1")))
@@ -21,11 +23,11 @@ class ClusterSpec extends munit.FunSuite {
     )
     assertEquals(
       run(reply),
-      Right(Vector(Shard(Node("10.0.0.1", 6379), Vector(Node("10.0.0.2", 6379)), Vector(SlotRange(Slot.unsafe(0), Slot.unsafe(5460))))))
+      Right(Vector(SlotRange(Slot.at(0).get, Slot.at(5460).get, Node("10.0.0.1", 6379), Vector(Node("10.0.0.2", 6379)))))
     )
   }
 
-  test("merges multiple ranges owned by the same master into one Shard") {
+  test("keeps each range of the same master as listed") {
     val master = node("10.0.0.1", 6379, "m1")
     val reply  = Frame.Array(
       Vector(
@@ -37,11 +39,8 @@ class ClusterSpec extends munit.FunSuite {
       run(reply),
       Right(
         Vector(
-          Shard(
-            Node("10.0.0.1", 6379),
-            Vector.empty,
-            Vector(SlotRange(Slot.unsafe(0), Slot.unsafe(10)), SlotRange(Slot.unsafe(100), Slot.unsafe(110)))
-          )
+          SlotRange(Slot.at(0).get, Slot.at(10).get, Node("10.0.0.1", 6379), Vector.empty),
+          SlotRange(Slot.at(100).get, Slot.at(110).get, Node("10.0.0.1", 6379), Vector.empty)
         )
       )
     )
@@ -66,10 +65,14 @@ class ClusterSpec extends munit.FunSuite {
     assert(run(reply).isLeft)
   }
 
-  test("a null endpoint decodes to the empty host the caller substitutes itself into") {
-    val master = Frame.Array(Vector(Frame.Null, int(6379), bulk("m1")))
-    val reply  = Frame.Array(Vector(Frame.Array(Vector(int(0), int(10), master))))
-    assertEquals(run(reply).map(_.map(_.master)), Right(Vector(Node("", 6379))))
+  test("a null or empty endpoint decodes to the host of the queried node") {
+    val master  = Frame.Array(Vector(Frame.Null, int(6379), bulk("m1")))
+    val replica = node("", 6380, "r1")
+    val reply   = Frame.Array(Vector(Frame.Array(Vector(int(0), int(10), master, replica))))
+    assertEquals(
+      run(reply).map(_.map(range => range.master +: range.replicas)),
+      Right(Vector(Vector(Node("10.9.9.9", 6379), Node("10.9.9.9", 6380))))
+    )
   }
 
   test("a `?` endpoint stays literal: it means an unknown node, not the queried one") {

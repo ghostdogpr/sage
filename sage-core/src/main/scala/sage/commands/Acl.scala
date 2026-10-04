@@ -55,27 +55,24 @@ private[sage] object Acl {
     Command("ACL", Command.NoKeys, Vector(GetUser, Bytes.utf8(username)), decodeUser)
 
   def aclLog(count: Option[Long] = None): Command[Vector[AclLogEntry]] =
-    Command("ACL", Command.NoKeys, Log +: count.map(n => Bytes.utf8(n.toString)).toVector, Decode.vector(decodeLogEntry))
+    Command("ACL", Command.NoKeys, Log +: count.map(n => Args.long(n)).toVector, Decode.vector(decodeLogEntry))
 
-  private val decodeUser: Frame => Either[DecodeError, Option[AclUser]] = {
-    case Frame.Null => Right(None)
-    case frame      =>
+  private val decodeUser: Frame => Either[DecodeError, Option[AclUser]] =
+    Decode.nullable { frame =>
       Decode.fieldMap(frame).map { fields =>
-        Some(
-          AclUser(
-            flags = strings(fields.get("flags")),
-            passwords = strings(fields.get("passwords")),
-            commands = string(fields, "commands"),
-            keys = string(fields, "keys"),
-            channels = string(fields, "channels"),
-            selectors = fields.get("selectors") match {
-              case Some(Frame.Array(rows)) => rows.flatMap(selectorOf)
-              case _                       => Vector.empty
-            }
-          )
+        AclUser(
+          flags = strings(fields.get("flags")),
+          passwords = strings(fields.get("passwords")),
+          commands = string(fields, "commands"),
+          keys = string(fields, "keys"),
+          channels = string(fields, "channels"),
+          selectors = fields.get("selectors") match {
+            case Some(Frame.Array(rows)) => rows.flatMap(selectorOf)
+            case _                       => Vector.empty
+          }
         )
       }
-  }
+    }
 
   private def selectorOf(frame: Frame): Option[Map[String, String]] =
     Decode.fieldMap(frame).toOption.map(_.collect { case (k, Frame.BulkString(v)) => k -> v.asUtf8String })
@@ -88,21 +85,14 @@ private[sage] object Acl {
         context = string(fields, "context"),
         obj = string(fields, "object"),
         username = string(fields, "username"),
-        ageSeconds = fields.get("age-seconds").flatMap(asDouble).getOrElse(0.0),
+        ageSeconds = fields.get("age-seconds").collect { case Frame.Double(v) => v }.getOrElse(0.0),
         clientInfo = string(fields, "client-info"),
         entryId = long(fields, "entry-id")
       )
     }
 
   private def string(fields: Map[String, Frame], key: String): String =
-    fields
-      .get(key)
-      .flatMap {
-        case Frame.BulkString(b)   => Some(b.asUtf8String)
-        case Frame.SimpleString(s) => Some(s)
-        case _                     => None
-      }
-      .getOrElse("")
+    fields.get(key).collect { case Decode.Text(s) => s }.getOrElse("")
 
   private def long(fields: Map[String, Frame], key: String): Long =
     fields.get(key).collect { case Frame.Integer(n) => n }.getOrElse(0L)
@@ -112,13 +102,5 @@ private[sage] object Acl {
       case Some(Frame.Array(elements)) => elements.collect { case Frame.BulkString(b) => b.asUtf8String }
       case Some(Frame.Set(elements))   => elements.collect { case Frame.BulkString(b) => b.asUtf8String }
       case _                           => Vector.empty
-    }
-
-  private def asDouble(frame: Frame): Option[Double] =
-    frame match {
-      case Frame.Double(v)     => Some(v)
-      case Frame.Integer(v)    => Some(v.toDouble)
-      case Frame.BulkString(b) => b.asUtf8String.toDoubleOption
-      case _                   => None
     }
 }

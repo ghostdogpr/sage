@@ -3,10 +3,9 @@ package sage.client.internal
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Try}
 
-import sage.SageException.{ConnectionLost, ServerError}
-import sage.client.{AuthConfig, BuildInfo}
+import sage.client.{BuildInfo, SageConfig}
 import sage.commands.{Command, Connection}
 
 private[client] object Bootstrap {
@@ -16,63 +15,33 @@ private[client] object Bootstrap {
     * share this list, keeping connection identification consistent across topologies. `SELECT` lives here rather than as a runtime command
     * because it would move the database under every fiber sharing the connection.
     */
-  def commands(auth: Option[AuthConfig], database: Int, clientName: Option[String]): Vector[Command[?]] = {
+  def commands(config: SageConfig): Vector[Command[?]] = {
     val identification = Vector(
       Connection.clientSetInfo("LIB-NAME", "sage"),
       Connection.clientSetInfo("LIB-VER", BuildInfo.version)
-    ) ++ clientName.map(Connection.clientSetName).toVector
-    val selectDb       = if (database > 0) Vector(Connection.select(database)) else Vector.empty
-    (Connection.hello(auth.map(a => a.username -> a.password)) +: identification) ++ selectDb
+    ) ++ config.clientName.map(Connection.clientSetName).toVector
+    val selectDb       = if (config.database > 0) Vector(Connection.select(config.database)) else Vector.empty
+    (Connection.hello(config.auth.map(a => a.username -> a.password)) +: identification) ++ selectDb
   }
 
   /**
-    * Runs the connection-setup handshake on a freshly opened connection: submits each command in turn and blocks for its reply up to
-    * `connectTimeoutMillis`, then closes the half-built connection and throws on a timeout or a failed reply so the caller discards it.
-    * `submit` enqueues one command and delivers its decoded reply; replies are FIFO, so each command is awaited before the next is sent.
-    * A [[bestEffort]] command whose reply is a `ServerError` is tolerated rather than fatal (and reported to `onTolerated`); a
-    * `ConnectionLost`/`DecodeError` stays fatal even for it. Used by the Multiplexed, Dedicated, and Subscription connections, which differ
-    * only in how a reply is obtained.
+    * Submits one command and blocks the calling thread for its reply, failing with `timedOut` when none arrives in time.
     */
-  def run(
-    commands: Vector[Command[?]],
-    connectTimeoutMillis: Long,
-    submit: (Command[?], Try[Any] => Unit) => Unit,
-    close: () => Unit,
-    onTolerated: Command[?] => Unit = _ => ()
-  ): Unit =
-    commands.foreach { command =>
-      awaitReply[Any](connectTimeoutMillis)(callback => submit(command, callback)) match {
-        case None                                                 =>
-          close()
-          throw ConnectionLost(mayHaveExecuted = false)
-        case Some(Failure(_: ServerError)) if bestEffort(command) => onTolerated(command)
-        case Some(Failure(error))                                 =>
-          close()
-          throw error
-        case Some(Success(_))                                     => ()
-      }
-    }
-
-  /**
-    * Submits one command and blocks the calling thread for its reply; `None` is the timeout.
-    */
-  def awaitReply[A](timeoutMillis: Long)(submit: (Try[A] => Unit) => Unit): Option[Try[A]] = {
+  def awaitReply[A](timeoutMillis: Long, timedOut: => Throwable)(submit: (Try[A] => Unit) => Unit): Try[A] = {
     val latch   = new CountDownLatch(1)
     val outcome = new AtomicReference[Try[A]]()
     submit { result =>
       outcome.set(result)
       latch.countDown()
     }
-    if (latch.await(timeoutMillis, TimeUnit.MILLISECONDS)) Some(outcome.get()) else None
+    if (latch.await(timeoutMillis, TimeUnit.MILLISECONDS)) outcome.get() else Failure(timedOut)
   }
 
   /**
     * Whether a server-error reply to this command may be tolerated during bootstrap. `CLIENT SETINFO` qualifies because it is library
-    * identification added in Redis 7.2, so an older server rejects it with an error every client ignores. `CLIENT TRACKING` qualifies because
-    * a server that permits `HELLO` but denies tracking (an ACL restriction, a proxy) should still connect and serve cached reads uncached
-    * rather than fail the connection (ADR-0045). Every other bootstrap command is load-bearing, so its failure stays fatal.
+    * identification added in Redis 7.2, so an older server rejects it with an error every client ignores. Every other bootstrap command is
+    * load-bearing, so its failure stays fatal.
     */
-  private def bestEffort(command: Command[?]): Boolean =
-    Connection.isClientTracking(command) ||
-      (command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "SETINFO"))
+  def bestEffort(command: Command[?]): Boolean =
+    command.name == "CLIENT" && command.args.headOption.exists(_.asUtf8String == "SETINFO")
 }

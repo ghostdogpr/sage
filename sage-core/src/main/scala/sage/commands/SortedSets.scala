@@ -3,6 +3,7 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.{Doubles, KeyCodec, ValueCodec}
+import sage.commands.Args.{Ch, Gt, Lt, Nx, Rev, Xx}
 import sage.protocol.Frame
 
 /**
@@ -119,23 +120,15 @@ object ZRange {
 
 private[sage] object SortedSets {
 
-  private val Nx            = Bytes.utf8("NX")
-  private val Xx            = Bytes.utf8("XX")
-  private val Gt            = Bytes.utf8("GT")
-  private val Lt            = Bytes.utf8("LT")
-  private val Ch            = Bytes.utf8("CH")
   private val Incr          = Bytes.utf8("INCR")
   private val ByScore       = Bytes.utf8("BYSCORE")
   private val ByLex         = Bytes.utf8("BYLEX")
-  private val Rev           = Bytes.utf8("REV")
-  private val LimitWord     = Bytes.utf8("LIMIT")
   private val WithScores    = Bytes.utf8("WITHSCORES")
   private val WithScore     = Bytes.utf8("WITHSCORE")
   private val WeightsWord   = Bytes.utf8("WEIGHTS")
   private val AggregateWord = Bytes.utf8("AGGREGATE")
-  private val MinWord       = Bytes.utf8("MIN")
-  private val MaxWord       = Bytes.utf8("MAX")
-  private val CountWord     = Bytes.utf8("COUNT")
+  private val aggregateWord = Args.keywords(Aggregate.values)
+  private val minMaxArg     = Args.keywords(MinMax.values)
   private val NegInfWord    = Bytes.utf8("-inf")
   private val PosInfWord    = Bytes.utf8("+inf")
   private val LexMin        = Bytes.utf8("-")
@@ -148,7 +141,7 @@ private[sage] object SortedSets {
     Command(
       "ZADD",
       Command.FirstKey,
-      (keyCodec.encode(key) +: conditionArgs(condition)) ++ (if (changed) Vector(Ch) else Vector.empty) ++ memberScoreArgs(first +: rest.toVector),
+      (keyCodec.encode(key) +: conditionArgs(condition)) ++ Args.flag(changed, Ch) ++ memberScoreArgs(first +: rest.toVector),
       Decode.long
     )
 
@@ -159,7 +152,7 @@ private[sage] object SortedSets {
     Command(
       "ZADD",
       Command.FirstKey,
-      (keyCodec.encode(key) +: conditionArgs(condition)) ++ Vector(Incr, scoreArg(score), valueCodec.encode(member)),
+      (keyCodec.encode(key) +: conditionArgs(condition)) ++ Vector(Incr, Args.double(score), valueCodec.encode(member)),
       Decode.optionalScore
     )
 
@@ -170,15 +163,10 @@ private[sage] object SortedSets {
     Command.read("ZSCORE", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalScore)
 
   def zMScore[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[Double]]] =
-    Command.read(
-      "ZMSCORE",
-      Command.FirstKey,
-      keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode),
-      Decode.vector(Decode.optionalScore)
-    )
+    Command.read("ZMSCORE", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.vector(Decode.optionalScore))
 
   def zIncrBy[K, V](key: K, member: V, increment: Double)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Double] =
-    Command("ZINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), scoreArg(increment), valueCodec.encode(member)), Decode.score)
+    Command("ZINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Args.double(increment), valueCodec.encode(member)), Decode.double)
 
   def zRank[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[Long]] =
     Command.read("ZRANK", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalLong)
@@ -213,10 +201,10 @@ private[sage] object SortedSets {
     )
 
   def zRem[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    Command("ZREM", Command.FirstKey, keyCodec.encode(key) +: (first +: rest.toVector).map(valueCodec.encode), Decode.long)
+    Command("ZREM", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.long)
 
   def zRemRangeByRank[K](key: K, start: Long, stop: Long)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command("ZREMRANGEBYRANK", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)), Decode.long)
+    Command("ZREMRANGEBYRANK", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(start), Args.long(stop)), Decode.long)
 
   def zRemRangeByScore[K](key: K, min: ScoreBoundary, max: ScoreBoundary)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command("ZREMRANGEBYSCORE", Command.FirstKey, Vector(keyCodec.encode(key), scoreBoundaryArg(min), scoreBoundaryArg(max)), Decode.long)
@@ -234,107 +222,87 @@ private[sage] object SortedSets {
     Command("ZPOPMAX", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalScoredMember[V])
 
   def zPopMinCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] =
-    Command("ZPOPMIN", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.scoredMembers[V])
+    Command("ZPOPMIN", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count)), Decode.scoredMembers[V])
 
   def zPopMaxCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] =
-    Command("ZPOPMAX", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.scoredMembers[V])
+    Command("ZPOPMAX", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count)), Decode.scoredMembers[V])
 
   def zMpop[K, V](first: K, rest: K*)(minMax: MinMax, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
-  ): Command[Option[(K, Vector[(V, Double)])]] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command("ZMPOP", indices, (prefix :+ minMaxArg(minMax)) ++ countArg(count), mpopReply[K, V])
-  }
+  ): Command[Option[(K, Vector[(V, Double)])]] =
+    KeyArgs.multiPop("ZMPOP", None, first +: rest.toVector, minMaxArg(minMax), count, Decode.scoredMembers[V], MpopLabel)
 
   def bzPopMin[K, V](first: K, rest: K*)(
     timeout: BlockTimeout
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V, Double)]] =
-    blockingPop("BZPOPMIN", first, rest.toVector, timeout)
+    KeyArgs.blockingPop("BZPOPMIN", first +: rest.toVector, timeout, poppedMember[K, V])
 
   def bzPopMax[K, V](first: K, rest: K*)(
     timeout: BlockTimeout
   )(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V, Double)]] =
-    blockingPop("BZPOPMAX", first, rest.toVector, timeout)
+    KeyArgs.blockingPop("BZPOPMAX", first +: rest.toVector, timeout, poppedMember[K, V])
 
   def bzMpop[K, V](first: K, rest: K*)(minMax: MinMax, timeout: BlockTimeout, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
-  ): Command[Option[(K, Vector[(V, Double)])]] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
-    Command(
-      "BZMPOP",
-      keyIndices = Vector.tabulate(keys.size)(_ + 2),
-      args = (BlockTimeout.wire(timeout) +: Bytes.utf8(keys.size.toString) +: keys :+ minMaxArg(minMax)) ++ countArg(count),
-      decode = mpopReply[K, V],
-      execution = Execution.Blocking
-    )
-  }
+  ): Command[Option[(K, Vector[(V, Double)])]] =
+    KeyArgs.multiPop("BZMPOP", Some(timeout), first +: rest.toVector, minMaxArg(minMax), count, Decode.scoredMembers[V], MpopLabel)
 
   def zRandMember[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command.readUncacheable("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
   def zRandMemberCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command.readUncacheable("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vector(Decode.value[V]))
+    Command.readUncacheable("ZRANDMEMBER", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count)), Decode.vector(Decode.value[V]))
 
   def zRandMemberWithScores[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[(V, Double)]] =
     Command.readUncacheable(
       "ZRANDMEMBER",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(count.toString), WithScores),
+      Vector(keyCodec.encode(key), Args.long(count), WithScores),
       Decode.scoredMembers[V]
     )
 
   def zUnion[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Vector[V]] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command.read("ZUNION", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
-  }
+    using KeyCodec[K],
+    ValueCodec[V]
+  ): Command[Vector[V]] =
+    combine("ZUNION", first +: rest.toVector, weights, aggregate, withScores = false, Decode.vector(Decode.value[V]))
 
   def zUnionWithScores[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Vector[(V, Double)]] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command.read("ZUNION", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
-  }
+    using KeyCodec[K],
+    ValueCodec[V]
+  ): Command[Vector[(V, Double)]] =
+    combine("ZUNION", first +: rest.toVector, weights, aggregate, withScores = true, Decode.scoredMembers[V])
 
   def zUnionStore[K](destination: K, first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
     using keyCodec: KeyCodec[K]
   ): Command[Long] = {
-    val (indices, prefix) = storeKeyed(destination, first +: rest.toVector)
-    Command("ZUNIONSTORE", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.long)
+    val (indices, prefix) = KeyArgs.numKeyedAfter(keyCodec.encode(destination), first +: rest.toVector)
+    Command("ZUNIONSTORE", 0 +: indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.long)
   }
 
   def zInter[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Vector[V]] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command.read("ZINTER", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.vector(Decode.value[V]))
-  }
+    using KeyCodec[K],
+    ValueCodec[V]
+  ): Command[Vector[V]] =
+    combine("ZINTER", first +: rest.toVector, weights, aggregate, withScores = false, Decode.vector(Decode.value[V]))
 
   def zInterWithScores[K, V](first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Vector[(V, Double)]] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command.read("ZINTER", indices, (prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate)) :+ WithScores, Decode.scoredMembers[V])
-  }
+    using KeyCodec[K],
+    ValueCodec[V]
+  ): Command[Vector[(V, Double)]] =
+    combine("ZINTER", first +: rest.toVector, weights, aggregate, withScores = true, Decode.scoredMembers[V])
 
   def zInterStore[K](destination: K, first: K, rest: K*)(weights: Option[Vector[Double]] = None, aggregate: Aggregate = Aggregate.Sum)(
     using keyCodec: KeyCodec[K]
   ): Command[Long] = {
-    val (indices, prefix) = storeKeyed(destination, first +: rest.toVector)
-    Command("ZINTERSTORE", indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.long)
+    val (indices, prefix) = KeyArgs.numKeyedAfter(keyCodec.encode(destination), first +: rest.toVector)
+    Command("ZINTERSTORE", 0 +: indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate), Decode.long)
   }
 
-  def zInterCard[K](first: K, rest: K*)(limit: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Long] = {
-    val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command.read("ZINTERCARD", indices, prefix ++ limit.toVector.flatMap(n => Vector(LimitWord, Bytes.utf8(n.toString))), Decode.long)
-  }
+  def zInterCard[K](first: K, rest: K*)(limit: Option[Long] = None)(using keyCodec: KeyCodec[K]): Command[Long] =
+    KeyArgs.interCard("ZINTERCARD", first +: rest.toVector, limit)
 
   def zDiff[K, V](first: K, rest: K*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] = {
     val (indices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
@@ -347,62 +315,26 @@ private[sage] object SortedSets {
   }
 
   def zDiffStore[K](destination: K, first: K, rest: K*)(using keyCodec: KeyCodec[K]): Command[Long] = {
-    val (indices, prefix) = storeKeyed(destination, first +: rest.toVector)
-    Command("ZDIFFSTORE", indices, prefix, Decode.long)
+    val (indices, prefix) = KeyArgs.numKeyedAfter(keyCodec.encode(destination), first +: rest.toVector)
+    Command("ZDIFFSTORE", 0 +: indices, prefix, Decode.long)
   }
 
   def zScan[K, V](key: K, cursor: ScanCursor, pattern: Option[String] = None, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[ScanPage[(V, Double)]] =
-    Command.readCursor(
-      "ZSCAN",
-      Command.FirstKey,
-      Vector(keyCodec.encode(key), ScanCursor.bytes(cursor)) ++ ScanArgs.options(pattern, count),
-      Decode.scanPage(Decode.scoredMembersFlat[V])
-    )
+    KeyArgs.keyScan("ZSCAN", key, cursor, pattern, count)(Decode.scoredMembersFlat[V])
 
-  private def blockingPop[K, V](name: String, first: K, rest: Vector[K], timeout: BlockTimeout)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Option[(K, V, Double)]] = {
-    val keys = (first +: rest).map(keyCodec.encode)
-    Command(
-      name,
-      keyIndices = Vector.tabulate(keys.size)(identity),
-      args = keys :+ BlockTimeout.wire(timeout),
-      decode = {
-        case Frame.Null => Right(None)
-        case other      =>
-          Decode
-            .array3(Decode.key[K], Decode.value[V], Decode.score, "key, member and score or null") { (key, member, s) =>
-              (key, member, s)
-            }(other)
-            .map(Some(_))
-      },
-      execution = Execution.Blocking
-    )
-  }
+  private def poppedMember[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, (K, V, Double)] =
+    Decode.array3(Decode.key[K], Decode.value[V], Decode.double, "key, member and score or null")((_, _, _))
 
-  private def mpopReply[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Option[(K, Vector[(V, Double)])]] = {
-    case Frame.Null => Right(None)
-    case other      =>
-      Decode.array2(Decode.key[K], Decode.scoredMembers[V], "key and members or null")(_ -> _)(other).map(Some(_))
-  }
+  private val MpopLabel = "key and members or null"
 
-  private val rankWithScore: Frame => Either[DecodeError, Option[(Long, Double)]] = {
-    case Frame.Null => Right(None)
-    case other      => Decode.array2(Decode.long, Decode.score, "rank/score pair or null")(_ -> _)(other).map(Some(_))
-  }
-
-  private def storeKeyed[K](destination: K, keys: Vector[K])(using keyCodec: KeyCodec[K]): (Vector[Int], Vector[Bytes]) = {
-    val encoded = keys.map(keyCodec.encode)
-    val indices = 0 +: Vector.tabulate(encoded.size)(_ + 2)
-    (indices, keyCodec.encode(destination) +: Bytes.utf8(encoded.size.toString) +: encoded)
-  }
+  private val rankWithScore: Frame => Either[DecodeError, Option[(Long, Double)]] =
+    Decode.nullable(Decode.array2(Decode.long, Decode.double, "rank/score pair or null")(_ -> _))
 
   private def memberScoreArgs[V](pairs: Vector[(V, Double)])(using valueCodec: ValueCodec[V]): Vector[Bytes] =
-    pairs.flatMap { case (member, score) => Vector(scoreArg(score), valueCodec.encode(member)) }
+    pairs.flatMap { case (member, score) => Vector(Args.double(score), valueCodec.encode(member)) }
 
   private def conditionArgs(condition: ZAddCondition): Vector[Bytes] =
     condition match {
@@ -418,22 +350,18 @@ private[sage] object SortedSets {
   private def rangeArgs[V](range: ZRange[V])(using valueCodec: ValueCodec[V]): Vector[Bytes] =
     range match {
       case ZRange.ByRank(start, stop, rev)      =>
-        Vector(Bytes.utf8(start.toString), Bytes.utf8(stop.toString)) ++ (if (rev) Vector(Rev) else Vector.empty)
-      case ZRange.ByScore(min, max, limit, rev) =>
-        val (a, b) = if (rev) (max, min) else (min, max)
-        (Vector(scoreBoundaryArg(a), scoreBoundaryArg(b), ByScore) ++ (if (rev) Vector(Rev) else Vector.empty)) ++ limitArgs(limit)
-      case ZRange.ByLex(min, max, limit, rev)   =>
-        val (a, b) = if (rev) (max, min) else (min, max)
-        (Vector(lexBoundaryArg[V](a), lexBoundaryArg[V](b), ByLex) ++ (if (rev) Vector(Rev) else Vector.empty)) ++ limitArgs(limit)
+        Vector(Args.long(start), Args.long(stop)) ++ Args.flag(rev, Rev)
+      case ZRange.ByScore(min, max, limit, rev) => bounded(scoreBoundaryArg(min), scoreBoundaryArg(max), ByScore, limit, rev)
+      case ZRange.ByLex(min, max, limit, rev)   => bounded(lexBoundaryArg[V](min), lexBoundaryArg[V](max), ByLex, limit, rev)
     }
 
-  private def limitArgs(limit: Option[Limit]): Vector[Bytes] =
-    limit.toVector.flatMap(l => Vector(LimitWord, Bytes.utf8(l.offset.toString), Bytes.utf8(l.count.toString)))
+  private def bounded(min: Bytes, max: Bytes, by: Bytes, limit: Option[Limit], rev: Boolean): Vector[Bytes] =
+    (if (rev) Vector(max, min, by, Rev) else Vector(min, max, by)) ++ Args.limit(limit)
 
   private def scoreBoundaryArg(boundary: ScoreBoundary): Bytes =
     boundary match {
-      case ScoreBoundary.Inclusive(s) => Bytes.utf8(formatScore(s))
-      case ScoreBoundary.Exclusive(s) => Bytes.utf8("(" + formatScore(s))
+      case ScoreBoundary.Inclusive(s) => Args.double(s)
+      case ScoreBoundary.Exclusive(s) => Bytes.utf8("(" + Doubles.format(s))
       case ScoreBoundary.NegInf       => NegInfWord
       case ScoreBoundary.PosInf       => PosInfWord
     }
@@ -447,27 +375,22 @@ private[sage] object SortedSets {
     }
 
   private def aggregateArgs(aggregate: Aggregate): Vector[Bytes] =
-    aggregate match {
-      case Aggregate.Sum => Vector.empty
-      case Aggregate.Min => Vector(AggregateWord, MinWord)
-      case Aggregate.Max => Vector(AggregateWord, MaxWord)
-    }
+    if (aggregate == Aggregate.Sum) Vector.empty else Vector(AggregateWord, aggregateWord(aggregate))
+
+  private def combine[K: KeyCodec, Out](
+    name: String,
+    keys: Vector[K],
+    weights: Option[Vector[Double]],
+    aggregate: Aggregate,
+    withScores: Boolean,
+    decode: Frame => Either[DecodeError, Out]
+  ): Command[Out] = {
+    val (indices, prefix) = KeyArgs.numKeyed(keys)
+    Command.read(name, indices, prefix ++ weightsArgs(weights) ++ aggregateArgs(aggregate) ++ Args.flag(withScores, WithScores), decode)
+  }
 
   private def weightsArgs(weights: Option[Vector[Double]]): Vector[Bytes] =
-    weights.toVector.flatMap(ws => WeightsWord +: ws.map(w => Bytes.utf8(formatScore(w))))
-
-  private def countArg(count: Option[Long]): Vector[Bytes] =
-    count.toVector.flatMap(c => Vector(CountWord, Bytes.utf8(c.toString)))
-
-  private def minMaxArg(minMax: MinMax): Bytes =
-    minMax match {
-      case MinMax.Min => MinWord
-      case MinMax.Max => MaxWord
-    }
-
-  private def scoreArg(score: Double): Bytes = Bytes.utf8(formatScore(score))
-
-  private def formatScore(value: Double): String = Doubles.format(value)
+    weights.toVector.flatMap(ws => WeightsWord +: ws.map(Args.double))
 
   private def prefixed(prefix: Char, value: Bytes): Bytes = {
     val src = value.unsafeArray

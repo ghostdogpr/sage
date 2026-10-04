@@ -3,38 +3,48 @@ package sage.commands
 import java.time.Instant
 
 import scala.collection.mutable
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{FiniteDuration, MILLISECONDS}
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.{Doubles, KeyCodec, ValueCodec}
+import sage.codec.{Doubles, KeyCodec, Primitives, ValueCodec}
 import sage.protocol.Frame
 
 private[commands] object Decode {
 
+  // a decoder for the frames `accept` handles; any other frame fails with a mismatch against `expected`
+  def shape[A](expected: String)(accept: PartialFunction[Frame, Either[DecodeError, A]]): Frame => Either[DecodeError, A] = {
+    val mismatch: Frame => Either[DecodeError, A] = other => Left(DecodeError(expected, Frame.describe(other)))
+    frame => accept.applyOrElse(frame, mismatch)
+  }
+
   val frame: Frame => Either[DecodeError, Frame] = Right(_)
 
-  val long: Frame => Either[DecodeError, Long] = {
-    case Frame.Integer(value) => Right(value)
-    case other                => Left(DecodeError("integer", Frame.describe(other)))
+  val long: Frame => Either[DecodeError, Long] = shape("integer") { case Frame.Integer(value) =>
+    Right(value)
   }
 
-  val flag: Frame => Either[DecodeError, Boolean] = {
+  val millisDuration: Frame => Either[DecodeError, FiniteDuration] = shape("integer") { case Frame.Integer(ms) =>
+    Right(FiniteDuration(ms, MILLISECONDS))
+  }
+
+  val millisInstant: Frame => Either[DecodeError, Instant] = shape("integer") { case Frame.Integer(ms) => Right(Instant.ofEpochMilli(ms)) }
+
+  def decimal(expected: String): Frame => Either[DecodeError, Long] =
+    shape(expected) { case Frame.BulkString(text) => Primitives.decodeLong(expected, Long.MinValue, Long.MaxValue)(text) }
+
+  val flag: Frame => Either[DecodeError, Boolean] = shape("integer 0 or 1") {
     case Frame.Integer(0) => Right(false)
     case Frame.Integer(1) => Right(true)
-    case other            => Left(DecodeError("integer 0 or 1", Frame.describe(other)))
   }
 
-  val ok: Frame => Either[DecodeError, Unit] = {
-    case Frame.SimpleString("OK") => Right(())
-    case other                    => Left(DecodeError("simple string 'OK'", Frame.describe(other)))
+  val ok: Frame => Either[DecodeError, Unit] = shape("simple string 'OK'") { case Frame.SimpleString("OK") =>
+    Right(())
   }
 
-  val double: Frame => Either[DecodeError, Double] = {
-    case Frame.BulkString(bytes) =>
-      val text = bytes.asUtf8String
-      Doubles.parse(text).toRight(DecodeError("double bulk string", s"bulk string '$text'"))
-    case other                   => Left(DecodeError("double bulk string", Frame.describe(other)))
+  val okOrNull: Frame => Either[DecodeError, Boolean] = shape("simple string 'OK' or null") {
+    case Frame.SimpleString("OK") => Right(true)
+    case Frame.Null               => Right(false)
   }
 
   // Decode the integer format shared by TTL, EXPIRETIME, HTTL, and related commands. -2 means absent, -1 means no expiry, and a non-negative
@@ -57,34 +67,29 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
-  val utf8String: Frame => Either[DecodeError, String] = {
-    case Frame.BulkString(bytes) => Right(bytes.asUtf8String)
-    case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
+  val utf8String: Frame => Either[DecodeError, String] = shape("bulk string") { case Frame.BulkString(bytes) =>
+    Right(bytes.asUtf8String)
   }
 
   // text however the server framed it: simple, bulk, or the RESP3 verbatim form INFO/CLIENT INFO/CLUSTER NODES use
-  val text: Frame => Either[DecodeError, String] = {
+  val text: Frame => Either[DecodeError, String] = shape("string") {
     case Frame.SimpleString(value)      => Right(value)
     case Frame.BulkString(bytes)        => Right(bytes.asUtf8String)
     case Frame.VerbatimString(_, bytes) => Right(bytes.asUtf8String)
-    case other                          => Left(DecodeError("string", Frame.describe(other)))
   }
 
-  val optionalUtf8String: Frame => Either[DecodeError, Option[String]] = {
+  val optionalUtf8String: Frame => Either[DecodeError, Option[String]] = shape("bulk string or null") {
     case Frame.Null              => Right(None)
     case Frame.BulkString(bytes) => Right(Some(bytes.asUtf8String))
-    case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
-  val bytes: Frame => Either[DecodeError, Bytes] = {
-    case Frame.BulkString(value) => Right(value)
-    case other                   => Left(DecodeError("bulk string", Frame.describe(other)))
+  val bytes: Frame => Either[DecodeError, Bytes] = shape("bulk string") { case Frame.BulkString(value) =>
+    Right(value)
   }
 
-  val optionalBytes: Frame => Either[DecodeError, Option[Bytes]] = {
+  val optionalBytes: Frame => Either[DecodeError, Option[Bytes]] = shape("bulk string or null") {
     case Frame.Null              => Right(None)
     case Frame.BulkString(value) => Right(Some(value))
-    case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
   def key[K](using codec: KeyCodec[K]): Frame => Either[DecodeError, K] = {
@@ -98,25 +103,25 @@ private[commands] object Decode {
     case other                   => Left(DecodeError("bulk string or null", Frame.describe(other)))
   }
 
-  val optionalLong: Frame => Either[DecodeError, Option[Long]] = {
+  val optionalLong: Frame => Either[DecodeError, Option[Long]] = shape("integer or null") {
     case Frame.Null           => Right(None)
     case Frame.Integer(value) => Right(Some(value))
-    case other                => Left(DecodeError("integer or null", Frame.describe(other)))
   }
 
-  // a double however the server framed it: a RESP3 Double, or a bulk string under RESP2 (geo coordinates, distances)
-  val lenientDouble: Frame => Either[DecodeError, Double] = {
+  // a double however the server framed it: a RESP3 Double (scores), or a bulk string (INCRBYFLOAT, ZSCAN scores, geo under RESP2)
+  val double: Frame => Either[DecodeError, Double] = shape("double") {
     case Frame.Double(value)     => Right(value)
     case Frame.BulkString(bytes) =>
       val text = bytes.asUtf8String
       Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
-    case other                   => Left(DecodeError("double", Frame.describe(other)))
   }
 
   // GEODIST replies the distance as a double, or null when a member is absent
-  val optionalDouble: Frame => Either[DecodeError, Option[Double]] = {
+  val optionalDouble: Frame => Either[DecodeError, Option[Double]] = nullable(double)
+
+  def nullable[A](decode: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Option[A]] = {
     case Frame.Null => Right(None)
-    case other      => lenientDouble(other).map(Some(_))
+    case other      => decode(other).map(Some(_))
   }
 
   private def buildEach[A, B, C](items: IterableOnce[A], builder: mutable.Builder[B, C])(
@@ -133,15 +138,24 @@ private[commands] object Decode {
     Right(builder.result())
   }
 
+  def mapEntries[A, K, V](items: IterableOnce[A])(f: A => Either[DecodeError, (K, V)]): Either[DecodeError, Map[K, V]] =
+    buildEach(items, Map.newBuilder[K, V])(f)
+
   def each[A, B](items: IterableOnce[A])(f: A => Either[DecodeError, B]): Either[DecodeError, Vector[B]] =
     buildEach(items, Vector.newBuilder[B])(f)
 
-  // steps a flat alternating array two elements at a time, without grouped(2)'s throwaway 2-element Vector per pair; caller guarantees even length
-  private def buildPairs[B, C](elements: Vector[Frame], builder: mutable.Builder[B, C])(
-    f: (Frame, Frame) => Either[DecodeError, B]
-  ): Either[DecodeError, C] = {
+  def flatPairsOf[B](label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Frame => Either[DecodeError, Vector[B]] = {
+    case array: Frame.Array => buildPairs(array, label)(f)
+    case other              => Left(DecodeError(label, Frame.describe(other)))
+  }
+
+  // steps a flat alternating array two elements at a time, without grouped(2)'s throwaway 2-element Vector per pair
+  private def buildPairs[B](array: Frame.Array, label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Either[DecodeError, Vector[B]] = {
+    val elements = array.elements
+    if (elements.length % 2 != 0) return Left(DecodeError(label, Frame.describe(array)))
+    val builder = Vector.newBuilder[B]
     builder.sizeHint(elements.length / 2)
-    var i = 0
+    var i       = 0
     while (i < elements.length) {
       f(elements(i), elements(i + 1)) match {
         case Right(value) => builder += value
@@ -196,75 +210,84 @@ private[commands] object Decode {
     case other                               => Left(DecodeError(label, Frame.describe(other)))
   }
 
-  def vector[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
+  def byLowerName[E](cases: E*): Map[String, E] = cases.iterator.map(value => value.toString.toLowerCase(java.util.Locale.ROOT) -> value).toMap
+
+  def vector[A](element: Frame => Either[DecodeError, A], expected: String = "array"): Frame => Either[DecodeError, Vector[A]] = {
     case Frame.Array(elements) => buildEach(elements, Vector.newBuilder[A])(element)
-    case other                 => Left(DecodeError("array", Frame.describe(other)))
+    case other                 => Left(DecodeError(expected, Frame.describe(other)))
   }
 
   // a missing list replies null where a present one replies an array; a stored list is never empty, so null collapses to an empty vector
-  def vectorOrEmpty[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
-    val decodeVector = vector(element)
-    frame =>
-      frame match {
-        case Frame.Null => Right(Vector.empty)
-        case other      => decodeVector(other)
-      }
+  def orEmpty[A](decode: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, Vector[A]] = {
+    case Frame.Null => Right(Vector.empty)
+    case other      => decode(other)
   }
 
   // a RESP3 map, or the flat RESP2 array of alternating key/value some introspection replies still use; non-string keys are dropped
-  val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = {
-    case Frame.Map(entries) => Right(entries.collect { case (Frame.BulkString(k), v) => k.asUtf8String -> v }.toMap)
-    case Frame.Array(elements) if elements.length % 2 == 0 =>
-      val builder = Map.newBuilder[String, Frame]
-      builder.sizeHint(elements.length / 2)
-      var i       = 0
-      while (i < elements.length) {
-        elements(i) match {
-          case Frame.BulkString(k) => builder += (k.asUtf8String -> elements(i + 1))
-          case _                   => ()
-        }
-        i += 2
-      }
-      Right(builder.result())
-    case other => Left(DecodeError("map", Frame.describe(other)))
+  val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = shape("map") {
+    case Frame.Map(entries) => Right(entries.collect { case (Text(k), v) => k -> v }.toMap)
+    case array: Frame.Array => buildPairs(array, "map")((k, v) => Right(Text.unapply(k).map(_ -> v))).map(_.flatten.toMap)
   }
 
-  def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
-    case Frame.Map(entries) =>
-      buildEach(entries, Map.newBuilder[K, V]) { case (fieldFrame, valueFrame) =>
-        for {
-          field <- key(fieldFrame)
-          value <- this.value(valueFrame)
-        } yield field -> value
+  def fields[A](read: Fields => Either[DecodeError, A]): Frame => Either[DecodeError, A] = frame => fieldMap(frame).flatMap(m => read(new Fields(m)))
+
+  def fieldValues[A](value: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Map[String, A]] =
+    frame => fieldMap(frame).flatMap(mapEntries(_) { case (name, field) => value(field).map(name -> _) })
+
+  // text framed as a bulk or simple string
+  object Text {
+    def unapply(frame: Frame): Option[String] =
+      frame match {
+        case Frame.BulkString(bytes)  => Some(bytes.asUtf8String)
+        case Frame.SimpleString(name) => Some(name)
+        case _                        => None
       }
-    case other              => Left(DecodeError("map", Frame.describe(other)))
+  }
+
+  /**
+    * A lenient view over an introspection reply map: read fields by known name, ignore the rest.
+    */
+  final class Fields(table: Map[String, Frame]) {
+
+    def get(name: String): Option[Frame] = table.get(name)
+
+    def required[A](name: String, decode: Frame => Either[DecodeError, A]): Either[DecodeError, A] =
+      table.get(name).toRight(DecodeError(s"field '$name'", "absent")).flatMap(decode)
+
+    // a field that is core to the reply but whose absence on some server we tolerate with a default rather than failing the whole decode
+    def requiredOr[A](name: String, decode: Frame => Either[DecodeError, A], fallback: A): Either[DecodeError, A] =
+      table.get(name) match {
+        case None | Some(Frame.Null) => Right(fallback)
+        case Some(frame)             => decode(frame)
+      }
+
+    def optional[A](name: String, decode: Frame => Either[DecodeError, A]): Either[DecodeError, Option[A]] =
+      table.get(name) match {
+        case None | Some(Frame.Null) => Right(None)
+        case Some(frame)             => decode(frame).map(Some(_))
+      }
+
+    def optionalVector[A](name: String, element: Frame => Either[DecodeError, A]): Either[DecodeError, Vector[A]] =
+      requiredOr(name, vector(element), Vector.empty)
+  }
+
+  def pair[A, B](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B]): (Frame, Frame) => Either[DecodeError, (A, B)] =
+    (x, y) => a(x).flatMap(first => b(y).map(first -> _))
+
+  def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
+    val entry = pair(key[K], value[V]).tupled
+    shape("map") { case Frame.Map(entries) => mapEntries(entries)(entry) }
   }
 
   // HSCAN's items are a flat field, value, field, value, … array; HRANDFIELD WITHVALUES nests each pair in its own array.
-  def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
-    case Frame.Array(elements) if elements.length % 2 == 0 =>
-      buildPairs(elements, Vector.newBuilder[(K, V)]) { (fieldFrame, valueFrame) =>
-        for {
-          field <- key(fieldFrame)
-          value <- this.value(valueFrame)
-        } yield field -> value
-      }
-    case other => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
-  }
+  def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
+    flatPairsOf("array of field/value pairs")(pair(key[K], value[V]))
 
-  def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] = {
-    val pair = array2(key[K], value[V], "field/value pair")(_ -> _)
-    frame =>
-      frame match {
-        case Frame.Array(rows) => each(rows)(pair)
-        case other             => Left(DecodeError("array of field/value pairs", Frame.describe(other)))
-      }
-  }
+  def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
+    vector(array2(key[K], value[V], "field/value pair")(_ -> _), "array of field/value pairs")
 
-  private val scanCursor: Frame => Either[DecodeError, Option[ScanCursor]] = {
-    case Frame.BulkString(bytes) =>
-      Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
-    case other                   => Left(DecodeError("cursor bulk string", Frame.describe(other)))
+  private val scanCursor: Frame => Either[DecodeError, Option[ScanCursor]] = shape("cursor bulk string") { case Frame.BulkString(bytes) =>
+    Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
   }
 
   def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] =
@@ -276,25 +299,17 @@ private[commands] object Decode {
     case other               => Left(DecodeError("set", Frame.describe(other)))
   }
 
-  val score: Frame => Either[DecodeError, Double] = {
-    case Frame.Double(value) => Right(value)
-    case other               => Left(DecodeError("double", Frame.describe(other)))
-  }
-
-  val optionalScore: Frame => Either[DecodeError, Option[Double]] = {
+  val optionalScore: Frame => Either[DecodeError, Option[Double]] = shape("double or null") {
     case Frame.Null          => Right(None)
     case Frame.Double(value) => Right(Some(value))
-    case other               => Left(DecodeError("double or null", Frame.describe(other)))
   }
 
   private def memberScore[V](using ValueCodec[V]): Frame => Either[DecodeError, (V, Double)] =
-    array2(value[V], score, "member/score pair")(_ -> _)
+    array2(value[V], double, "member/score pair")(_ -> _)
 
   // RESP3 nests each member with its Double score in a two-element array (ZRANGE WITHSCORES, ZPOPMIN count, …)
-  def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
-    case Frame.Array(rows) => each(rows)(memberScore[V])
-    case other             => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
-  }
+  def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] =
+    vector(memberScore[V], "array of member/score pairs")
 
   // ZPOPMIN/ZPOPMAX without a count: a flat [member, score], or an empty array when the key is absent
   def optionalScoredMember[V](using ValueCodec[V]): Frame => Either[DecodeError, Option[(V, Double)]] = {
@@ -305,16 +320,8 @@ private[commands] object Decode {
   }
 
   // ZSCAN's items are a flat member, score, member, score array with scores as bulk strings, not RESP3 doubles
-  def scoredMembersFlat[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] = {
-    case Frame.Array(elements) if elements.length % 2 == 0 =>
-      buildPairs(elements, Vector.newBuilder[(V, Double)]) { (memberFrame, scoreFrame) =>
-        for {
-          member <- value(memberFrame)
-          s      <- double(scoreFrame)
-        } yield member -> s
-      }
-    case other => Left(DecodeError("array of member/score pairs", Frame.describe(other)))
-  }
+  def scoredMembersFlat[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] =
+    flatPairsOf("array of member/score pairs")(pair(value[V], double))
 }
 
 private[commands] object TimeArgs {
@@ -326,6 +333,11 @@ private[commands] object TimeArgs {
   // Keep second precision for whole seconds. Round finer durations up to the next millisecond so the encoded expiry is not earlier than the
   // requested time. Rounding down would encode a sub-millisecond duration as 0, which expires immediately.
   def millis(duration: FiniteDuration): Long = Math.ceilDiv(duration.toNanos, 1000000L)
+
+  // for arguments where the wire value 0 means "no timeout" or "no expiry"
+  def positiveMillis(duration: FiniteDuration): Long = Math.max(1L, millis(duration))
+
+  def positiveMillis(timestamp: Instant): Long = Math.max(1L, millis(timestamp))
 
   // Use saturating arithmetic for an Instant outside the millisecond range. This avoids an overflow while building the command and preserves
   // upward rounding at the maximum value.
@@ -341,12 +353,12 @@ private[commands] object TimeArgs {
     catch { case _: ArithmeticException => if (a < 0L) Long.MinValue else Long.MaxValue }
 
   def relative(duration: FiniteDuration): Vector[Bytes] =
-    if (wholeSeconds(duration)) Vector(Ex, Bytes.utf8(duration.toSeconds.toString))
-    else Vector(Px, Bytes.utf8(millis(duration).toString))
+    if (wholeSeconds(duration)) Vector(Ex, Args.long(duration.toSeconds))
+    else Vector(Px, Args.long(millis(duration)))
 
   def absolute(timestamp: Instant): Vector[Bytes] =
-    if (wholeSeconds(timestamp)) Vector(ExAt, Bytes.utf8(timestamp.getEpochSecond.toString))
-    else Vector(PxAt, Bytes.utf8(millis(timestamp).toString))
+    if (wholeSeconds(timestamp)) Vector(ExAt, Args.long(timestamp.getEpochSecond))
+    else Vector(PxAt, Args.long(millis(timestamp)))
 
   def expireCommand(secName: String, msName: String, duration: FiniteDuration): (String, Long) =
     if (wholeSeconds(duration)) (secName, duration.toSeconds) else (msName, millis(duration))

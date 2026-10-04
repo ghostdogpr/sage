@@ -18,9 +18,7 @@ trait TransactionScope[F[_], K] extends CommandRunner[F, K] {
     */
   def watch[K: KeyCodec](key: K, rest: K*): F[Unit]
 
-  private[sage] def exec[Out, R](pipeline: Pipeline[Out, R]): F[Option[Out]]
-
-  private[sage] def execAttempt[Out, R](pipeline: Pipeline[Out, R]): F[Option[R]]
+  private[sage] def exec[R](pipeline: Pipeline[R]): F[Option[R]]
 
   /**
     * Executes a fixed-arity batch of commands atomically (`MULTI`/`EXEC`), yielding a result tuple that mirrors the argument tuple
@@ -40,13 +38,13 @@ trait TransactionScope[F[_], K] extends CommandRunner[F, K] {
     * Like the tuple [[exec]], but yields the per-position results (each slot a `Right`/`Left`) on commit. `None` still means aborted.
     */
   def execAttempt[T <: NonEmptyTuple](commands: T)(using Tuple.IsMappedBy[Command][T]): F[Option[Tuple.Map[Tuple.InverseMap[T, Command], Attempt]]] =
-    execAttempt(Pipeline.fromTuple(commands))
+    exec(Pipeline.fromTupleAttempt(commands))
 
   /**
     * Like the `Seq` [[exec]], but yields the per-position results (each slot a `Right`/`Left`) on commit. `None` still means aborted.
     */
   def execAttempt[A](commands: Seq[Command[A]]): F[Option[Vector[Attempt[A]]]] =
-    execAttempt(Pipeline.sequence(commands))
+    exec(Pipeline.sequenceAttempt(commands))
 
   /**
     * Abandons the scope without committing, clearing any watched keys so the connection can be recycled (issues `UNWATCH`).
@@ -60,11 +58,10 @@ trait TransactionScope[F[_], K] extends CommandRunner[F, K] {
   override def as[K2](using KeyCodec[K2]): TransactionScope[F, K2] = {
     val self = this
     new TransactionScope[F, K2] {
-      def run[A](command: Command[A]): F[A]                                           = self.run(command)
-      def watch[K0: KeyCodec](key: K0, rest: K0*): F[Unit]                            = self.watch(key, rest*)
-      private[sage] def exec[Out, R](pipeline: Pipeline[Out, R]): F[Option[Out]]      = self.exec(pipeline)
-      private[sage] def execAttempt[Out, R](pipeline: Pipeline[Out, R]): F[Option[R]] = self.execAttempt(pipeline)
-      def discard: F[Unit]                                                            = self.discard
+      def run[A](command: Command[A]): F[A]                          = self.run(command)
+      def watch[K0: KeyCodec](key: K0, rest: K0*): F[Unit]           = self.watch(key, rest*)
+      private[sage] def exec[R](pipeline: Pipeline[R]): F[Option[R]] = self.exec(pipeline)
+      def discard: F[Unit]                                           = self.discard
     }
   }
 }

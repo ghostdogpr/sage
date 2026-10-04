@@ -16,16 +16,15 @@ object CLatch {
     * Allocates a latch with counter `n`; `n <= 0` is normalized to "already released".
     */
   inline def init(inline n: Int): CIO[CLatch] =
-    CIO.lift(initImpl(n))
+    CIO.lift(
+      if (n <= 0) CountDownLatch[IO](1).flatMap(l => l.release.as(l))
+      else CountDownLatch[IO](n)
+    )
 
   /**
     * Wraps a native `cats.effect.std.CountDownLatch` as a `CLatch`. The conversion is the identity on the carrier.
     */
   inline def lift(inline u: CountDownLatch[IO]): CLatch = u
-
-  private inline def initImpl(inline n: Int): IO[CountDownLatch[IO]] =
-    if (n <= 0) CountDownLatch[IO](1).flatMap(l => l.release.as(l))
-    else CountDownLatch[IO](n)
 
   extension (inline self: CLatch) {
 

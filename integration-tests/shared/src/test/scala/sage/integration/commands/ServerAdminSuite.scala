@@ -4,106 +4,78 @@ import scala.concurrent.duration.*
 
 import kyo.compat.*
 
-import sage.commands.Role
-import sage.integration.{Images, ServerSuite}
+import sage.commands.{CommandLogType, Role}
+import sage.integration.BothServersSuite
 
-abstract class ServerAdminSuite(image: String) extends ServerSuite(image) {
+class ServerAdminSuite extends BothServersSuite {
 
-  test("CONFIG GET and SET read and write a parameter") {
-    withClient { client =>
-      for {
-        before <- client.configGet("maxmemory")
-        _      <- client.configSet(("maxmemory", "100mb"))
-        after  <- client.configGet("maxmemory")
-        _      <- client.configSet(("maxmemory", before.getOrElse("maxmemory", "0")))
-      } yield {
-        assert(before.contains("maxmemory"))
-        assertEquals(after.get("maxmemory"), Some("104857600"))
-      }
+  clientTest("CONFIG GET and SET read and write a parameter") { client =>
+    for {
+      before <- client.configGet("maxmemory")
+      _      <- client.configSet(("maxmemory", "100mb"))
+      after  <- client.configGet("maxmemory")
+      _      <- client.configSet(("maxmemory", before.getOrElse("maxmemory", "0")))
+    } yield {
+      assert(before.contains("maxmemory"))
+      assertEquals(after.get("maxmemory"), Some("104857600"))
     }
   }
 
-  test("DBSIZE, FLUSHDB, ECHO, TIME") {
-    withClient { client =>
-      for {
-        _     <- client.set("admin-k", "v")
-        size  <- client.dbSize
-        _     <- client.flushDb()
-        empty <- client.dbSize
-        echo  <- client.echo("ping")
-        time  <- client.time
-      } yield {
-        assert(size >= 1L)
-        assertEquals(empty, 0L)
-        assertEquals(echo, "ping")
-        assert(time.getEpochSecond > 1_000_000_000L)
-      }
+  clientTest("DBSIZE, FLUSHDB, ECHO, TIME") { client =>
+    client.set("admin-k", "v") >>
+      client.dbSize.satisfies(_ >= 1L) >>
+      client.flushDb() >>
+      client.dbSize.is(0L) >>
+      client.echo("ping").is("ping") >>
+      client.time.satisfies(_.getEpochSecond > 1_000_000_000L)
+  }
+
+  clientTest("ROLE reports a standalone server as master") { client =>
+    client.role.map {
+      case Role.Master(_, _) => ()
+      case other             => fail(s"expected master, got $other")
     }
   }
 
-  test("ROLE reports a standalone server as master") {
-    withClient { client =>
-      client.role.map {
-        case Role.Master(_, _) => ()
-        case other             => fail(s"expected master, got $other")
-      }
-    }
+  clientTest("CLIENT ID/GETNAME/INFO/LIST and WAIT") { client =>
+    client.clientId.satisfies(_ > 0L) >>
+      client.clientGetName.is("") >>
+      client.clientInfo.satisfies(_.contains("id=")) >>
+      client.clientList.satisfies(_.contains("addr=")) >>
+      client.waitReplicas(0L, 100.millis).is(0L)
   }
 
-  test("CLIENT ID/GETNAME/INFO/LIST and WAIT") {
-    withClient { client =>
-      for {
-        id     <- client.clientId
-        name   <- client.clientGetName
-        info   <- client.clientInfo
-        list   <- client.clientList
-        waited <- client.waitReplicas(0L, 100.millis)
-      } yield {
-        assert(id > 0L)
-        assertEquals(name, "")
-        assert(info.contains("id="))
-        assert(list.contains("addr="))
-        assertEquals(waited, 0L)
-      }
-    }
+  clientTest("COMMAND COUNT/INFO/GETKEYS") { client =>
+    client.commandCount.satisfies(_ > 100L) >>
+      client.commandInfo("get", "set").map(_.map(_.name).toSet).is(Set("get", "set")) >>
+      client.commandGetKeys("SET", "k", "v").is(Vector("k"))
   }
 
-  test("COMMAND COUNT/INFO/GETKEYS") {
-    withClient { client =>
-      for {
-        count <- client.commandCount
-        infos <- client.commandInfo("get", "set")
-        keys  <- client.commandGetKeys("SET", "k", "v")
-      } yield {
-        assert(count > 100L)
-        assertEquals(infos.map(_.name).toSet, Set("get", "set"))
-        assertEquals(keys, Vector("k"))
-      }
-    }
+  clientTest("MEMORY USAGE, SLOWLOG, LATENCY, ACL reads") { client =>
+    client.set("mem-k", "value") >>
+      client.memoryUsage("mem-k").satisfies(_.exists(_ > 0L)) >>
+      client.slowLogReset >>
+      client.slowLogLen.is(0L) >>
+      client.latencyLatest >>
+      client.aclWhoAmI.is("default") >>
+      client.aclUsers.satisfies(_.contains("default")) >>
+      client.aclGetUser("default").satisfies(_.exists(_.flags.nonEmpty))
   }
 
-  test("MEMORY USAGE, SLOWLOG, LATENCY, ACL reads") {
-    withClient { client =>
-      for {
-        _      <- client.set("mem-k", "value")
-        usage  <- client.memoryUsage("mem-k")
-        _      <- client.slowLogReset
-        len    <- client.slowLogLen
-        latest <- client.latencyLatest
-        who    <- client.aclWhoAmI
-        users  <- client.aclUsers
-        user   <- client.aclGetUser("default")
-      } yield {
-        assert(usage.exists(_ > 0L))
-        assertEquals(len, 0L)
-        assert(latest.isEmpty || latest.nonEmpty)
-        assertEquals(who, "default")
-        assert(users.contains("default"))
-        assert(user.exists(_.flags.nonEmpty))
-      }
-    }
+  // COMMANDLOG exists only on Valkey.
+  valkeyTest("COMMANDLOG GET/LEN/RESET over the slow log") { client =>
+    client.configSet(("slowlog-log-slower-than", "0")) >>
+      client.commandLogReset(CommandLogType.Slow) >>
+      client.get[String]("cl-probe") >>
+      client.commandLogLen(CommandLogType.Slow).satisfies(_ > 0L) >>
+      client.commandLogGet(5L, CommandLogType.Slow).satisfies(recent => recent.nonEmpty && recent.forall(_.command.nonEmpty)) >>
+      client.configSet(("slowlog-log-slower-than", "10000")) >>
+      client.commandLogReset(CommandLogType.Slow) >>
+      client.commandLogLen(CommandLogType.Slow).is(0L)
+  }
+
+  valkeyTest("COMMANDLOG LEN works for the large-request and large-reply types") { client =>
+    client.commandLogLen(CommandLogType.LargeRequest).satisfies(_ >= 0L) >>
+      client.commandLogLen(CommandLogType.LargeReply).satisfies(_ >= 0L)
   }
 }
-
-class RedisServerAdminSuite  extends ServerAdminSuite(Images.redis)
-class ValkeyServerAdminSuite extends ServerAdminSuite(Images.valkey)

@@ -1,17 +1,19 @@
 package sage.client.internal
 
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicReference, AtomicReferenceArray}
 import java.util.concurrent.locks.ReentrantLock
 
+import scala.annotation.tailrec
 import scala.collection.mutable
 import scala.concurrent.duration.*
-import scala.util.{Failure, Try}
+import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 import sage.SageException
 import sage.SageException.{ConnectionLost, NotConnected, TimedOut}
 import sage.client.DedicatedPoolConfig
 import sage.commands.{Command, Connection}
+import sage.protocol.Frame
 
 /**
   * A pool of dedicated connections for blocking commands, transactions, and lock replication checks. Connections are created when needed,
@@ -27,8 +29,6 @@ final private[client] class DedicatedPool(
   bootstrap: Vector[Command[?]],
   scheduler: Scheduler,
   isLive: () => Boolean,
-  liveGeneration: () => Option[MultiplexedConnection.Generation],
-  isCurrent: MultiplexedConnection.Generation => Boolean,
   config: DedicatedPoolConfig,
   connectTimeoutMillis: Long
 ) {
@@ -40,7 +40,6 @@ final private[client] class DedicatedPool(
   private val live                              = mutable.Set.empty[DedicatedConnection]
   // connections whose socket is being opened outside the lock, so close() can abort one still connecting
   private val establishing                      = mutable.Set.empty[DedicatedConnection]
-  private var reserved                          = 0
   private var closing                           = false
   private val sweepHandle: Scheduler.Cancelable =
     config.idleTimeout match {
@@ -50,23 +49,11 @@ final private[client] class DedicatedPool(
 
   /**
     * Runs a blocking command on a borrowed connection and releases it after the reply or failure. Acquisition runs on another thread
-    * because it may wait for a pool slot or open a socket.
+    * because it may wait for a pool slot or open a socket. After an `ASK` redirect, `asking` writes `ASKING` and the command consecutively on
+    * the same leased connection. The `ASKING` reply is discarded, and the command's reply releases the connection.
     */
-  def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease = new DedicatedPool.Lease): Unit =
-    leaseAndSubmit(command, asking = false, callback, lease)
-
-  /**
-    * Runs a blocking command after an `ASK` redirect. `ASKING` and the command are written consecutively on the same leased connection.
-    * The `ASKING` reply is discarded, and the command's reply releases the connection.
-    */
-  def useAsking[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
-    leaseAndSubmit(command, asking = true, callback, lease)
-
-  private def leaseAndSubmit[A](command: Command[A], asking: Boolean, callback: Try[A] => Unit, lease: DedicatedPool.Lease): Unit =
-    useConnection(callback, lease) { (conn, complete) =>
-      if (asking) conn.submit[Unit](Connection.asking, _ => ())
-      conn.submit(command, complete)
-    }
+  def use[A](command: Command[A], callback: Try[A] => Unit, lease: DedicatedPool.Lease = new DedicatedPool.Lease, asking: Boolean = false): Unit =
+    useConnection(callback, lease, asking)(_.submit(command, _))
 
   // WAIT blocks its socket. Keep the write and confirmation on one leased connection so other commands can proceed independently.
   def useLockWrite[A](
@@ -76,12 +63,12 @@ final private[client] class DedicatedPool(
     lease: DedicatedPool.Lease,
     replication: LockReplication
   ): Unit =
-    useConnection(callback, lease, replication.cancelled, Some(replication.deadlineMillis))(replication.submit(_, command, asking, _))
+    useConnection(callback, lease, asking, Some(replication.deadlineMillis))(replication.submit(_, command, _))
 
   private def useConnection[A](
     callback: Try[A] => Unit,
     lease: DedicatedPool.Lease,
-    onCancel: () => Unit = () => (),
+    asking: Boolean,
     deadlineMillis: Option[Long] = None
   )(submit: (DedicatedConnection, Try[A] => Unit) => Unit): Unit =
     if (!isLive()) callback(Failure(NotConnected()))
@@ -100,11 +87,10 @@ final private[client] class DedicatedPool(
             callback(Failure(error))
           case Right(conn) =>
             // Cancellation can precede attachment while acquisition waits for a socket or pool slot.
-            val onInterrupt = () => {
-              onCancel()
-              callback(Failure(ConnectionLost(mayHaveExecuted = true)))
-            }
+            val onInterrupt = () => callback(Failure(ConnectionLost(mayHaveExecuted = true)))
             if (lease.attach(this, conn, onInterrupt)) {
+              // the leased connection is exclusive, so ASKING stays adjacent to the command
+              if (asking) conn.submit[Unit](Connection.asking, _ => ())
               submit(
                 conn,
                 result =>
@@ -140,6 +126,13 @@ final private[client] class DedicatedPool(
 
   private[internal] def wakeWaiters(): Unit = locked(available.signalAll())
 
+  // a connection admitted before the loss may point to the previous server after a failover, so it is discarded when released
+  private[internal] def onLivenessLost(): Unit =
+    locked {
+      live.foreach(_.markDead())
+      available.signalAll()
+    }
+
   def close(): Unit = {
     val toClose = locked {
       closing = true
@@ -154,69 +147,52 @@ final private[client] class DedicatedPool(
   }
 
   private def acquire(lease: Option[DedicatedPool.Lease] = None, deadlineMillis: Option[Long] = None): DedicatedConnection = {
-    val budgetNanos   = deadlineMillis.fold(config.acquireTimeout.toNanos) { deadline =>
+    val budgetNanos                          = deadlineMillis.fold(config.acquireTimeout.toNanos) { deadline =>
       math.min(config.acquireTimeout.toNanos, (deadline - scheduler.nowMillis).millis.toNanos)
     }
     // Condition waits use real nanoseconds, so only the remaining duration crosses from the scheduler's monotonic clock.
-    val deadlineNanos = System.nanoTime() + budgetNanos
-    locked {
-      while (true) {
-        if (lease.exists(_.isCancelled)) throw ConnectionLost(mayHaveExecuted = true)
-        if (closing) throw NotConnected()
-        // reject acquisition while the shared connection is reconnecting; repeat the liveness check after each wake-up
-        if (!isLive()) throw NotConnected()
-        val remaining = deadlineNanos - System.nanoTime()
-        // A lock deadline limits the write itself. An expired write must not take a slot even when one is immediately available.
-        if (deadlineMillis.isDefined && remaining <= 0L) throw acquireTimedOut(budgetNanos.nanos)
-        val reused    = takeIdleLocked()
-        if (reused != null) return reused
-        if (live.size + reserved < config.maxConnections) {
-          reserved += 1
-          return establishOutsideLock()
-        }
-        if (remaining <= 0L) throw acquireTimedOut(budgetNanos.nanos)
+    val deadlineNanos                        = System.nanoTime() + budgetNanos
+    @tailrec def loop(): DedicatedConnection = {
+      if (lease.exists(_.isCancelled)) throw ConnectionLost(mayHaveExecuted = true)
+      if (closing) throw NotConnected()
+      // reject acquisition while the shared connection is reconnecting; repeat the liveness check after each wake-up
+      if (!isLive()) throw NotConnected()
+      val remaining = deadlineNanos - System.nanoTime()
+      // A lock deadline limits the write itself. An expired write must not take a slot even when one is immediately available.
+      if (deadlineMillis.isDefined && remaining <= 0L) throw acquireTimedOut(budgetNanos.nanos)
+      val reused    = takeIdleLocked()
+      if (reused != null) reused
+      else if (live.size + establishing.size < config.maxConnections) establishOutsideLock()
+      else if (remaining <= 0L) throw acquireTimedOut(budgetNanos.nanos)
+      else {
         available.awaitNanos(remaining): Unit
+        loop()
       }
-      throw new IllegalStateException("unreachable")
     }
+    locked(loop())
   }
 
-  // Entered holding the lock with `reserved` already incremented; registers the connection, drops the lock for the blocking establish, then
-  // re-accounts under it.
+  // Entered holding the lock; registers the connection, drops the lock for the blocking establish, then re-accounts under it.
   private def establishOutsideLock(): DedicatedConnection = {
-    val connection = DedicatedConnection.create(factory, connectTimeoutMillis)
+    val connection = new DedicatedConnection(factory, scheduler)
     establishing += connection
     lock.unlock()
-    try connection.establish(bootstrap)
-    catch {
-      case e: Throwable =>
-        locked {
-          establishing -= connection
-          reserved -= 1
-          available.signal()
-        }
-        lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
-        throw e
+    onThrow(connection.handshake(bootstrap, connectTimeoutMillis)) { _ =>
+      locked {
+        establishing -= connection
+        available.signal()
+      }
+      lock.lock() // re-take so acquire()'s `locked` block unlocks exactly once on exit
     }
     lock.lock()
     establishing -= connection
-    reserved -= 1
-    // record the current generation only after the connection is ready to join the pool. This handles reconnects during establishment.
-    if (closing) {
+    if (closing || !isLive()) {
       available.signal()
       scheduleClose(connection)
       throw NotConnected()
     }
-    liveGeneration() match {
-      case None      =>
-        available.signal()
-        scheduleClose(connection)
-        throw NotConnected()
-      case Some(gen) =>
-        connection.stampEpoch(gen)
-        live += connection
-        connection
-    }
+    live += connection
+    connection
   }
 
   private def acquireTimedOut(budget: FiniteDuration): TimedOut =
@@ -234,7 +210,7 @@ final private[client] class DedicatedPool(
 
   private def release(connection: DedicatedConnection): Unit =
     locked {
-      if (closing || !healthyAndCurrent(connection)) discardLocked(connection)
+      if (closing || !healthy(connection)) discardLocked(connection)
       else idle.append(DedicatedPool.Idle(connection, scheduler.nowMillis))
       available.signal()
     }
@@ -254,12 +230,9 @@ final private[client] class DedicatedPool(
     toClose.foreach(scheduleClose) // never close on the timer thread: close() joins I/O threads
   }
 
-  // a connection from an older generation may still point to the previous server after a reconnect or DNS failover.
-  private def healthyAndCurrent(connection: DedicatedConnection): Boolean =
-    connection.isHealthy && isCurrent(connection.epoch)
+  private def healthy(connection: DedicatedConnection): Boolean = !connection.isDead && isLive()
 
-  private def reusable(entry: DedicatedPool.Idle): Boolean =
-    healthyAndCurrent(entry.connection) && !expired(entry)
+  private def reusable(entry: DedicatedPool.Idle): Boolean = healthy(entry.connection) && !expired(entry)
 
   private def expired(entry: DedicatedPool.Idle): Boolean =
     config.idleTimeout.isFinite && scheduler.nowMillis - entry.idleSinceMillis >= config.idleTimeout.toMillis
@@ -281,29 +254,37 @@ final private[client] class DedicatedPool(
   }
 }
 
-private[client] object DedicatedPool {
+/**
+  * A connection borrowed exclusively from the [[DedicatedPool]]. It does not reconnect or run a watchdog. If the connection is lost, the
+  * pool discards it and in-flight work fails with `ConnectionLost(mayHaveExecuted = true)`. Replies are matched in order. This allows the
+  * synchronous `HELLO` setup to finish before the connection is borrowed and keeps a transaction's `MULTI`, queued-command, and `EXEC`
+  * replies aligned with their commands.
+  */
+final private[client] class DedicatedConnection(factory: MultiplexedConnection.TransportFactory, scheduler: Scheduler)
+  extends Pipe(factory, scheduler) {
 
-  def forConnection(
-    factory: MultiplexedConnection.TransportFactory,
-    bootstrap: Vector[Command[?]],
-    scheduler: Scheduler,
-    connection: MultiplexedConnection,
-    config: DedicatedPoolConfig,
-    connectTimeoutMillis: Long
-  ): DedicatedPool = {
-    val pool = new DedicatedPool(
-      factory,
-      bootstrap,
-      scheduler,
-      () => connection.isLive,
-      () => connection.liveGeneration(),
-      connection.isCurrent,
-      config,
-      connectTimeoutMillis
-    )
-    connection.setOnLivenessLost(() => pool.wakeWaiters())
-    pool
+  // The pool discards a dead connection on release, and closing here would fail the rest of a MULTI/EXEC batch the server discards anyway.
+  override protected def onReadOnly(): Unit = ()
+
+  /**
+    * Sends `MULTI`, `commands` and `EXEC` as a single pipelined write and returns their raw reply frames. The caller decodes the `EXEC`
+    * array per position against the original commands.
+    */
+  def submitExec(commands: Vector[Command[?]], callback: Try[TxSupport.ExecReplies] => Unit): Unit = {
+    val queued                     = (Connection.multi +: commands).map(_.rawFrame)
+    val replies                    = new AtomicReferenceArray[Try[Frame]](queued.length)
+    // replies arrive in write order, so EXEC's reply comes after every queued reply is stored
+    val onExec: Try[Frame] => Unit = {
+      case Failure(lost: ConnectionLost) => callback(Failure(lost))
+      case exec                          => callback(Success(TxSupport.ExecReplies(Vector.tabulate(queued.length)(replies.get), exec)))
+    }
+    reserve(queued.length + 1)
+    val entries                    = Vector.tabulate(queued.length)(i => new Entry[Frame](queued(i), replies.set(i, _)))
+    sendAll(entries :+ new Entry(Connection.exec.rawFrame, onExec))
   }
+}
+
+private[client] object DedicatedPool {
 
   final case class Idle(connection: DedicatedConnection, idleSinceMillis: Long)
 

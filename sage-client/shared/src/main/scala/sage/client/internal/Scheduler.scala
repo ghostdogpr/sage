@@ -1,9 +1,12 @@
 package sage.client.internal
 
 import java.util.concurrent.{Executors, ScheduledExecutorService, ScheduledFuture, ThreadLocalRandom, TimeUnit}
+import java.util.concurrent.locks.ReentrantLock
 
-import scala.concurrent.duration.{Duration, FiniteDuration}
+import scala.concurrent.duration.*
 import scala.util.control.NonFatal
+
+import sage.client.BackoffConfig
 
 /**
   * The clock and timer abstraction under the reconnect loop and the watchdog, injected so tests drive virtual time. `nowMillis` is monotonic. A
@@ -23,6 +26,51 @@ private[client] trait Scheduler {
   def every(interval: FiniteDuration)(task: => Unit): Scheduler.Cancelable
 
   final def offload(task: => Unit): Unit = after(Duration.Zero)(task)
+
+  // Reconnects and cluster-redirect retries share this formula: exponential backoff capped at maxDelay, then full jitter in [0, base].
+  final def backoffMillis(config: BackoffConfig, attempt: Int): Long = {
+    val capped = config.maxDelay.toMillis
+    val raw    = config.initialDelay.toMillis.toDouble * math.pow(config.multiplier, attempt.toDouble)
+    val base   = if (raw.isInfinite || raw >= capped.toDouble) capped else math.max(0L, raw.toLong)
+    jitterMillis(base + 1)
+  }
+
+  final def afterBackoff(config: BackoffConfig, attempt: Int)(task: => Unit): Unit = after(backoffMillis(config, attempt).millis)(task)
+}
+
+/**
+  * The reconnect loop of one connection or subscription manager, guarded by its owner's `lock`. Attempts keep counting across connections
+  * that drop before staying live for `maxDelay`, so a connection the server keeps closing backs off instead of reconnecting at the initial
+  * delay. At most one retry waits at a time; a loss while one waits joins it.
+  */
+final private[internal] class Reconnects(scheduler: Scheduler, config: BackoffConfig, lock: ReentrantLock) {
+  private var attempt   = 0
+  private var liveSince = -1L
+  private var waiting   = false
+
+  def live(): Unit = liveSince = scheduler.nowMillis
+
+  // Must hold lock. After the backoff, runs `retry` if `wanted` still holds; a failed retry is reported and scheduled again while it holds.
+  // With `immediately`, the first attempt runs without waiting.
+  def schedule(wanted: => Boolean, onFailure: Throwable => Unit, immediately: Boolean = false)(retry: => Unit): Unit =
+    if (!waiting) {
+      if (liveSince >= 0L && scheduler.nowMillis - liveSince >= config.maxDelay.toMillis) attempt = 0
+      val delay = if (immediately && attempt == 0) 0L else scheduler.backoffMillis(config, attempt)
+      attempt += 1
+      liveSince = -1L
+      waiting = true
+      scheduler.after(delay.millis) {
+        if (holding { waiting = false; wanted })
+          try retry
+          catch { case NonFatal(error) => holding(if (wanted) { onFailure(error); schedule(wanted, onFailure)(retry) }) }
+      }
+    }
+
+  private def holding[A](body: => A): A = {
+    lock.lock()
+    try body
+    finally lock.unlock()
+  }
 }
 
 private[client] object Scheduler {

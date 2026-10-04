@@ -1,6 +1,6 @@
 package sage.client.internal
 
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.{CompletableFuture, ExecutionException}
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
@@ -10,35 +10,27 @@ import scala.util.control.NonFatal
 
 import sage.SageEvent
 import sage.SageException.NotConnected
-import sage.client.{BackoffConfig, DedicatedPoolConfig, WatchdogConfig}
+import sage.client.SageConfig
 import sage.cluster.Node
-import sage.commands.Command
 
 /**
-  * Stores one [[NodeClient]] for each [[Node]]. Concurrent callers for the same node share one connection attempt and receive the same result.
+  * Stores one [[MultiplexedConnection]] for each [[Node]]. Concurrent callers for the same node share one connection attempt and receive the same result.
   * If an attempt finishes after [[close]], its connection is closed. Master-replica clients use these pools for both roles. Cluster clients
   * use one for replicas and a separate pool for masters because master failures affect redirects and topology refresh.
-  *
-  * The `bootstrap` is fixed per pool, so a replica pool can append `READONLY` while a master pool stays read-write.
   */
 final private[client] class NodePool(
   nodeFactory: Node => MultiplexedConnection.TransportFactory,
   scheduler: Scheduler,
-  bootstrap: Vector[Command[?]],
-  reconnect: BackoffConfig,
-  watchdog: WatchdogConfig,
-  connectTimeout: FiniteDuration,
-  closeTimeout: FiniteDuration,
-  dedicatedPool: DedicatedPoolConfig,
-  cacheMaxBytes: Long = 0L,
-  events: Events = Events.disabled,
-  dedicatedBootstrap: Option[Vector[Command[?]]] = None
+  config: SageConfig,
+  role: MultiplexedConnection.NodeRole,
+  events: Events = Events.disabled
 ) {
 
   private val lock             = new ReentrantLock()
   // lock-free reads; every mutation stays under `lock`
-  private val established      = new java.util.concurrent.ConcurrentHashMap[Node, NodeClient]()
-  private val pendingEstablish = mutable.HashMap.empty[Node, NodePool.Establish]
+  private val established      = new java.util.concurrent.ConcurrentHashMap[Node, MultiplexedConnection]()
+  // one attempt shared by concurrent callers for a node; the first result is final, so a late establishment after close is ignored
+  private val pendingEstablish = mutable.HashMap.empty[Node, CompletableFuture[MultiplexedConnection]]
   // connections whose socket is still being opened, so close() can abort one still connecting
   private val establishing     = mutable.Set.empty[MultiplexedConnection]
   @volatile private var closed = false
@@ -52,14 +44,14 @@ final private[client] class NodePool(
   /**
     * Returns the established client for the node, or `null`. This method never blocks.
     */
-  def existing(node: Node): NodeClient = established.get(node)
+  def existing(node: Node): MultiplexedConnection = established.get(node)
 
   def firstLiveNode: Option[Node] = established.asScala.collectFirst { case (node, nc) if nc.isLive => node }
 
-  def foreachEstablished(f: NodeClient => Unit): Unit = established.values.forEach(nc => f(nc))
+  def foreachEstablished(f: MultiplexedConnection => Unit): Unit = established.values.forEach(nc => f(nc))
 
   private[internal] def pendingWaiterCount(node: Node): Int =
-    locked(pendingEstablish.get(node).fold(0)(_.waiterCount))
+    locked(pendingEstablish.get(node).fold(0)(_.getNumberOfDependents))
 
   // live nodes first, so a refresh prefers a known-good node
   def candidatesByLiveness: Vector[Node] = {
@@ -67,90 +59,81 @@ final private[client] class NodePool(
     live.map(_._1) ++ others.map(_._1)
   }
 
-  def getOrEstablish(node: Node): NodeClient = {
-    val fast                       = established.get(node)
+  def getOrEstablish(node: Node): MultiplexedConnection = {
+    val fast    = established.get(node)
     if (fast != null) return fast
-    var existing: NodeClient       = null
-    var waitOn: NodePool.Establish = null
-    var mine: NodePool.Establish   = null
-    locked {
+    // Left joins an attempt in flight, Right owns a new one
+    val attempt = locked {
       if (closed) throw NotConnected()
-      existing = established.get(node)
-      if (existing == null)
-        pendingEstablish.get(node) match {
-          case Some(p) => waitOn = p
-          case None    =>
-            mine = new NodePool.Establish
-            pendingEstablish.put(node, mine): Unit
-        }
+      val existing = established.get(node)
+      if (existing != null) return existing
+      pendingEstablish.get(node).toLeft {
+        val mine = new CompletableFuture[MultiplexedConnection]
+        pendingEstablish.put(node, mine)
+        mine
+      }
     }
-    if (existing != null) existing
-    else if (waitOn != null) waitOn.get()
-    else {
-      val connRef = new java.util.concurrent.atomic.AtomicReference[MultiplexedConnection]()
-      val nc      =
-        try
-          NodeClient.connect(
-            nodeFactory(node),
-            scheduler,
-            bootstrap,
-            reconnect,
-            watchdog,
-            connectTimeout,
-            closeTimeout,
-            dedicatedPool,
-            cacheMaxBytes,
-            node,
-            events,
-            dedicatedBootstrap,
-            onConstructed = conn => {
-              connRef.set(conn)
-              val poolClosed = locked {
-                establishing += conn
-                closed
-              }
-              if (poolClosed) conn.close()
-            }
-          )
-        catch {
-          case error: Throwable =>
-            locked {
-              val conn = connRef.get()
-              if (conn != null) establishing -= conn
-              if (pendingEstablish.get(node).exists(_ eq mine)) { pendingEstablish.remove(node): Unit }
-            }
-            mine.fail(error)
-            if (!closed) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
-            throw error
+    attempt match {
+      case Left(waitOn) =>
+        try waitOn.get()
+        catch { case e: ExecutionException => throw e.getCause }
+      case Right(mine)  =>
+        var nc: MultiplexedConnection = null
+        onThrow {
+          nc = new MultiplexedConnection(nodeFactory(node), scheduler, config, role, Some(node), events)
+          // register before the blocking connect so that close() can abort it
+          if (locked { establishing += nc; closed }) nc.close()
+          nc.start(): Unit
+        } { error =>
+          locked {
+            establishing -= nc
+            if (pendingEstablish.get(node).exists(_ eq mine)) { pendingEstablish.remove(node): Unit }
+          }
+          // a joiner gets NotConnected for this thread's interrupt, as it does for an abandoned attempt
+          mine.completeExceptionally(error match { case NonFatal(e) => e; case _ => NotConnected() })
+          if (!closed) events.emit(SageEvent.Connection.ConnectFailed(Some(node), error))
         }
-      // Publish the client only while this attempt is current. A retain, close, or newer attempt supersedes it, in which case it is closed below.
-      val publish = locked {
-        val conn    = connRef.get()
-        if (conn != null) establishing -= conn
-        val current = pendingEstablish.get(node).exists(_ eq mine)
-        if (current) { pendingEstablish.remove(node): Unit }
-        if (current && !closed) {
-          established.put(node, nc)
-          true
-        } else false
-      }
-      if (publish) {
-        mine.succeed(nc)
-        nc
-      } else {
-        nc.close()
-        mine.fail(NotConnected())
-        throw NotConnected()
-      }
+        // Publish the client only while this attempt is current. A retain, close, or newer attempt supersedes it, in which case it is closed below.
+        val publish                   = locked {
+          establishing -= nc
+          val current = pendingEstablish.get(node).exists(_ eq mine)
+          if (current) { pendingEstablish.remove(node): Unit }
+          if (current && !closed) {
+            established.put(node, nc)
+            true
+          } else false
+        }
+        if (publish) {
+          mine.complete(nc)
+          nc
+        } else {
+          mine.completeExceptionally(NotConnected())
+          nc.close()
+          throw NotConnected()
+        }
     }
   }
 
   /**
     * As [[getOrEstablish]], blocking to connect if need be, but `null` rather than throwing when the connect fails.
     */
-  def getOrEstablishOrNull(node: Node): NodeClient =
+  def getOrEstablishOrNull(node: Node): MultiplexedConnection =
     try getOrEstablish(node)
     catch { case NonFatal(_) => null }
+
+  /**
+    * Runs `use` on the caller's thread when the node already has a client. Otherwise connects on the scheduler and runs `use` with the new
+    * client, or `unreachable` when the connect fails. Inlining keeps the established path free of a closure allocation.
+    */
+  inline def withClient(node: Node)(inline unreachable: => Unit)(inline use: MultiplexedConnection => Unit): Unit = {
+    val nc = existing(node)
+    if (nc != null) use(nc)
+    else
+      scheduler.offload {
+        val connected = getOrEstablishOrNull(node)
+        if (connected != null) use(connected) else unreachable
+      }
+  }
 
   // remove and close clients for nodes rejected by keep. Also fail connection attempts for those nodes. Schedule closes outside the pool lock.
   def retain(keep: Node => Boolean): Unit = {
@@ -160,7 +143,7 @@ final private[client] class NodePool(
       (absent, rejectedPending)
     }
     gone.foreach(nc => scheduler.after(Duration.Zero)(nc.close()))
-    rejected.foreach(_.fail(NotConnected()))
+    rejected.foreach(_.completeExceptionally(NotConnected()))
   }
 
   def close(): Unit = {
@@ -175,42 +158,8 @@ final private[client] class NodePool(
     }
     // Fail callers waiting for a connection immediately instead of making them wait for the connection timeout; an opening connection
     // observes `closed` when it finishes and closes the node
-    waiters.foreach(_.fail(NotConnected()))
+    waiters.foreach(_.completeExceptionally(NotConnected()))
     opening.foreach(_.close())
     all.foreach(_.close())
-  }
-}
-
-private[client] object NodePool {
-
-  // Share one connection attempt among concurrent callers. One caller opens the connection while the others wait for the same result.
-  // The first result is final; once close has failed the waiters, a late establishment is ignored.
-  final private class Establish {
-    private val latch                                           = new CountDownLatch(1)
-    private val settled                                         = new java.util.concurrent.atomic.AtomicBoolean(false)
-    private val waiters                                         = new java.util.concurrent.atomic.AtomicInteger(0)
-    @volatile private var result: Either[Throwable, NodeClient] = null
-
-    def waiterCount: Int = waiters.get()
-
-    def succeed(nc: NodeClient): Unit = settle(Right(nc))
-    def fail(error: Throwable): Unit  = settle(Left(error))
-
-    private def settle(outcome: Either[Throwable, NodeClient]): Unit =
-      if (settled.compareAndSet(false, true)) {
-        result = outcome
-        latch.countDown()
-      }
-
-    def get(): NodeClient = {
-      waiters.incrementAndGet()
-      try {
-        latch.await()
-        result match {
-          case Right(nc)   => nc
-          case Left(error) => throw error
-        }
-      } finally waiters.decrementAndGet(): Unit
-    }
   }
 }

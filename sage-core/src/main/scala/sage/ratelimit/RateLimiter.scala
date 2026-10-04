@@ -4,7 +4,7 @@ import scala.concurrent.duration.*
 
 import sage.Bytes
 import sage.SageException.DecodeError
-import sage.codec.KeyCodec
+import sage.codec.{KeyCodec, Primitives}
 import sage.commands.*
 
 /**
@@ -20,13 +20,13 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
     * Attempts to consume `cost` tokens for `subject`. Returns [[Decision.Allowed]] with the remaining balance, or [[Decision.Denied]] with the
     * time until enough tokens become available. Returns immediately.
     */
-  def tryAcquire(subject: K, cost: Long = 1): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost, peek = false)
+  def tryAcquire(subject: K, cost: Long = 1): Command[Decision] = eval(cached = false, subject, cost, peek = false)
 
   /**
     * Checks `subject` without consuming a token. Elapsed time still refills the bucket. Returns [[Decision.Allowed]] when a token is available,
     * or [[Decision.Denied]] with the time until one becomes available.
     */
-  def peek(subject: K): Command[Decision] = eval(RateLimiter.Invocation.Eval, subject, cost = 1, peek = true)
+  def peek(subject: K): Command[Decision] = eval(cached = false, subject, cost = 1, peek = true)
 
   /**
     * Clears `subject`'s bucket. Its next request starts with full capacity.
@@ -34,18 +34,12 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   def reset(subject: K): Command[Unit] =
     Command("DEL", Command.FirstKey, Vector(keyBytes(subject)), _ => Right(()))
 
-  private val capacityText            = limit.capacity.toString
-  private val refillTokensText        = limit.refillTokens.toString
   private val refillPeriodMicros      = limit.refillPeriodMicros
-  private val refillPeriodText        = refillPeriodMicros.toString
-  private val capacityArgument        = Bytes.utf8(capacityText)
-  private val refillArgument          = Bytes.utf8(refillTokensText)
-  private val periodArgument          = Bytes.utf8(refillPeriodText)
-  private val policySignatureArgument = Bytes.utf8(s"$capacityText:$refillTokensText:$refillPeriodText")
-  private val keyPrefix               = {
-    val ns = Bytes.utf8(namespace)
-    Bytes.concat(Vector(Bytes.utf8(s"${ns.length}:"), ns, Bytes.utf8(":")))
-  }
+  private val capacityArgument        = Primitives.encodeLong(limit.capacity)
+  private val refillArgument          = Primitives.encodeLong(limit.refillTokens)
+  private val periodArgument          = Primitives.encodeLong(refillPeriodMicros)
+  private val policySignatureArgument = Bytes.utf8(s"${limit.capacity}:${limit.refillTokens}:$refillPeriodMicros")
+  private val namespaced              = SingleKeyScript.namespaced(namespace)
   private val policyProblem           =
     if (limit.capacity <= 0) Some("capacity must be > 0")
     else if (limit.refillTokens <= 0) Some("refillTokens must be > 0")
@@ -66,29 +60,19 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
       else None
   }
 
-  private[sage] def evalSha(subject: K, cost: Long, peek: Boolean = false): Command[Decision] =
-    eval(RateLimiter.Invocation.EvalSha, subject, cost, peek)
-
   // test-only entry point that supplies the script clock explicitly.
   private[sage] def tryAcquireAt(subject: K, cost: Long, nowMicros: Long): Command[Decision] =
-    eval(RateLimiter.Invocation.Eval, subject, cost, peek = false, Some(nowMicros))
+    eval(cached = false, subject, cost, peek = false, Some(nowMicros))
 
-  // NOSCRIPT recovery for evalSha. Sending the body runs the check and caches the script on that node.
-  private[sage] def evalScript(subject: K, cost: Long, peek: Boolean): Command[Decision] =
-    eval(RateLimiter.Invocation.Eval, subject, cost, peek)
+  private def keyBytes(subject: K): Bytes = namespaced(keyCodec.encode(subject))
 
-  // length framing distinguishes namespace `a` with subject `b:c` from namespace `a:b` with subject `c`.
-  private def keyBytes(subject: K): Bytes = Bytes.concat(Vector(keyPrefix, keyCodec.encode(subject)))
-
-  private def eval(invocation: RateLimiter.Invocation, subject: K, cost: Long, peek: Boolean, now: Option[Long] = None): Command[Decision] = {
-    val costArgument = if (cost == 1L) RateLimiter.defaultCostArgument else Bytes.utf8(cost.toString)
-    val nowArgument  = now match {
-      case None        => Bytes.empty // an empty injected time uses the server's TIME value
-      case Some(value) => Bytes.utf8(value.toString)
-    }
+  // a cached call sends the digest; NOSCRIPT recovery sends the body, which runs the check and caches the script on that node.
+  private[sage] def eval(cached: Boolean, subject: K, cost: Long, peek: Boolean, now: Option[Long] = None): Command[Decision] = {
+    val costArgument = Primitives.encodeLong(cost)
+    val nowArgument  = now.fold(Bytes.empty)(Primitives.encodeLong) // an empty injected time uses the server's TIME value
     val allArgs      = Vector(
-      invocation.scriptReference,
-      RateLimiter.oneKeyArgument,
+      RateLimiter.compiled.reference(cached),
+      SingleKeyScript.NumKeys,
       keyBytes(subject),
       capacityArgument,
       refillArgument,
@@ -96,9 +80,9 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
       policySignatureArgument,
       costArgument,
       nowArgument,
-      if (peek) RateLimiter.peekArgument else Bytes.empty
+      if (peek) Primitives.encodeLong(1L) else Bytes.empty
     )
-    Command(invocation.verb, RateLimiter.scriptKeyIndices, allArgs, RateLimiter.decode, Execution.Ordinary)
+    Command(RateLimiter.compiled.verb(cached), SingleKeyScript.KeyIndices, allArgs, RateLimiter.decode)
   }
 }
 
@@ -217,10 +201,7 @@ object RateLimiter {
       |return { allowed, tokens, timed_catchup, retry_wait, reset_wait }
       |""".stripMargin
 
-  private[sage] val sha: String = {
-    val digest = java.security.MessageDigest.getInstance("SHA-1").digest(script.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-    digest.iterator.map(b => f"${b & 0xff}%02x").mkString
-  }
+  private[sage] val compiled = SingleKeyScript(script)
 
   /**
     * The greatest retry/reset duration returned; a wait beyond it (severe clock rollback) saturates here, while the TTL still covers it.
@@ -254,14 +235,4 @@ object RateLimiter {
 
   // Lua numbers are IEEE doubles, so integers (and capacity * refillPeriod) are held to 2^53 to stay exact
   private[sage] val maxExactInt: Long = 1L << 53
-
-  private val scriptKeyIndices: Vector[Int] = Vector(2) // 0 = script/sha, 1 = numkeys, 2 = the single key
-  private val oneKeyArgument: Bytes         = Bytes.utf8("1")
-  private val defaultCostArgument: Bytes    = Bytes.utf8("1")
-  private val peekArgument: Bytes           = Bytes.utf8("1")
-
-  private enum Invocation(val verb: String, val scriptReference: Bytes) {
-    case Eval    extends Invocation("EVAL", Bytes.utf8(script))
-    case EvalSha extends Invocation("EVALSHA", Bytes.utf8(sha))
-  }
 }

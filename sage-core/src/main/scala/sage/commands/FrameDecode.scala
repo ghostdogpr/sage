@@ -19,7 +19,7 @@ extension (frame: Frame) {
   /**
     * Decodes an array/set/push frame into a `Vector[A]`, decoding each element through its [[sage.codec.ValueCodec]].
     */
-  def asArrayOf[A](using ValueCodec[A]): Either[DecodeError, Vector[A]] = Decode.vector(Decode.value[A]).apply(frame)
+  def asArrayOf[A](using ValueCodec[A]): Either[DecodeError, Vector[A]] = asArray.flatMap(Decode.each(_)(Decode.value[A]))
 
   /**
     * The raw, undecoded elements of an array/set/push frame, for replies whose elements are heterogeneous.

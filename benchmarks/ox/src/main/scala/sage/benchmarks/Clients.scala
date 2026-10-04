@@ -1,15 +1,14 @@
 package sage.benchmarks
 
-import java.util.concurrent.{CountDownLatch, Executors}
-import java.util.concurrent.atomic.{AtomicInteger, AtomicLong, AtomicReference}
+import java.util.concurrent.{CompletableFuture, CountDownLatch, Executors}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.concurrent.{Await, Future}
 import scala.concurrent.duration.*
-import scala.jdk.CollectionConverters.*
-import scala.util.{Failure, Success}
+import scala.util.Failure
 
-import _root_.ox.{fork, supervised}
-import io.lettuce.core.{RedisClient, RedisFuture}
+import _root_.ox.{fork, supervised, Ox}
+import io.lettuce.core.RedisClient
 import org.apache.pekko.actor.ActorSystem
 import redis.clients.jedis.{DefaultJedisClientConfig, HostAndPort, JedisPool, RedisProtocol}
 
@@ -34,62 +33,27 @@ object Clients {
   * Sage's Ox API requires an `Ox` scope. A holder fiber keeps the client's scope open for the benchmark lifetime, while each benchmark
   * operation runs in a short-lived supervised scope and shares the same connection.
   */
-final class SageOxBench(host: String, port: Int) extends BenchClient {
+final class SageOxBench(host: String, port: Int) extends SageBench[[A] =>> Ox ?=> A] {
 
-  @volatile private var client: SageClient = null
-  private val ready                        = new CountDownLatch(1)
-  private val shutdown                     = new CountDownLatch(1)
+  private val opened   = new CompletableFuture[SageClient]
+  private val shutdown = new CountDownLatch(1)
 
-  private val holder = Thread.ofVirtual().start { () =>
-    supervised {
-      client = SageClient.connect(SageConfig(topology = Topology.Standalone(Endpoint(host, port))))
-      ready.countDown()
-      shutdown.await()
-      try client.close
-      catch { case _: Throwable => () }
-    }
+  private val holder               = Thread.ofVirtual().start { () =>
+    try
+      supervised {
+        opened.complete(SageClient.scoped(SageConfig(topology = Topology.Standalone(Endpoint(host, port))))): Unit
+        shutdown.await()
+      }
+    catch { case t: Throwable => opened.completeExceptionally(t): Unit }
   }
-  ready.await()
+  protected val client: SageClient = opened.join()
 
-  def name: String = "sage-ox"
+  protected def run[A](effect: Ox ?=> A): Unit = supervised(effect): Unit
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = supervised {
-    (0 until count).foreach { i =>
-      client.set(s"$prefix:$i", value)
-    }
-    (0 until fields).foreach { i =>
-      client.hSet(hashKey, (s"f$i", value))
-    }
-  }
+  protected def inLanes[A](work: Payloads.Workload)(perKey: String => Ox ?=> A): Ox ?=> Unit =
+    work.lanes.map(g => fork(g.foreach(perKey(_): A))).foreach(_.join())
 
-  def getAll(keys: Array[String], concurrency: Int): Long = supervised {
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .map(g => fork(g.foldLeft(0L)((t, k) => t + client.get[String](k).fold(0L)(_.length.toLong))))
-      .map(_.join())
-      .sum
-  }
-
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long = supervised {
-    Payloads
-      .groups(keys, concurrency)
-      .toList
-      .map(g =>
-        fork(g.foldLeft(0L) { (n, k) =>
-          client.set(k, value)
-          n + 1
-        })
-      )
-      .map(_.join())
-      .sum
-  }
-
-  def mget(keys: Array[String]): Long = supervised(client.mGet[String](keys.head, keys.tail*).flatten.map(_.length.toLong).sum)
-
-  def hgetall(key: String): Long = supervised(client.hGetAll[String, String](key).size.toLong)
-
-  def close(): Unit = {
+  override def close(): Unit = {
     shutdown.countDown()
     holder.join()
   }
@@ -105,65 +69,15 @@ final class LettuceBench(host: String, port: Int) extends BenchClient {
   private val conn   = client.connect()
   private val async  = conn.async()
 
-  def name: String = "lettuce"
+  def getAll(work: Payloads.Workload): Unit =
+    SlidingWindow(work)((k, done) => async.get(k).whenComplete((_, t) => done(t)): Unit).run()
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
-    val writes = (0 until count).map(i => async.set(s"$prefix:$i", value)) ++ (0 until fields).map(i => async.hset(hashKey, s"f$i", value))
-    writes.foreach { f =>
-      f.get()
-    }
-  }
+  def setAll(work: Payloads.Workload, value: String): Unit =
+    SlidingWindow(work)((k, done) => async.set(k, value).whenComplete((_, t) => done(t)): Unit).run()
 
-  // Keep up to concurrency futures in flight, starting the next request whenever one completes. This avoids making all requests wait for
-  // the slowest member of a fixed batch. Completion callbacks run on Lettuce's event loop.
-  private def slidingWindow[T](keys: Array[String], concurrency: Int)(submit: String => RedisFuture[T])(score: T => Long): Long = {
-    val n                = keys.length
-    val width            = math.max(1, math.min(concurrency, n))
-    val total            = new AtomicLong(0L)
-    val nextIndex        = new AtomicInteger(0)
-    val remaining        = new CountDownLatch(n)
-    val failure          = new AtomicReference[Throwable]()
-    def fireNext(): Unit = {
-      val i = nextIndex.getAndIncrement()
-      if (i < n) {
-        try
-          submit(keys(i)).whenComplete { (v, t) =>
-            if (t != null) { failure.compareAndSet(null, t): Unit }
-            else if (v != null) { total.addAndGet(score(v)): Unit }
-            remaining.countDown()
-            fireNext()
-          }: Unit
-        catch {
-          case t: Throwable =>
-            failure.compareAndSet(null, t)
-            remaining.countDown()
-            fireNext()
-        }
-      }
-    }
-    var k                = 0
-    while (k < width) {
-      fireNext()
-      k += 1
-    }
-    remaining.await()
-    val t                = failure.get()
-    if (t != null) throw t // never publish numbers for a run where commands failed
-    total.get()
-  }
+  def mget(): Unit = async.mget(Payloads.Keys.all*).get(): Unit
 
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    slidingWindow(keys, concurrency)(async.get)(v => v.length.toLong)
-
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    slidingWindow(keys, concurrency)(k => async.set(k, value))(_ => 0L)
-    keys.length.toLong
-  }
-
-  def mget(keys: Array[String]): Long =
-    async.mget(keys*).get().asScala.iterator.filter(_.hasValue).map(_.getValue.length.toLong).sum
-
-  def hgetall(key: String): Long = async.hgetall(key).get().size.toLong
+  def hgetall(): Unit = async.hgetall(Payloads.HashKey).get(): Unit
 
   def close(): Unit = {
     conn.close()
@@ -181,63 +95,56 @@ final class RediscalaBench(host: String, port: Int) extends BenchClient {
   import system.dispatcher
   private val client                = redis.RedisClient(host, port)
 
-  def name: String = "rediscala"
-
   private def await[A](f: Future[A]): A = Await.result(f, 5.minutes)
 
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
-    val writes = (0 until count).map(i => client.set(s"$prefix:$i", value)) ++ (0 until fields).map(i => client.hset(hashKey, s"f$i", value))
-    writes.foreach { f =>
-      await(f)
-    }
-  }
+  def getAll(work: Payloads.Workload): Unit =
+    SlidingWindow(work)((k, done) => client.get[String](k).onComplete { case Failure(t) => done(t); case _ => done(null) }).run()
 
-  // match LettuceBench.slidingWindow by keeping up to concurrency futures in flight and starting the next request after each completion.
-  private def slidingWindow[T](keys: Array[String], concurrency: Int)(submit: String => Future[T])(score: T => Long): Long = {
-    val n                = keys.length
-    val width            = math.max(1, math.min(concurrency, n))
-    val total            = new AtomicLong(0L)
-    val nextIndex        = new AtomicInteger(0)
-    val remaining        = new CountDownLatch(n)
-    val failure          = new AtomicReference[Throwable]()
-    def fireNext(): Unit = {
-      val i = nextIndex.getAndIncrement()
-      if (i < n)
-        submit(keys(i)).onComplete { result =>
-          result match {
-            case Success(v) => total.addAndGet(score(v))
-            case Failure(t) => failure.compareAndSet(null, t)
-          }
-          remaining.countDown()
-          fireNext()
-        }
-    }
-    var k                = 0
-    while (k < width) {
-      fireNext()
-      k += 1
-    }
-    remaining.await()
-    val t                = failure.get()
-    if (t != null) throw t // never publish numbers for a run where commands failed
-    total.get()
-  }
+  def setAll(work: Payloads.Workload, value: String): Unit =
+    SlidingWindow(work)((k, done) => client.set(k, value).onComplete { case Failure(t) => done(t); case _ => done(null) }).run()
 
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    slidingWindow(keys, concurrency)(k => client.get[String](k))(_.fold(0L)(_.length.toLong))
+  def mget(): Unit = await(client.mget[String](Payloads.Keys.all*)): Unit
 
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    slidingWindow(keys, concurrency)(k => client.set(k, value))(_ => 0L)
-    keys.length.toLong
-  }
-
-  def mget(keys: Array[String]): Long = await(client.mget[String](keys*)).flatten.map(_.length.toLong).sum
-
-  def hgetall(key: String): Long = await(client.hgetall[String](key)).size.toLong
+  def hgetall(): Unit = await(client.hgetall[String](Payloads.HashKey)): Unit
 
   def close(): Unit = {
     client.stop()
     Await.result(system.terminate(), 30.seconds): Unit
+  }
+}
+
+/**
+  * Keeps up to `concurrency` requests in flight and starts the next one whenever one completes, so no request waits for the slowest member
+  * of a fixed batch. `submit` starts the request for a key and calls `done(failure)` once, with a null `failure` on success.
+  */
+final private class SlidingWindow(work: Payloads.Workload)(submit: (String, Throwable => Unit) => Unit) {
+  private val nextIndex = new AtomicInteger(0)
+  private val remaining = new CountDownLatch(Payloads.Keys.all.length)
+  private val failure   = new AtomicReference[Throwable]()
+
+  private val done: Throwable => Unit = t => {
+    if (t != null) failure.compareAndSet(null, t): Unit
+    remaining.countDown()
+    fireNext()
+  }
+
+  private def fireNext(): Unit = {
+    val i = nextIndex.getAndIncrement()
+    if (i < Payloads.Keys.all.length) {
+      try submit(Payloads.Keys.all(i), done)
+      catch { case t: Throwable => done(t) }
+    }
+  }
+
+  def run(): Unit = {
+    var k = 0
+    while (k < work.concurrency) {
+      fireNext()
+      k += 1
+    }
+    remaining.await()
+    val t = failure.get()
+    if (t != null) throw t // never publish numbers for a run where commands failed
   }
 }
 
@@ -257,58 +164,23 @@ final class JedisBench(host: String, port: Int) extends BenchClient {
   private val pool     = new JedisPool(poolCfg, new HostAndPort(host, port), config)
   private val executor = Executors.newVirtualThreadPerTaskExecutor()
 
-  def name: String = "jedis"
-
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit = {
-    val j = pool.getResource()
-    try {
-      val p = j.pipelined()
-      (0 until count).foreach { i =>
-        p.set(s"$prefix:$i", value)
-      }
-      (0 until fields).foreach { i =>
-        p.hset(hashKey, s"f$i", value)
-      }
-      p.sync()
-    } finally j.close()
-  }
-
   // one lane per group on a virtual thread, each with its own borrowed connection running blocking commands sequentially
-  private def lanes(keys: Array[String], concurrency: Int)(run: (redis.clients.jedis.Jedis, Array[String]) => Long): Long =
-    Payloads
-      .groups(keys, concurrency)
-      .map(g =>
-        executor.submit[Long] { () =>
-          val j = pool.getResource()
-          try run(j, g)
-          finally j.close()
-        }
-      )
-      .map(_.get())
-      .sum
+  private def lanes(work: Payloads.Workload)(run: (redis.clients.jedis.Jedis, String) => Any): Unit =
+    work.lanes
+      .map(g => executor.submit[Unit](() => borrow(j => g.foreach(run(j, _)))))
+      .foreach(_.get())
 
-  def getAll(keys: Array[String], concurrency: Int): Long =
-    lanes(keys, concurrency)((j, g) => g.foldLeft(0L)((t, k) => t + Option(j.get(k)).fold(0L)(_.length.toLong)))
+  def getAll(work: Payloads.Workload): Unit = lanes(work)(_.get(_))
 
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long = {
-    lanes(keys, concurrency) { (j, g) =>
-      g.foreach { k =>
-        j.set(k, value)
-      }
-      g.length.toLong
-    }
-    keys.length.toLong
-  }
+  def setAll(work: Payloads.Workload, value: String): Unit = lanes(work)(_.set(_, value))
 
-  def mget(keys: Array[String]): Long = {
+  def mget(): Unit = borrow(_.mget(Payloads.Keys.all*)): Unit
+
+  def hgetall(): Unit = borrow(_.hgetAll(Payloads.HashKey)): Unit
+
+  private inline def borrow[A](inline f: redis.clients.jedis.Jedis => A): A = {
     val j = pool.getResource()
-    try j.mget(keys*).asScala.iterator.filter(_ != null).map(_.length.toLong).sum
-    finally j.close()
-  }
-
-  def hgetall(key: String): Long = {
-    val j = pool.getResource()
-    try j.hgetAll(key).size.toLong
+    try f(j)
     finally j.close()
   }
 

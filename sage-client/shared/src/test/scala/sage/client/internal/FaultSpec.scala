@@ -1,21 +1,21 @@
 package sage.client.internal
 
 import sage.SageException.{ConnectionLost, NotConnected, ServerError}
-import sage.cluster.{Node, Redirect, RedirectKind, Slot}
+import sage.cluster.{Node, Redirect, RedirectKind}
 
 class FaultSpec extends munit.FunSuite {
 
   test("a MOVED reply categorizes as Redirected carrying the parsed redirect") {
     assertEquals(
       Fault.categorize(ServerError("MOVED", "3999 127.0.0.1:6379")),
-      Fault.Redirected(Redirect(RedirectKind.Moved, Slot.at(3999).get, Node("127.0.0.1", 6379)))
+      Fault.Redirected(Redirect(RedirectKind.Moved, Node("127.0.0.1", 6379)))
     )
   }
 
   test("an ASK reply categorizes as Redirected") {
     assertEquals(
       Fault.categorize(ServerError("ASK", "42 127.0.0.1:7000")),
-      Fault.Redirected(Redirect(RedirectKind.Ask, Slot.at(42).get, Node("127.0.0.1", 7000)))
+      Fault.Redirected(Redirect(RedirectKind.Ask, Node("127.0.0.1", 7000)))
     )
   }
 
@@ -64,7 +64,7 @@ class FaultSpec extends munit.FunSuite {
   }
 
   test("an ownership or connection change forces a refresh past the throttle window") {
-    val moved = Fault.Redirected(Redirect(RedirectKind.Moved, Slot.at(1).get, Node("a", 6379)))
+    val moved = Fault.Redirected(Redirect(RedirectKind.Moved, Node("a", 6379)))
     assertEquals(moved.refreshPolicy, RefreshPolicy.Forced)
     assertEquals(Fault.Demoted.refreshPolicy, RefreshPolicy.Forced)
     assertEquals(Fault.Lost(mayHaveExecuted = false).refreshPolicy, RefreshPolicy.Forced)
@@ -72,7 +72,7 @@ class FaultSpec extends munit.FunSuite {
   }
 
   test("an ASK refreshes throttled: it leaves slot ownership unchanged") {
-    val ask = Fault.Redirected(Redirect(RedirectKind.Ask, Slot.at(1).get, Node("a", 6379)))
+    val ask = Fault.Redirected(Redirect(RedirectKind.Ask, Node("a", 6379)))
     assertEquals(ask.refreshPolicy, RefreshPolicy.Throttled)
   }
 

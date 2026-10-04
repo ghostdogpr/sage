@@ -75,6 +75,19 @@ class CodecSpec extends munit.FunSuite {
     assertEquals(summon[ValueCodec[Long]].decode(Bytes.utf8("9223372036854775808")), Left(DecodeError("Long", "'9223372036854775808'")))
   }
 
+  test("Int and Long decoding accepts ASCII decimal digits with an optional '-'") {
+    for (text <- List("+5", "\u0665", "\uff15", "", "-", " 5", "5 ")) {
+      assert(summon[KeyCodec[Int]].decode(Bytes.utf8(text)).isLeft, text)
+      assert(summon[ValueCodec[Long]].decode(Bytes.utf8(text)).isLeft, text)
+    }
+    for ((text, expected) <- List("05" -> 5, "-0" -> 0, "-007" -> -7, "-5" -> -5)) {
+      assertEquals(summon[ValueCodec[Int]].decode(Bytes.utf8(text)), Right(expected), text)
+      assertEquals(summon[KeyCodec[Long]].decode(Bytes.utf8(text)), Right(expected.toLong), text)
+    }
+    assertEquals(summon[ValueCodec[Int]].decode(Bytes.utf8("2147483648")), Left(DecodeError("Int", "'2147483648'")))
+    assertEquals(summon[ValueCodec[Long]].decode(Bytes.utf8("-9223372036854775809")), Left(DecodeError("Long", "'-9223372036854775809'")))
+  }
+
   test("String decode rejects invalid UTF-8") {
     val invalid = Bytes.fromArray(Array(0xff.toByte, 0xfe.toByte))
     summon[ValueCodec[String]].decode(invalid) match {

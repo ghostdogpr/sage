@@ -8,7 +8,7 @@ import kyo.compat.*
 
 import sage.{Message, PatternMessage}
 import sage.client.SageConfig
-import sage.client.internal.{Client, LoweredClient, Paged, ScanStep, ScanTarget, Subscription}
+import sage.client.internal.{Client, LoweredClient, Paged, Subscription}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
@@ -28,7 +28,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     count: Option[Long] = None,
     ofType: Option[RedisType] = None
   ): fs2.Stream[IO, K] =
-    scanStreamAll(target => cursor => client.runOn(target, Keys.scan[K](cursor, pattern, count, ofType)))
+    paged(Paged.scanAll[K](client.runner, pattern, count, ofType))
 
   /**
     * Iterates over all HSCAN field/value pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -38,7 +38,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): fs2.Stream[IO, (F, V)] =
-    scanStream(cursor => client.run(Hashes.hScan[K, F, V](key, cursor, pattern, count)))
+    paged(Paged.scanKey(client.runner)(cursor => Hashes.hScan[K, F, V](key, cursor, pattern, count)))
 
   /**
     * Iterates over all SSCAN members until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -48,7 +48,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): fs2.Stream[IO, V] =
-    scanStream(cursor => client.run(Sets.sScan[K, V](key, cursor, pattern, count)))
+    paged(Paged.scanKey(client.runner)(cursor => Sets.sScan[K, V](key, cursor, pattern, count)))
 
   /**
     * Iterates over all ZSCAN member/score pairs until the server returns a zero cursor. An empty page with a non-zero cursor continues the scan.
@@ -58,18 +58,11 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     pattern: Option[String] = None,
     count: Option[Long] = None
   ): fs2.Stream[IO, (V, Double)] =
-    scanStream(cursor => client.run(SortedSets.zScan[K, V](key, cursor, pattern, count)))
+    paged(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
   // convert pages from the shared Paged helper into individual fs2 Stream elements
-  private def paged[S, A](init: S)(step: Paged.Step[S, A]): fs2.Stream[IO, A] =
-    CStream.unfold[S, Vector[A]](init)(step).flatMap(items => CStream.init(items)).lower
-
-  private def scanStream[A](fetch: ScanCursor => IO[ScanPage[A]]): fs2.Stream[IO, A] =
-    paged[Option[ScanCursor], A](Some(ScanCursor.start))(Paged.byCursor(cursor => CIO.lift(fetch(cursor))))
-
-  // scan each target in sequence with its own node-local cursor. A cluster scan visits every master that owns slots.
-  private def scanStreamAll[A](fetch: ScanTarget => ScanCursor => IO[ScanPage[A]]): fs2.Stream[IO, A] =
-    paged[ScanStep, A](ScanStep.Begin)(Paged.acrossTargets(CIO.lift(client.scanTargets))(target => cursor => CIO.lift(fetch(target)(cursor))))
+  private def paged[S, A](pages: Paged.Pages[S, A]): fs2.Stream[IO, A] =
+    CStream.unfold[S, Vector[A]](pages.init)(pages.step).flatMap(items => CStream.init(items)).lower
 
   /**
     * Lazily pages an entire stream by range, batching `XRANGE` and advancing past the last id each page. Stops when a page comes back empty.
@@ -80,9 +73,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     end: StreamRangeId = StreamRangeId.Max,
     batch: Long = 100L
   ): fs2.Stream[IO, StreamEntry[F, V]] =
-    paged[Option[StreamRangeId], StreamEntry[F, V]](Some(start))(
-      Paged.byRange(batch)(from => CIO.lift(client.run(Streams.xRange[K, F, V](key, from, end, Some(batch)))))
-    )
+    paged(Paged.xRangeAll[K, F, V](client.runner, key, start, end, batch))
 
   /**
     * Auto-claims idle pending entries for `consumer`, advancing the `XAUTOCLAIM` cursor until it returns to the start. Entries whose data
@@ -96,9 +87,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     start: StreamId = StreamId.Zero,
     count: Option[Long] = None
   ): fs2.Stream[IO, StreamEntry[F, V]] =
-    paged[Option[StreamId], StreamEntry[F, V]](Some(start))(
-      Paged.byAutoClaim(from => CIO.lift(client.run(Streams.xAutoClaim[K, F, V](key, group, consumer, minIdle, from, count))))
-    )
+    paged(Paged.xAutoClaimAll[K, F, V](client.runner, key, group, consumer, minIdle, start, count))
 
   /**
     * Follows a stream without a consumer group. It first reads every entry after `from`, then waits for new entries. The explicit entry ID
@@ -111,11 +100,7 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     count: Option[Long] = None,
     block: BlockTimeout = Paged.defaultPoll
   ): fs2.Stream[IO, StreamEntry[F, V]] =
-    paged[StreamId, StreamEntry[F, V]](from)(
-      Paged.tail(last =>
-        CIO.lift(client.run(Streams.xRead[K, F, V]((key, ReadId.After(last)))(count = count, block = Some(block)))).map(_.flatMap(_._2))
-      )
-    )
+    paged(Paged.xTail[K, F, V](client.runner, key, from, count, block))
 
   /**
     * Follows a stream as part of a consumer group. It processes this consumer's pending entries first, then waits for new entries. Each
@@ -128,27 +113,10 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
     count: Option[Long] = None,
     block: BlockTimeout = Paged.defaultPoll
   )(handle: StreamEntry[F, V] => IO[Unit]): IO[Unit] =
-    consumeStream[F, V](group, consumer, key, count, block)
+    paged(Paged.xConsume[K, F, V](client.runner, group, consumer, key, count, block))
       .evalMap(entry => handle(entry) >> client.run(Streams.xAck(key, group)(entry.id)).void)
       .compile
       .drain
-
-  private def consumeStream[F: KeyCodec, V: ValueCodec](
-    group: String,
-    consumer: String,
-    key: K,
-    count: Option[Long],
-    block: BlockTimeout
-  ): fs2.Stream[IO, StreamEntry[F, V]] =
-    paged[Either[StreamId, Unit], StreamEntry[F, V]](Left(StreamId.Zero))(
-      Paged.consume(
-        drainPending = after =>
-          CIO.lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.After(after)))(count = count))).map(_.flatMap(_._2)),
-        tailNew = CIO
-          .lift(client.run(Streams.xReadGroup[K, F, V](group, consumer)((key, GroupReadId.New))(count = count, block = Some(block))))
-          .map(_.flatMap(_._2))
-      )
-    )
 
   /**
     * Subscribes to one or more channels. Closing the stream's scope unsubscribes. Sage resubscribes after reconnecting, but messages

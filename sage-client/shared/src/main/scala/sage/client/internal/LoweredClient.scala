@@ -31,15 +31,11 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
     timeout: FiniteDuration,
     replicaAcknowledgement: Boolean
   ): CIO[Boolean] =
-    underlying.lockWrite(command, timeout, replicaAcknowledgement)
+    underlying.runner.lockWrite(command, timeout, replicaAcknowledgement)
 
-  private val lockRunner: CommandRunner[CIO, String] = new CommandRunner[CIO, String] {
-    def run[A](command: Command[A]): CIO[A] = lockCommand(command)
-    override private[sage] def lockWrite(
-      command: Command[Boolean],
-      timeout: FiniteDuration,
-      replicaAcknowledgement: Boolean
-    ): CIO[Boolean]                         =
+  private val lockRunner: SharedRunner = new SharedRunner {
+    def run[A](command: Command[A]): CIO[A]                                                                                   = lockCommand(command)
+    override def lockWrite(command: Command[Boolean], timeout: FiniteDuration, replicaAcknowledgement: Boolean): CIO[Boolean] =
       confirmedLockCommand(command, timeout, replicaAcknowledgement)
   }
 
@@ -47,9 +43,10 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   final def cached[A](command: Command[A], ttl: FiniteDuration): F[A] = lower(underlying.cached(command, ttl))
 
-  final private[sage] def pipeline[Out, R](p: Pipeline[Out, R]): F[Out] = lower(underlying.pipeline(p))
+  final private[sage] def pipeline[R](p: Pipeline[R]): F[R] = lower(underlying.pipeline(p))
 
-  final private[sage] def pipelineAttempt[Out, R](p: Pipeline[Out, R]): F[R] = lower(underlying.pipelineAttempt(p))
+  // keeps the method signature of 0.4.0 for MiMa; `pipeline` handles both result shapes
+  final private[sage] def pipelineAttempt[R](p: Pipeline[R]): F[R] = pipeline(p)
 
   final def transaction[A](body: TransactionScope[F, String] => F[A]): F[A] =
     lower(underlying.transaction[A](scope => lift(body(lowerScope(scope)))))
@@ -63,9 +60,7 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
   final def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): F[Subscription[F, Message[V]]] =
     lower(underlying.subscribeShardChannels[V](channel, rest*).map(lowerSub))
 
-  final private[sage] def scanTargets: F[Vector[ScanTarget]] = lower(underlying.scanTargets)
-
-  final private[sage] def runOn[A](target: ScanTarget, command: Command[A]): F[A] = lower(underlying.runOn(target, command))
+  final override private[sage] def runner: SharedRunner = underlying.runner
 
   final private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision] =
     lower(underlying.rateLimitAcquire(executor, subject, cost, peek))
@@ -84,11 +79,10 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   private def lowerScope(scope: TransactionScope[CIO, String]): TransactionScope[F, String] =
     new TransactionScope[F, String] {
-      def watch[K: KeyCodec](key: K, rest: K*): F[Unit]                        = lower(scope.watch(key, rest*))
-      def run[A](command: Command[A]): F[A]                                    = lower(scope.run(command))
-      private[sage] def exec[Out, R](p: Pipeline[Out, R]): F[Option[Out]]      = lower(scope.exec(p))
-      private[sage] def execAttempt[Out, R](p: Pipeline[Out, R]): F[Option[R]] = lower(scope.execAttempt(p))
-      def discard: F[Unit]                                                     = lower(scope.discard)
+      def watch[K: KeyCodec](key: K, rest: K*): F[Unit]       = lower(scope.watch(key, rest*))
+      def run[A](command: Command[A]): F[A]                   = lower(scope.run(command))
+      private[sage] def exec[R](p: Pipeline[R]): F[Option[R]] = lower(scope.exec(p))
+      def discard: F[Unit]                                    = lower(scope.discard)
     }
 
   private def lowerSub[A](sub: Subscription[CIO, A]): Subscription[F, A] =

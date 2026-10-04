@@ -3,7 +3,7 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.{DecodeError, ServerError}
 import sage.protocol.{Frame, RespParser}
-import sage.protocol.Frames.bulk
+import sage.protocol.Frames.{bulk, feed}
 
 class CommandSpec extends munit.FunSuite {
 
@@ -37,6 +37,11 @@ class CommandSpec extends munit.FunSuite {
   test("multi-word command names encode one bulk string per word") {
     val command = Command[Unit]("CONFIG GET", Vector.empty, Vector(Bytes.utf8("maxmemory")), _ => Right(()))
     assertEquals(command.encode.asUtf8String, "*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$9\r\nmaxmemory\r\n")
+    val spaced  = Command[Unit](" CONFIG  GET ", Vector.empty, Vector.empty, _ => Right(()))
+    assertEquals(spaced.encode.asUtf8String, "*2\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n")
+    // a blank name is sent as an empty bulk string so the first argument is never run as the command
+    val blank   = Command[Unit]("  ", Vector.empty, Vector(Bytes.utf8("GET")), _ => Right(()))
+    assertEquals(blank.encode.asUtf8String, "*2\r\n$0\r\n\r\n$3\r\nGET\r\n")
   }
 
   test("a command's encoded bytes parse back as an array of bulk strings") {
@@ -54,12 +59,15 @@ class CommandSpec extends munit.FunSuite {
   }
 
   test("a top-level error frame becomes a ServerError for any command") {
-    assertEquals(Reply.run(Strings.get[String, String]("foo"), Frame.SimpleError("ERR oops")), Left(ServerError("ERR", "oops")))
-    assertEquals(Reply.run(Strings.set("foo", "bar"), Frame.BulkError(Bytes.utf8("WRONGTYPE bad"))), Left(ServerError("WRONGTYPE", "bad")))
+    assertEquals(Reply.decode(Strings.get[String, String]("foo"), Frame.SimpleError("ERR oops")).toEither, Left(ServerError("ERR", "oops")))
+    assertEquals(
+      Reply.decode(Strings.set("foo", "bar"), Frame.BulkError(Bytes.utf8("WRONGTYPE bad"))).toEither,
+      Left(ServerError("WRONGTYPE", "bad"))
+    )
   }
 
   test("an unexpected frame shape becomes a DecodeError naming expected and actual") {
-    Reply.run(Strings.mSet(("foo", "bar")), Frame.Integer(1)) match {
+    Reply.decode(Strings.mSet(("foo", "bar")), Frame.Integer(1)).toEither match {
       case Left(error: DecodeError) =>
         assertEquals(error.expected, "simple string 'OK'")
         assertEquals(error.actual, "integer 1")
@@ -69,7 +77,39 @@ class CommandSpec extends munit.FunSuite {
 
   test("map transforms the decoded result") {
     val exists = Strings.get[String, String]("foo").map(_.isDefined)
-    assertEquals(Reply.run(exists, bulk("bar")), Right(true))
-    assertEquals(Reply.run(exists, Frame.Null), Right(false))
+    assertEquals(Reply.decode(exists, bulk("bar")).toEither, Right(true))
+    assertEquals(Reply.decode(exists, Frame.Null).toEither, Right(false))
+  }
+
+  test("enum keywords and wire names use root-locale case mapping, so a Turkish default locale still sends RIGHT and reads integer") {
+    val previous = java.util.Locale.getDefault
+    java.util.Locale.setDefault(java.util.Locale.forLanguageTag("tr-TR"))
+    try {
+      assert(Args.keywords(ListSide.values)(ListSide.Right).sameBytes(Bytes.utf8("RIGHT")))
+      assertEquals(Decode.byLowerName(JsonType.Integer).get("integer"), Some(JsonType.Integer))
+    } finally java.util.Locale.setDefault(previous)
+  }
+
+  test("a First broadcast returns the first master's reply but fails when another master's reply does not decode") {
+    val flush = Scripting.scriptFlush()
+    val ok    = Frame.SimpleString("OK")
+    assertEquals(flush.reduceReplies(ok, Vector(ok)), ok)
+    intercept[DecodeError](flush.reduceReplies(ok, Vector(ok, Frame.Integer(1L))))
+  }
+
+  test("a First broadcast whose decoder throws on a dropped reply fails with a DecodeError") {
+    val boom    = new IllegalStateException("boom")
+    val command = Command[Unit](
+      "SCRIPT",
+      Command.NoKeys,
+      Vector.empty,
+      {
+        case Frame.Integer(_) => throw boom
+        case _                => Right(())
+      },
+      allMasters = true
+    )
+    val error   = intercept[DecodeError](command.reduceReplies(Frame.SimpleString("OK"), Vector(Frame.Integer(1L))))
+    assertEquals(error.getCause, boom)
   }
 }

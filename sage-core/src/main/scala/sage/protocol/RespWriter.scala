@@ -1,53 +1,36 @@
 package sage.protocol
 
 import sage.Bytes
+import sage.codec.Primitives.{digitCount, writeDigits}
 
 /**
   * Encodes commands as RESP bytes.
   */
 private[sage] object RespWriter {
 
-  // precomputes the buffer size to encode into one array and return it without copying.
   def writeCommand(name: String, args: Vector[Bytes]): Bytes =
-    if (name.indexOf(' ') < 0) { // encode a single-word command name directly without splitting it
-      val nameBytes = Bytes.utf8(name)
-      val count     = 1L + args.length
-      val sink      = new Sink(headerSize(count) + bulkSize(nameBytes.length) + argsSize(args))
-      sink.writeByte('*')
-      sink.writeLong(count)
-      sink.writeCrlf()
-      writeBulk(nameBytes, sink)
-      writeArgs(args, sink)
-      sink.result()
-    } else {
-      val words     = name.split(' ').filter(_.nonEmpty)
-      val wordBytes = words.map(Bytes.utf8)
-      val count     = wordBytes.length.toLong + args.length
-      var bodySize  = 0
-      var s         = 0
-      while (s < wordBytes.length) {
-        bodySize += bulkSize(wordBytes(s).length)
-        s += 1
+    if (name.indexOf(' ') < 0) write(Bytes.utf8(name), args)
+    else
+      // a multi-word name such as "XGROUP CREATE" is sent as one bulk string per word
+      name.split(' ').iterator.filter(_.nonEmpty).map(Bytes.utf8).toVector match {
+        case first +: rest => write(first, rest ++ args)
+        case _             => write(Bytes.empty, args)
       }
-      val sink      = new Sink(headerSize(count) + bodySize + argsSize(args))
-      sink.writeByte('*')
-      sink.writeLong(count)
-      sink.writeCrlf()
-      var w         = 0
-      while (w < wordBytes.length) {
-        writeBulk(wordBytes(w), sink)
-        w += 1
-      }
-      writeArgs(args, sink)
-      sink.result()
-    }
 
-  private def writeArgs(args: Vector[Bytes], sink: Sink): Unit = {
-    var i = 0
+  // precomputes the buffer size to encode into one array and return it without copying.
+  private def write(name: Bytes, args: Vector[Bytes]): Bytes = {
+    val count = 1L + args.length
+    val sink  = new Sink(headerSize(count) + bulkSize(name.length) + argsSize(args))
+    sink.writeByte('*')
+    sink.writeLong(count)
+    sink.writeCrlf()
+    writeBulk(name, sink)
+    var i     = 0
     while (i < args.length) {
       writeBulk(args(i), sink)
       i += 1
     }
+    sink.result()
   }
 
   // keep this calculation aligned with writeBulk and the array header written above.
@@ -65,17 +48,6 @@ private[sage] object RespWriter {
     total
   }
 
-  // shared with Sink.writeDigits to keep sizing and encoding consistent.
-  private def digitCount(value: Long): Int = {
-    var digits  = 1
-    var ceiling = 10L
-    while (digits < 19 && value >= ceiling) {
-      digits += 1
-      ceiling *= 10
-    }
-    digits
-  }
-
   private def writeBulk(value: Bytes, sink: Sink): Unit = {
     sink.writeByte('$')
     sink.writeLong(value.length.toLong)
@@ -84,64 +56,34 @@ private[sage] object RespWriter {
     sink.writeCrlf()
   }
 
-  /**
-    * An unsynchronized growable byte buffer (java.io.ByteArrayOutputStream locks on every call).
-    */
-  final private class Sink(initialCapacity: Int) {
+  final private class Sink(size: Int) {
 
-    private var buf: Array[Byte] = new Array[Byte](initialCapacity)
+    private val buf: Array[Byte] = new Array[Byte](size)
     private var len: Int         = 0
 
     def writeByte(value: Int): Unit = {
-      ensure(1)
       buf(len) = value.toByte
       len += 1
     }
 
     def writeCrlf(): Unit = {
-      ensure(2)
       buf(len) = '\r'
       buf(len + 1) = '\n'
       len += 2
     }
 
-    def writeBytes(bytes: Bytes): Unit =
-      writeArray(bytes.unsafeArray)
-
-    // only ever called with non-negative lengths and element counts
-    def writeLong(value: Long): Unit = writeDigits(value)
-
-    // return the buffer directly when its size is exact. If it grew beyond the encoded length, copy only the used bytes.
-    def result(): Bytes =
-      if (len == buf.length) Bytes.wrap(IArray.unsafeFromArray(buf))
-      else Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOf(buf, len)))
-
-    private def writeDigits(value: Long): Unit = {
-      val digits    = digitCount(value)
-      ensure(digits)
-      var i         = len + digits - 1
-      var remaining = value
-      while (i >= len) {
-        buf(i) = ('0' + (remaining % 10).toInt).toByte
-        remaining /= 10
-        i -= 1
-      }
-      len += digits
-    }
-
-    private def writeArray(array: Array[Byte]): Unit = {
-      ensure(array.length)
+    def writeBytes(bytes: Bytes): Unit = {
+      val array = bytes.unsafeArray
       System.arraycopy(array, 0, buf, len, array.length)
       len += array.length
     }
 
-    // use Long arithmetic to prevent capacity overflow for multi-gigabyte commands, then cap at the maximum array size.
-    private def ensure(extra: Int): Unit =
-      if (buf.length - len < extra) {
-        val needed   = len.toLong + extra
-        var capacity = buf.length.toLong * 2
-        while (capacity < needed) capacity *= 2
-        buf = java.util.Arrays.copyOf(buf, math.min(capacity, Int.MaxValue - 8).toInt)
-      }
+    def writeLong(value: Long): Unit = {
+      val digits = digitCount(value)
+      writeDigits(buf, len, digits, value)
+      len += digits
+    }
+
+    def result(): Bytes = Bytes.wrap(IArray.unsafeFromArray(buf))
   }
 }

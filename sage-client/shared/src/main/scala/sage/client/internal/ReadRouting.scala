@@ -16,7 +16,7 @@ import sage.commands.Command
   */
 private[client] object ReadRouting {
 
-  final case class Picked(node: Node, client: NodeClient, remaining: Vector[Node])
+  final case class Picked(node: Node, client: MultiplexedConnection, remaining: Vector[Node])
 
   // Allow ordinary non-blocking reads. Exclude writes, blocking reads, and cursor-bound scans because their cursors are node-local. Cached
   // reads apply their own routing rule before calling this method.
@@ -58,18 +58,6 @@ final private[client] class ReadRouting(
 
   private val cursors = new ConcurrentHashMap[Node, AtomicInteger]()
 
-  private enum CandidateState {
-    case Unknown
-    case Unavailable
-    case Connected(client: NodeClient)
-  }
-
-  private enum Selection {
-    case Found(picked: ReadRouting.Picked)
-    case NeedsEstablish
-    case Exhausted
-  }
-
   /**
     * The candidates for `master`'s replicas under the policy, advancing that master's cursor once.
     */
@@ -101,17 +89,10 @@ final private[client] class ReadRouting(
   ): Unit =
     candidates match {
       case node +: rest =>
-        val pool     = poolFor(node, master)
-        val existing = pool.existing(node)
-        if (existing != null)
-          if (existing.isLive) submit(existing, node, command, rest, complete)(onFault)
-          else walk(command, rest, master, complete)(onFault)
-        else
-          scheduler.offload {
-            val nc = pool.getOrEstablishOrNull(node)
-            if (nc == null || !nc.isLive) walk(command, rest, master, complete)(onFault)
-            else submit(nc, node, command, rest, complete)(onFault)
-          }
+        poolFor(node, master).withClient(node)(walk(command, rest, master, complete)(onFault)) { nc =>
+          if (!nc.isLive) walk(command, rest, master, complete)(onFault)
+          else submit(nc, node, command, rest, complete)(onFault)
+        }
       case _            =>
         triggerRefresh()
         complete(Failure(NotConnected()))
@@ -123,58 +104,24 @@ final private[client] class ReadRouting(
     * establishment is offloaded.
     */
   def pickOne(candidates: Vector[Node], master: Node)(onPick: Option[ReadRouting.Picked] => Unit): Unit =
-    select(candidates, master, existingCandidate) match {
-      case Selection.Found(picked)  => onPick(Some(picked))
-      case Selection.Exhausted      => onPick(None)
-      case Selection.NeedsEstablish =>
-        scheduler.offload {
-          // retry the full order, allowing a previously disconnected candidate to reconnect before checking the first unknown one
-          select(candidates, master, establishCandidate) match {
-            case Selection.Found(picked) => onPick(Some(picked))
-            case _                       => onPick(None)
-          }
+    candidates match {
+      case node +: rest =>
+        poolFor(node, master).withClient(node)(pickOne(rest, master)(onPick)) { nc =>
+          if (nc.isLive) onPick(Some(ReadRouting.Picked(node, nc, rest))) else pickOne(rest, master)(onPick)
         }
+      case _            => onPick(None)
     }
 
-  private def submit[A](nc: NodeClient, node: Node, command: Command[A], rest: Vector[Node], complete: Try[A] => Unit)(
+  private def submit[A](nc: MultiplexedConnection, node: Node, command: Command[A], rest: Vector[Node], complete: Try[A] => Unit)(
     onFault: (Node, Throwable, Vector[Node]) => Unit
   ): Unit =
     nc.submit[A](
       command,
-      asking = false,
       {
-        case success @ Success(_) =>
-          Events.attributeNode(complete, node)
-          complete(success)
+        case success @ Success(_) => Events.completeAt(complete, node)(success)
         case Failure(error)       => scheduler.offload(onFault(node, error, rest))
       }
     )
-
-  private def select(candidates: Vector[Node], master: Node, lookup: (NodePool, Node) => CandidateState): Selection = {
-    var remaining = candidates
-    while (remaining.nonEmpty) {
-      val node = remaining.head
-      val pool = poolFor(node, master)
-      lookup(pool, node) match {
-        case CandidateState.Unknown       => return Selection.NeedsEstablish
-        case CandidateState.Unavailable   => ()
-        case CandidateState.Connected(nc) =>
-          if (nc.isLive) return Selection.Found(ReadRouting.Picked(node, nc, remaining.tail))
-      }
-      remaining = remaining.tail
-    }
-    Selection.Exhausted
-  }
-
-  private def existingCandidate(pool: NodePool, node: Node): CandidateState = {
-    val nc = pool.existing(node)
-    if (nc == null) CandidateState.Unknown else CandidateState.Connected(nc)
-  }
-
-  private def establishCandidate(pool: NodePool, node: Node): CandidateState = {
-    val nc = pool.getOrEstablishOrNull(node)
-    if (nc == null) CandidateState.Unavailable else CandidateState.Connected(nc)
-  }
 
   private def poolFor(node: Node, master: Node): NodePool = if (node == master) masterPool else replicaPool
 }

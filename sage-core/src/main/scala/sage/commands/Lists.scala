@@ -3,6 +3,7 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.{KeyCodec, ValueCodec}
+import sage.commands.Args.Count
 import sage.protocol.Frame
 
 /**
@@ -10,17 +11,6 @@ import sage.protocol.Frame
   */
 enum ListSide {
   case Left, Right
-}
-
-object ListSide {
-
-  private[commands] def wire(side: ListSide): Bytes =
-    side match {
-      case ListSide.Left  => LeftWord
-      case ListSide.Right => RightWord
-    }
-  private val LeftWord                              = Bytes.utf8("LEFT")
-  private val RightWord                             = Bytes.utf8("RIGHT")
 }
 
 /**
@@ -32,23 +22,22 @@ enum InsertPosition {
 
 private[sage] object Lists {
 
-  private val Before = Bytes.utf8("BEFORE")
-  private val After  = Bytes.utf8("AFTER")
-  private val Rank   = Bytes.utf8("RANK")
-  private val Count  = Bytes.utf8("COUNT")
-  private val MaxLen = Bytes.utf8("MAXLEN")
+  private val sideArg     = Args.keywords(ListSide.values)
+  private val positionArg = Args.keywords(InsertPosition.values)
+  private val Rank        = Bytes.utf8("RANK")
+  private val MaxLen      = Bytes.utf8("MAXLEN")
 
   def lPush[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    push("LPUSH", key, first +: rest.toVector)
+    Command("LPUSH", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.long)
 
   def rPush[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    push("RPUSH", key, first +: rest.toVector)
+    Command("RPUSH", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.long)
 
   def lPushX[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    push("LPUSHX", key, first +: rest.toVector)
+    Command("LPUSHX", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.long)
 
   def rPushX[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    push("RPUSHX", key, first +: rest.toVector)
+    Command("RPUSHX", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.long)
 
   def lPop[K, V](key: K)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
     Command("LPOP", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
@@ -57,10 +46,10 @@ private[sage] object Lists {
     Command("RPOP", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.optionalValue)
 
   def lPopCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("LPOP", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vectorOrEmpty(Decode.value[V]))
+    Command("LPOP", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count)), Decode.orEmpty(Decode.vector(Decode.value[V])))
 
   def rPopCount[K, V](key: K, count: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[V]] =
-    Command("RPOP", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString)), Decode.vectorOrEmpty(Decode.value[V]))
+    Command("RPOP", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count)), Decode.orEmpty(Decode.vector(Decode.value[V])))
 
   def lLen[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command.read("LLEN", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
@@ -69,15 +58,15 @@ private[sage] object Lists {
     Command.read(
       "LRANGE",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)),
+      Vector(keyCodec.encode(key), Args.long(start), Args.long(stop)),
       Decode.vector(Decode.value[V])
     )
 
   def lIndex[K, V](key: K, index: Long)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
-    Command.read("LINDEX", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(index.toString)), Decode.optionalValue)
+    Command.read("LINDEX", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(index)), Decode.optionalValue)
 
   def lSet[K, V](key: K, index: Long, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Unit] =
-    Command("LSET", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(index.toString), valueCodec.encode(value)), Decode.ok)
+    Command("LSET", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(index), valueCodec.encode(value)), Decode.ok)
 
   // the list length after the insert; 0 if the key is absent, -1 if the pivot is not found
   def lInsert[K, V](key: K, position: InsertPosition, pivot: V, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
@@ -89,35 +78,28 @@ private[sage] object Lists {
     )
 
   def lRem[K, V](key: K, count: Long, value: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    Command("LREM", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(count.toString), valueCodec.encode(value)), Decode.long)
+    Command("LREM", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(count), valueCodec.encode(value)), Decode.long)
 
   def lTrim[K](key: K, start: Long, stop: Long)(using keyCodec: KeyCodec[K]): Command[Unit] =
-    Command("LTRIM", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)), Decode.ok)
+    Command("LTRIM", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(start), Args.long(stop)), Decode.ok)
 
   def lPos[K, V](key: K, element: V, rank: Option[Long] = None, maxLen: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Option[Long]] =
-    Command.read(
-      "LPOS",
-      Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ longArg(Rank, rank) ++ longArg(MaxLen, maxLen),
-      Decode.optionalLong
-    )
+    Command.read("LPOS", Command.FirstKey, posArgs(key, element, rank, Vector.empty, maxLen), Decode.optionalLong)
 
   def lPosCount[K, V](key: K, element: V, count: Long, rank: Option[Long] = None, maxLen: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
   ): Command[Vector[Long]] =
-    Command.read(
-      "LPOS",
-      Command.FirstKey,
-      Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ longArg(Rank, rank) ++ Vector(Count, Bytes.utf8(count.toString)) ++ longArg(
-        MaxLen,
-        maxLen
-      ),
-      Decode.vector(Decode.long)
-    )
+    Command.read("LPOS", Command.FirstKey, posArgs(key, element, rank, Vector(Count, Args.long(count)), maxLen), Decode.vector(Decode.long))
+
+  private def posArgs[K, V](key: K, element: V, rank: Option[Long], count: Vector[Bytes], maxLen: Option[Long])(
+    using keyCodec: KeyCodec[K],
+    valueCodec: ValueCodec[V]
+  ): Vector[Bytes] =
+    Vector(keyCodec.encode(key), valueCodec.encode(element)) ++ Args.optLong(Rank, rank) ++ count ++ Args.optLong(MaxLen, maxLen)
 
   def lMove[K, V](source: K, destination: K, from: ListSide, to: ListSide)(
     using keyCodec: KeyCodec[K],
@@ -126,28 +108,21 @@ private[sage] object Lists {
     Command(
       "LMOVE",
       Vector(0, 1),
-      Vector(keyCodec.encode(source), keyCodec.encode(destination), ListSide.wire(from), ListSide.wire(to)),
+      Vector(keyCodec.encode(source), keyCodec.encode(destination), sideArg(from), sideArg(to)),
       Decode.optionalValue
     )
 
   def lMpop[K, V](
     first: K,
     rest: K*
-  )(side: ListSide, count: Option[Long] = None)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, Vector[V])]] = {
-    val (keyIndices, prefix) = KeyArgs.numKeyed(first +: rest.toVector)
-    Command(
-      "LMPOP",
-      keyIndices,
-      args = (prefix :+ ListSide.wire(side)) ++ longArg(Count, count),
-      decode = mpopReply[K, V]
-    )
-  }
+  )(side: ListSide, count: Option[Long] = None)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, Vector[V])]] =
+    KeyArgs.multiPop("LMPOP", None, first +: rest.toVector, sideArg(side), count, Decode.vector(Decode.value[V]), MpopLabel)
 
   def blPop[K, V](first: K, rest: K*)(timeout: BlockTimeout)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V)]] =
-    blockingPop("BLPOP", first, rest.toVector, timeout)
+    KeyArgs.blockingPop("BLPOP", first +: rest.toVector, timeout, poppedPair[K, V])
 
   def brPop[K, V](first: K, rest: K*)(timeout: BlockTimeout)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[(K, V)]] =
-    blockingPop("BRPOP", first, rest.toVector, timeout)
+    KeyArgs.blockingPop("BRPOP", first +: rest.toVector, timeout, poppedPair[K, V])
 
   def blMove[K, V](source: K, destination: K, from: ListSide, to: ListSide, timeout: BlockTimeout)(
     using keyCodec: KeyCodec[K],
@@ -156,7 +131,7 @@ private[sage] object Lists {
     Command(
       "BLMOVE",
       Vector(0, 1),
-      Vector(keyCodec.encode(source), keyCodec.encode(destination), ListSide.wire(from), ListSide.wire(to), BlockTimeout.wire(timeout)),
+      Vector(keyCodec.encode(source), keyCodec.encode(destination), sideArg(from), sideArg(to), BlockTimeout.wire(timeout)),
       Decode.optionalValue,
       Execution.Blocking
     )
@@ -164,49 +139,11 @@ private[sage] object Lists {
   def blMpop[K, V](first: K, rest: K*)(side: ListSide, timeout: BlockTimeout, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     valueCodec: ValueCodec[V]
-  ): Command[Option[(K, Vector[V])]] = {
-    val keys = (first +: rest.toVector).map(keyCodec.encode)
-    Command(
-      "BLMPOP",
-      keyIndices = Vector.tabulate(keys.size)(_ + 2),
-      args = (BlockTimeout.wire(timeout) +: Bytes.utf8(keys.size.toString) +: keys :+ ListSide.wire(side)) ++ longArg(Count, count),
-      decode = mpopReply[K, V],
-      execution = Execution.Blocking
-    )
-  }
+  ): Command[Option[(K, Vector[V])]] =
+    KeyArgs.multiPop("BLMPOP", Some(timeout), first +: rest.toVector, sideArg(side), count, Decode.vector(Decode.value[V]), MpopLabel)
 
-  private def blockingPop[K, V](name: String, first: K, rest: Vector[K], timeout: BlockTimeout)(
-    using keyCodec: KeyCodec[K],
-    valueCodec: ValueCodec[V]
-  ): Command[Option[(K, V)]] = {
-    val keys = (first +: rest).map(keyCodec.encode)
-    Command(
-      name,
-      keyIndices = Vector.tabulate(keys.size)(identity),
-      args = keys :+ BlockTimeout.wire(timeout),
-      decode = {
-        case Frame.Null => Right(None)
-        case other      => Decode.array2(Decode.key[K], Decode.value[V], "array of key and value or null")(_ -> _)(other).map(Some(_))
-      },
-      execution = Execution.Blocking
-    )
-  }
+  private def poppedPair[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, (K, V)] =
+    Decode.array2(Decode.key[K], Decode.value[V], "array of key and value or null")(_ -> _)
 
-  private def mpopReply[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Option[(K, Vector[V])]] = {
-    case Frame.Null => Right(None)
-    case other      =>
-      Decode.array2(Decode.key[K], Decode.vector(Decode.value[V]), "array of key and values or null")(_ -> _)(other).map(Some(_))
-  }
-
-  private def longArg(keyword: Bytes, value: Option[Long]): Vector[Bytes] =
-    value.toVector.flatMap(v => Vector(keyword, Bytes.utf8(v.toString)))
-
-  private def push[K, V](name: String, key: K, values: Vector[V])(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Long] =
-    Command(name, Command.FirstKey, keyCodec.encode(key) +: values.map(valueCodec.encode), Decode.long)
-
-  private def positionArg(position: InsertPosition): Bytes =
-    position match {
-      case InsertPosition.Before => Before
-      case InsertPosition.After  => After
-    }
+  private val MpopLabel = "array of key and values or null"
 }

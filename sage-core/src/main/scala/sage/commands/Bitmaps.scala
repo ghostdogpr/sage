@@ -1,7 +1,8 @@
 package sage.commands
 
 import sage.Bytes
-import sage.codec.KeyCodec
+import sage.codec.{KeyCodec, Primitives}
+import sage.commands.Args.Get
 
 /**
   * Whether a `BITCOUNT`/`BITPOS` range is measured in `Byte`s or `Bit`s.
@@ -60,33 +61,27 @@ enum BitFieldOp {
 
 private[sage] object Bitmaps {
 
-  private val Zero         = Bytes.utf8("0")
-  private val One          = Bytes.utf8("1")
   private val And          = Bytes.utf8("AND")
   private val Or           = Bytes.utf8("OR")
   private val Xor          = Bytes.utf8("XOR")
   private val Not          = Bytes.utf8("NOT")
-  private val GetWord      = Bytes.utf8("GET")
   private val SetWord      = Bytes.utf8("SET")
   private val IncrByWord   = Bytes.utf8("INCRBY")
   private val OverflowWord = Bytes.utf8("OVERFLOW")
-  private val WrapWord     = Bytes.utf8("WRAP")
-  private val SatWord      = Bytes.utf8("SAT")
-  private val FailWord     = Bytes.utf8("FAIL")
-  private val ByteWord     = Bytes.utf8("BYTE")
-  private val BitWord      = Bytes.utf8("BIT")
+  private val overflowArg  = Args.keywords(BitFieldOverflow.values)
+  private val unitArg      = Args.keywords(BitUnit.values)
 
   def setBit[K](key: K, offset: Long, value: Boolean)(using keyCodec: KeyCodec[K]): Command[Boolean] =
-    Command("SETBIT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(offset.toString), bitToken(value)), Decode.flag)
+    Command("SETBIT", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(offset), Primitives.encodeBoolean(value)), Decode.flag)
 
   def getBit[K](key: K, offset: Long)(using keyCodec: KeyCodec[K]): Command[Boolean] =
-    Command.read("GETBIT", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(offset.toString)), Decode.flag)
+    Command.read("GETBIT", Command.FirstKey, Vector(keyCodec.encode(key), Args.long(offset)), Decode.flag)
 
   def bitCount[K](key: K, range: Option[BitRange] = None)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command.read("BITCOUNT", Command.FirstKey, keyCodec.encode(key) +: rangeArgs(range), Decode.long)
 
   def bitPos[K](key: K, bit: Boolean, range: Option[BitPosRange] = None)(using keyCodec: KeyCodec[K]): Command[Long] =
-    Command.read("BITPOS", Command.FirstKey, Vector(keyCodec.encode(key), bitToken(bit)) ++ posRangeArgs(range), Decode.long)
+    Command.read("BITPOS", Command.FirstKey, Vector(keyCodec.encode(key), Primitives.encodeBoolean(bit)) ++ posRangeArgs(range), Decode.long)
 
   def bitOpAnd[K](destination: K, first: K, rest: K*)(using KeyCodec[K]): Command[Long] = bitOp(And, destination, first +: rest.toVector)
 
@@ -108,20 +103,20 @@ private[sage] object Bitmaps {
   }
 
   private def rangeArgs(range: Option[BitRange]): Vector[Bytes] =
-    range.toVector.flatMap(r => Vector(Bytes.utf8(r.start.toString), Bytes.utf8(r.end.toString), unitArg(r.unit)))
+    range.toVector.flatMap(r => Vector(Args.long(r.start), Args.long(r.end), unitArg(r.unit)))
 
   private def posRangeArgs(range: Option[BitPosRange]): Vector[Bytes] =
     range match {
       case None                                       => Vector.empty
-      case Some(BitPosRange.FromStart(start))         => Vector(Bytes.utf8(start.toString))
-      case Some(BitPosRange.Within(start, end, unit)) => Vector(Bytes.utf8(start.toString), Bytes.utf8(end.toString), unitArg(unit))
+      case Some(BitPosRange.FromStart(start))         => Vector(Args.long(start))
+      case Some(BitPosRange.Within(start, end, unit)) => Vector(Args.long(start), Args.long(end), unitArg(unit))
     }
 
   private def opArgs(op: BitFieldOp): Vector[Bytes] =
     op match {
-      case BitFieldOp.Get(fieldType, offset)          => Vector(GetWord, typeArg(fieldType), offsetArg(offset))
-      case BitFieldOp.Set(fieldType, offset, value)   => Vector(SetWord, typeArg(fieldType), offsetArg(offset), Bytes.utf8(value.toString))
-      case BitFieldOp.IncrBy(fieldType, offset, incr) => Vector(IncrByWord, typeArg(fieldType), offsetArg(offset), Bytes.utf8(incr.toString))
+      case BitFieldOp.Get(fieldType, offset)          => Vector(Get, typeArg(fieldType), offsetArg(offset))
+      case BitFieldOp.Set(fieldType, offset, value)   => Vector(SetWord, typeArg(fieldType), offsetArg(offset), Args.long(value))
+      case BitFieldOp.IncrBy(fieldType, offset, incr) => Vector(IncrByWord, typeArg(fieldType), offsetArg(offset), Args.long(incr))
       case BitFieldOp.Overflow(behavior)              => Vector(OverflowWord, overflowArg(behavior))
     }
 
@@ -133,22 +128,8 @@ private[sage] object Bitmaps {
 
   private def offsetArg(offset: BitFieldOffset): Bytes =
     offset match {
-      case BitFieldOffset.Absolute(value)   => Bytes.utf8(value.toString)
+      case BitFieldOffset.Absolute(value)   => Args.long(value)
       case BitFieldOffset.TypeWidth(factor) => Bytes.utf8("#" + factor.toString)
     }
 
-  private def overflowArg(behavior: BitFieldOverflow): Bytes =
-    behavior match {
-      case BitFieldOverflow.Wrap => WrapWord
-      case BitFieldOverflow.Sat  => SatWord
-      case BitFieldOverflow.Fail => FailWord
-    }
-
-  private def unitArg(unit: BitUnit): Bytes =
-    unit match {
-      case BitUnit.Byte => ByteWord
-      case BitUnit.Bit  => BitWord
-    }
-
-  private def bitToken(value: Boolean): Bytes = if (value) One else Zero
 }

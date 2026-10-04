@@ -1,7 +1,5 @@
 package sage.opentelemetry
 
-import java.util.concurrent.atomic.AtomicBoolean
-
 import io.opentelemetry.api.{GlobalOpenTelemetry, OpenTelemetry}
 import io.opentelemetry.api.common.AttributeKey
 import io.opentelemetry.api.trace.{SpanKind, StatusCode, Tracer}
@@ -61,7 +59,7 @@ object OpenTelemetryCommandTracer {
     * in-memory SDK.
     */
   def apply(openTelemetry: OpenTelemetry, peerService: String = "redis"): CommandTracer =
-    new OpenTelemetryCommandTracer(openTelemetry.getTracer("sage"), peerService, () => Context.current())
+    withContextProvider(openTelemetry, peerService, () => Context.current())
 
   /**
     * Builds a tracer from the registered global `OpenTelemetry` instance. Use this method with an APM agent that registers itself globally,
@@ -79,23 +77,20 @@ object OpenTelemetryCommandTracer {
 
   final private class Span(span: io.opentelemetry.api.trace.Span) extends CommandSpan {
 
-    // a fast failure can race with a late callback. End the span only for the first outcome.
-    private val ended = new AtomicBoolean(false)
-
     def routedTo(node: Node): Unit = {
       span.setAttribute(ServerAddress, node.host)
       span.setAttribute(ServerPort, node.port.toLong): Unit
     }
 
-    def settled(outcome: Outcome): Unit =
-      if (ended.compareAndSet(false, true)) {
-        outcome match {
-          case Outcome.Succeeded   => ()
-          case Outcome.Failed(err) =>
-            span.setStatus(StatusCode.ERROR, Option(err.getMessage).getOrElse(err.getClass.getName))
-            span.recordException(err)
-        }
-        span.end()
+    // OpenTelemetry ignores calls on a span after it has ended, so a repeated call changes nothing.
+    def settled(outcome: Outcome): Unit = {
+      outcome match {
+        case Outcome.Succeeded   => ()
+        case Outcome.Failed(err) =>
+          span.setStatus(StatusCode.ERROR, Option(err.getMessage).getOrElse(err.getClass.getName))
+          span.recordException(err)
       }
+      span.end()
+    }
   }
 }

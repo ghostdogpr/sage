@@ -23,10 +23,8 @@ final private[sage] class RespParser {
   private var writePos: Int          = 0
   private var failure: ProtocolError = null
 
-  // out-fields, avoiding a result-wrapper allocation per parsed value
-  private var cursor: Int         = 0
-  private var produced: Frame     = null
-  private var failMessage: String = null
+  // out-field, avoiding a result-wrapper allocation per parsed value
+  private var produced: Frame = null
 
   private var numberOk: Boolean = false
 
@@ -40,28 +38,15 @@ final private[sage] class RespParser {
   private[protocol] def unsafeBuffer: Array[Byte] = buf
 
   /**
-    * Returns every frame completed by `bytes`, in order.
-    */
-  def feed(bytes: Bytes): Either[ProtocolError, Vector[Frame]] = {
-    val frames = Vector.newBuilder[Frame]
-    val array  = bytes.unsafeArray
-    feed(array, 0, array.length)(frames += _) match {
-      case Some(error) => Left(error)
-      case None        => Right(frames.result())
-    }
-  }
-
-  /**
-    * Parses every frame completed by `array(offset until offset + length)` and passes each one to `onFrame` in order. Unlike [[feed]], this
-    * overload does not create an input `Bytes` value or collect the frames in a `Vector`. It copies the slice into the parser's internal
-    * buffer and invokes the callback as frames are completed.
+    * Parses every frame completed by `array(offset until offset + length)` and passes each one to `onFrame` in order. The slice is copied
+    * into the parser's internal buffer.
     */
   def feed(array: Array[Byte], offset: Int, length: Int)(onFrame: Frame => Unit): Option[ProtocolError] =
     if (failure != null) Some(failure)
     else if (!append(array, offset, length)) Some(poison("input exceeds the maximum buffer size"))
     else {
       parseLoop(onFrame)
-      if (failMessage != null) Some(poison(failMessage))
+      if (failure != null) Some(failure)
       else {
         // partial aggregates remain on the stack, so an empty input buffer can be reset between reads.
         if (readPos == writePos) {
@@ -122,52 +107,36 @@ final private[sage] class RespParser {
   }
 
   private def parseLoop(onFrame: Frame => Unit): Unit = {
-    var running = true
-    while (running) {
+    var status = Opened
+    while (status == Produced || status == Opened) {
       // close completed aggregates first: this also finalizes an empty aggregate (zero children) the instant it is opened
-      var closing = true
-      while (closing)
-        if (stackDepth > 0 && complete(stack(stackDepth - 1))) {
-          val top = stack(stackDepth - 1)
-          stack(stackDepth - 1) = null
-          stackDepth -= 1
-          if (top.kind == Attr) closing = false // an attribute yields no value; the value it prefixes is produced next, for the same slot
-          else {
-            val value = build(top)
-            if (stackDepth == 0) {
-              onFrame(value)
-              closing = false
-            } else addChild(stack(stackDepth - 1), value) // re-check: the parent may now be complete too
-          }
-        } else closing = false
-
-      val status = produceValue()
-      if (status == Produced) {
-        val value = produced
-        if (stackDepth == 0) onFrame(value) else addChild(stack(stackDepth - 1), value)
-      } else if (status == Opened) () // re-loop: the close pass finalizes it if empty, otherwise its children are produced next
-      else running = false
+      while (stackDepth > 0 && complete(stack(stackDepth - 1))) {
+        stackDepth -= 1
+        val top = stack(stackDepth)
+        stack(stackDepth) = null
+        // an attribute yields no value; the value it prefixes is produced next, for the same slot
+        if (top.kind != Attr) deliver(build(top), onFrame)
+      }
+      status = produceValue()
+      if (status == Produced) deliver(produced, onFrame)
     }
   }
+
+  private def deliver(value: Frame, onFrame: Frame => Unit): Unit =
+    if (stackDepth == 0) onFrame(value) else addChild(stack(stackDepth - 1), value)
 
   private def complete(agg: Agg): Boolean = agg.remaining == 0 && agg.pendingKey == null
 
   private def addChild(agg: Agg, value: Frame): Unit =
     agg.kind match {
-      case Map  =>
+      case Map | Attr =>
         if (agg.pendingKey == null) agg.pendingKey = value
         else {
           agg.pairs += ((agg.pendingKey, value))
           agg.pendingKey = null
           agg.remaining -= 1
         }
-      case Attr => // discarded metadata: count off each pair without materializing it
-        if (agg.pendingKey == null) agg.pendingKey = value
-        else {
-          agg.pendingKey = null
-          agg.remaining -= 1
-        }
-      case _    =>
+      case _          =>
         agg.elements += value
         agg.remaining -= 1
     }
@@ -182,29 +151,21 @@ final private[sage] class RespParser {
     }
 
   // Produces one value at `readPos`: Produced (`produced` set, `readPos` advanced), Opened (header pushed), Incomplete (`readPos` unmoved),
-  // or Invalid (`failMessage` set)
+  // or Invalid (the parser is poisoned)
   private def produceValue(): Int =
     if (readPos >= writePos) Incomplete
     else {
       val pos = readPos
-      (buf(pos).toChar: @switch) match {
-        case '+'   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete else leaf(cr + 2, Frame.SimpleString(stringAt(pos + 1, cr)))
-        case '-'   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete else leaf(cr + 2, Frame.SimpleError(stringAt(pos + 1, cr)))
-        case ':'   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete
-          else {
+      val cr  = findCrlf(pos + 1)
+      if (cr < 0) { if (FrameTypes.indexOf(buf(pos).toInt) >= 0) Incomplete else unknownType(buf(pos)) }
+      else
+        (buf(pos).toChar: @switch) match {
+          case '+'   => leaf(cr + 2, Frame.SimpleString(stringAt(pos + 1, cr)))
+          case '-'   => leaf(cr + 2, Frame.SimpleError(stringAt(pos + 1, cr)))
+          case ':'   =>
             val value = readLong(pos + 1, cr)
             if (!numberOk) fail(s"invalid integer: '${stringAt(pos + 1, cr)}'") else leaf(cr + 2, Frame.Integer(value))
-          }
-        case ','   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete
-          else {
+          case ','   =>
             val text = stringAt(pos + 1, cr)
             try {
               val value = text match {
@@ -215,42 +176,34 @@ final private[sage] class RespParser {
               }
               leaf(cr + 2, Frame.Double(value))
             } catch { case _: NumberFormatException => fail(s"invalid double: '$text'") }
-          }
-        case '#'   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete
-          else if (cr != pos + 2) fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
-          else
-            buf(pos + 1).toChar match {
-              case 't' => leaf(cr + 2, Frame.Bool(true))
-              case 'f' => leaf(cr + 2, Frame.Bool(false))
-              case _   => fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
-            }
-        case '('   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete
-          else {
+          case '#'   =>
+            if (cr != pos + 2) fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
+            else
+              buf(pos + 1).toChar match {
+                case 't' => leaf(cr + 2, Frame.Bool(true))
+                case 'f' => leaf(cr + 2, Frame.Bool(false))
+                case _   => fail(s"invalid boolean: '${stringAt(pos + 1, cr)}'")
+              }
+          case '('   =>
             val text = stringAt(pos + 1, cr)
             try leaf(cr + 2, Frame.BigNumber(BigInt(text)))
             catch { case _: NumberFormatException => fail(s"invalid big number: '$text'") }
-          }
-        case '_'   =>
-          val cr = findCrlf(pos + 1)
-          if (cr < 0) Incomplete
-          else if (cr != pos + 1) fail(s"unexpected content in null frame: '${stringAt(pos + 1, cr)}'")
-          else leaf(cr + 2, Frame.Null)
-        case '$'   => bulk(pos, allowNull = true, "invalid bulk string length", isError = false)
-        case '!'   => bulk(pos, allowNull = false, "invalid bulk error length", isError = true)
-        case '='   => verbatim(pos)
-        case '*'   => openElements(pos, Arr, allowNull = true)
-        case '~'   => openElements(pos, Set, allowNull = false)
-        case '>'   => openElements(pos, Push, allowNull = false)
-        case '%'   => openPairs(pos, Map)
-        case '|'   => openPairs(pos, Attr)
-        case other =>
-          fail(f"unknown frame type byte 0x${other.toByte}%02x")
-      }
+          case '_'   =>
+            if (cr != pos + 1) fail(s"unexpected content in null frame: '${stringAt(pos + 1, cr)}'")
+            else leaf(cr + 2, Frame.Null)
+          case '$'   => bulk(pos, cr, '$', -1, "invalid bulk string length")
+          case '!'   => bulk(pos, cr, '!', 0, "invalid bulk error length")
+          case '='   => bulk(pos, cr, '=', 4, "invalid verbatim string length")
+          case '*'   => open(pos, cr, Arr, -1, "invalid array length")
+          case '~'   => open(pos, cr, Set, 0, "invalid set length")
+          case '>'   => open(pos, cr, Push, 0, "invalid push length")
+          case '%'   => open(pos, cr, Map, 0, "invalid map length")
+          case '|'   => open(pos, cr, Attr, 0, "invalid attribute length")
+          case other => unknownType(other.toByte)
+        }
     }
+
+  private def unknownType(byte: Byte): Int = fail(f"unknown frame type byte 0x$byte%02x")
 
   private def leaf(end: Int, frame: Frame): Int = {
     readPos = end
@@ -258,61 +211,34 @@ final private[sage] class RespParser {
     Produced
   }
 
-  private def bulk(pos: Int, allowNull: Boolean, lengthError: String, isError: Boolean): Int = {
-    val length = readLength(pos + 1, allowNull)
-    if (length == Incomplete) Incomplete
-    else if (length == Invalid) fail(s"$lengthError: '${headerText(pos + 1)}'")
-    else if (length == -1) leaf(cursor, Frame.Null)
+  private def bulk(pos: Int, cr: Int, kind: Char, minLength: Int, lengthError: String): Int = {
+    val length = readLength(pos + 1, cr)
+    if (length < minLength) fail(s"$lengthError: '${stringAt(pos + 1, cr)}'")
+    else if (length == -1) leaf(cr + 2, Frame.Null)
     else {
-      val start = cursor
+      val start = cr + 2
       val end   = payloadEnd(start, length)
-      if (end == Incomplete) Incomplete
-      else if (end == Invalid) Invalid // payloadEnd set failMessage
-      else {
-        val bytes = bytesAt(start, start + length)
-        leaf(end, if (isError) Frame.BulkError(bytes) else Frame.BulkString(bytes))
-      }
-    }
-  }
-
-  private def verbatim(pos: Int): Int = {
-    val length = readLength(pos + 1, allowNull = false)
-    if (length == Incomplete) Incomplete
-    else if (length < 4) fail(s"invalid verbatim string length: '${headerText(pos + 1)}'") // an Invalid sentinel is < 4 too
-    else {
-      val start = cursor
-      val end   = payloadEnd(start, length)
-      if (end == Incomplete) Incomplete
-      else if (end == Invalid) Invalid
+      if (end < 0) end // Incomplete, or Invalid after payloadEnd poisoned the parser
+      else if (kind == '$') leaf(end, Frame.BulkString(bytesAt(start, start + length)))
+      else if (kind == '!') leaf(end, Frame.BulkError(bytesAt(start, start + length)))
       else if (buf(start + 3) != ':') fail("verbatim string missing ':' separator")
       else leaf(end, Frame.VerbatimString(stringAt(start, start + 3), bytesAt(start + 4, start + length)))
     }
   }
 
-  private def openElements(pos: Int, kind: Byte, allowNull: Boolean): Int = {
-    val count = readLength(pos + 1, allowNull)
-    if (count == Incomplete) Incomplete
-    else if (count == Invalid) fail(s"${lengthErrorFor(kind)}: '${headerText(pos + 1)}'")
-    else if (count == -1) leaf(cursor, Frame.Null)
+  private def open(pos: Int, cr: Int, kind: Byte, minCount: Int, lengthError: String): Int = {
+    val count = readLength(pos + 1, cr)
+    if (count < minCount) fail(s"$lengthError: '${stringAt(pos + 1, cr)}'")
+    else if (count == -1) leaf(cr + 2, Frame.Null)
     else {
-      readPos = cursor
+      readPos = cr + 2
       val agg = new Agg(kind, count)
-      agg.elements = Vector.newBuilder[Frame]
-      agg.elements.sizeHint(count)
-      push(agg)
-    }
-  }
-
-  private def openPairs(pos: Int, kind: Byte): Int = {
-    val count = readLength(pos + 1, allowNull = false)
-    if (count == Incomplete) Incomplete
-    else if (count == Invalid) fail(s"${lengthErrorFor(kind)}: '${headerText(pos + 1)}'")
-    else {
-      readPos = cursor
-      val agg = new Agg(kind, count)
-      if (kind == Map) {
+      if (kind == Map || kind == Attr) {
         agg.pairs = Vector.newBuilder[(Frame, Frame)]
         agg.pairs.sizeHint(count)
+      } else {
+        agg.elements = Vector.newBuilder[Frame]
+        agg.elements.sizeHint(count)
       }
       push(agg)
     }
@@ -333,29 +259,18 @@ final private[sage] class RespParser {
     }
 
   // -1 is the RESP2 null marker; '+' is signed-integer syntax that the length grammar does not permit
-  private def readLength(pos: Int, allowNull: Boolean): Int = {
-    val cr = findCrlf(pos)
-    if (cr < 0) Incomplete
-    else if (buf(pos) == '+') Invalid
+  private def readLength(pos: Int, cr: Int): Int =
+    if (buf(pos) == '+') Invalid
     else {
       val value = readLong(pos, cr)
-      if (!numberOk || value > Int.MaxValue || value < -1 || (value == -1 && !allowNull)) Invalid
-      else {
-        cursor = cr + 2
-        value.toInt
-      }
+      if (!numberOk || value > Int.MaxValue || value < -1) Invalid else value.toInt
     }
-  }
 
   // Long arithmetic: `start + length + 2` can overflow Int
   private def payloadEnd(start: Int, length: Int): Int =
     if ((writePos - start).toLong < length.toLong + 2) Incomplete
-    else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') {
-      failMessage = "missing CRLF after bulk payload"
-      Invalid
-    } else start + length + 2
-
-  private def headerText(pos: Int): String = stringAt(pos, findCrlf(pos))
+    else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
+    else start + length + 2
 
   // index of the next CRLF's '\r', or -1 if the input ends first
   private def findCrlf(from: Int): Int = {
@@ -404,30 +319,23 @@ final private[sage] class RespParser {
     Bytes.wrap(IArray.unsafeFromArray(java.util.Arrays.copyOfRange(buf, from, until)))
 
   private def fail(message: String): Int = {
-    failMessage = message
+    poison(message)
     Invalid
   }
 
-  // Incomplete/Invalid also serve as readLength/payloadEnd sentinels, so they must stay distinct from any valid Int position/length
+  // Incomplete/Invalid also serve as readLength/payloadEnd sentinels, so they must stay below -1 and every valid Int position/length
   final private val Incomplete: Int = Int.MinValue
   final private val Invalid: Int    = Int.MinValue + 1
   final private val Produced: Int   = Int.MinValue + 2
   final private val Opened: Int     = Int.MinValue + 3
+
+  private val FrameTypes = "+-:,#(_$!=*~>%|"
 
   final private val Arr: Byte  = 0
   final private val Set: Byte  = 1
   final private val Push: Byte = 2
   final private val Map: Byte  = 3
   final private val Attr: Byte = 4
-
-  private def lengthErrorFor(kind: Byte): String = kind match {
-    case Arr  => "invalid array length"
-    case Set  => "invalid set length"
-    case Push => "invalid push length"
-    case Map  => "invalid map length"
-    case Attr => "invalid attribute length"
-    case _    => "invalid aggregate length"
-  }
 
   // largest unconsumed input the parser will buffer (the JVM's max array size)
   private inline def MaxBuffer: Long = Int.MaxValue - 8

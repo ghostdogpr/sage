@@ -13,15 +13,15 @@ import sage.commands.Command
 import sage.protocol.Frame
 
 class CeLockCancellationSpec extends LockCancellationSpec {
-  override protected def tryWithLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
+  override protected def tryWithLock[A](commands: SharedRunner, lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
     CIO.lift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).tryWithLock("key")(body.lower))
 
-  override protected def withLock[A](commands: CommandRunner[CIO, String], lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
+  override protected def withLock[A](commands: SharedRunner, lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
     CIO.lift(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).withLock("key", wait)(body.lower))
 
   List("acquire", "renew", "release").foreach { stalled =>
     test(s"a delayed $stalled callback does not hold up the lock deadline") {
-      val commands  = new CommandRunner[CIO, String] {
+      val commands  = new SharedRunner {
         def run[A](command: Command[A]): CIO[A] = CIO.async { callback =>
           val result = command.decode(Frame.Integer(1)).toTry
           if (command.args(4).asUtf8String == stalled) Scheduler.real.after(5.seconds)(callback(result))

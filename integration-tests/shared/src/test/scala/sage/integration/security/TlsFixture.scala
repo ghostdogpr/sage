@@ -17,24 +17,12 @@ import org.testcontainers.DockerClientFactory
   */
 object TlsFixture {
 
-  private lazy val material = generate()
-
   /**
-    * A local file holding the server certificate, for the client's PEM trust material.
+    * The server certificate and key in PEM, copied into the container, plus a local file holding the certificate for the client's trust.
     */
-  def serverCert: Path = material.certFile
+  final case class Material(certFile: Path, certPem: Array[Byte], keyPem: Array[Byte])
 
-  /**
-    * The server certificate in PEM, to copy into the container as `--tls-cert-file`.
-    */
-  def serverCertPem: Array[Byte] = material.certPem
-
-  /**
-    * The server private key in PEM, to copy into the container as `--tls-key-file`.
-    */
-  def serverKeyPem: Array[Byte] = material.keyPem
-
-  final private case class Material(certFile: Path, certPem: Array[Byte], keyPem: Array[Byte])
+  lazy val material: Material = generate()
 
   private def generate(): Material = {
     val dir       = Files.createTempDirectory("sage-tls")

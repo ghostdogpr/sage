@@ -6,7 +6,7 @@ import scala.concurrent.ExecutionContext
 import kyo.compat.*
 
 import sage.Bytes
-import sage.SageException.{ConnectionLost, ServerError}
+import sage.SageException.{ConnectionLost, TransactionDiscarded}
 import sage.client.DedicatedPoolConfig
 import sage.commands.{Connection, Strings}
 import sage.protocol.Frame
@@ -17,26 +17,19 @@ class TxScopeFaultSpec extends munit.FunSuite {
 
   private val readonly = Frame.SimpleError("READONLY You can't write against a read only replica.")
 
-  private def txScope(respond: Bytes => Seq[Frame]): (Client.TxScope, mutable.ArrayBuffer[Throwable]) = {
+  private def txScope(respond: Bytes => Seq[Frame]): (Client.TxScope, mutable.ArrayBuffer[RefreshPolicy]) = {
     val scheduler                                       = new ManualScheduler
-    val gen                                             = MultiplexedConnection.Generation.initial
     val factory: MultiplexedConnection.TransportFactory = ScriptedTransport.factory(respond)
     val pool                                            =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, () => Some(gen), _ == gen, DedicatedPoolConfig(), 1000L)
-    val faults                                          = mutable.ArrayBuffer.empty[Throwable]
-    (new Client.TxScope(pool.acquireForTransaction(), faults += _), faults)
+      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
+    val faults                                          = mutable.ArrayBuffer.empty[RefreshPolicy]
+    (new Client.TxScope(pool.acquireForTransaction(), pool.releaseTransaction, faults += _), faults)
   }
 
-  private def isOwnershipFault(error: Throwable): Boolean = error match {
-    case e: ServerError    => e.code == "READONLY"
-    case _: ConnectionLost => true
-    case _                 => false
-  }
-
-  test("a READONLY command fault invokes the onFault hook") {
+  test("a READONLY command fault requests a forced refresh") {
     val (scope, faults) = txScope(p => if (p.asUtf8String.contains("HELLO")) Seq(Replies.hello) else Seq(readonly))
     scope.run(Strings.set("k", "v")).unsafeRun.failed.map { _ =>
-      assert(faults.exists(isOwnershipFault), s"expected an ownership fault, got $faults")
+      assert(faults.contains(RefreshPolicy.Forced), s"expected a forced refresh, got $faults")
     }
   }
 
@@ -45,14 +38,15 @@ class TxScopeFaultSpec extends munit.FunSuite {
     scope.run(Strings.set("k", "v")).unsafeRun.failed.map(e => assert(e.isInstanceOf[ConnectionLost], s"expected ConnectionLost, got $e"))
   }
 
-  test("a transaction whose EXEC hits a READONLY invokes the onFault hook") {
+  test("a transaction whose queued command hits a READONLY is discarded and requests a forced refresh") {
     val respond: Bytes => Seq[Frame] = p =>
       if (p.asUtf8String.contains("HELLO")) Seq(Replies.hello)
       else if (p.asUtf8String.contains("MULTI")) Seq(Frame.SimpleString("OK"), readonly, Frame.SimpleError("EXECABORT discarded"))
       else Seq(Frame.SimpleString("OK"))
     val (scope, faults)              = txScope(respond)
-    scope.exec(Vector(Strings.set("k", "v"))).unsafeRun.failed.map { _ =>
-      assert(faults.exists(isOwnershipFault), s"expected an ownership fault, got $faults")
+    scope.exec(Vector(Strings.set("k", "v"))).unsafeRun.failed.map { error =>
+      assert(error.isInstanceOf[TransactionDiscarded] && error.getMessage.contains("READONLY"), s"expected TransactionDiscarded, got $error")
+      assert(faults.contains(RefreshPolicy.Forced), s"expected a forced refresh, got $faults")
     }
   }
 }

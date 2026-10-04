@@ -4,198 +4,88 @@ import java.util.concurrent.TimeUnit
 
 import scala.concurrent.duration.FiniteDuration
 
+import kyo.compat.*
+import munit.{Location, TestOptions}
 import zio.*
 
 import sage.*
 import sage.backend.*
 import sage.client.{DedicatedPoolConfig, SageConfig}
 
-class ZioSmokeSuite extends ServerSuite(Images.redis) {
+class ZioSmokeSuite extends SmokeSuite {
 
-  private def withNativeClient(body: SageClient => RIO[Scope, Unit]): Unit = withTunedClient(identity)(body)
-
-  private def withTunedClient(tune: SageConfig => SageConfig)(body: SageClient => RIO[Scope, Unit]): Unit =
-    withContainers { server =>
+  private def nativeTest(options: TestOptions, tune: SageConfig => SageConfig = identity)(
+    body: SageClient => RIO[Scope, Unit]
+  )(using Location): Unit =
+    test(options)(withContainers { server =>
       val program: Task[Unit] = ZIO.scoped(SageClient.scoped(tune(configOf(server))).flatMap(body))
       Unsafe.unsafe(implicit u => Runtime.default.unsafe.run(program).getOrThrowFiberFailure())
-    }
+    })
 
-  test("a distributed lock scopes native effects and skips contended bodies") {
-    withNativeClient { client =>
-      val locks     = client.lock[String]()
-      var evaluated = false
-      for {
-        busy     <- locks.withLock("native-lock", FiniteDuration(2L, TimeUnit.SECONDS)) {
-                      locks.tryWithLock("native-lock") {
-                        evaluated = true
-                        client.ping()
-                      }
-                    }
-        acquired <- locks.tryWithLock("native-lock")(client.ping())
-      } yield {
-        assertEquals(busy, None)
-        assertEquals(acquired, Some("PONG"))
-        assert(!evaluated)
-      }
+  private val lift: [A] => IO[SageException, A] => CIO[A] = [A] => (io: IO[SageException, A]) => CIO.lift(io)
+
+  nativeTest("a distributed lock scopes native effects and skips contended bodies")(lockScopesNativeEffects(_)(lift).lower)
+
+  private val pool = DedicatedPoolConfig(maxConnections = 2, acquireTimeout = FiniteDuration(1L, TimeUnit.SECONDS))
+
+  nativeTest("an interrupted blocking command releases its pooled slot instead of leaking it", _.copy(dedicatedPool = pool)) { client =>
+    for {
+      _    <- ZIO.foreachDiscard(1 to 4)(_ => client.blPop[String]("leak:empty")(BlockTimeout.Forever).timeout(Duration.fromMillis(150)))
+      none <- client.blPop[String]("leak:empty")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
+    } yield assertEquals(none, None)
+  }
+
+  nativeTest("re-running the same blocking command value succeeds each round instead of hanging after the first") { client =>
+    val blPop = client.blPop[String]("h1:reuse")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
+    for {
+      first  <- blPop
+      second <- blPop.timeout(Duration.fromSeconds(5))
+    } yield {
+      assertEquals(first, None)
+      assertEquals(second, Some(None), "re-running the same blocking effect hung: its lease was captured and single-shot")
     }
   }
 
-  test("an end user connects and round-trips with native ZIO") {
-    withNativeClient { client =>
-      for {
-        pong   <- client.ping()
-        _      <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"key-$i", s"value-$i"))
-        values <- ZIO.foreachPar((1 to 50).toList)(i => client.get[String](s"key-$i"))
-      } yield {
-        assertEquals(pong, "PONG")
-        assertEquals(values, (1 to 50).toList.map(i => Some(s"value-$i")))
-      }
-    }
+  nativeTest("scanAll streams every key as a native ZStream") { client =>
+    scanAllFindsEveryKey(client)(lift)(client.scanAll(pattern = Some("scan-*"), count = Some(10L)).runCollect).lower
   }
 
-  test("a pipeline returns a typed tuple natively, surfacing failures per position") {
-    withNativeClient { client =>
-      for {
-        _       <- client.set("pipe:a", "x")
-        _       <- client.set("pipe:n", 10)
-        out     <- client.pipeline((Commands.get[String, String]("pipe:a"), Commands.incrBy[String]("pipe:n", 5)))
-        _       <- client.set("pipe:str", "hello")
-        attempt <- client.pipelineAttempt((Commands.get[String, String]("pipe:str"), Commands.incr[String]("pipe:str")))
-      } yield {
-        assertEquals(out, (Some("x"), 15L))
-        assert(attempt._1 == Right(Some("hello")), attempt._1)
-        assert(attempt._2.isLeft, attempt._2)
-      }
-    }
+  nativeTest("subscribe delivers published messages as a native ZStream") { client =>
+    for {
+      stream   <- client.subscribeScoped[String]("smoke")
+      _        <- ZIO.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
+      messages <- stream.take(3).runCollect
+    } yield assertEquals(messages.toList, List("m1", "m2", "m3").map(Message("smoke", _)))
   }
 
-  test("a transaction commits atomically with native ZIO, guarded by WATCH") {
-    withNativeClient { client =>
-      for {
-        _   <- client.set("tx:n", 1)
-        out <- client.transaction { tx =>
-                 for {
-                   _   <- tx.watch("tx:n")
-                   _   <- tx.get[Int]("tx:n")
-                   res <- tx.exec((Commands.incr[String]("tx:n"), Commands.incrBy[String]("tx:n", 4)))
-                 } yield res
-               }
-      } yield assertEquals(out, Some((2L, 6L)))
-    }
+  nativeTest("hScanAll streams every field/value pair as a native ZStream") { client =>
+    for {
+      _     <- ZIO.foreachParDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
+      pairs <- client.hScanAll[String, String]("hscan", count = Some(10L)).runCollect
+    } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
   }
 
-  test("an interrupted blocking command releases its pooled slot instead of leaking it") {
-    val pool = DedicatedPoolConfig(maxConnections = 2, acquireTimeout = FiniteDuration(1L, TimeUnit.SECONDS))
-    withTunedClient(_.copy(dedicatedPool = pool)) { client =>
-      for {
-        _    <- ZIO.foreachDiscard(1 to 4)(_ => client.blPop[String]("leak:empty")(BlockTimeout.Forever).timeout(Duration.fromMillis(150)))
-        none <- client.blPop[String]("leak:empty")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
-      } yield assertEquals(none, None)
-    }
+  nativeTest("xRangeAll pages every entry as a native ZStream") { client =>
+    for {
+      _       <- ZIO.foreachDiscard(1 to 50)(i => client.xAdd("xrangeall", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
+      entries <- client.xRangeAll[String, String]("xrangeall", batch = 10L).runCollect
+    } yield assertEquals(entries.map(_.id).toList, (1 to 50).map(i => StreamId(i.toLong, 0L)).toList)
   }
 
-  test("re-running the same blocking command value succeeds each round instead of hanging after the first") {
-    withNativeClient { client =>
-      val blPop = client.blPop[String]("h1:reuse")(BlockTimeout.After(FiniteDuration(100L, TimeUnit.MILLISECONDS)))
-      for {
-        first  <- blPop
-        second <- blPop.timeout(Duration.fromSeconds(5))
-      } yield {
-        assertEquals(first, None)
-        assert(second.isDefined, "re-running the same blocking effect hung: its lease was captured and single-shot")
-        assertEquals(second.flatten, None)
-      }
-    }
-  }
-
-  test("scanAll streams every key as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        _    <- ZIO.foreachParDiscard(1 to 50)(i => client.set(s"scan-$i", "v"))
-        keys <- client.scanAll(pattern = Some("scan-*"), count = Some(10L)).runCollect
-      } yield assertEquals(keys.toSet, (1 to 50).map(i => s"scan-$i").toSet)
-    }
-  }
-
-  test("subscribe delivers published messages as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        stream   <- client.subscribeScoped[String]("smoke")
-        _        <- ZIO.foreachDiscard(1 to 3)(i => client.publish("smoke", s"m$i"))
-        messages <- stream.take(3).runCollect
-      } yield {
-        assertEquals(messages.map(_.channel).toSet, Set("smoke"))
-        assertEquals(messages.map(_.payload).toList, List("m1", "m2", "m3"))
-      }
-    }
-  }
-
-  test("hScanAll streams every field/value pair as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        _     <- ZIO.foreachParDiscard(1 to 50)(i => client.hSet("hscan", (s"f$i", s"v$i")))
-        pairs <- client.hScanAll[String, String]("hscan", count = Some(10L)).runCollect
-      } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"f$i" -> s"v$i").toMap)
-    }
-  }
-
-  test("sScanAll streams every member as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        _       <- ZIO.foreachParDiscard(1 to 50)(i => client.sAdd("sscan", s"m$i"))
-        members <- client.sScanAll[String]("sscan", count = Some(10L)).runCollect
-      } yield assertEquals(members.toSet, (1 to 50).map(i => s"m$i").toSet)
-    }
-  }
-
-  test("zScanAll streams every member/score pair as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        _     <- ZIO.foreachParDiscard(1 to 50)(i => client.zAdd("zscan")((s"m$i", i.toDouble)))
-        pairs <- client.zScanAll[String]("zscan", count = Some(10L)).runCollect
-      } yield assertEquals(pairs.toMap, (1 to 50).map(i => s"m$i" -> i.toDouble).toMap)
-    }
-  }
-
-  test("xRangeAll pages every entry as a native ZStream") {
-    withNativeClient { client =>
-      for {
-        _       <- ZIO.foreachDiscard(1 to 50)(i => client.xAdd("xrangeall", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
-        entries <- client.xRangeAll[String, String]("xrangeall", batch = 10L).runCollect
-      } yield assertEquals(entries.map(_.id).toList, (1 to 50).map(i => StreamId(i.toLong, 0L)).toList)
-    }
-  }
-
-  test("xConsume tails a group and auto-acks each entry after the handler succeeds") {
-    withNativeClient { client =>
-      val block = BlockTimeout.After(FiniteDuration(200L, TimeUnit.MILLISECONDS))
-      for {
-        _     <- ZIO.foreachDiscard(1 to 3)(i => client.xAdd("xconsume", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
-        _     <- client.xGroupCreate("xconsume", "g", GroupStartId.At(StreamId(0L, 0L)))
-        seen  <- Ref.make(Vector.empty[String])
-        fiber <- client.xConsume[String, String]("g", "c", "xconsume", block = block)(entry => seen.update(_ :+ entry.fields.head._2)).fork
-        _     <- seen.get.repeatUntil(_.size >= 3).timeoutFail(new RuntimeException("xConsume did not deliver"))(Duration.fromSeconds(10))
-        _     <- fiber.interrupt
-        got   <- seen.get
-        pend  <- client.xPending("xconsume", "g")
-      } yield {
-        assertEquals(got.sorted, Vector("v1", "v2", "v3"))
-        assertEquals(pend.total, 0L)
-      }
-    }
-  }
-
-  test("client.rateLimiter admits up to capacity then denies") {
-    withNativeClient { client =>
-      val rl = client.rateLimiter[String](RateLimit(capacity = 2, refillTokens = 1, refillPeriod = FiniteDuration(1L, TimeUnit.HOURS)))
-      for {
-        first  <- rl.tryAcquire("smoke")
-        second <- rl.tryAcquire("smoke")
-        denied <- rl.tryAcquire("smoke")
-      } yield {
-        assert(first.isAllowed && second.isAllowed, "the first two are admitted")
-        assert(!denied.isAllowed, "the third is denied once the bucket empties")
-      }
+  nativeTest("xConsume tails a group and auto-acks each entry after the handler succeeds") { client =>
+    val block = BlockTimeout.After(FiniteDuration(200L, TimeUnit.MILLISECONDS))
+    for {
+      _     <- ZIO.foreachDiscard(1 to 3)(i => client.xAdd("xconsume", XAddId.Explicit(StreamId(i.toLong, 0L)))(("f", s"v$i")))
+      _     <- client.xGroupCreate("xconsume", "g", GroupStartId.At(StreamId(0L, 0L)))
+      seen  <- Ref.make(Vector.empty[String])
+      fiber <- client.xConsume[String, String]("g", "c", "xconsume", block = block)(entry => seen.update(_ ++ entry.fields.map(_._2))).fork
+      _     <- seen.get.repeatUntil(_.size >= 3).timeoutFail(new RuntimeException("xConsume did not deliver"))(Duration.fromSeconds(10))
+      _     <- fiber.interrupt
+      got   <- seen.get
+      pend  <- client.xPending("xconsume", "g")
+    } yield {
+      assertEquals(got.sorted, Vector("v1", "v2", "v3"))
+      assertEquals(pend.total, 0L)
     }
   }
 }

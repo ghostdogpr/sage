@@ -6,9 +6,9 @@ package sage.cluster
   * its arguments.
   */
 private[sage] enum Route {
-  case ToNode(node: Node, slot: Slot)
+  case ToNode(shard: Shard, slot: Slot)
   case Keyless
   case Unowned(slot: Slot)
-  case CrossSlot(slots: Set[Slot])
+  case CrossSlot
   case Malformed
 }

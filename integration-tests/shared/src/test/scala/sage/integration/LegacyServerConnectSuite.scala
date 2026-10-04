@@ -7,12 +7,7 @@ import kyo.compat.*
   */
 class LegacyServerConnectSuite extends ServerSuite(Images.legacyRedis) {
 
-  test("connects and round-trips against a pre-7.2 server that lacks CLIENT SETINFO") {
-    withClient { client =>
-      for {
-        _     <- client.set("legacy", "ok")
-        value <- client.get[String]("legacy")
-      } yield assertEquals(value, Some("ok"))
-    }
+  clientTest("connects and round-trips against a pre-7.2 server that lacks CLIENT SETINFO") { client =>
+    client.set("legacy", "ok").flatMap(_ => client.get[String]("legacy").is(Some("ok")))
   }
 }

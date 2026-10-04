@@ -12,11 +12,11 @@ import scala.util.Try
 import kyo.compat.*
 
 import sage.{Bytes, SageEvent}
-import sage.SageException.{ConnectionFailed, NotConnected, TimedOut}
+import sage.SageException.{ConnectionFailed, TimedOut}
 import sage.client.internal.{ConnectFailureRecorder, Events, FakeTransport, MasterReplicaLive, MultiplexedConnection, Replies, Scheduler}
 import sage.client.internal.Replies.{masterRole, replicaRole}
 import sage.cluster.Node
-import sage.commands.{Command, Connection}
+import sage.commands.{BlockTimeout, Command, Lists}
 import sage.protocol.Frame
 
 class MasterReplicaTopologySpec extends munit.FunSuite {
@@ -89,6 +89,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
             roleRequests.add(node)
             roles.get(node).toSeq
           } else if (text.contains("EVALSHA")) Seq(Frame.Integer(1))
+          else if (text.contains("STALL") || text.contains("BLPOP")) Nil
           else if (text.contains("WAIT")) Seq(Frame.Integer(lockAcknowledgements))
           else if (reads > 0 && node == diesOnRead) {
             kill(node)
@@ -107,7 +108,6 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     val live = new MasterReplicaLive(
       factory,
       scheduler,
-      Vector(Connection.hello(None)),
       SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 500.millis, closeTimeout = Duration.Zero),
       seeds,
       MasterReplicaConfig(minRefreshInterval, topologyRefreshInterval),
@@ -124,6 +124,9 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       transports.asScala.toVector.collect { case (`node`, transport) =>
         transport.written.count(_.asUtf8String.contains("ZSCORE"))
       }.sum
+
+    def wrote(node: Node, token: String): Int =
+      transports.asScala.toVector.collect { case (`node`, transport) => transport.written.count(_.asUtf8String.contains(token)) }.sum
 
     def lockConfirmations(node: Node): Int =
       transports.asScala.toVector.collect { case (`node`, transport) =>
@@ -154,7 +157,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
   test("master-replica locks confirm acquisition and renewal on the master with replica reads") {
     val fixture = new Fixture(Vector(primary), Map(primary -> masterRole(reader), reader -> replicaRole(primary)))
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     try {
       val result = scala.concurrent.Await.result(
         fixture.live
@@ -173,7 +176,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
 
   test("master-replica locks reject a missing replica and recover after refreshing its removal") {
     val fixture   = new Fixture(Vector(primary), Map(primary -> masterRole(reader), reader -> replicaRole(primary)))
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     fixture.roles(primary) = masterRole()
     fixture.lockAcknowledgements = 0
     var evaluated = false
@@ -201,6 +204,32 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     } finally fixture.close()
   }
 
+  test("a master-replica lock write that times out requests role discovery") {
+    val fixture = new Fixture(Vector(primary), Map(primary -> masterRole()))
+    fixture.live.start()
+    val stalled = Command[Boolean]("STALL", Vector(0), Vector(Bytes.utf8("k")), _ => Right(true))
+    try {
+      val result =
+        Try(scala.concurrent.Await.result(fixture.live.lockWrite(stalled, 100.millis, replicaAcknowledgement = false).unsafeRun, 5.seconds))
+      assert(result.failed.get.isInstanceOf[TimedOut], result.toString)
+      fixture.awaitTrue(fixture.roleRequestCount(primary) >= 2, "the lock write timeout did not request role discovery")
+    } finally fixture.close()
+  }
+
+  test("cancelling a blocking command requests role discovery") {
+    val fixture = new Fixture(Vector(primary), Map(primary -> masterRole()))
+    fixture.live.start()
+    val cancel  = for {
+      fiber <- fixture.live.run(Lists.blPop[String, String]("k")(BlockTimeout.Forever)).lower.fork
+      _     <- zio.ZIO.attemptBlocking(fixture.awaitTrue(fixture.wrote(primary, "BLPOP") > 0, "BLPOP was never written"))
+      _     <- fiber.interrupt
+    } yield ()
+    try {
+      scala.concurrent.Await.result(CIO.lift(cancel).unsafeRun, 5.seconds)
+      fixture.awaitTrue(fixture.roleRequestCount(primary) >= 2, "the cancelled blocking command did not request role discovery")
+    } finally fixture.close()
+  }
+
   test("several seeds keep the supplied addresses and never dial a ROLE-advertised address") {
     val fixture = new Fixture(
       seeds = Vector(primary, reader),
@@ -211,7 +240,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       ),
       unreachable = Set(advertisedReplica)
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(reader), 1)
@@ -227,7 +256,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(primary -> masterRole()),
       minRefreshInterval = Duration.Zero
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     fixture.awaitTrue(fixture.roleRequestCount(primary) >= 2, "the first read did not trigger a re-discovery")
@@ -251,7 +280,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       seeds = Vector(primary),
       initialRoles = Map(primary -> masterRole(advertisedReplica), advertisedReplica -> replicaRole(primary))
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     fixture.diesOnRead = advertisedReplica
 
     assertEquals(fixture.read(), 1L)
@@ -265,7 +294,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       seeds = Vector(primary),
       initialRoles = Map(primary -> masterRole(advertisedReplica), advertisedReplica -> replicaRole(primary))
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(advertisedReplica), 1)
@@ -291,7 +320,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       events = events
     )
 
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     fixture.close()
 
     assertEquals(connected.asScala.toVector, Vector.empty)
@@ -305,12 +334,18 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       events = recorder.events
     )
 
-    intercept[NotConnected](fixture.live.bootstrapRoles())
+    intercept[TimedOut](fixture.live.start())
     assert(recorder.await(), "the singleton ROLE timeout was not reported")
     val failure  = recorder.failures.head
 
     assertEquals(failure.node, Some(primary))
     assert(failure.error.isInstanceOf[TimedOut], s"unexpected cause: ${failure.error}")
+  }
+
+  test("supplied endpoints that all time out on ROLE return the timeout") {
+    val fixture = new Fixture(seeds = Vector(primary, reader), initialRoles = Map.empty)
+
+    intercept[TimedOut](fixture.live.start())
   }
 
   test("an unreachable supplied endpoint is omitted and reported while the available topology connects") {
@@ -321,7 +356,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       unreachable = Set(reader),
       events = recorder.events
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assert(recorder.await(), "ConnectFailed was not delivered")
@@ -340,7 +375,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       unreachable = down,
       minRefreshInterval = 10.millis
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(primary), 1)
@@ -365,7 +400,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(primary -> masterRole()),
       events = recorder.events
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assert(recorder.await(), "the ROLE timeout was not reported")
     val failure = recorder.failures.head
@@ -384,7 +419,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       unreachable = down,
       events = recorder.events
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     assert(fixture.write().isSuccess, "the master pool should be established before discovery connections fail")
 
     down += primary
@@ -405,7 +440,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       seeds = Vector(primary, reader),
       initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary, state = "sync"))
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(primary), 1)
@@ -434,7 +469,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       ),
       topologyRefreshInterval = Some(50.millis)
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(reader), 1)
@@ -452,6 +487,26 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
     fixture.close()
   }
 
+  test("a subscription moves to the current master when its former master leaves replication but keeps running") {
+    val fixture      = new Fixture(
+      seeds = Vector(primary),
+      initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary)),
+      topologyRefreshInterval = Some(50.millis)
+    )
+    fixture.live.start()
+    val subscription = scala.concurrent.Await.result(fixture.live.subscribeChannels[String]("news").unsafeRun, 10.seconds)
+    assertEquals(fixture.wrote(primary, "\r\nSUBSCRIBE\r\n"), 1)
+
+    // a failover promotes the reader, and the former master replicates it, so PUBLISH still reaches the subscription
+    fixture.roles ++= Map(reader -> masterRole(primary), primary -> replicaRole(reader))
+    fixture.awaitTrue({ fixture.write(); fixture.wrote(reader, "ZADD") > 0 }, "the failover was not discovered")
+    // REPLICAOF NO ONE on the former master keeps its connections open, but PUBLISH on the current master no longer reaches it
+    fixture.roles ++= Map(reader -> masterRole(), primary -> masterRole())
+    fixture.awaitTrue(fixture.wrote(reader, "\r\nSUBSCRIBE\r\n") > 0, "the subscription stayed on the former master")
+    scala.concurrent.Await.result(subscription.close.unsafeRun, 10.seconds)
+    fixture.close()
+  }
+
   test("a re-discovery the poll queued before close does not probe after it") {
     val scheduler          = new DeferringScheduler
     val fixture            = new Fixture(
@@ -460,7 +515,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       topologyRefreshInterval = Some(1.minute),
       scheduler = scheduler
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     val dialledAtBootstrap = fixture.dialled.size
 
     scheduler.tick()
@@ -476,7 +531,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(primary -> masterRole(reader), reader -> replicaRole(primary, state = "sync")),
       minRefreshInterval = 10.millis
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
 
     fixture.readPipeline()
     assertEquals(fixture.readsServedBy(primary), 1)
@@ -500,7 +555,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(primary -> masterRole(advertisedReplica)),
       failDial = (node, attempt) => node == primary && attempt == 1
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     assertEquals(fixture.roleRequestCount(primary), 1)
 
     assert(fixture.writePipeline().isFailure, "the master connection establishment should fail")
@@ -517,7 +572,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(reader -> replicaRole(primary), advertisedReplica -> replicaRole(primary))
     )
 
-    val error = intercept[ConnectionFailed](fixture.live.bootstrapRoles())
+    val error = intercept[ConnectionFailed](fixture.live.start())
     assert(error.getMessage.contains("no supplied endpoint reports the master role"), error.getMessage)
   }
 
@@ -527,7 +582,7 @@ class MasterReplicaTopologySpec extends munit.FunSuite {
       initialRoles = Map(primary -> masterRole(advertisedReplica), reader -> replicaRole(primary)),
       unreachable = Set(advertisedReplica)
     )
-    fixture.live.bootstrapRoles()
+    fixture.live.start()
     assertEquals(fixture.read(), 1L)
     assertEquals(fixture.readsServedBy(reader), 1)
 

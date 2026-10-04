@@ -4,6 +4,7 @@ import scala.util.Random
 
 import sage.Bytes
 import sage.SageException.ProtocolError
+import sage.protocol.Frames.feed
 
 class RespParserSpec extends munit.FunSuite {
 
@@ -264,6 +265,10 @@ class RespParserSpec extends munit.FunSuite {
 
   test("rejects an unknown frame type byte") {
     assert(parseError("?\r\n").message.contains("unknown frame type"))
+  }
+
+  test("rejects an unknown frame type byte before its line ends") {
+    assert(parseError("\u0015\u0003").message.contains("unknown frame type byte 0x15"))
   }
 
   test("rejects an invalid integer") {

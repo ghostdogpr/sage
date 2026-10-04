@@ -15,6 +15,20 @@ object Replies {
   val pong: Frame   = Frame.SimpleString("PONG")
   val queued: Frame = Frame.SimpleString("QUEUED")
 
+  // the setup HELLO selects RESP3; a HELLO without arguments, written after an SUNSUBSCRIBE, is left to `respond`
+  private def isSetupHello(payload: Bytes): Boolean = payload.asUtf8String.contains("\r\nHELLO\r\n$1\r\n3\r\n")
+
+  // the setup commands every connection writes before its first command
+  def isSetup(payload: Bytes): Boolean = isSetupHello(payload) || payload.asUtf8String.contains("\r\nSETINFO\r\n")
+
+  /**
+    * Answers the connection setup (`HELLO 3`, `CLIENT SETINFO`) and passes every other command to `respond`.
+    */
+  def withSetup(respond: Bytes => Seq[Frame]): Bytes => Seq[Frame] = payload =>
+    if (!isSetup(payload)) respond(payload)
+    else if (isSetupHello(payload)) Seq(hello)
+    else Seq(ok)
+
   val hello: Frame =
     Frame.Map(
       Vector(

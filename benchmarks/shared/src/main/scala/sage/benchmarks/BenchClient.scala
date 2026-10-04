@@ -1,35 +1,27 @@
 package sage.benchmarks
 
 /**
-  * One client under benchmark. Each method waits for its effect to finish, allowing JMH to measure the full round trip. Each method also
-  * returns a checksum that the benchmark consumes, which gives JMH a result to report and prevents the JIT from eliminating the call.
+  * One client under benchmark. Each method waits for its effect to finish, allowing JMH to measure the full round trip.
   */
 trait BenchClient extends AutoCloseable {
 
-  def name: String
+  /**
+    * GET every key with `work.concurrency` commands in flight.
+    */
+  def getAll(work: Payloads.Workload): Unit
 
   /**
-    * Seed `count` string keys `prefix:0..count-1` with `value`, plus one hash `hashKey` of `fields` field/value pairs.
+    * SET every key to `value` with `work.concurrency` commands in flight.
     */
-  def seed(prefix: String, count: Int, value: String, hashKey: String, fields: Int): Unit
+  def setAll(work: Payloads.Workload, value: String): Unit
 
   /**
-    * GET every key with `concurrency` commands in flight; returns the total length of the values read.
+    * One MGET of all `Payloads.Keys`.
     */
-  def getAll(keys: Array[String], concurrency: Int): Long
+  def mget(): Unit
 
   /**
-    * SET every key to `value` with `concurrency` commands in flight; returns the number of writes.
+    * One HGETALL of `Payloads.HashKey`.
     */
-  def setAll(keys: Array[String], value: String, concurrency: Int): Long
-
-  /**
-    * One MGET of all `keys`; returns the total length of the values read.
-    */
-  def mget(keys: Array[String]): Long
-
-  /**
-    * One HGETALL of `key`; returns the number of fields read.
-    */
-  def hgetall(key: String): Long
+  def hgetall(): Unit
 }

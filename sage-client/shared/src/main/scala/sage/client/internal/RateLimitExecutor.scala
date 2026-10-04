@@ -2,7 +2,7 @@ package sage.client.internal
 
 import kyo.compat.*
 
-import sage.SageException.{InvalidArgument, ServerError}
+import sage.SageException.InvalidArgument
 import sage.commands.Command
 import sage.ratelimit.{Decision, RateLimiter}
 
@@ -20,9 +20,6 @@ final private[client] class RateLimitExecutor[K](definition: RateLimiter[K]) {
     definition.validate(cost) match {
       case Some(problem) => CIO.fail(InvalidArgument(problem))
       case None          =>
-        runner.run(definition.evalSha(subject, cost, peek)).recover {
-          case ServerError(code, _) if code == "NOSCRIPT" => runner.run(definition.evalScript(subject, cost, peek))
-          case other                                      => CIO.fail(other)
-        }
+        Client.withScriptFallback(cached => runner.run(definition.eval(cached, subject, cost, peek)))
     }
 }

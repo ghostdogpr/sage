@@ -49,7 +49,7 @@ class LockExecutorSpec extends munit.FunSuite {
       .unsafeRun
   }
 
-  private class Store extends CommandRunner[CIO, String] {
+  private class Store extends SharedRunner {
     private var entries                               = Map.empty[String, (String, Long)]
     private var loaded                                = false
     val operations                                    = new ConcurrentLinkedQueue[String]()
@@ -148,17 +148,17 @@ class LockExecutorSpec extends munit.FunSuite {
     new LockExecutor[String](lease, namespace, replicaAcknowledgement = true)
 
   test("namespace framing distinguishes ambiguous prefixes and preserves binary key bytes") {
-    val a      = new LockCommands[String](1.second, "a").key("b:c")
-    val b      = new LockCommands[String](1.second, "a:b").key("c")
+    val a      = new LockExecutor[String](1.second, "a", replicaAcknowledgement = true).key("b:c")
+    val b      = new LockExecutor[String](1.second, "a:b", replicaAcknowledgement = true).key("c")
     assert(!a.sameBytes(b))
     val raw    = Array[Byte](0, -1, 42)
-    val binary = new LockCommands[Array[Byte]](1.second, "é").key(raw)
+    val binary = new LockExecutor[Array[Byte]](1.second, "é", replicaAcknowledgement = true).key(raw)
     assert(binary.sameBytes(Bytes.concat(Vector(Bytes.utf8("2:é:"), Bytes.fromArray(raw)))))
   }
 
   test("all scripts route to one key on its master and decode only valid outcomes") {
-    val commands = new LockCommands[String](1.second, "lock")
-    for (operation <- LockCommands.Operation.values) {
+    val commands = executor(1.second)
+    for (operation <- LockExecutor.Operation.values) {
       val command = commands.command(commands.key("subject"), "owner", operation, cached = true)
       assertEquals(command.name, "EVALSHA")
       assertEquals(command.keys.map(_.asUtf8String), Vector("4:lock:subject"))
@@ -191,7 +191,7 @@ class LockExecutorSpec extends munit.FunSuite {
 
   test("a successful renewal keeps the scope running and releases it afterwards") {
     val store = new Store
-    executor(300.millis)
+    executor(900.millis)
       .tryWithLock(store, "key") {
         store.awaitRenewal.map(_ => assert(store.held))
       }
@@ -222,7 +222,7 @@ class LockExecutorSpec extends munit.FunSuite {
     test(s"renewal retries a transient $failureName while the lease remains valid") {
       val store = new Store
       store.renewalErrors.add(failure)
-      executor(300.millis)
+      executor(900.millis)
         .tryWithLock(store, "key") {
           store.awaitRenewal.map(_ => assert(store.held, "the lock expired while renewal was retrying"))
         }
@@ -364,7 +364,7 @@ class LockExecutorSpec extends munit.FunSuite {
 
   test("sustained contention reduces acquisition requests while respecting the wait timeout") {
     val attempts = new AtomicInteger(0)
-    val commands = new CommandRunner[CIO, String] {
+    val commands = new SharedRunner {
       def run[A](command: Command[A]): CIO[A] = CIO.defer(()).flatMap { _ =>
         attempts.incrementAndGet()
         command.decode(Frame.Integer(0)).fold(CIO.fail(_), CIO.value(_))

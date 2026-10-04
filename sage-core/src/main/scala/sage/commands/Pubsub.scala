@@ -1,9 +1,9 @@
 package sage.commands
 
-import sage.Bytes
+import sage.{Bytes, Message, PatternMessage}
 import sage.SageException.DecodeError
 import sage.codec.ValueCodec
-import sage.protocol.{Frame, RespWriter}
+import sage.protocol.Frame
 
 /**
   * Pub/sub command definitions. `PUBLISH`, `SPUBLISH`, and `PUBSUB` use the usual request/reply flow. In a cluster, `SPUBLISH` uses its
@@ -20,16 +20,16 @@ private[sage] object Pubsub {
     Command("SPUBLISH", Command.FirstKey, Vector(Bytes.utf8(channel), codec.encode(message)), Decode.long)
 
   def pubsubChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    introspect(Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, Merge.distinctChannels)
+    introspect(Bytes.utf8("CHANNELS") +: pattern.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String), Merge.distinct)
 
   def pubsubShardChannels(pattern: Option[String] = None): Command[Vector[String]] =
-    introspect(Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, decodeStrings, Merge.distinctChannels)
+    introspect(Bytes.utf8("SHARDCHANNELS") +: pattern.map(Bytes.utf8).toVector, Decode.vector(Decode.utf8String), Merge.distinct)
 
   def pubsubNumSub(channels: String*): Command[Map[String, Long]] =
-    introspect(Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, Merge.sumByChannel)
+    introspect(Bytes.utf8("NUMSUB") +: channels.toVector.map(Bytes.utf8), numSub, sumByChannel)
 
   def pubsubShardNumSub(channels: String*): Command[Map[String, Long]] =
-    introspect(Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), decodeNumSub, Merge.sumByChannel)
+    introspect(Bytes.utf8("SHARDNUMSUB") +: channels.toVector.map(Bytes.utf8), numSub, sumByChannel)
 
   val pubsubNumPat: Command[Long] =
     introspect(Vector(Bytes.utf8("NUMPAT")), Decode.long, Merge.sum)
@@ -46,24 +46,37 @@ private[sage] object Pubsub {
   ): Command[Out] =
     Command("PUBSUB", Command.NoKeys, args, decode, allMasters = true, broadcast = BroadcastReduce.Fold(merge))
 
-  def subscribe(channels: Vector[String]): Bytes    = RespWriter.writeCommand("SUBSCRIBE", channels.map(Bytes.utf8))
-  def unsubscribe(channels: Vector[String]): Bytes  = RespWriter.writeCommand("UNSUBSCRIBE", channels.map(Bytes.utf8))
-  def psubscribe(patterns: Vector[String]): Bytes   = RespWriter.writeCommand("PSUBSCRIBE", patterns.map(Bytes.utf8))
-  def punsubscribe(patterns: Vector[String]): Bytes = RespWriter.writeCommand("PUNSUBSCRIBE", patterns.map(Bytes.utf8))
-  def ssubscribe(channels: Vector[String]): Bytes   = RespWriter.writeCommand("SSUBSCRIBE", channels.map(Bytes.utf8))
-  def sunsubscribe(channels: Vector[String]): Bytes = RespWriter.writeCommand("SUNSUBSCRIBE", channels.map(Bytes.utf8))
+  /**
+    * The three subscription kinds, each with its wire encoders: classic channels (`SUBSCRIBE`), glob patterns (`PSUBSCRIBE`), and shard
+    * channels (`SSUBSCRIBE`).
+    */
+  enum Kind(subscribeVerb: String, unsubscribeVerb: String) {
+    case Channel extends Kind("SUBSCRIBE", "UNSUBSCRIBE")
+    case Pattern extends Kind("PSUBSCRIBE", "PUNSUBSCRIBE")
+    case Shard   extends Kind("SSUBSCRIBE", "SUNSUBSCRIBE")
+
+    // one name per command, so the server answers it with exactly one confirmation push or one error reply
+    def subscribe(name: String): Command[Unit]    = Command(subscribeVerb, Command.NoKeys, Vector(Bytes.utf8(name)), _ => Right(()))
+    def unsubscribe(name: String): Command[Frame] = Command(unsubscribeVerb, Command.NoKeys, Vector(Bytes.utf8(name)), Decode.frame)
+  }
+
+  // HELLO without arguments returns the connection's server information. It runs while the server is loading, stale or busy, and every
+  // connection may run it, since its setup did.
+  val helloInfo: Command[Frame] = Command("HELLO", Command.NoKeys, Vector.empty, Decode.frame)
+
+  type Delivery = Message[Bytes] | PatternMessage[Bytes]
 
   /**
-    * A classified pub/sub push frame. Confirmations include the current subscription count. Deliveries contain raw payload bytes, which are
-    * decoded to the subscriber's value type at the stream boundary.
+    * A classified pub/sub push frame: a confirmation, a shard channel unsubscription, or a delivery. Deliveries contain raw payload bytes,
+    * which are decoded to the subscriber's value type at the stream boundary.
     */
   enum Event {
-    case Subscribed(channel: String, count: Long)
-    case Unsubscribed(channel: String, count: Long)
-    case Message(channel: String, payload: Bytes)
-    // kept separate from Message so a connection can route classic and sharded deliveries to different subscribers.
-    case ShardMessage(channel: String, payload: Bytes)
-    case PatternMessage(pattern: String, channel: String, payload: Bytes)
+    // the reply to a SUBSCRIBE, PSUBSCRIBE, SSUBSCRIBE, UNSUBSCRIBE or PUNSUBSCRIBE, which the server never sends on its own
+    case Confirmed
+    // the server sends this push to confirm an SUNSUBSCRIBE and also when it drops a shard channel whose slot moved
+    case ShardUnsubscribed(channel: String)
+    // `subscription` is the channel or pattern under which the subscribers of `kind` are registered
+    case Delivered(kind: Kind, subscription: String, delivery: Delivery)
   }
 
   /**
@@ -72,79 +85,30 @@ private[sage] object Pubsub {
     */
   def decode(elements: Vector[Frame]): Option[Event] =
     elements match {
-      case Vector(kind, a, b)           =>
-        text(kind).flatMap {
-          case "message"                                       =>
-            for {
-              ch <- text(a)
-              p  <- bytes(b)
-            } yield Event.Message(ch, p)
-          case "smessage"                                      =>
-            for {
-              ch <- text(a)
-              p  <- bytes(b)
-            } yield Event.ShardMessage(ch, p)
-          case "subscribe" | "psubscribe" | "ssubscribe"       =>
-            for {
-              ch <- text(a)
-              c  <- int(b)
-            } yield Event.Subscribed(ch, c)
-          case "unsubscribe" | "punsubscribe" | "sunsubscribe" =>
-            for {
-              ch <- text(a)
-              c  <- int(b)
-            } yield Event.Unsubscribed(ch, c)
-          case _                                               => None
-        }
-      case Vector(kind, p, ch, payload) =>
-        text(kind).flatMap {
-          case "pmessage" =>
-            for {
-              pat <- text(p)
-              c   <- text(ch)
-              pl  <- bytes(payload)
-            } yield Event.PatternMessage(pat, c, pl)
-          case _          => None
-        }
-      case _                            => None
+      case Vector(Decode.Text("message"), Decode.Text(channel), Frame.BulkString(payload))                        =>
+        Some(Event.Delivered(Kind.Channel, channel, Message(channel, payload)))
+      case Vector(Decode.Text("smessage"), Decode.Text(channel), Frame.BulkString(payload))                       =>
+        Some(Event.Delivered(Kind.Shard, channel, Message(channel, payload)))
+      case Vector(Decode.Text("pmessage"), Decode.Text(pattern), Decode.Text(channel), Frame.BulkString(payload)) =>
+        Some(Event.Delivered(Kind.Pattern, pattern, PatternMessage(pattern, channel, payload)))
+      case Vector(Decode.Text("subscribe" | "psubscribe" | "ssubscribe" | "unsubscribe" | "punsubscribe"), _, _)  => Some(Event.Confirmed)
+      case Vector(Decode.Text("sunsubscribe"), Decode.Text(channel), _)                                           => Some(Event.ShardUnsubscribed(channel))
+      case _                                                                                                      => None
     }
 
-  private def text(frame: Frame): Option[String] =
-    frame match {
-      case Frame.BulkString(b)   => Some(b.asUtf8String)
-      case Frame.SimpleString(s) => Some(s)
-      case _                     => None
+  private val numSub: Frame => Either[DecodeError, Map[String, Long]] = {
+    val pairs = Decode.flatPairsOf("array of channel/count pairs") {
+      case (Frame.BulkString(channel), Frame.Integer(count)) => Right(channel.asUtf8String -> count)
+      case (channel, count)                                  => Left(DecodeError("channel/count pair", s"${Frame.describe(channel)} and ${Frame.describe(count)}"))
     }
+    pairs(_).map(_.toMap)
+  }
 
-  private def bytes(frame: Frame): Option[Bytes] =
-    frame match {
-      case Frame.BulkString(b) => Some(b)
-      case _                   => None
-    }
-
-  private def int(frame: Frame): Option[Long] =
-    frame match {
-      case Frame.Integer(i) => Some(i)
-      case _                => None
-    }
-
-  private def decodeStrings(frame: Frame): Either[DecodeError, Vector[String]] =
-    frame match {
-      case Frame.Array(elements) =>
-        val builder = Vector.newBuilder[String]
-        val it      = elements.iterator
-        while (it.hasNext)
-          it.next() match {
-            case Frame.BulkString(b) => builder += b.asUtf8String
-            case other               => return Left(DecodeError("bulk string", Frame.describe(other)))
-          }
-        Right(builder.result())
-      case other                 => Left(DecodeError("array", Frame.describe(other)))
-    }
-
-  private def decodeNumSub(frame: Frame): Either[DecodeError, Map[String, Long]] =
-    Merge
-      .channelCounts(frame)
-      .map(_.iterator.map { case (channel, count) => channel.value.asUtf8String -> count }.toMap)
-      .toRight(DecodeError("array of channel/count pairs", Frame.describe(frame)))
+  // sums the decoded maps, so a channel a master reports twice still counts once for that master
+  private val sumByChannel = Merge.typed(
+    numSub,
+    counts => Frame.Array(counts.iterator.flatMap((c, n) => Iterator(Frame.BulkString(Bytes.utf8(c)), Frame.Integer(n))).toVector)
+  ) { (x, y) =>
+    y.foldLeft(x) { case (acc, (channel, count)) => acc.updated(channel, math.addExact(acc.getOrElse(channel, 0L), count)) }
+  }
 }

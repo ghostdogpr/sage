@@ -1,111 +1,126 @@
 package sage.integration.commands
 
+import java.time.Instant
+
+import scala.concurrent.duration.*
+
 import kyo.compat.*
 
-import sage.commands.ScanCursor
-import sage.integration.{Images, ServerSuite}
+import sage.commands.*
+import sage.integration.BothServersSuite
+import sage.integration.Ttls.expiresWithin
 
-abstract class HashesSuite(image: String) extends ServerSuite(image) {
+class HashesSuite extends BothServersSuite {
 
-  test("HSET writes fields, HGET and HMGET read them back, HEXISTS and HDEL remove them") {
-    withClient { client =>
-      for {
-        added   <- client.hSet("hash-basic", ("f1", "v1"), ("f2", "v2"))
-        one     <- client.hGet[String, String]("hash-basic", "f1")
-        many    <- client.hmGet[String, String]("hash-basic", "f1", "missing", "f2")
-        present <- client.hExists("hash-basic", "f1")
-        removed <- client.hDel("hash-basic", "f1", "missing")
-        gone    <- client.hExists("hash-basic", "f1")
-      } yield {
-        assertEquals(added, 2L)
-        assertEquals(one, Some("v1"))
-        assertEquals(many, Vector(Some("v1"), None, Some("v2")))
-        assertEquals(present, true)
-        assertEquals(removed, 1L)
-        assertEquals(gone, false)
-      }
+  clientTest("HSET writes fields, HGET and HMGET read them back, HEXISTS and HDEL remove them") { client =>
+    client.hSet("hash-basic", ("f1", "v1"), ("f2", "v2")).is(2L) >>
+      client.hGet[String, String]("hash-basic", "f1").is(Some("v1")) >>
+      client.hmGet[String, String]("hash-basic", "f1", "missing", "f2").is(Vector(Some("v1"), None, Some("v2"))) >>
+      client.hExists("hash-basic", "f1").is(true) >>
+      client.hDel("hash-basic", "f1", "missing").is(1L) >>
+      client.hExists("hash-basic", "f1").is(false)
+  }
+
+  clientTest("HSETNX only writes an absent field") { client =>
+    client.hSetNx("hash-setnx", "f", "one").is(true) >>
+      client.hSetNx("hash-setnx", "f", "two").is(false) >>
+      client.hGet[String, String]("hash-setnx", "f").is(Some("one"))
+  }
+
+  clientTest("HGETALL HKEYS HVALS HLEN HSTRLEN view the whole hash") { client =>
+    client.hSet("hash-view", ("a", "1"), ("b", "22")) >>
+      client.hGetAll[String, String]("hash-view").is(Map("a" -> "1", "b" -> "22")) >>
+      client.hKeys[String]("hash-view").map(_.toSet).is(Set("a", "b")) >>
+      client.hVals[String]("hash-view").map(_.toSet).is(Set("1", "22")) >>
+      client.hLen("hash-view").is(2L) >>
+      client.hStrLen("hash-view", "b").is(2L)
+  }
+
+  clientTest("HINCRBY and HINCRBYFLOAT count atomically on a field") { client =>
+    client.hSet("hash-incr", ("n", "10")) >>
+      client.hIncrBy("hash-incr", "n", 5L).is(15L) >>
+      client.hIncrByFloat("hash-incr", "n", 0.5).is(15.5)
+  }
+
+  clientTest("HRANDFIELD returns a member, a count of members, and field/value pairs") { client =>
+    for {
+      _     <- client.hSet("hash-rand", ("a", "1"), ("b", "2"), ("c", "3"))
+      _     <- client.hRandField[String]("hash-rand").satisfies(_.exists(Set("a", "b", "c")))
+      few   <- client.hRandField[String]("hash-rand", 2L)
+      pairs <- client.hRandFieldWithValues[String, String]("hash-rand", -5L)
+      _     <- client.hRandField[String]("hash-rand-missing").is(None)
+    } yield {
+      assertEquals(few.size, 2)
+      assert(few.toSet.subsetOf(Set("a", "b", "c")))
+      assertEquals(pairs.size, 5)
+      assert(pairs.forall { case (f, v) => Map("a" -> "1", "b" -> "2", "c" -> "3").get(f).contains(v) })
     }
   }
 
-  test("HSETNX only writes an absent field") {
-    withClient { client =>
-      for {
-        first  <- client.hSetNx("hash-setnx", "f", "one")
-        second <- client.hSetNx("hash-setnx", "f", "two")
-        value  <- client.hGet[String, String]("hash-setnx", "f")
-      } yield {
-        assertEquals(first, true)
-        assertEquals(second, false)
-        assertEquals(value, Some("one"))
-      }
+  clientTest("HSCAN streams field/value pairs and NOVALUES streams bare fields") { client =>
+    client.hSet("hash-scan", ("a", "1"), ("b", "2"), ("c", "3")) >>
+      client.hScan[String, String]("hash-scan", ScanCursor.start).map(_.items.toMap).is(Map("a" -> "1", "b" -> "2", "c" -> "3")) >>
+      client.hScanNoValues[String]("hash-scan", ScanCursor.start).map(_.items.toSet).is(Set("a", "b", "c"))
+  }
+
+  // Hash field expiration exists only on Redis.
+  redisTest("HEXPIRE/HTTL/HPERSIST set, read, and clear per-field TTLs") { client =>
+    for {
+      _   <- client.hSet("hfe-ttl", ("a", "1"), ("b", "2"))
+      _   <- client.hExpire("hfe-ttl", 100.seconds)("a", "missing").is(Vector(FieldExpiry.Updated, FieldExpiry.NoField))
+      ttl <- client.hTtl("hfe-ttl")("a", "b", "missing")
+      _   <- client.hPersist("hfe-ttl")("a", "b").is(Vector(FieldPersist.Persisted, FieldPersist.NoExpiry))
+      _   <- client.hTtl("hfe-ttl")("a").is(Vector(FieldTtl.NoExpiry))
+    } yield {
+      assert(expiresWithin(ttl(0), 100.seconds))
+      assertEquals(ttl(1), FieldTtl.NoExpiry)
+      assertEquals(ttl(2), FieldTtl.NoField)
     }
   }
 
-  test("HGETALL HKEYS HVALS HLEN HSTRLEN view the whole hash") {
-    withClient { client =>
-      for {
-        _      <- client.hSet("hash-view", ("a", "1"), ("b", "22"))
-        all    <- client.hGetAll[String, String]("hash-view")
-        keys   <- client.hKeys[String]("hash-view")
-        vals   <- client.hVals[String]("hash-view")
-        len    <- client.hLen("hash-view")
-        strLen <- client.hStrLen("hash-view", "b")
-      } yield {
-        assertEquals(all, Map("a" -> "1", "b" -> "22"))
-        assertEquals(keys.toSet, Set("a", "b"))
-        assertEquals(vals.toSet, Set("1", "22"))
-        assertEquals(len, 2L)
-        assertEquals(strLen, 2L)
-      }
+  redisTest("a field-TTL command on a missing key reports NoField per field, not a null") { client =>
+    client.hExpire("hfe-missing", 100.seconds)("a", "b").is(Vector(FieldExpiry.NoField, FieldExpiry.NoField))
+  }
+
+  redisTest("HEXPIREAT pins an absolute deadline that HEXPIRETIME reads back") { client =>
+    val at = Instant.ofEpochSecond(Instant.now().getEpochSecond + 3600)
+    client.hSet("hfe-at", ("a", "1")) >>
+      client.hExpireAt("hfe-at", at)("a").is(Vector(FieldExpiry.Updated)) >>
+      client.hExpireTime("hfe-at")("a").is(Vector(FieldExpiryTime.At(at)))
+  }
+
+  redisTest("HPTTL and HPEXPIRETIME read the millisecond-precision TTL and absolute deadline") { client =>
+    for {
+      now <- client.time
+      at   = Instant.ofEpochSecond(now.getEpochSecond + 3600)
+      _   <- client.hSet("hfe-px", ("a", "1"))
+      _   <- client.hExpireAt("hfe-px", at)("a")
+      ttl <- client.hpTtl("hfe-px")("a", "missing")
+      _   <- client.hpExpireTime("hfe-px")("a").is(Vector(FieldExpiryTime.At(at)))
+    } yield {
+      assert(expiresWithin(ttl(0), 3600.seconds))
+      assertEquals(ttl(1), FieldTtl.NoField)
     }
   }
 
-  test("HINCRBY and HINCRBYFLOAT count atomically on a field") {
-    withClient { client =>
-      for {
-        _     <- client.hSet("hash-incr", ("n", "10"))
-        byInt <- client.hIncrBy("hash-incr", "n", 5L)
-        byFlt <- client.hIncrByFloat("hash-incr", "n", 0.5)
-      } yield {
-        assertEquals(byInt, 15L)
-        assertEquals(byFlt, 15.5)
-      }
-    }
+  redisTest("HGETDEL returns field values and removes them") { client =>
+    client.hSet("hfe-getdel", ("a", "1"), ("b", "2")) >>
+      client.hGetDel[String, String]("hfe-getdel")("a", "missing").is(Vector(Some("1"), None)) >>
+      client.hGetAll[String, String]("hfe-getdel").is(Map("b" -> "2"))
   }
 
-  test("HRANDFIELD returns a member, a count of members, and field/value pairs") {
-    withClient { client =>
-      for {
-        _      <- client.hSet("hash-rand", ("a", "1"), ("b", "2"), ("c", "3"))
-        single <- client.hRandField[String]("hash-rand")
-        few    <- client.hRandField[String]("hash-rand", 2L)
-        pairs  <- client.hRandFieldWithValues[String, String]("hash-rand", -5L)
-        empty  <- client.hRandField[String]("hash-rand-missing")
-      } yield {
-        assert(single.exists(Set("a", "b", "c")))
-        assertEquals(few.size, 2)
-        assert(few.toSet.subsetOf(Set("a", "b", "c")))
-        assertEquals(pairs.size, 5)
-        assert(pairs.forall { case (f, v) => Map("a" -> "1", "b" -> "2", "c" -> "3").get(f).contains(v) })
-        assertEquals(empty, None)
-      }
-    }
+  redisTest("HGETEX returns field values and sets their TTL") { client =>
+    client.hSet("hfe-getex", ("a", "1")) >>
+      client.hGetEx[String, String]("hfe-getex", GetExpiry.In(100.seconds))("a").is(Vector(Some("1"))) >>
+      client.hTtl("hfe-getex")("a").satisfies(ttl => expiresWithin(ttl(0), 100.seconds))
   }
 
-  test("HSCAN streams field/value pairs and NOVALUES streams bare fields") {
-    withClient { client =>
-      for {
-        _         <- client.hSet("hash-scan", ("a", "1"), ("b", "2"), ("c", "3"))
-        page      <- client.hScan[String, String]("hash-scan", ScanCursor.start)
-        fieldPage <- client.hScanNoValues[String]("hash-scan", ScanCursor.start)
-      } yield {
-        assertEquals(page.items.toMap, Map("a" -> "1", "b" -> "2", "c" -> "3"))
-        assertEquals(fieldPage.items.toSet, Set("a", "b", "c"))
-      }
-    }
+  redisTest("HSETEX sets fields with a shared TTL and honors FNX/FXX") { client =>
+    client.hSetEx("hfe-setex", SetExpiry.In(100.seconds), HSetExCondition.IfNoneExist)(("a", "1"), ("b", "2")).is(true) >>
+      client.hTtl("hfe-setex")("a").satisfies(ttl => expiresWithin(ttl(0), 100.seconds)) >>
+      client.hSetEx("hfe-setex", condition = HSetExCondition.IfNoneExist)(("a", "9")).is(false) >>
+      client.hGet[String, String]("hfe-setex", "a").is(Some("1")) >>
+      client.hSetEx("hfe-setex", SetExpiry.KeepTtl, HSetExCondition.IfAllExist)(("a", "10")).is(true) >>
+      client.hGet[String, String]("hfe-setex", "a").is(Some("10"))
   }
 }
-
-class RedisHashesSuite extends HashesSuite(Images.redis)
-
-class ValkeyHashesSuite extends HashesSuite(Images.valkey)

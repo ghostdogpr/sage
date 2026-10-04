@@ -1,6 +1,6 @@
 # Pub/Sub
 
-Subscribing returns the backend's native stream type. Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, and Pekko returns `Source`. Each message contains its channel and a payload decoded by a `ValueCodec`. Ending the stream or closing its scope unsubscribes.
+Subscribing returns the backend's native stream type. Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, and Pekko returns `Source`. Each message contains its channel and a payload decoded by a `ValueCodec`. Ending the stream or closing its scope unsubscribes. If the server refuses a subscribed name, for example with `NOPERM` from an ACL, the stream fails with that `ServerError`, including when a reconnect subscribes the name again. Temporary errors such as `BUSY` or `LOADING` do not end the stream; Sage subscribes again after a backoff.
 
 ## Classic channels
 

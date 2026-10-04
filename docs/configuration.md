@@ -88,8 +88,8 @@ val config = SageConfig(
 )
 ```
 
-Sage refreshes on a timer only when you configure this setting. Each refresh costs one `CLUSTER SLOTS`, and ticks arriving within `minRefreshInterval` of the last refresh are
-skipped, so a short interval cannot flood the cluster. `MasterReplicaConfig` has the same setting.
+Sage refreshes on a timer only when you configure this setting. Each refresh costs one `CLUSTER SLOTS`. Ticks arriving within `minRefreshInterval` of the last refresh
+are deferred and run as one refresh at the end of that interval, so a short interval cannot flood the cluster. `MasterReplicaConfig` has the same setting.
 
 ## Master-replica
 
@@ -140,7 +140,7 @@ val config = SageConfig(
 )
 ```
 
-`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA. Use `TrustSource.Custom(sslContext)` to supply your own `SSLContext`, including for mutual TLS. `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
+`TrustSource.System` uses the system trust store. Use `TrustSource.Pem` or `TrustSource.TrustStore` for a private CA. Sage reads that file before it first connects to a node, and the node's reconnects and dedicated connections reuse what it read. A standalone client therefore reads the file once, when it connects. A cluster or master-replica client reads it again whenever it adds a node or opens a pub/sub or discovery connection, so a replaced CA bundle applies to those connections only. Use `TrustSource.Custom(sslContext)` to supply your own `SSLContext`, including for mutual TLS. `AuthConfig` redacts its password in logs and in any printed `SageConfig`.
 
 ::: warning
 `TrustSource.Insecure` is for local development only. It trusts every certificate and skips hostname verification, leaving the connection open to machine-in-the-middle attacks. Never use it in production.

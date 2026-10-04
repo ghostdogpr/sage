@@ -2,205 +2,107 @@ package sage.integration
 
 import kyo.compat.*
 
-import sage.Bytes
-import sage.SageException.DecodeError
+import sage.SageException.ServerError
 import sage.client.internal.Client
-import sage.commands.{Command, Commands}
-import sage.protocol.Frame
+import sage.commands.Commands
 
-abstract class RoundTripSuite(image: String) extends ServerSuite(image) {
+class RoundTripSuite extends BothServersSuite {
 
-  test("ping round-trips") {
-    withClient(client => client.ping().map(reply => assertEquals(reply, "PONG")))
+  clientTest("ping round-trips")(client => client.ping().is("PONG"))
+
+  clientTest("values round-trip per call type, and a missing key is None") { client =>
+    client.set("greeting", "hello") >>
+      client.set("count", 42) >>
+      client.set("flag", true) >>
+      client.get[String]("greeting").is(Some("hello")) >>
+      client.get[Int]("count").is(Some(42)) >>
+      client.get[Boolean]("flag").is(Some(true)) >>
+      client.get[String]("missing-key").is(None)
   }
 
-  test("values round-trip per call type, and a missing key is None") {
-    withClient { client =>
-      for {
-        _        <- client.set("greeting", "hello")
-        _        <- client.set("count", 42)
-        _        <- client.set("flag", true)
-        greeting <- client.get[String]("greeting")
-        count    <- client.get[Int]("count")
-        flag     <- client.get[Boolean]("flag")
-        missing  <- client.get[String]("missing-key")
-      } yield {
-        assertEquals(greeting, Some("hello"))
-        assertEquals(count, Some(42))
-        assertEquals(flag, Some(true))
-        assertEquals(missing, None)
-      }
-    }
-  }
-
-  test("concurrent fibers pipeline onto the Multiplexed Connection and match FIFO") {
-    withClient { client =>
-      CIO
-        .foreach(1 to 200) { i =>
-          for {
-            _     <- client.set(s"key-$i", s"value-$i")
-            value <- client.get[String](s"key-$i")
-          } yield assertEquals(value, Some(s"value-$i"))
-        }
-        .unit
-    }
-  }
-
-  test("no reply misattribution under high fiber concurrency") {
-    def pingLoop(client: Client[CIO, String], fiber: Int, i: Int): CIO[Unit] =
+  clientTest("no reply misattribution under high fiber concurrency") { client =>
+    def pingLoop(fiber: Int, i: Int): CIO[Unit] =
       if (i > 100) CIO.value(())
       else {
         val token = s"$fiber-$i"
-        client.ping(Some(token)).flatMap { reply =>
-          assertEquals(reply, token)
-          pingLoop(client, fiber, i + 1)
+        client.ping(Some(token)).is(token).flatMap(_ => pingLoop(fiber, i + 1))
+      }
+    CIO.foreachDiscard(1 to 500)(fiber => pingLoop(fiber, 1))
+  }
+
+  clientTest("a pipeline yields one typed result per command in a single round-trip") { client =>
+    client.set("p:a", "x") >>
+      client.set("p:n", 10) >>
+      client.pipeline((Commands.get[String, String]("p:a"), Commands.incrBy[String]("p:n", 5))).is((Some("x"), 15L))
+  }
+
+  clientTest("a command failure in a pipeline surfaces per-position without poisoning the rest") { client =>
+    client.set("p:str", "hello") >>
+      client
+        .pipelineAttempt(
+          (
+            Commands.get[String, String]("p:str"),
+            Commands.incr[String]("p:str"),
+            Commands.get[String, String]("p:str")
+          )
+        )
+        .is((Right(Some("hello")), Left(ServerError("ERR", "value is not an integer or out of range")), Right(Some("hello"))))
+  }
+
+  clientTest("a large pipeline runs every command and returns one result per position") { client =>
+    val n = 200
+    client.pipeline(Vector.fill(n)(Commands.incr[String]("p:rtt"))).is((1 to n).map(_.toLong).toVector) >>
+      client.get[Int]("p:rtt").is(Some(n))
+  }
+
+  clientTest("a transaction commits atomically and returns typed results") { client =>
+    client.set("t:n", 10) >>
+      client.transaction(tx => tx.exec((Commands.incr[String]("t:n"), Commands.incrBy[String]("t:n", 5)))).is(Some((11L, 16L)))
+  }
+
+  clientTest("a read-modify-write transaction commits when the watched key is unchanged") { client =>
+    client.set("t:rmw", 5) >>
+      client
+        .transaction { tx =>
+          for {
+            _   <- tx.watch("t:rmw")
+            cur <- tx.get[Int]("t:rmw")
+            res <- tx.exec(Vector(Commands.set[String, Int]("t:rmw", cur.getOrElse(0) + 1)))
+          } yield res
         }
-      }
-    withClient(client => CIO.foreachDiscard(1 to 500)(fiber => pingLoop(client, fiber, 1)))
+        .is(Some(Vector(true))) >>
+      client.get[Int]("t:rmw").is(Some(6))
   }
 
-  test("a pipeline yields one typed result per command in a single round-trip") {
-    withClient { client =>
-      for {
-        _   <- client.set("p:a", "x")
-        _   <- client.set("p:n", 10)
-        out <- client.pipeline((Commands.get[String, String]("p:a"), Commands.incrBy[String]("p:n", 5)))
-      } yield assertEquals(out, (Some("x"), 15L))
-    }
-  }
-
-  test("a command failure in a pipeline surfaces per-position without poisoning the rest") {
-    withClient { client =>
-      for {
-        _       <- client.set("p:str", "hello")
-        results <- client.pipelineAttempt(
-                     (
-                       Commands.get[String, String]("p:str"),
-                       Commands.incr[String]("p:str"),
-                       Commands.get[String, String]("p:str")
-                     )
-                   )
-      } yield {
-        val (a, b, c) = results
-        assertEquals(a, Right(Some("hello")))
-        assert(b.isLeft, s"expected the INCR on a string to fail, got $b")
-        assertEquals(c, Right(Some("hello")))
-      }
-    }
-  }
-
-  test("a large pipeline runs every command and returns one result per position") {
-    withClient { client =>
-      val n = 200
-      client.pipeline(Vector.fill(n)(Commands.incr[String]("p:rtt"))).flatMap { results =>
-        client.get[Int]("p:rtt").map { stored =>
-          assertEquals(results.length, n)
-          assertEquals(results, (1 to n).map(_.toLong).toVector)
-          assertEquals(stored, Some(n))
+  clientsTest("WATCH aborts the transaction when a watched key is modified concurrently") { (client, other) =>
+    client.set("t:w", 1) >>
+      client
+        .transaction { tx =>
+          for {
+            _   <- tx.watch("t:w")
+            _   <- tx.get[Int]("t:w")
+            _   <- other.set("t:w", 99) // a different connection changes the watched key before EXEC
+            res <- tx.exec(Vector(Commands.incr[String]("t:w")))
+          } yield res
         }
-      }
-    }
+        .is(None) >>                      // aborted
+      client.get[Int]("t:w").is(Some(99)) // the INCR never ran
   }
 
-  test("a transaction commits atomically and returns typed results") {
-    withClient { client =>
-      for {
-        _   <- client.set("t:n", 10)
-        out <- client.transaction(tx => tx.exec((Commands.incr[String]("t:n"), Commands.incrBy[String]("t:n", 5))))
-      } yield assertEquals(out, Some((11L, 16L)))
-    }
+  clientTest("an execution-phase error surfaces per-position while the other commands commit") { client =>
+    client.set("t:str", "x") >>
+      client
+        .transaction(tx => tx.execAttempt((Commands.incr[String]("t:fresh"), Commands.incr[String]("t:str"))))
+        .is(Some((Right(1L), Left(ServerError("ERR", "value is not an integer or out of range"))))) >>
+      client.get[Int]("t:fresh").is(Some(1)) // Redis does not roll back, so the first INCR remains committed after the second one fails.
   }
 
-  test("a read-modify-write transaction commits when the watched key is unchanged") {
-    withClient { client =>
-      for {
-        _      <- client.set("t:rmw", 5)
-        out    <- client.transaction { tx =>
-                    for {
-                      _   <- tx.watch("t:rmw")
-                      cur <- tx.get[Int]("t:rmw")
-                      res <- tx.exec(Vector(Commands.set[String, Int]("t:rmw", cur.getOrElse(0) + 1)))
-                    } yield res
-                  }
-        stored <- client.get[Int]("t:rmw")
-      } yield {
-        assert(out.isDefined, s"expected a committed transaction, got $out")
-        assertEquals(stored, Some(6))
-      }
+  serverTest("closing the client releases its server connection") { server =>
+    connectAndUse(configOf(server)) { observer =>
+      connectAndUse(configOf(server))(_ => connectionCount(observer)).flatMap(before => Eventually(50)(connectionCount(observer).is(before - 1)))
     }
   }
-
-  test("WATCH aborts the transaction when a watched key is modified concurrently") {
-    withContainers { server =>
-      connectAndUse(configOf(server)) { client =>
-        for {
-          other  <- Client.connect(configOf(server))
-          _      <- client.set("t:w", 1)
-          out    <- client.transaction { tx =>
-                      for {
-                        _   <- tx.watch("t:w")
-                        _   <- tx.get[Int]("t:w")
-                        _   <- other.set("t:w", 99) // a different connection changes the watched key before EXEC
-                        res <- tx.exec(Vector(Commands.incr[String]("t:w")))
-                      } yield res
-                    }
-          _      <- other.close
-          stored <- client.get[Int]("t:w")
-        } yield {
-          assertEquals(out, None)        // aborted
-          assertEquals(stored, Some(99)) // the INCR never ran
-        }
-      }.unsafeRun
-    }
-  }
-
-  test("an execution-phase error surfaces per-position while the other commands commit") {
-    withClient { client =>
-      for {
-        _   <- client.set("t:str", "x")
-        res <- client.transaction(tx => tx.execAttempt((Commands.incr[String]("t:fresh"), Commands.incr[String]("t:str"))))
-        ok  <- client.get[Int]("t:fresh")
-      } yield {
-        val (a, b) = res.getOrElse(fail("expected a committed transaction"))
-        assertEquals(a, Right(1L))
-        assert(b.isLeft, s"expected the INCR on a string to fail, got $b")
-        assertEquals(ok, Some(1)) // Redis does not roll back, so the first INCR remains committed after the second one fails.
-      }
-    }
-  }
-
-  test("closing the client releases its server connection") {
-    withContainers { server =>
-      connectAndUse(configOf(server)) { observer =>
-        for {
-          subject <- Client.connect(configOf(server))
-          before  <- connectionCount(observer)
-          _       <- subject.close
-          _       <- awaitConnectionCount(observer, before - 1, attempts = 50)
-        } yield ()
-      }.unsafeRun
-    }
-  }
-
-  private val clientList: Command[String] =
-    Command(
-      "CLIENT",
-      keyIndices = Command.NoKeys,
-      args = Vector(Bytes.utf8("LIST")),
-      decode = {
-        case Frame.BulkString(value)        => Right(value.asUtf8String)
-        case Frame.VerbatimString(_, value) => Right(value.asUtf8String)
-        case other                          => Left(DecodeError("bulk or verbatim string", Frame.describe(other)))
-      }
-    )
 
   private def connectionCount(client: Client[CIO, String]): CIO[Int] =
-    client.run(clientList).map(_.linesIterator.count(_.nonEmpty))
-
-  private def awaitConnectionCount(client: Client[CIO, String], expected: Int, attempts: Int): CIO[Unit] =
-    Eventually.converges(attempts)(() => connectionCount(client))(_ == expected)(count => s"expected $expected connections, still $count")
+    client.clientList.map(_.linesIterator.count(_.nonEmpty))
 }
-
-class RedisRoundTripSuite extends RoundTripSuite(Images.redis)
-
-class ValkeyRoundTripSuite extends RoundTripSuite(Images.valkey)

@@ -9,23 +9,16 @@ import sage.commands.{FieldTtl, Ttl}
   */
 object Ttls {
 
-  def remaining(ttl: Ttl): Option[FiniteDuration] =
+  private def remaining(ttl: Ttl | FieldTtl): Option[FiniteDuration] =
     ttl match {
-      case Ttl.Expires(value) => Some(value)
-      case _                  => None
-    }
-
-  private def remaining(ttl: FieldTtl): Option[FiniteDuration] =
-    ttl match {
+      case Ttl.Expires(value)      => Some(value)
       case FieldTtl.Expires(value) => Some(value)
       case _                       => None
     }
 
-  def expires(ttl: Ttl): Boolean = remaining(ttl).exists(_ > Duration.Zero)
+  def expiresWithin(ttl: Ttl | FieldTtl, bound: FiniteDuration, above: FiniteDuration = Duration.Zero): Boolean =
+    remaining(ttl).exists(value => value > above && value <= bound)
 
-  def expires(ttl: FieldTtl): Boolean = remaining(ttl).exists(_ > Duration.Zero)
-
-  def expiresWithin(ttl: Ttl, bound: FiniteDuration): Boolean = remaining(ttl).exists(value => value > Duration.Zero && value <= bound)
-
-  def expiresWithin(ttl: FieldTtl, bound: FiniteDuration): Boolean = remaining(ttl).exists(value => value > Duration.Zero && value <= bound)
+  def renewed(before: Ttl, after: Ttl): Boolean =
+    remaining(before).zip(remaining(after)).exists((previous, current) => current > previous + 100.millis)
 }

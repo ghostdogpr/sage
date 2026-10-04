@@ -1,27 +1,27 @@
 package sage.integration.security
 
-import scala.concurrent.{ExecutionContext, Future}
-
 import com.dimafeng.testcontainers.GenericContainer
-import com.dimafeng.testcontainers.munit.TestContainerForAll
 import kyo.compat.*
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.images.builder.Transferable
 
 import sage.SageException.{ServerError, TlsError}
 import sage.client.{AuthConfig, SageConfig, TlsConfig, TrustSource}
-import sage.integration.{ContainerClient, Images}
+import sage.integration.{BothServersSuite, Images}
 
 /**
-  * One TLS+ACL server hosts every case. The args start with `-`, so the redis and valkey entrypoints each prepend their own server
+  * One TLS+ACL server per image hosts every case. The args start with `-`, so the redis and valkey entrypoints each prepend their own server
   * binary; `--port 0` makes the single exposed port speak only TLS. The cert is generated per run with the Docker host in its SAN
   * ([[TlsFixture]]), so hostname verification passes whatever host Testcontainers reports.
   */
-abstract class TlsAuthSuite(image: String) extends munit.FunSuite with TestContainerForAll with ContainerClient {
+class TlsAuthSuite extends BothServersSuite {
+
+  override protected def redisDef: GenericContainer.Def[GenericContainer]  = tlsServer(Images.redis)
+  override protected def valkeyDef: GenericContainer.Def[GenericContainer] = tlsServer(Images.valkey)
 
   // Copy certificates through the Docker API so the suite also works with a remote daemon. A bind mount would look for the path on the daemon
   // host instead of the test runner.
-  override val containerDef: GenericContainer.Def[GenericContainer] =
+  private def tlsServer(image: String): GenericContainer.Def[GenericContainer] =
     new GenericContainer.Def[GenericContainer]({
       val container = GenericContainer(
         image,
@@ -55,58 +55,34 @@ abstract class TlsAuthSuite(image: String) extends munit.FunSuite with TestConta
         waitStrategy = Wait.forLogMessage(".*Ready to accept connections.*", 1)
       )
       container.underlyingUnsafeContainer
-        .withCopyToContainer(Transferable.of(TlsFixture.serverCertPem), "/tls/server.crt")
-        .withCopyToContainer(Transferable.of(TlsFixture.serverKeyPem), "/tls/server.key")
+        .withCopyToContainer(Transferable.of(TlsFixture.material.certPem), "/tls/server.crt")
+        .withCopyToContainer(Transferable.of(TlsFixture.material.keyPem), "/tls/server.key")
       container
     }) {}
 
-  given ExecutionContext = munitExecutionContext
-
-  private val caPath = TlsFixture.serverCert
+  private val caPath = TlsFixture.material.certFile
   private val app    = AuthConfig(username = "app", password = "apppass")
 
   private def configWith(server: GenericContainer, trust: TrustSource = TrustSource.System, auth: AuthConfig = app): SageConfig =
     configOf(server).copy(tls = Some(TlsConfig(trust)), auth = Some(auth))
 
-  private def connectAndPing(config: SageConfig): Future[String] = connectAndUse(config)(_.ping()).unsafeRun
+  serverTest("rejects the server certificate by default: the private CA is not in the system trust store") { server =>
+    failsWith[TlsError](connectAndUse(configWith(server))(_.ping()))
+  }
 
-  test("rejects the server certificate by default: the private CA is not in the system trust store") {
-    withContainers { server =>
-      connectAndPing(configWith(server)).failed.map(error => assert(error.isInstanceOf[TlsError], error))
+  serverTest("connects with verification disabled") { server =>
+    connectAndUse(configWith(server, TrustSource.Insecure))(_.ping().is("PONG"))
+  }
+
+  serverTest("ACL auth over TLS succeeds for a named user via HELLO, and round-trips a command") { server =>
+    connectAndUse(configWith(server, TrustSource.Pem(caPath))) { client =>
+      client.set("tls:key", "value").flatMap(_ => client.get[String]("tls:key").is(Some("value")))
     }
   }
 
-  test("connects when the private CA is supplied as PEM trust material") {
-    withContainers { server =>
-      connectAndPing(configWith(server, TrustSource.Pem(caPath))).map(pong => assertEquals(pong, "PONG"))
-    }
-  }
-
-  test("connects with verification disabled") {
-    withContainers { server =>
-      connectAndPing(configWith(server, TrustSource.Insecure)).map(pong => assertEquals(pong, "PONG"))
-    }
-  }
-
-  test("ACL auth over TLS succeeds for a named user via HELLO, and round-trips a command") {
-    withContainers { server =>
-      connectAndUse(configWith(server, TrustSource.Pem(caPath))) { client =>
-        for {
-          _     <- client.set("tls:key", "value")
-          value <- client.get[String]("tls:key")
-        } yield value
-      }.unsafeRun.map(value => assertEquals(value, Some("value")))
-    }
-  }
-
-  test("bad credentials fail with a server error") {
-    withContainers { server =>
-      val config = configWith(server, TrustSource.Pem(caPath), AuthConfig(username = "app", password = "wrong"))
-      connectAndPing(config).failed.map(error => assert(error.isInstanceOf[ServerError], error))
-    }
+  serverTest("bad credentials fail with a server error") { server =>
+    failsWith[ServerError](
+      connectAndUse(configWith(server, TrustSource.Pem(caPath), AuthConfig(username = "app", password = "wrong")))(_.ping())
+    )
   }
 }
-
-class RedisTlsAuthSuite extends TlsAuthSuite(Images.redis)
-
-class ValkeyTlsAuthSuite extends TlsAuthSuite(Images.valkey)

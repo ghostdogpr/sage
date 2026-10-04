@@ -3,10 +3,10 @@ package sage.integration.commands
 import kyo.compat.*
 
 import sage.commands.FlushMode
-import sage.integration.{Images, ServerSuite}
-import sage.protocol.Frame
+import sage.integration.BothServersSuite
+import sage.protocol.{Frame, Frames}
 
-abstract class FunctionsSuite(image: String) extends ServerSuite(image) {
+class FunctionsSuite extends BothServersSuite {
 
   private val library =
     """#!lua name=saregg
@@ -14,80 +14,45 @@ abstract class FunctionsSuite(image: String) extends ServerSuite(image) {
       |redis.register_function('saregg_one', function(keys, args) return 1 end)
       |""".stripMargin
 
-  test("FUNCTION LOAD registers a library that FCALL then invokes") {
-    withClient { client =>
-      for {
-        _    <- client.functionFlush(Some(FlushMode.Sync))
-        name <- client.functionLoad(library)
-        one  <- client.fCall("saregg_one")
-        echo <- client.fCall("saregg_echo", Seq.empty[String], Seq("hello"))
-      } yield {
-        assertEquals(name, "saregg")
-        assertEquals(one, Frame.Integer(1L))
-        echo match {
-          case Frame.BulkString(b) => assertEquals(b.asUtf8String, "hello")
-          case other               => fail(s"expected bulk string, got $other")
-        }
-      }
-    }
+  clientTest("FUNCTION LOAD registers a library that FCALL then invokes") { client =>
+    client.functionFlush(Some(FlushMode.Sync)) >>
+      client.functionLoad(library).is("saregg") >>
+      client.fCall("saregg_one").is(Frame.Integer(1L)) >>
+      client.fCall("saregg_echo", Seq.empty[String], Seq("hello")).is(Frames.bulk("hello"))
   }
 
-  test("FCALL_RO invokes a function flagged no-writes") {
-    withClient { client =>
-      for {
-        _  <- client.functionFlush(Some(FlushMode.Sync))
-        _  <- client.functionLoad(
-                """#!lua name=saregg
-                  |redis.register_function{function_name='saregg_ro', callback=function(keys, args) return args[1] end, flags={'no-writes'}}
-                  |""".stripMargin
-              )
-        ro <- client.fCallRo("saregg_ro", Seq.empty[String], Seq("hi"))
-      } yield ro match {
-        case Frame.BulkString(b) => assertEquals(b.asUtf8String, "hi")
-        case other               => fail(s"expected bulk string, got $other")
-      }
-    }
+  clientTest("FCALL_RO invokes a function flagged no-writes") { client =>
+    client.functionFlush(Some(FlushMode.Sync)) >>
+      client.functionLoad(
+        """#!lua name=saregg
+      |redis.register_function{function_name='saregg_ro', callback=function(keys, args) return args[1] end, flags={'no-writes'}}
+      |""".stripMargin
+      ) >>
+      client.fCallRo("saregg_ro", Seq.empty[String], Seq("hi")).is(Frames.bulk("hi"))
   }
 
-  test("FUNCTION LIST and STATS describe loaded libraries; DELETE removes them") {
-    withClient { client =>
-      for {
-        _         <- client.functionFlush(Some(FlushMode.Sync))
-        _         <- client.functionLoad(library)
-        libraries <- client.functionList()
-        withCode  <- client.functionList(Some("saregg"), withCode = true)
-        stats     <- client.functionStats
-        _         <- client.functionDelete("saregg")
-        afterDel  <- client.functionList()
-      } yield {
-        val lib = libraries.find(_.libraryName == "saregg")
-        assert(lib.isDefined, libraries.toString)
-        assertEquals(lib.map(_.engine), Some("LUA"))
-        assertEquals(lib.map(_.functions.map(_.name).toSet), Some(Set("saregg_echo", "saregg_one")))
-        assertEquals(withCode.flatMap(_.code).headOption.isDefined, true)
-        assert(stats.engines.contains("LUA"), stats.toString)
-        assert(afterDel.forall(_.libraryName != "saregg"))
-      }
-    }
+  clientTest("FUNCTION LIST and STATS describe loaded libraries; DELETE removes them") { client =>
+    client.functionFlush(Some(FlushMode.Sync)) >>
+      client.functionLoad(library) >>
+      client
+        .functionList()
+        .map(_.map(l => (l.libraryName, l.engine, l.functions.map(_.name).toSet)))
+        .is(Vector(("saregg", "LUA", Set("saregg_echo", "saregg_one")))) >>
+      client.functionList(Some("saregg"), withCode = true).map(_.map(_.code)).is(Vector(Some(library))) >>
+      client.functionStats.satisfies(_.engines.contains("LUA")) >>
+      client.functionDelete("saregg") >>
+      client.functionList().is(Vector.empty)
   }
 
-  test("FUNCTION DUMP and RESTORE round-trip the library payload") {
-    withClient { client =>
-      for {
-        _        <- client.functionFlush(Some(FlushMode.Sync))
-        _        <- client.functionLoad(library)
-        payload  <- client.functionDump
-        _        <- client.functionFlush(Some(FlushMode.Sync))
-        empty    <- client.functionList()
-        _        <- client.functionRestore(payload)
-        restored <- client.functionList()
-      } yield {
-        assert(empty.isEmpty)
-        assert(restored.exists(_.libraryName == "saregg"))
-      }
-    }
+  clientTest("FUNCTION DUMP and RESTORE round-trip the library payload") { client =>
+    for {
+      _       <- client.functionFlush(Some(FlushMode.Sync))
+      _       <- client.functionLoad(library)
+      payload <- client.functionDump
+      _       <- client.functionFlush(Some(FlushMode.Sync))
+      _       <- client.functionList().is(Vector.empty)
+      _       <- client.functionRestore(payload)
+      _       <- client.functionList().map(_.map(_.libraryName)).is(Vector("saregg"))
+    } yield ()
   }
 }
-
-class RedisFunctionsSuite  extends FunctionsSuite(Images.redis)
-class ValkeyFunctionsSuite extends FunctionsSuite(Images.valkey)

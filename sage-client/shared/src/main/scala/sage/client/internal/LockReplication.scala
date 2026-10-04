@@ -1,12 +1,10 @@
 package sage.client.internal
 
-import java.util.concurrent.atomic.AtomicBoolean
-
 import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 
 import sage.SageException.{ConnectionLost, LockLost, TimedOut}
-import sage.commands.{Command, Connection, Reply, Role, Server}
+import sage.commands.{Command, Role, Server}
 
 /**
   * Confirms a lock write on the connection that executed it. Each instance handles one write and its replication check.
@@ -18,11 +16,7 @@ final private[client] class LockReplication(
   onConfirmationFailure: () => Unit,
   replicaAcknowledgement: Boolean
 ) {
-  private val confirming = new AtomicBoolean(false)
-
-  def cancelled(): Unit = if (confirming.get()) onConfirmationFailure()
-
-  def submit[A](conn: DedicatedConnection, command: Command[A], asking: Boolean, complete: Try[A] => Unit): Unit = {
+  def submit[A](conn: DedicatedConnection, command: Command[A], complete: Try[A] => Unit): Unit = {
     // Lock acquisition retries are safe because they reuse the same ownership token.
     def confirmationFailed(error: Throwable): Unit = {
       onConfirmationFailure()
@@ -36,8 +30,7 @@ final private[client] class LockReplication(
       complete(Failure(failure))
     }
 
-    def confirm(value: A): Unit = {
-      confirming.set(true)
+    def confirm(value: A): Unit =
       conn.submit(
         Server.role,
         {
@@ -48,15 +41,12 @@ final private[client] class LockReplication(
           case Failure(error)                             => confirmationFailed(error)
         }
       )
-    }
 
     val onReply: Try[A] => Unit = {
       case Success(value) if value == true => confirm(value)
       case result                          => complete(result)
     }
-    if (asking)
-      conn.submitRaw(Vector(Connection.asking, command.rawFrame), result => onReply(result.flatMap(frames => Reply.decode(command, frames.last))))
-    else conn.submit(command, onReply)
+    conn.submit(command, onReply)
   }
 
   private def waitForReplicas[A](

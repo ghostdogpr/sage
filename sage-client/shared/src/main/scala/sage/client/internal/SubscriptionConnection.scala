@@ -1,19 +1,17 @@
 package sage.client.internal
 
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.mutable
-import scala.concurrent.duration.*
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-import sage.{Bytes, SageEvent, SageException}
-import sage.SageException.{ConnectionFailed, ConnectionLost, NotConnected}
-import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.SageEvent
+import sage.SageException.{NotConnected, ServerError}
+import sage.client.SageConfig
 import sage.cluster.Node
-import sage.commands.{Command, Connection, Pubsub, Reply}
+import sage.commands.Pubsub
 import sage.protocol.Frame
 
 /**
@@ -22,49 +20,33 @@ import sage.protocol.Frame
   * connection also wait, but command connections are unaffected. The watchdog does not close the connection while its reader is waiting
   * on this backpressure.
   *
-  * In standalone and master-replica mode, the connection owns its subscribers and restores them after reconnecting. `onReconnect` lets a
-  * master-replica client discover the current master before each attempt. In cluster mode, [[ClusterSubscriptions]] owns the subscribers
-  * and assigns them to nodes. When a cluster connection closes, the manager assigns its subscribers again using the latest topology.
+  * With [[OnLoss.Reconnect]] (standalone, master-replica, and cluster classic subscriptions), the connection owns its subscribers and restores
+  * them after reconnecting; `beforeAttempt` lets the client discover the current master before each attempt. For shard channels in a
+  * cluster, [[ClusterSubscriptions]] owns the subscribers and assigns them to nodes. When such a connection closes, the manager assigns its
+  * subscribers again using the latest topology.
   */
 final private[client] class SubscriptionConnection(
   factory: MultiplexedConnection.TransportFactory,
-  bootstrap: Vector[Command[?]],
   scheduler: Scheduler,
-  backoff: BackoffConfig,
-  watchdog: WatchdogConfig,
-  connectTimeoutMillis: Long,
-  bufferSize: Int,
+  config: SageConfig,
   isLive: () => Boolean,
-  cluster: Boolean = false,
-  onTerminated: () => Unit = () => (),
-  onReconnect: () => Unit = () => (),
-  events: Events = Events.disabled,
-  node: Option[Node] = None
-) extends Placement.ShardConn {
+  onLoss: SubscriptionConnection.OnLoss = SubscriptionConnection.OnLoss.Reconnect(() => (), Events.disabled)
+) extends ClusterSubscriptions.ShardConn
+  with SubscriptionConnection.PubSub {
   import SubscriptionConnection.*
 
-  private val lock          = new ReentrantLock()
-  private val established   = lock.newCondition()
-  private val confirmed     = lock.newCondition()
-  private var state: State  = State.Idle
-  private var current: Conn = null
+  private enum State {
+    case Idle, Establishing, Reconnecting, Closed
+    case Live(conn: Conn)
+  }
+
+  private val lock         = new ReentrantLock()
+  private val changed      = lock.newCondition()
+  private var state: State = State.Idle
   // connections still being opened; a set, since a reconnect and a fresh attach can be establishing at once
-  private val establishing  = mutable.Set.empty[Conn]
-  private val sinksByKind   = Array.fill(Kind.values.length)(mutable.HashMap.empty[String, mutable.LinkedHashSet[Sink]])
-
-  // The server confirms each subscribed name with one push frame in send order. Standalone subscriptions return after confirmation. Cluster
-  // attachment waits up to the connection timeout and may return before confirmation, which can arrive later. These counters are guarded by `lock`.
-  private var subscribeSent: Long      = 0L
-  private var subscribeConfirmed: Long = 0L
-  // Set this generation's resubscribe acknowledgement count in goLive before waking waiters. Later subscriptions do not change what an
-  // existing waiter expects.
-  private var liveTarget: Long         = -1L
-
-  private var watchdogHandle: Scheduler.Cancelable   = null
-  @volatile private var readerBlocked: Boolean       = false
-  @volatile private var lastReplyAtMillis: Long      = scheduler.nowMillis
-  @volatile private var lastBackpressureMillis: Long = 0L
-  @volatile private var pingSentAtMillis: Long       = 0L
+  private val establishing = mutable.Set.empty[Conn]
+  private val sinksByKind  = Array.fill(Kind.values.length)(mutable.HashMap.empty[String, Name])
+  private val reconnects   = new Reconnects(scheduler, config.reconnect, lock)
 
   private inline def locked[A](inline body: A): A = {
     lock.lock()
@@ -72,25 +54,24 @@ final private[client] class SubscriptionConnection(
     finally lock.unlock()
   }
 
-  private def sinksFor(kind: Kind): mutable.HashMap[String, mutable.LinkedHashSet[Sink]] = sinksByKind(kind.ordinal)
+  private def sinksFor(kind: Kind): mutable.HashMap[String, Name] = sinksByKind(kind.ordinal)
+
+  // must hold lock. A refused, dropped or emptied name is replaced by a new Name when subscribed again.
+  private def registered(name: Name): Boolean = sinksFor(name.kind).get(name.name).exists(_ eq name)
 
   // --- standalone conveniences: the connection owns the sink -------------------------------------------------------------------------------
 
-  def subscribeChannels(channels: Vector[String]): RawSubscription = ownedSubscription(channels, Kind.Channel)
+  def subscribeChannels(channels: Vector[String]): RawSubscription = owned(channels, Kind.Channel, failIfUnconfirmed = true)
 
-  def subscribePatterns(patterns: Vector[String]): RawSubscription = ownedSubscription(patterns, Kind.Pattern)
+  def subscribePatterns(patterns: Vector[String]): RawSubscription = owned(patterns, Kind.Pattern, failIfUnconfirmed = true)
 
-  def subscribeShard(channels: Vector[String]): RawSubscription = ownedSubscription(channels, Kind.Shard)
+  def subscribeShard(channels: Vector[String]): RawSubscription = owned(channels, Kind.Shard, failIfUnconfirmed = true)
 
-  private def ownedSubscription(names: Vector[String], kind: Kind): RawSubscription = {
-    val sink = new Sink(names, kind, bufferSize)
+  // cluster classic subscriptions pass failIfUnconfirmed = false, since confirmation in a cluster is best-effort
+  def owned(names: Vector[String], kind: Kind, failIfUnconfirmed: Boolean): RawSubscription = {
+    val sink = new Sink(names, kind, config.pubsub.bufferSize)
     // closeOwned removes a sink that attachInternal registered before awaitActive failed, preventing it from being restored after reconnecting
-    try attachInternal(sink, names, kind, failIfUnconfirmed = true)
-    catch {
-      case e: Throwable =>
-        closeOwned(sink)
-        throw e
-    }
+    onThrow { attachInternal(sink, names, failIfUnconfirmed); sink.failure.foreach(throw _) }(_ => closeOwned(sink))
     new RawSubscription(sink, () => closeOwned(sink))
   }
 
@@ -98,36 +79,31 @@ final private[client] class SubscriptionConnection(
 
   /**
     * Registers `sink` under `names` and subscribes names that are not already active. It waits up to the connection timeout for confirmation;
-    * if the timeout expires, the method returns and the connection can confirm later. For shard subscriptions, the caller must pass
-    * names from one slot so a single `SSUBSCRIBE` does not cross slots.
+    * if the timeout expires, the method returns and the connection can confirm later. A name the server rejects leaves the registry.
     */
-  def attach(sink: Sink, names: Vector[String], kind: Kind): Unit = attachInternal(sink, names, kind, failIfUnconfirmed = false)
+  def attach(sink: Sink, names: Vector[String]): Unit = attachInternal(sink, names, failIfUnconfirmed = false)
 
-  private def attachInternal(sink: Sink, names: Vector[String], kind: Kind, failIfUnconfirmed: Boolean): Unit = {
-    var doEstablish   = false
-    // the acknowledgement count this attachment waits for; -1 means goLive will send the subscription and set the target
-    var confirmTarget = -1L
+  private def attachInternal(sink: Sink, names: Vector[String], failIfUnconfirmed: Boolean): Unit = {
+    var doEstablish = false
+    var waitFor     = Vector.empty[Name]
     lock.lock()
     try {
       var settled = false
       while (!settled)
         state match {
           case State.Closed       => throw NotConnected()
-          case State.Establishing => established.await()
-          case State.Live         =>
-            val fresh = register(sink, names, kind)
-            // when every name is already subscribed, wait only for acknowledgements already confirmed and ignore other pending subscriptions
-            if (fresh.nonEmpty) {
-              sendSubscribe(current, kind, fresh)
-              confirmTarget = subscribeSent
-            } else confirmTarget = subscribeConfirmed
+          case State.Establishing => changed.await()
+          case State.Live(conn)   =>
+            val (all, created) = register(sink, names)
+            conn.subscribe(created)
+            waitFor = all
             settled = true
           case State.Reconnecting =>
-            register(sink, names, kind) // the next successful reconnect resubscribes everything currently registered
+            waitFor = register(sink, names)._1 // the next successful reconnect resubscribes everything currently registered
             settled = true
           case State.Idle         =>
             if (!isLive()) throw NotConnected()
-            register(sink, names, kind)
+            waitFor = register(sink, names)._1
             state = State.Establishing
             doEstablish = true
             settled = true
@@ -135,130 +111,116 @@ final private[client] class SubscriptionConnection(
     } finally lock.unlock()
 
     if (doEstablish)
-      try goLive(establish())
-      catch {
-        case e: Throwable =>
-          // If establishment fails after registering the sink, remove it while the connection remains in the Establishing state; a concurrent
-          // close or goLive call may have already changed the state and completed the cleanup
-          locked(if (state == State.Establishing) {
-            deregister(sink, names, kind)
-            state = State.Idle
-            established.signalAll()
-          })
-          throw e
+      onThrow(goLive(establish())) { _ =>
+        // If establishment fails after registering the sink, remove it while the connection remains in the Establishing state; a concurrent
+        // close or goLive call may have already changed the state and completed the cleanup
+        locked(if (state == State.Establishing) {
+          deregister(sink, names)
+          state = State.Idle
+          changed.signalAll()
+        })
       }
-    awaitActive(failIfUnconfirmed, confirmTarget)
+    awaitActive(waitFor, failIfUnconfirmed)
   }
 
   /**
-    * Deregisters `sink` from `names` and unsubscribes the names left with no subscriber. Returns true when the connection now holds no sinks
-    * at all, so the manager can evict and close it.
+    * Deregisters `sink` from `names` and unsubscribes the names left with no subscriber.
     */
-  def detach(sink: Sink, names: Vector[String], kind: Kind): Boolean =
+  def detach(sink: Sink, names: Vector[String]): Unit =
     locked {
-      val emptied = deregister(sink, names, kind)
-      // best-effort: swallow a failed (or interrupted) unsubscribe write so the caller still learns emptiness and terminates the sink
-      if (emptied.nonEmpty && state == State.Live)
-        try current.send(kind.unsubscribeWire(emptied))
-        catch { case NonFatal(_) | _: InterruptedException => () }
-      isEmptyUnlocked
+      val emptied = deregister(sink, names)
+      liveConn.foreach(_.unsubscribe(sink.kind, emptied))
     }
+
+  def namesOf(sink: Sink): Vector[String] =
+    locked(sink.names.distinct.filter(name => sinksFor(sink.kind).get(name).exists(_.sinks.contains(sink))))
 
   def isEmpty: Boolean = locked(isEmptyUnlocked)
 
   private def isEmptyUnlocked: Boolean = sinksByKind.forall(_.isEmpty)
 
+  // must hold lock
+  private def liveConn: Option[Conn] =
+    state match {
+      case State.Live(conn) => Some(conn)
+      case _                => None
+    }
+
   // --- shared establish/dispatch machinery -------------------------------------------------------------------------------------------------
 
-  // Mark a new socket Live and subscribe it to every registered name. Reset confirmation counters for the new connection. In cluster mode,
-  // each connection has shard channels for at most one slot, which keeps its SSUBSCRIBE within that slot.
-  private def goLive(conn: Conn): Unit = {
-    var reconnect          = false
-    var notify             = false
+  // Mark a new socket Live and subscribe it to every registered name.
+  private def goLive(conn: Conn): Unit =
     // conn.close waits for the reader, and onConnClosed needs lock. Close conn after releasing lock.
-    var teardown: Conn     = null
-    var failure: Throwable = null
-    locked {
-      if (state != State.Establishing && state != State.Reconnecting) teardown = conn
-      else if (conn.isTerminated) {
-        if (cluster) {
-          stopWatchdog()
-          current = null
-          state = State.Closed
-          notify = true
-        } else {
-          state = State.Reconnecting
-          reconnect = true
-        }
-        established.signalAll()
-        confirmed.signalAll()
-      } else {
-        current = conn
-        subscribeSent = 0L
-        subscribeConfirmed = 0L
-        pingSentAtMillis = 0L
-        lastReplyAtMillis = scheduler.nowMillis
-        val pending = Kind.values.map(kind => kind -> sinksFor(kind).keys.toVector)
-        try
-          pending.foreach { case (kind, names) =>
-            if (names.nonEmpty) sendSubscribe(conn, kind, names)
-          }
-        catch {
-          // If writing the subscriptions fails, clear current and close this connection before reporting the failure; this prevents an older
-          // connection from dispatching after its replacement becomes active
-          case e: Throwable =>
-            current = null
-            teardown = conn
-            failure = e
-        }
-        if (failure == null)
-          if (pending.forall(_._2.isEmpty)) {
+    locked(state match {
+      case State.Establishing | State.Reconnecting =>
+        if (conn.isDead) lost()
+        else {
+          val pending = sinksByKind.toVector.flatMap(_.values)
+          conn.subscribe(pending)
+          changed.signalAll()
+          if (pending.isEmpty) {
             // if all subscribers close during establishment, close the new connection and return to Idle
-            teardown = conn
-            current = null
             state = State.Idle
+            () => conn.close()
           } else {
-            state = State.Live
-            startWatchdog()
-            liveTarget = subscribeSent
+            state = State.Live(conn)
+            reconnects.live()
+            conn.watch()
+            () => ()
           }
-        established.signalAll()
-        confirmed.signalAll()
+        }
+      case _                                       => () => conn.close()
+    })()
+
+  // Runs once per subscribed name with its confirmation, its error reply, or ConnectionLost when the connection ends first. A refusal (NOPERM,
+  // ERR) ends the name's subscriptions with the server's error. After any other error, such as BUSY, LOADING or MOVED, a cluster shard
+  // channel is placed again, and any other connection closes so that its reconnect subscribes the name again.
+  private def confirm(conn: Conn, name: Name)(result: Try[Unit]): Unit =
+    locked {
+      changed.signalAll()
+      result match {
+        case Success(_)                                      =>
+          name.confirmedOn = Some(conn)
+          () => ()
+        case Failure(error: ServerError) if registered(name) =>
+          onLoss match {
+            case _ if refuses(error)          =>
+              sinksFor(name.kind) -= name.name
+              val ends = name.sinks.toVector.map(_.end(Some(error)))
+              () => ends.foreach(_())
+            case OnLoss.Report(_, _, onMoved) =>
+              sinksFor(name.kind) -= name.name
+              onMoved
+            case _: OnLoss.Reconnect          => () => scheduler.offload(conn.close())
+          }
+        case _                                               => () => () // a lost reply is sent again by the next connection
       }
-    }
-    if (teardown != null) teardown.close()
-    if (reconnect) scheduleReconnect(0)
-    if (notify) onTerminated()
-    if (failure != null) throw failure
-  }
+    }()
 
-  private def sendSubscribe(conn: Conn, kind: Kind, names: Vector[String]): Unit = {
-    conn.send(kind.subscribeWire(names))
-    subscribeSent += names.size
-  }
-
-  // Wait up to the connection timeout for subscribeConfirmed to reach the target. A target of -1 is replaced with liveTarget after the
-  // connection becomes live, covering subscriptions sent by goLive after reconnecting. Owned subscriptions fail with NotConnected when
-  // confirmation does not arrive before the deadline.
-  private def awaitActive(failIfUnconfirmed: Boolean, target0: Long): Unit = {
+  // Wait up to the connection timeout until the live connection confirmed every name that is still registered. Owned subscriptions fail
+  // with NotConnected when confirmation does not arrive before the deadline.
+  private def awaitActive(names: Vector[Name], failIfUnconfirmed: Boolean): Unit = {
     var active = false
     lock.lock()
     try {
-      val deadline = scheduler.nowMillis + connectTimeoutMillis
-      var target   = target0
-      var settled  = false
+      val deadline  = scheduler.nowMillis + config.connectTimeout.toMillis
+      // names before `done` are settled on `checkedOn`; a new live connection must confirm them again
+      var checkedOn = Option.empty[Conn]
+      var done      = 0
+      var settled   = false
       while (!settled)
-        state match {
-          case State.Closed => settled = true
-          case State.Live   =>
-            if (target < 0) target = liveTarget
-            if (subscribeConfirmed >= target) {
-              active = true
-              settled = true
-            } else if (awaitOrTimeout(deadline)) settled = true
-          case _            =>
-            target = -1L // reconnecting resets the counters; use the next liveTarget when the connection becomes live
-            if (awaitOrTimeout(deadline)) settled = true
+        if (state == State.Closed) settled = true
+        else {
+          val live = liveConn
+          if (live != checkedOn) {
+            checkedOn = live
+            done = 0
+          }
+          while (done < names.size && (!registered(names(done)) || live.exists(conn => names(done).confirmedOn.exists(_ eq conn)))) done += 1
+          if (done == names.size) {
+            active = true
+            settled = true
+          } else if (awaitOrTimeout(deadline)) settled = true
         }
     } finally lock.unlock()
     if (failIfUnconfirmed && !active) throw NotConnected()
@@ -269,7 +231,7 @@ final private[client] class SubscriptionConnection(
     val remaining = deadline - scheduler.nowMillis
     if (remaining <= 0) true
     else {
-      confirmed.await(remaining, TimeUnit.MILLISECONDS)
+      changed.await(remaining, TimeUnit.MILLISECONDS)
       false
     }
   }
@@ -281,211 +243,114 @@ final private[client] class SubscriptionConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      try conn.start()
-      catch {
-        case e: SageException => throw e
-        case NonFatal(e)      =>
-          val failed = ConnectionFailed(s"could not open the subscription connection: $e")
-          failed.initCause(e)
-          throw failed
-      }
-      runBootstrap(conn)
+      try conn.handshake(Bootstrap.commands(config), config.connectTimeout.toMillis)
+      catch { case NonFatal(e) => throw Client.translateHandshake(e) }
       conn
     } finally locked(establishing -= conn): Unit
   }
 
-  // keep bootstrap completion on its connection because two connections may bootstrap concurrently; clear it afterward to ignore later PONG replies
-  private def runBootstrap(conn: Conn): Unit =
-    try
-      Bootstrap.run(
-        bootstrap,
-        connectTimeoutMillis,
-        (command, cb) => {
-          conn.armBootstrap(result => cb(result.flatMap(frame => Reply.decode(command, frame))))
-          if (conn.isTerminated) { conn.completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false))): Unit }
-          else conn.send(command.encode)
-        },
-        () => conn.close()
-      )
-    finally conn.clearBootstrap()
+  private def onConnClosed(conn: Conn): Unit =
+    locked(state match {
+      case State.Live(c) if c eq conn => lost()
+      case _                          => () => ()
+    })()
 
-  private def scheduleReconnect(attempt: Int): Unit =
-    scheduler.after(Backoff.jitteredMillis(backoff, attempt, scheduler).millis)(attemptReconnect(attempt))
-
-  private def attemptReconnect(attempt: Int): Unit = {
-    val proceed = locked(state == State.Reconnecting)
-    if (proceed) {
-      onReconnect()
-      try goLive(establish())
-      catch {
-        case NonFatal(error) =>
-          locked(if (state == State.Reconnecting) {
-            events.emit(SageEvent.Connection.ReconnectFailed(node, error))
-            scheduleReconnect(attempt + 1)
-          })
-      }
+  // Must hold lock; returns the action to run after releasing it. A cluster shard connection does not reconnect itself: the manager reassigns its
+  // subscribers using the latest topology.
+  private def lost(): () => Unit = {
+    changed.signalAll()
+    onLoss match {
+      case OnLoss.Report(onTerminated, _, _) =>
+        state = State.Closed
+        () => onTerminated(this)
+      case mode: OnLoss.Reconnect            =>
+        state = State.Reconnecting
+        reconnects.schedule(
+          state == State.Reconnecting,
+          error => mode.events.emit(SageEvent.Connection.ReconnectFailed(mode.node(), error)),
+          mode.immediately
+        ) {
+          mode.beforeAttempt()
+          goLive(establish())
+        }
+        () => ()
     }
   }
 
-  private def onConnClosed(conn: Conn): Unit =
-    if (cluster) {
-      // Cluster connections do not reconnect themselves. The manager uses the latest topology to reassign their subscribers. During slot
-      // migration, the server sends `sunsubscribe` and disconnects, making closure the reliable signal to do this.
-      val notify = locked {
-        if (conn ne current) false
-        else
-          state match {
-            case State.Live | State.Establishing =>
-              stopWatchdog()
-              current = null
-              state = State.Closed
-              established.signalAll()
-              confirmed.signalAll()
-              true
-            case _                               => false
-          }
-      }
-      if (notify) onTerminated()
-    } else {
-      val reconnect = locked {
-        if (conn ne current) false
-        else
-          state match {
-            case State.Live | State.Reconnecting =>
-              state = State.Reconnecting
-              confirmed.signalAll()
-              true
-            case _                               => false
-          }
-      }
-      if (reconnect) scheduleReconnect(0)
-    }
-
-  private def onFrame(conn: Conn, frame: Frame): Unit =
-    frame match {
-      case Frame.Push(elements) =>
-        // a push confirms only that reads are working. Leave lastReplyAtMillis unchanged so push-only traffic still receives idle PING checks.
-        Pubsub.decode(elements) match {
-          case Some(Pubsub.Event.Message(channel, payload))            =>
-            dispatch(sinksFor(Kind.Channel), channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.ShardMessage(channel, payload))       =>
-            dispatch(sinksFor(Kind.Shard), channel, Delivery.Channel(channel, payload))
-          case Some(Pubsub.Event.PatternMessage(pattern, ch, payload)) =>
-            dispatch(sinksFor(Kind.Pattern), pattern, Delivery.Pattern(pattern, ch, payload))
-          case Some(_: Pubsub.Event.Subscribed)                        =>
-            // conn eq current: a late ack from a superseded generation must not advance this generation's count
-            locked(if (conn eq current) {
-              subscribeConfirmed += 1
-              confirmed.signalAll()
-            })
-          case _                                                       => () // an Unsubscribed ack is informational; re-homing is disconnect-driven
-        }
-      case reply                => // non-push reply: bootstrap HELLO, watchdog PONG, or an unexpected error
-        lastReplyAtMillis = scheduler.nowMillis
-        if (!conn.completeBootstrap(Success(reply)))
-          reply match {
-            // an error such as MOVED is not a PONG. Close the connection so subscription placement is recalculated.
-            case _: Frame.SimpleError | _: Frame.BulkError => scheduler.after(Duration.Zero)(conn.close()) // off the reader thread: close() joins it
-            case _                                         => pingSentAtMillis = 0L
-          }
-    }
-
   // snapshot the sinks under the lock, then deliver outside it: a blocking put (backpressure) must never hold the registry lock
-  private def dispatch(map: mutable.HashMap[String, mutable.LinkedHashSet[Sink]], key: String, delivery: Delivery): Unit = {
-    val targets = locked(map.get(key).map(_.toVector).getOrElse(Vector.empty))
+  private def dispatch(conn: Conn, map: mutable.HashMap[String, Name], key: String, delivery: Delivery): Unit = {
+    val targets = locked(map.get(key).map(_.sinks.toVector).getOrElse(Vector.empty))
     if (targets.nonEmpty) {
-      readerBlocked = true
+      conn.readerBlocked = true
       try {
         var blocked = false
         targets.foreach(sink => if (sink.offer(delivery)) blocked = true)
-        if (blocked) lastBackpressureMillis = scheduler.nowMillis
-      } finally readerBlocked = false
+        if (blocked) conn.lastBackpressureMillis = scheduler.nowMillis
+      } finally conn.readerBlocked = false
     }
   }
 
-  // in standalone mode, close the sink after unsubscribing it. Close the socket when the last sink is removed.
+  // Close the socket without unsubscribing when the last sink is removed. Terminate the sink first: closing the socket waits for the reader,
+  // which may be blocked offering to this sink.
   private def closeOwned(sink: Sink): Unit = {
-    var teardown: Conn     = null
-    var failure: Throwable = null
-    locked {
-      val emptied = deregister(sink, sink.names, sink.kind)
-      try if (emptied.nonEmpty && state == State.Live) current.send(sink.kind.unsubscribeWire(emptied))
-      catch { case e: Throwable => failure = e }
-      if (isEmptyUnlocked && (state == State.Live || state == State.Reconnecting)) {
-        stopWatchdog()
-        teardown = current
-        current = null
-        state = State.Idle
-      }
-    }
     sink.terminate()
-    if (teardown != null) teardown.close()
-    if (failure != null) throw failure
+    locked {
+      val emptied = deregister(sink, sink.names)
+      if (isEmptyUnlocked && (liveConn.nonEmpty || state == State.Reconnecting)) {
+        val teardown = liveConn
+        state = State.Idle
+        teardown
+      } else {
+        liveConn.foreach(_.unsubscribe(sink.kind, emptied))
+        None
+      }
+    }.foreach(_.close())
   }
 
   // must hold lock. Change the state to Closed and return the current and establishing connections for the caller to close.
   private def markClosed(): Vector[Conn] = {
-    val conns = (Option(current) ++ establishing).toVector
+    val conns = (liveConn ++ establishing).toVector
     establishing.clear()
     state = State.Closed
-    stopWatchdog()
-    current = null
-    established.signalAll()
-    confirmed.signalAll()
+    changed.signalAll()
     conns
   }
 
   // check for subscribers and set Closed under one lock, preventing attach from registering a subscriber between those operations
   def closeIfEmpty(): Boolean = {
-    var toClose: Vector[Conn] = Vector.empty
-    val closing               = locked {
-      if (!isEmptyUnlocked) false
-      else {
-        toClose = markClosed()
-        true
-      }
-    }
-    toClose.foreach(_.close())
-    closing
+    val toClose = locked(Option.when(isEmptyUnlocked)(markClosed()))
+    toClose.foreach(_.foreach(_.close()))
+    toClose.nonEmpty
   }
 
-  // close the socket and watchdog but keep subscribers available for reassignment.
-  def shutdown(): Unit = tearDown(terminateSinks = false)
-
-  def close(): Unit = tearDown(terminateSinks = true)
-
-  private def tearDown(terminateSinks: Boolean): Unit = {
-    var sinks: Set[Sink] = Set.empty
-    val toClose          = locked {
-      if (terminateSinks) sinks = sinksByKind.iterator.flatMap(_.values.flatten).toSet
+  def close(): Unit = {
+    val (sinks, toClose) = locked {
+      val sinks = sinksByKind.iterator.flatMap(_.values.flatMap(_.sinks)).toSet
       val conns = markClosed()
       sinksByKind.foreach(_.clear())
-      conns
+      (sinks, conns)
     }
     // Terminate sinks before closing connections. Connection close waits for the reader, and the reader may be waiting in Sink.offer until
-    // its sink is closed. Closing the connection first would deadlock. In cluster mode, the manager has already terminated the sinks.
+    // its sink is closed. Closing the connection first would deadlock. For shard connections, the cluster manager has already terminated the sinks.
     sinks.foreach(_.terminate())
     toClose.foreach(_.close())
   }
 
-  private def register(sink: Sink, names: Vector[String], kind: Kind): Vector[String] = {
-    val map   = sinksFor(kind)
-    val fresh = Vector.newBuilder[String]
-    names.foreach { name =>
-      val set = map.getOrElseUpdate(name, mutable.LinkedHashSet.empty)
-      if (set.isEmpty) fresh += name
-      set += sink
-    }
-    fresh.result()
+  // returns the Names of `names` and the ones this call created, which still need a subscribe
+  private def register(sink: Sink, names: Vector[String]): (Vector[Name], Vector[Name]) = {
+    val created = Vector.newBuilder[Name]
+    val all     = names.map(name => sinksFor(sink.kind).getOrElseUpdate(name, { val n = new Name(sink.kind, name); created += n; n }))
+    all.foreach(_.sinks += sink)
+    (all, created.result())
   }
 
-  private def deregister(sink: Sink, names: Vector[String], kind: Kind): Vector[String] = {
-    val map     = sinksFor(kind)
+  private def deregister(sink: Sink, names: Vector[String]): Vector[String] = {
+    val map     = sinksFor(sink.kind)
     val emptied = Vector.newBuilder[String]
     names.foreach { name =>
-      map.get(name).foreach { set =>
-        set -= sink
-        if (set.isEmpty) {
+      map.get(name).foreach { n =>
+        n.sinks -= sink
+        if (n.sinks.isEmpty) {
           map -= name
           emptied += name
         }
@@ -494,119 +359,133 @@ final private[client] class SubscriptionConnection(
     emptied.result()
   }
 
-  private def startWatchdog(): Unit =
-    if (watchdog.enabled && watchdogHandle == null)
-      watchdogHandle = scheduler.every(watchdog.pingInterval)(watchdogTick())
-
-  private def stopWatchdog(): Unit =
-    if (watchdogHandle != null) {
-      watchdogHandle.cancel()
-      watchdogHandle = null
-    }
-
-  private def watchdogTick(): Unit = {
-    if (readerBlocked) return // deliberate backpressure on a slow consumer; the connection is alive, not stuck
-    val conn = locked(if (state == State.Live) current else null)
-    if (conn != null) {
-      val now = scheduler.nowMillis
-      if (pingSentAtMillis != 0L) {
-        // Recent backpressure may have kept the reader from reaching the queued PONG. When the sink has room, an unanswered PING still closes
-        // the connection after the timeout.
-        val backpressured = now - lastBackpressureMillis < watchdog.pingTimeout.toMillis
-        if (!backpressured && now - pingSentAtMillis >= watchdog.pingTimeout.toMillis) scheduler.after(Duration.Zero)(conn.close())
-      } else if (now - lastReplyAtMillis >= watchdog.pingInterval.toMillis) {
-        pingSentAtMillis = now
-        conn.send(Connection.ping(None).encode)
-      }
-    }
+  // One registered name and its sinks, guarded by `lock`. `confirmedOn` is the last connection that confirmed it, so after a reconnect the
+  // name counts as active only once the new connection confirms it.
+  final private class Name(val kind: Kind, val name: String) {
+    val sinks                     = mutable.LinkedHashSet.empty[Sink]
+    var confirmedOn: Option[Conn] = None
   }
 
-  final private class Conn {
+  // Replies (bootstrap, subscribed and unsubscribed names, and watchdog PING) match their entries in write order; a reply with nothing pending
+  // closes the connection.
+  final private class Conn extends WatchedPipe(factory, scheduler, config.watchdog) {
 
-    private val transportRef         = new AtomicReference[Transport]()
-    @volatile private var terminated = false
-    @volatile private var aborted    = false
-    private val bootstrapWaiter      = new AtomicReference[Try[Frame] => Unit]()
+    // Each name is its own entry, answered in write order by its confirmation push or by an error reply such as NOPERM or MOVED.
+    def subscribe(names: Vector[Name]): Unit = sendEach(names.map(name => new Entry(name.kind.subscribe(name.name), confirm(this, name))))
 
-    def isTerminated: Boolean = terminated
+    // An UNSUBSCRIBE or PUNSUBSCRIBE is answered by its own push. The push of an SUNSUBSCRIBE is ambiguous: a cluster node sends the same
+    // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). One HELLO
+    // written after the SUNSUBSCRIBEs ends their replies: an error before the HELLO's reply is one of theirs, and their pushes go to onPush.
+    // Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
+    def unsubscribe(kind: Kind, names: Vector[String]): Unit =
+      if (kind != Kind.Shard) sendEach(names.map(name => new Entry(kind.unsubscribe(name), _ => ())))
+      else if (names.nonEmpty) sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilHello)) :+ new Entry(Pubsub.helloInfo, afterHello))
 
-    def start(): Unit = {
-      val transport = factory(frame => onFrame(this, frame), () => onTerminated())
-      transportRef.set(transport)
-      if (aborted) transport.close()
-      else transport.start()
+    // used on the reader thread only, while the HELLO's reply is passed on to its own entry
+    private var passing = false
+    private var reached = false
+
+    // The first SUNSUBSCRIBE still pending receives the HELLO's reply and passes it on in a loop, not recursively, so a long batch cannot
+    // overflow the stack.
+    private val untilHello: Try[Frame] => Unit = {
+      case Success(reply) if !passing =>
+        passing = true
+        reached = false
+        try while (!reached && !isDead) answer(reply)
+        finally passing = false
+      case _                          => ()
     }
 
-    private def onTerminated(): Unit = {
-      terminated = true
-      completeBootstrap(Failure(ConnectionLost(mayHaveExecuted = false)))
+    // ACL does not refuse an argument-less HELLO, so an error here means that replies no longer match their entries
+    private val afterHello: Try[Frame] => Unit = { result =>
+      reached = true
+      result match {
+        case Failure(_: ServerError) => this.close()
+        case _                       => ()
+      }
+    }
+
+    private def sendEach(entries: Vector[Entry[?]]): Unit =
+      if (entries.nonEmpty) {
+        reserve(entries.size)
+        sendAll(entries)
+      }
+
+    @volatile var readerBlocked: Boolean       = false
+    @volatile var lastBackpressureMillis: Long = 0L
+
+    // Recent backpressure may have kept the reader from reaching the probe's reply. When the sink has room, an unanswered probe still closes
+    // the connection after the timeout.
+    override protected def tick(): Unit =
+      if (!readerBlocked) // deliberate backpressure on a slow consumer; the connection is alive, not stuck
+        checkLiveness(lastBackpressureMillis + config.watchdog.pingTimeout.toMillis)
+
+    protected def onPush(elements: Vector[Frame]): Unit =
+      Pubsub.decode(elements).foreach {
+        case Pubsub.Event.Confirmed                               => answer(Frame.Push(elements))
+        case Pubsub.Event.Delivered(kind, subscription, delivery) => dispatch(this, sinksFor(kind), subscription, delivery)
+        // The server dropped the channel only if it is still registered and confirmed here. An unsubscribed channel has left the registry.
+        case Pubsub.Event.ShardUnsubscribed(channel)              =>
+          onLoss match {
+            case OnLoss.Report(_, onDropped, _)
+                if locked(
+                  sinksFor(Kind.Shard).get(channel).exists(_.confirmedOn.exists(_ eq this)) && sinksFor(Kind.Shard).remove(channel).isDefined
+                ) =>
+              onDropped()
+            case _ => ()
+          }
+      }
+
+    override protected def onClosed(): Unit = {
+      super.onClosed()
       onConnClosed(this)
-    }
-
-    def armBootstrap(waiter: Try[Frame] => Unit): Unit = bootstrapWaiter.set(waiter)
-    def clearBootstrap(): Unit                         = bootstrapWaiter.set(null)
-
-    def completeBootstrap(result: Try[Frame]): Boolean = {
-      val waiter = bootstrapWaiter.getAndSet(null)
-      if (waiter != null) {
-        waiter(result)
-        true
-      } else false
-    }
-
-    def send(payload: Bytes): Unit = {
-      val transport = transportRef.get()
-      if (transport != null) transport.send(new RawItem(payload))
-    }
-
-    def close(): Unit = {
-      aborted = true
-      val transport = transportRef.get()
-      if (transport != null) transport.close()
     }
   }
 }
 
 private[client] object SubscriptionConnection {
 
-  private enum State {
-    case Idle, Establishing, Live, Reconnecting, Closed
+  // What a lost connection does: reconnect and restore its subscribers, or report the loss (cluster shard channels).
+  enum OnLoss {
+    // `node` names the node of the last attempt in reported failures. With `immediately`, the first attempt after a stable period does not wait.
+    case Reconnect(beforeAttempt: () => Unit, events: Events, node: () => Option[Node] = () => None, immediately: Boolean = false)
+    // onDropped runs when the server drops a shard channel without closing the connection, as it does when the channel's slot moves, and
+    // onMoved when the server refuses a shard channel with a redirect or another retryable error
+    case Report(onTerminated: SubscriptionConnection => Unit, onDropped: () => Unit, onMoved: () => Unit)
   }
 
-  /**
-    * The three subscription kinds, each with its wire encoders: classic channels (`SUBSCRIBE`), glob patterns (`PSUBSCRIBE`), and shard
-    * channels (`SSUBSCRIBE`).
-    */
-  private[internal] enum Kind {
-    case Channel, Pattern, Shard
+  export Pubsub.{Delivery, Kind}
 
-    def subscribeWire(names: Vector[String]): Bytes =
-      this match {
-        case Channel => Pubsub.subscribe(names)
-        case Pattern => Pubsub.psubscribe(names)
-        case Shard   => Pubsub.ssubscribe(names)
+  // The errors a subscribe gets every time it is sent: an ACL denial, or a command or argument the server does not support.
+  private def refuses(error: ServerError): Boolean = error.code == "NOPERM" || error.code == "ERR"
+
+  // Connects each attempt to the node `pick` names at that time. `retain` closes that connection once its node leaves the deployment, and
+  // the connection then reconnects to a current node.
+  final class Following(nodeFactory: Node => MultiplexedConnection.TransportFactory, pick: () => Option[Node]) {
+
+    @volatile private var on: Option[(Node, Transport)] = None
+    // the node of the latest attempt, recorded before connecting so that a failed attempt reports it
+    @volatile var node: Option[Node]                    = None
+
+    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+      node = pick()
+      node match {
+        case Some(target) =>
+          val transport = nodeFactory(target)(onFrame, onClosed)
+          on = Some(target -> transport)
+          transport
+        case None         => throw NotConnected()
       }
+    }
 
-    def unsubscribeWire(names: Vector[String]): Bytes =
-      this match {
-        case Channel => Pubsub.unsubscribe(names)
-        case Pattern => Pubsub.punsubscribe(names)
-        case Shard   => Pubsub.sunsubscribe(names)
-      }
+    def retain(listed: Node => Boolean): Unit = on.foreach { case (node, transport) => if (!listed(node)) transport.close() }
   }
 
-  /**
-    * A raw delivery sent to a subscription buffer. Shard channel messages use [[Channel]] because they contain the same channel and payload.
-    */
-  enum Delivery {
-    case Channel(channel: String, payload: Bytes)
-    case Pattern(pattern: String, channel: String, payload: Bytes)
-  }
-
-  // pub/sub writes (SUBSCRIBE/UNSUBSCRIBE) are confirmed by push frames, not a per-write reply, so the write hooks are no-ops
-  final private class RawItem(val payload: Bytes) extends Transport.Item {
-    def writeAttempted(): Unit = ()
-    def dropped(): Unit        = ()
+  trait PubSub {
+    def subscribeChannels(channels: Vector[String]): RawSubscription
+    def subscribePatterns(patterns: Vector[String]): RawSubscription
+    def subscribeShard(channels: Vector[String]): RawSubscription
+    def close(): Unit
   }
 
   /**
@@ -617,12 +496,13 @@ private[client] object SubscriptionConnection {
     */
   final private[internal] class Sink(val names: Vector[String], val kind: Kind, capacity: Int) {
 
-    private val cap                              = math.max(1, capacity)
     private val lock                             = new ReentrantLock()
     private val notFull                          = lock.newCondition()
-    private val backlog                          = new java.util.ArrayDeque[Delivery](cap)
+    private val backlog                          = new java.util.ArrayDeque[Delivery](capacity)
     private var waiter: Option[Delivery] => Unit = null
-    private var closed                           = false
+    // `failure` holds the server's error when it ended the subscription by refusing a name; both are written under `lock`, failure first
+    @volatile var failure: Option[Throwable]     = None
+    @volatile private var ended                  = false
 
     def next(callback: Option[Delivery] => Unit): Unit = {
       var ready: Option[Delivery] = null // null means the callback was stored; a non-null value is delivered immediately
@@ -634,7 +514,7 @@ private[client] object SubscriptionConnection {
         if (head != null) {
           notFull.signal()
           ready = Some(head)
-        } else if (closed) ready = None
+        } else if (ended) ready = None
         else waiter = callback
       } finally lock.unlock()
       if (ready != null) callback(ready)
@@ -653,12 +533,12 @@ private[client] object SubscriptionConnection {
       try {
         var settled = false
         while (!settled)
-          if (closed) settled = true
+          if (ended) settled = true
           else if (waiter != null) {
             hungry = waiter
             waiter = null
             settled = true
-          } else if (backlog.size < cap) {
+          } else if (backlog.size < capacity) {
             backlog.add(delivery)
             settled = true
           } else {
@@ -671,25 +551,36 @@ private[client] object SubscriptionConnection {
       blocked
     }
 
-    def terminate(): Unit = {
+    def terminate(): Unit = end(None)()
+
+    // Ends the subscription, with the server's error if it refused a name, and returns the call that wakes a waiting consumer, to run after
+    // the caller's locks are released. Only the first end counts.
+    def end(error: Option[Throwable]): () => Unit = {
       var pending: Option[Delivery] => Unit = null
       lock.lock()
       try {
-        closed = true
+        if (!ended) {
+          failure = error
+          ended = true
+        }
         backlog.clear()
         pending = waiter
         waiter = null
         notFull.signalAll() // release a reader blocked on backpressure
       } finally lock.unlock()
-      if (pending != null) pending(None)
+      () => if (pending != null) pending(None)
     }
   }
 
   final class RawSubscription private[internal] (sink: Sink, onClose: () => Unit) {
 
+    // None once the subscription has ended
     def next(callback: Option[Delivery] => Unit): Unit = sink.next(callback)
 
     def cancelNext(callback: Option[Delivery] => Unit): Unit = sink.cancelNext(callback)
+
+    // the server's error when it ended the subscription by refusing a name
+    def failure: Option[Throwable] = sink.failure
 
     def close(): Unit = onClose()
   }

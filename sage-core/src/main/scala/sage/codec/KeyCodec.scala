@@ -44,38 +44,36 @@ object KeyCodec {
   /**
     * Builds a key codec from encode and decode functions. The decoder returns `Either` for invalid input.
     */
-  def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): KeyCodec[A] = instance(enc, dec)
-
-  /**
-    * UTF-8 text; decoding rejects malformed UTF-8.
-    */
-  given string: KeyCodec[String] = instance(Bytes.utf8, Primitives.decodeUtf8)
-
-  /**
-    * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
-    */
-  given int: KeyCodec[Int] = instance(Primitives.encodeInt, Primitives.decodeNumber("Int", Primitives.parseInt))
-
-  /**
-    * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
-    */
-  given long: KeyCodec[Long] = instance(Primitives.encodeLong, Primitives.decodeNumber("Long", Primitives.parseLong))
-
-  /**
-    * Raw [[sage.Bytes]], passed through unchanged in both directions.
-    */
-  given bytes: KeyCodec[Bytes] = instance(identity, Right(_))
-
-  /**
-    * Raw `Array[Byte]`, copied at the boundary in both directions (see [[sage.Bytes.fromArray]]/[[sage.Bytes.toArray]]).
-    */
-  given byteArray: KeyCodec[Array[Byte]] = instance(Bytes.fromArray, raw => Right(raw.toArray))
-
-  private def instance[A](enc: A => Bytes, dec: Bytes => Either[DecodeError, A]): KeyCodec[A] =
+  def from[A](enc: A => Bytes)(dec: Bytes => Either[DecodeError, A]): KeyCodec[A] =
     new KeyCodec[A] {
 
       def encode(value: A): Bytes = enc(value)
 
       def decode(bytes: Bytes): Either[DecodeError, A] = dec(bytes)
     }
+
+  /**
+    * UTF-8 text; decoding rejects malformed UTF-8.
+    */
+  given string: KeyCodec[String] = from(Bytes.utf8)(Primitives.decodeUtf8)
+
+  /**
+    * Decimal `Int`; decoding rejects non-numeric or out-of-range input.
+    */
+  given int: KeyCodec[Int] = from(Primitives.encodeInt)(Primitives.decodeLong("Int", Int.MinValue, Int.MaxValue)(_).map(_.toInt))
+
+  /**
+    * Decimal `Long`; decoding rejects non-numeric or out-of-range input.
+    */
+  given long: KeyCodec[Long] = from(Primitives.encodeLong)(Primitives.decodeLong("Long", Long.MinValue, Long.MaxValue))
+
+  /**
+    * Raw [[sage.Bytes]], passed through unchanged in both directions.
+    */
+  given bytes: KeyCodec[Bytes] = from[Bytes](identity)(Right(_))
+
+  /**
+    * Raw `Array[Byte]`, copied at the boundary in both directions (see [[sage.Bytes.fromArray]]/[[sage.Bytes.toArray]]).
+    */
+  given byteArray: KeyCodec[Array[Byte]] = from(Bytes.fromArray)(raw => Right(raw.toArray))
 }

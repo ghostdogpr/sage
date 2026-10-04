@@ -3,6 +3,7 @@ package sage.commands
 import sage.Bytes
 import sage.SageException.DecodeError
 import sage.codec.{Doubles, KeyCodec, ValueCodec}
+import sage.commands.Args.{Nx, Xx}
 import sage.protocol.Frame
 
 /**
@@ -39,23 +40,12 @@ enum JsonType {
 
 object JsonType {
 
-  private[commands] def fromWireName(name: java.lang.String): JsonType =
-    name match {
-      case "object"  => Object
-      case "array"   => Array
-      case "string"  => String
-      case "number"  => Number
-      case "integer" => Integer
-      case "boolean" => Boolean
-      case "null"    => Null
-      case other     => Other(other)
-    }
+  private val byWireName = Decode.byLowerName(Object, Array, String, Number, Integer, Boolean, Null)
+
+  private[commands] def fromWireName(name: java.lang.String): JsonType = byWireName.getOrElse(name, Other(name))
 }
 
 private[sage] object Json {
-
-  private val Nx = Bytes.utf8("NX")
-  private val Xx = Bytes.utf8("XX")
 
   def jsonSet[K, V](key: K, path: JsonPath, value: V, condition: JsonSetCondition = JsonSetCondition.Always)(
     using keyCodec: KeyCodec[K],
@@ -65,11 +55,7 @@ private[sage] object Json {
       "JSON.SET",
       Command.FirstKey,
       Vector(keyCodec.encode(key), JsonPath.encode(path), valueCodec.encode(value)) ++ conditionArgs(condition),
-      decode = {
-        case Frame.SimpleString("OK") => Right(true)
-        case Frame.Null               => Right(false)
-        case other                    => Left(DecodeError("simple string 'OK' or null", Frame.describe(other)))
-      }
+      Decode.okOrNull
     )
 
   def jsonGet[K, V](key: K, paths: JsonPath*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[V]] =
@@ -126,7 +112,7 @@ private[sage] object Json {
     Command(
       "JSON.NUMINCRBY",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), Bytes.utf8(Doubles.format(increment))),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), Args.double(increment)),
       numResult
     )
 
@@ -134,7 +120,7 @@ private[sage] object Json {
     Command(
       "JSON.NUMMULTBY",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), Bytes.utf8(Doubles.format(multiplier))),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), Args.double(multiplier)),
       numResult
     )
 
@@ -156,7 +142,7 @@ private[sage] object Json {
     Command.read(
       "JSON.ARRINDEX",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), valueCodec.encode(value), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), valueCodec.encode(value), Args.long(start), Args.long(stop)),
       pathMulti(Decode.optionalLong)
     )
 
@@ -167,7 +153,7 @@ private[sage] object Json {
     Command(
       "JSON.ARRINSERT",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), Bytes.utf8(index.toString)) ++ (first +: rest.toVector).map(valueCodec.encode),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), Args.long(index)) ++ (first +: rest.toVector).map(valueCodec.encode),
       pathMulti(Decode.optionalLong)
     )
 
@@ -181,7 +167,7 @@ private[sage] object Json {
     Command(
       "JSON.ARRPOP",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), Bytes.utf8(index.toString)),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), Args.long(index)),
       pathMulti(Decode.optionalValue)
     )
 
@@ -189,7 +175,7 @@ private[sage] object Json {
     Command(
       "JSON.ARRTRIM",
       Command.FirstKey,
-      Vector(keyCodec.encode(key), JsonPath.encode(path), Bytes.utf8(start.toString), Bytes.utf8(stop.toString)),
+      Vector(keyCodec.encode(key), JsonPath.encode(path), Args.long(start), Args.long(stop)),
       pathMulti(Decode.optionalLong)
     )
 
@@ -211,10 +197,8 @@ private[sage] object Json {
     Command.readUncacheable("JSON.RESP", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), Decode.frame)
 
   // JSONPath commands return an array with one value for each match. A legacy path without $ returns a single value and is rejected here.
-  private def pathMulti[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] = {
-    case array @ Frame.Array(_) => Decode.vector(element)(array)
-    case other                  => Left(DecodeError("a JSONPath ($) reply array (legacy '.' paths are unsupported)", Frame.describe(other)))
-  }
+  private def pathMulti[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] =
+    Decode.vector(element, "a JSONPath ($) reply array (legacy '.' paths are unsupported)")
 
   private def conditionArgs(condition: JsonSetCondition): Vector[Bytes] =
     condition match {
@@ -226,45 +210,37 @@ private[sage] object Json {
   private def tripleArgs[K, V](triple: (K, JsonPath, V))(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Vector[Bytes] =
     Vector(keyCodec.encode(triple._1), JsonPath.encode(triple._2), valueCodec.encode(triple._3))
 
-  private val optionalFlag: Frame => Either[DecodeError, Option[Boolean]] = {
+  private val optionalFlag: Frame => Either[DecodeError, Option[Boolean]] = Decode.shape("integer 0 or 1, or null") {
     case Frame.Null       => Right(None)
     case Frame.Integer(0) => Right(Some(false))
     case Frame.Integer(1) => Right(Some(true))
-    case other            => Left(DecodeError("integer 0 or 1, or null", Frame.describe(other)))
   }
 
-  private val optionalKeys: Frame => Either[DecodeError, Option[Vector[String]]] = {
-    case Frame.Null             => Right(None)
-    case array @ Frame.Array(_) => Decode.vector(Decode.utf8String)(array).map(Some(_))
-    case other                  => Left(DecodeError("array of keys, or null", Frame.describe(other)))
-  }
+  private val optionalKeys = Decode.nullable(Decode.vector(Decode.utf8String, "array of keys, or null"))
 
-  private val optionalTypeName: Frame => Either[DecodeError, Option[JsonType]] = {
+  private val optionalTypeName: Frame => Either[DecodeError, Option[JsonType]] = Decode.shape("type name string or null") {
     case Frame.Null            => Right(None)
     case Frame.SimpleString(v) => Right(Some(JsonType.fromWireName(v)))
     case Frame.BulkString(b)   => Right(Some(JsonType.fromWireName(b.asUtf8String)))
-    case other                 => Left(DecodeError("type name string or null", Frame.describe(other)))
   }
 
   // JSON.TYPE: Redis wraps the whole type list in one outer array, Valkey replies it flat; unify to one type name per match
-  private val typeReply: Frame => Either[DecodeError, Vector[Option[JsonType]]] = {
-    case Frame.Array(Vector(Frame.Array(inner))) => Decode.each(inner)(optionalTypeName)
-    case Frame.Array(elements)                   => Decode.each(elements)(optionalTypeName)
-    case other                                   => Left(DecodeError("a JSONPath ($) reply array of type names (legacy '.' paths are unsupported)", Frame.describe(other)))
-  }
+  private val typeReply: Frame => Either[DecodeError, Vector[Option[JsonType]]] =
+    Decode.shape("a JSONPath ($) reply array of type names (legacy '.' paths are unsupported)") {
+      case Frame.Array(Vector(Frame.Array(inner))) => Decode.each(inner)(optionalTypeName)
+      case Frame.Array(elements)                   => Decode.each(elements)(optionalTypeName)
+    }
 
-  private val optionalNumber: Frame => Either[DecodeError, Option[Double]] = {
+  private val optionalNumber: Frame => Either[DecodeError, Option[Double]] = Decode.shape("number or null") {
     case Frame.Null       => Right(None)
     case Frame.Integer(v) => Right(Some(v.toDouble))
     case Frame.Double(v)  => Right(Some(v))
-    case other            => Left(DecodeError("number or null", Frame.describe(other)))
   }
 
   // JSON.NUMINCRBY: Redis replies a RESP3 number array, Valkey a JSON-array bulk string; unify to one new value per match
-  private val numResult: Frame => Either[DecodeError, Vector[Option[Double]]] = {
+  private val numResult: Frame => Either[DecodeError, Vector[Option[Double]]] = Decode.shape("array of numbers or a JSON array string") {
     case Frame.Array(elements)   => Decode.each(elements)(optionalNumber)
     case Frame.BulkString(bytes) => parseNumberArray(bytes.asUtf8String)
-    case other                   => Left(DecodeError("array of numbers or a JSON array string", Frame.describe(other)))
   }
 
   private def parseNumberArray(text: String): Either[DecodeError, Vector[Option[Double]]] = {

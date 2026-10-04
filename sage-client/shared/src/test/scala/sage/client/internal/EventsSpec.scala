@@ -9,7 +9,7 @@ import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success}
 
 import sage.{Bytes, CommandTracer, SageEvent, SageListener}
-import sage.client.{BackoffConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, CacheConfig, SageConfig, WatchdogConfig}
 import sage.cluster.Node
 import sage.commands.{Connection, Strings}
 import sage.protocol.Frame
@@ -40,17 +40,30 @@ class EventsSpec extends munit.FunSuite {
   private def connect(
     node: Option[Node],
     events: Events,
-    respond: Bytes => Seq[Frame] = _ => Nil
+    respond: Bytes => Seq[Frame] = _ => Nil,
+    clientCache: CacheConfig = CacheConfig(enabled = false)
   ): (MultiplexedConnection, mutable.ArrayBuffer[FakeTransport]) = {
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, respond)
+      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(respond))
       transports += transport
       transport
     }
     val connection                                      =
-      MultiplexedConnection
-        .connect(factory, new ManualScheduler, Vector.empty, fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, events)
+      new MultiplexedConnection(
+        factory,
+        new ManualScheduler,
+        SageConfig(
+          reconnect = fixedBackoff,
+          watchdog = noWatchdog,
+          connectTimeout = 1.second,
+          closeTimeout = Duration.Zero,
+          clientCache = clientCache
+        ),
+        MultiplexedConnection.NodeRole.Master,
+        node,
+        events
+      ).start()
     (connection, transports)
   }
 
@@ -198,6 +211,19 @@ class EventsSpec extends munit.FunSuite {
 
   // --- command completion ----------------------------------------------------------------------------------------------------------------
 
+  test("a submit interrupted on the caller's thread still completes the tracked command") {
+    val rec         = new Recording
+    var settled     = Option.empty[scala.util.Try[String]]
+    val tracked     = Events.trackCommand[String](rec, Connection.ping(None), r => settled = Some(r))
+    val interrupted = new InterruptedException
+    Client.completing(tracked)(throw interrupted)
+    assertEquals(settled, Some(Failure(interrupted)))
+    rec.events match {
+      case Vector(SageEvent.CommandCompleted("PING", None, _, sage.Outcome.Failed(`interrupted`))) => ()
+      case other                                                                                   => fail(s"unexpected: $other")
+    }
+  }
+
   test("trackCommand emits a completion with name and outcome, and is transparent when disabled") {
     val rec                                = new Recording
     var settled                            = Option.empty[String]
@@ -224,44 +250,15 @@ class EventsSpec extends munit.FunSuite {
     }
   }
 
-  test("submitBatchOnOne attributes each completion to the selected node, and routes its span there") {
+  test("a tracked batch attributes each completion to the selected node, and routes its span there") {
     val tracer   = new RecordingTracer
     val rec      = new Recording(Some(tracer))
     val node     = Node("replica", 7001)
     val commands = Vector(Connection.ping(None))
-    Client.submitBatchOnOne(
-      rec,
-      commands,
-      Events.startSpans(rec, commands),
-      (_, cbs) => {
-        cbs.foreach(_(Success("PONG")))
-        true
-      },
-      _ => (),
-      onUnsent = () => (),
-      node = Some(node)
-    )
+    val batch    = new Client.TrackedBatch(rec, commands, Events.startSpans(rec, commands), _ => ())
+    batch.callbacks(Some(node)).foreach(_(Success("PONG")))
     assertEquals(rec.events.collect { case c: SageEvent.CommandCompleted => c.node }, Vector(Some(node)))
     assert(tracer.log.contains(s"routed:${node.host}:${node.port}"), s"expected routedTo the selected node, got ${tracer.log.toVector}")
-  }
-
-  test("submitBatchOnOne attributes no node when the batch is not submitted, even if a target was selected") {
-    val tracer                                                             = new RecordingTracer
-    val rec                                                                = new Recording(Some(tracer))
-    val commands                                                           = Vector(Connection.ping(None), Connection.ping(None))
-    var completed: scala.util.Try[Vector[Either[sage.SageException, Any]]] = null
-    Client.submitBatchOnOne(
-      rec,
-      commands,
-      Events.startSpans(rec, commands),
-      (_, _) => false,
-      r => completed = r,
-      onUnsent = () => (),
-      node = Some(Node("replica", 7001))
-    )
-    assert(completed != null && completed.isFailure, s"an unsubmitted batch must fail the effect, got $completed")
-    assertEquals(rec.events.collect { case c: SageEvent.CommandCompleted => c.node }, Vector(None, None))
-    assert(!tracer.log.exists(_.startsWith("routed:")), s"an unsent batch must route no span, got ${tracer.log.toVector}")
   }
 
   // --- tracing ---------------------------------------------------------------------------------------------------------------------------
@@ -360,16 +357,29 @@ class EventsSpec extends munit.FunSuite {
     val node                                            = Some(Node("shard-a", 6379))
     val rec                                             = new Recording
     val scheduler                                       = new ManualScheduler
-    var healthy                                         = true // first establish's PING succeeds; the reconnect's is rejected, as a rotated password would be
+    var healthy                                         = true // first establish's HELLO succeeds; the reconnect's is rejected, as a rotated password would be
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val respond: Bytes => Seq[Frame] = _ => Seq(if (healthy) Frame.SimpleString("PONG") else Frame.SimpleError("WRONGPASS invalid password"))
+      val respond: Bytes => Seq[Frame] =
+        payload => if (healthy) Replies.withSetup(_ => Nil)(payload) else Seq(Frame.SimpleError("WRONGPASS invalid password"))
       val t                            = new FakeTransport(onFrame, onClosed, respond)
       transports += t
       t
     }
-    MultiplexedConnection
-      .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec): Unit
+    new MultiplexedConnection(
+      factory,
+      scheduler,
+      SageConfig(
+        clientCache = CacheConfig(enabled = false),
+        reconnect = fixedBackoff,
+        watchdog = noWatchdog,
+        connectTimeout = 1.second,
+        closeTimeout = Duration.Zero
+      ),
+      MultiplexedConnection.NodeRole.Master,
+      node,
+      rec
+    ).start(): Unit
 
     healthy = false
     transports.head.close()
@@ -393,7 +403,7 @@ class EventsSpec extends munit.FunSuite {
     val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
       attempt += 1
       if (attempt == 1) {
-        val t = new FakeTransport(onFrame, onClosed, _ => Seq(Frame.SimpleString("PONG")))
+        val t = new FakeTransport(onFrame, onClosed, Replies.withSetup(_ => Nil))
         first.set(t)
         t
       } else
@@ -406,8 +416,20 @@ class EventsSpec extends munit.FunSuite {
           def close(): Unit                    = ()
         }
     }
-    connection = MultiplexedConnection
-      .connect(factory, scheduler, Vector(Connection.ping()), fixedBackoff, noWatchdog, 1.second, Duration.Zero, 1L << 20, node, rec)
+    connection = new MultiplexedConnection(
+      factory,
+      scheduler,
+      SageConfig(
+        clientCache = CacheConfig(enabled = false),
+        reconnect = fixedBackoff,
+        watchdog = noWatchdog,
+        connectTimeout = 1.second,
+        closeTimeout = Duration.Zero
+      ),
+      MultiplexedConnection.NodeRole.Master,
+      node,
+      rec
+    ).start()
 
     first.get().close()
     scheduler.advance(1.milli)
@@ -428,15 +450,18 @@ class EventsSpec extends munit.FunSuite {
     val (connection, _) = connect(
       None,
       rec,
-      respond = _ => {
-        writes += 1
-        // the first write is the [CLIENT CACHING YES, GET] batch: reply OK to the marker, the value to the read
-        if (writes == 1) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("v"))) else Nil
-      }
+      respond = payload =>
+        if (payload.asUtf8String.contains("TRACKING")) Seq(Frame.SimpleString("OK"))
+        else {
+          writes += 1
+          // the first write is the [CLIENT CACHING YES, GET] batch: reply OK to the marker, the value to the read
+          if (writes == 1) Seq(Frame.SimpleString("OK"), Frame.BulkString(Bytes.utf8("v"))) else Nil
+        },
+      clientCache = CacheConfig(enabled = true, maxBytes = 1L << 20)
     )
     val get             = Strings.get[String, String]("k")
-    connection.cachedSubmit(get, 60000L, (_: scala.util.Try[Option[String]]) => ())
-    connection.cachedSubmit(get, 60000L, (_: scala.util.Try[Option[String]]) => ())
+    for (_ <- 1 to 2)
+      connection.cachedSubmit(get, 60000L, (_: scala.util.Try[Option[String]]) => (), Events.fetchTracking(rec))
     val evs             = rec.events
     assertEquals(evs.collect { case c: SageEvent.Cache => c }, Vector(SageEvent.Cache.Miss("GET"), SageEvent.Cache.Hit("GET")))
     // the miss touched the server, so it also produces one CommandCompleted; the hit produces none
@@ -444,5 +469,32 @@ class EventsSpec extends munit.FunSuite {
       evs.collect { case c: SageEvent.CommandCompleted => (c.name, c.node, c.outcome) },
       Vector(("GET", None, sage.Outcome.Succeeded))
     )
+  }
+
+  test("the parts of a cached read that start fetching at once start one span") {
+    val entered = new CountDownLatch(1)
+    val release = new CountDownLatch(1)
+    val starts  = new java.util.concurrent.atomic.AtomicInteger
+    val tracer  = new CommandTracer {
+      def onCommand(command: sage.commands.Command[?]): sage.CommandSpan = {
+        starts.incrementAndGet()
+        entered.countDown()
+        release.await()
+        sage.CommandSpan.noop
+      }
+    }
+    val get     = Strings.get[String, String]("k")
+    Events.trackCached[Option[String]](new Recording(Some(tracer)), get, _ => ()) { (_, trace) =>
+      def fetch(): Thread = Thread.ofPlatform().start(() => trace.fetching(get, (_: scala.util.Try[Option[String]]) => ()): Unit)
+      val first           = fetch()
+      entered.await()
+      val second          = fetch()
+      // the second part either waits for the first to finish starting the span or starts its own and parks in the tracer
+      while (!Set(Thread.State.BLOCKED, Thread.State.WAITING, Thread.State.TERMINATED).contains(second.getState)) Thread.onSpinWait()
+      release.countDown()
+      first.join()
+      second.join()
+    }
+    assertEquals(starts.get(), 1)
   }
 }
