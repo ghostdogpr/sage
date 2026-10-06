@@ -6,7 +6,7 @@ val scala3Version = "3.9.0"
 val munitVersion          = "1.3.6"
 val testcontainersVersion = "0.44.1"
 val otelVersion           = "1.66.0"
-val circeVersion          = "0.14.16" // test-only: verifies ValueCodec.emap with a real JSON library
+val circeVersion          = "0.14.17" // test-only: verifies ValueCodec.emap with a real JSON library
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC6"
