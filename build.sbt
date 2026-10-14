@@ -10,7 +10,7 @@ val circeVersion          = "0.14.17" // test-only: verifies ValueCodec.emap wit
 
 // backend effect libraries, declared explicitly so Scala Steward keeps them current
 val kyoVersion        = "1.0.0-RC6"
-val zioVersion        = "2.1.26"
+val zioVersion        = "2.1.27"
 val catsEffectVersion = "3.7.1"
 val fs2Version        = "3.14.0"
 val oxVersion         = "1.0.9"
