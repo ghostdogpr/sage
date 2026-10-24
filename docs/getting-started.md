@@ -2,13 +2,17 @@
 
 Sage is a [Redis](https://redis.io) and [Valkey](https://valkey.io) client for [Scala 3](https://www.scala-lang.org/). It implements RESP3, commands, and codecs directly in Scala. The core has no dependencies on an effect system.
 
-Sage provides integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). Each integration uses its ecosystem's native types. The direct client has no dependency on an effect library: each command blocks the calling thread and returns its result, which suits frameworks that run each request on a virtual thread. Sage targets Redis 8+ and Valkey 8+. It supports Scala 3.9.x LTS and later and requires JDK 21 or later.
+Sage provides a direct client for plain blocking code and integrations for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), and [Apache Pekko](https://pekko.apache.org). The direct client has no dependency on an effect library: each command blocks the calling thread and returns its result, which suits frameworks that run each request on a virtual thread. Each integration uses its ecosystem's native types. Sage targets Redis 8+ and Valkey 8+. It supports Scala 3.9.x LTS and later and requires JDK 21 or later.
 
 ## Installation
 
 Add the artifact for your Scala stack. The core is pulled in transitively, so you depend on one module only.
 
 ::: code-group
+
+```scala [Direct]
+"com.github.ghostdogpr" %% "sage-client-direct" % "@VERSION@"
+```
 
 ```scala [Ox]
 "com.github.ghostdogpr" %% "sage-client-ox" % "@VERSION@"
@@ -30,19 +34,31 @@ Add the artifact for your Scala stack. The core is pulled in transitively, so yo
 "com.github.ghostdogpr" %% "sage-client-pekko" % "@VERSION@"
 ```
 
-```scala [Direct]
-"com.github.ghostdogpr" %% "sage-client-direct" % "@VERSION@"
-```
-
 :::
 
 Import `sage.*` for commands and connection configuration. Import `sage.backend.*` for the client. Every backend uses these imports, but each one has a different dependency.
 
 ## Your first connection
 
-A `SageClient` owns all connections to one server or cluster. Build it from a `SageConfig` with the resource type for your backend. Ox and Kyo use a scope, ZIO uses a `ZLayer`, Cats Effect uses a `Resource`, and Pekko and the direct client use a `use` block that closes the client when the program finishes. All six integrations provide the same commands.
+A `SageClient` owns all connections to one server or cluster. Build it from a `SageConfig` with the resource type for your backend. The direct client and Pekko use a `use` block that closes the client when the program finishes, Ox and Kyo use a scope, ZIO uses a `ZLayer`, and Cats Effect uses a `Resource`. All six integrations provide the same commands.
 
 ::: code-group
+
+```scala [Direct]
+import sage.*
+import sage.backend.*
+
+@main def main(): Unit = {
+  val config = SageConfig(
+    topology = Topology.Standalone(Endpoint("localhost", 6379))
+  )
+  SageClient.use(config) { client =>
+    client.set("greeting", "hello")
+    val greeting = client.get[String]("greeting")
+    println(s"greeting=$greeting") // Some("hello")
+  }
+}
+```
 
 ```scala [Ox]
 import ox.supervised
@@ -60,22 +76,6 @@ import sage.backend.*
     val greeting = client.get[String]("greeting")
     println(s"greeting=$greeting") // Some("hello")
   }
-```
-
-```scala [Direct]
-import sage.*
-import sage.backend.*
-
-@main def main(): Unit = {
-  val config = SageConfig(
-    topology = Topology.Standalone(Endpoint("localhost", 6379))
-  )
-  SageClient.use(config) { client =>
-    client.set("greeting", "hello")
-    val greeting = client.get[String]("greeting")
-    println(s"greeting=$greeting") // Some("hello")
-  }
-}
 ```
 
 ```scala [ZIO]
@@ -182,7 +182,7 @@ Transactions and blocking commands such as `WATCH`, `MULTI`, `EXEC`, and `BLPOP`
 
 ## A short tour
 
-Choose your backend tab in the examples below. Ox returns values directly. The other backends use a for-comprehension over their effect type. Pekko uses `Future`, so each `for` needs an `ExecutionContext`. Every example assumes that `client` and the imports for the effect type are in scope.
+Choose your backend tab in the examples below. The direct client and Ox return values directly. The other backends use a for-comprehension over their effect type. Pekko uses `Future`, so each `for` needs an `ExecutionContext`. Every example assumes that `client` and the imports for the effect type are in scope.
 
 ### Commands
 
@@ -190,7 +190,7 @@ Method names match Redis commands and are grouped by family (strings, hashes, li
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("greeting", "hello")
 val greeting = client.get[String]("greeting") // Some("hello")
 client.incrBy("counter", 10)
@@ -225,7 +225,7 @@ Put commands in a pipeline to send them in one round trip and receive a typed tu
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("pipe:a", "x")
 client.set("pipe:n", 10)
 val tuple = client.pipeline(
@@ -255,7 +255,7 @@ A transaction runs a pipeline atomically with `MULTI` and `EXEC`. You can use `W
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("tx:n", 1)
 val result = client.transaction { tx =>
   tx.watch("tx:n")
@@ -290,23 +290,23 @@ The distinction is covered in [Pipelines & transactions](/pipelines-transactions
 
 ### Pub/Sub
 
-Subscribing returns the backend's native stream type. Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, Pekko returns `Source`, and the direct client returns a blocking `Iterator` that you close to unsubscribe. Ending the stream or closing its scope unsubscribes.
+Subscribing returns the backend's native stream type. The direct client returns a blocking `Iterator` that you close to unsubscribe, Ox returns `Flow`, ZIO returns `ZStream`, Cats Effect returns an fs2 `Stream`, Kyo returns `Stream`, and Pekko returns `Source`. Ending the stream or closing its scope unsubscribes.
 
 These examples publish immediately after subscribing, so they use the variant that waits for the server to confirm the subscription first. [Pub/Sub](/pubsub) explains when you need it.
 
 ::: code-group
-
-```scala [Ox]
-val news = client.subscribeScoped[String]("news")
-(1 to 3).foreach(i => client.publish("news", s"item-$i"))
-val messages = news.take(3).runToList()
-```
 
 ```scala [Direct]
 val messages = Using.resource(client.subscribe[String]("news")) { news =>
   (1 to 3).foreach(i => client.publish("news", s"item-$i"))
   news.take(3).map(_.payload).toList
 }
+```
+
+```scala [Ox]
+val news = client.subscribeScoped[String]("news")
+(1 to 3).foreach(i => client.publish("news", s"item-$i"))
+val messages = news.take(3).runToList()
 ```
 
 ```scala [ZIO]
@@ -364,7 +364,7 @@ Opt a read into client-side caching per call. The first read fetches and caches;
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("cached:key", "v1")
 // first fetches and caches; second is a local hit
 val v1 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)

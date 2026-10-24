@@ -8,7 +8,7 @@ A stream is an append-only log. Each entry has an ID made from a millisecond tim
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.del("stream:orders")
 client.xAdd("stream:orders")(("item", "book"), ("qty", "2"))
 client.xAdd("stream:orders")(("item", "pen"), ("qty", "5"))
@@ -37,7 +37,7 @@ A consumer group divides a stream's entries among several consumers without over
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 // create the group reading from the start of the stream
 client.xGroupCreate(
   "stream:orders",
@@ -84,15 +84,15 @@ The same entry can be delivered again after a crash or a failed handler, so make
 
 ::: code-group
 
-```scala [Ox]
-// runs inside a `supervised` scope; tails new entries forever
+```scala [Direct]
+// blocks the calling thread until it is interrupted
 client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => println(s"got ${entry.id}: ${entry.fields}")
 }
 ```
 
-```scala [Direct]
-// blocks the calling thread until it is interrupted
+```scala [Ox]
+// runs inside a `supervised` scope; tails new entries forever
 client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => println(s"got ${entry.id}: ${entry.fields}")
 }

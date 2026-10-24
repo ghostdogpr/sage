@@ -14,7 +14,7 @@ locks.withLock("account:42", waitTimeout = 2.seconds) {
 }
 ```
 
-The body returns your backend's native effect. With Ox, it is a direct-style block. Construct the operation inside the block: an already-started `Future` may run before acquisition. Keep all protected work inside the returned effect. Wait for every child task before the body completes because detached work can continue after Sage releases the lock.
+The body returns your backend's native effect. With the direct client and Ox, it is a plain block of code. Construct the operation inside the block: an already-started `Future` may run before acquisition. Keep all protected work inside the returned effect. Wait for every child task before the body completes because detached work can continue after Sage releases the lock.
 
 ## Waiting for a lock
 

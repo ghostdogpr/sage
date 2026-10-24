@@ -8,7 +8,7 @@ A pipeline sends several `Command` values in one round trip and returns their re
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("pipe:a", "x")
 client.set("pipe:n", 10)
 val tuple = client.pipeline(
@@ -46,7 +46,7 @@ By default, a pipeline fails as a whole if any command fails. Use `pipelineAttem
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("pipe:str", "hello")
 // INCR on a non-numeric string fails only at its own position;
 // the GET still succeeds
@@ -84,7 +84,7 @@ A transaction runs a pipeline atomically with `MULTI`/`EXEC` on a temporary dedi
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("tx:n", 1)
 val result = client.transaction { tx =>
   tx.watch("tx:n")

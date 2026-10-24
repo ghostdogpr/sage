@@ -1,6 +1,6 @@
 # Examples
 
-These runnable examples cover every Sage backend. They use ZIO `Task`, Cats Effect `IO`, Ox direct style, Kyo computations, Pekko `Future` and Pekko Streams, or plain blocking calls with the direct client. The build does not publish this module, but CI compiles it.
+These runnable examples cover every Sage backend. They use plain blocking calls with the direct client, Ox direct style, ZIO `Task`, Cats Effect `IO`, Kyo computations, or Pekko `Future` and Pekko Streams. The build does not publish this module, but CI compiles it.
 
 Import `sage.*` for commands and connection configuration. Import `sage.<backend>.*` for the client.
 
@@ -8,15 +8,15 @@ Import `sage.*` for commands and connection configuration. Import `sage.<backend
 
 ```
 shared/   Domain.scala            a User type with a hand-written ValueCodec, reused by every backend
+direct/   …Example.scala + Tour   the direct tour (plain blocking calls, iterators, and callbacks)
+ox/       …Example.scala + Tour   the Ox tour, plus the master-replica + ReadFrom spotlight
 zio/      …Example.scala + Tour   the ZIO tour, plus the cluster + sharded pub/sub spotlight
 ce/       …Example.scala + Tour   the Cats Effect tour, plus the TLS/ACL spotlight
-ox/       …Example.scala + Tour   the Ox tour, plus the master-replica + ReadFrom spotlight
 kyo/      …Example.scala + Tour   the Kyo tour
 pekko/    …Example.scala + Tour   the Pekko tour (scala.concurrent.Future + Pekko Streams)
-direct/   …Example.scala + Tour   the direct tour (plain blocking calls, iterators, and callbacks)
 ```
 
-Each backend's `Tour` is a runnable entry point. It constructs the client with a ZIO `layer`, a Cats Effect `resource`, an Ox or Kyo `scoped` value, Pekko `connect` with an explicit `close` and a typed `ActorSystem`, or the direct client's `use`, which closes the client when its block returns. Each tour runs commands from several families, a pipeline, a `WATCH` transaction, classic pub/sub, and a cached read. The `...Example` objects contain the individual snippets used by the tour.
+Each backend's `Tour` is a runnable entry point. It constructs the client with `use` for the direct client, which closes the client when its block returns, a `scoped` value for Ox or Kyo, a ZIO `layer`, a Cats Effect `resource`, or Pekko `connect` with an explicit `close` and a typed `ActorSystem`. Each tour runs commands from several families, a pipeline, a `WATCH` transaction, classic pub/sub, and a cached read. The `...Example` objects contain the individual snippets used by the tour.
 
 ## Running the tours
 
@@ -29,12 +29,12 @@ docker run --rm -p 6379:6379 redis:8
 Then run a tour:
 
 ```sh
+sbt examplesDirect/run
+sbt examplesOx/run
 sbt examplesZio/run
 sbt examplesCe/run
-sbt examplesOx/run
 sbt exampleKyo
 sbt examplesPekko/run
-sbt examplesDirect/run
 ```
 
 ## Spotlights

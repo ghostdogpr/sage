@@ -6,7 +6,7 @@ Caching is opt-in per call. An ordinary `get` always goes to the server; only `c
 
 ::: code-group
 
-```scala [Ox · Direct]
+```scala [Direct · Ox]
 client.set("cached:key", "v1")
 // first fetches and caches; second is a local hit
 val v1 = client.cached(Commands.get[String, String]("cached:key"), 1.minute)

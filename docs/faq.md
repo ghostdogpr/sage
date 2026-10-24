@@ -10,12 +10,12 @@ Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) ag
 
 One per Scala stack, all sharing the same runtime:
 
+- Plain blocking code, with no effect library: `sage-client-direct`
+- Ox: `sage-client-ox`
 - ZIO: `sage-client-zio`
 - Cats Effect: `sage-client-ce`
 - Kyo: `sage-client-kyo`
-- Ox: `sage-client-ox`
 - Pekko: `sage-client-pekko`
-- Plain blocking code, with no effect library: `sage-client-direct`
 
 `sage-core` comes in transitively, so you depend on the backend artifact only. See [Getting started](/getting-started).
 
