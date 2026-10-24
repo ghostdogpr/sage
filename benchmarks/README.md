@@ -25,6 +25,7 @@ Each backend runs in a separate JVM and `projectMatrix` cell. The Sage backends 
 | `sage-ox` / `lettuce` / `rediscala` / `jedis` | `benchmarksOx` | `lettuce` is the asynchronous, auto-pipelined Java baseline. `jedis` is the synchronous RESP3 Java client and uses one pooled connection per concurrency lane. |
 | `sage-pekko` | `benchmarksPekko` | no native Pekko (Future) competitor exists. |
 | `sage-kyo` | `benchmarksKyo` | No native Kyo competitor exists. |
+| `sage-direct` | `benchmarksDirect` | Runs each concurrency lane on a virtual thread. Compare it with `jedis` and `lettuce` from the Ox cell. |
 
 ## Running
 

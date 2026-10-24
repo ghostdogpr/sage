@@ -100,6 +100,41 @@ class SocketTransportSpec extends munit.FunSuite {
     }
   }
 
+  test("close keeps waiting for a busy reader while the closing thread is interrupted repeatedly") {
+    @volatile var closedCount  = 0
+    val inFrame                = new CountDownLatch(1)
+    val release                = new Semaphore(0)
+    // the reader stays in onFrame, ignoring interrupts, until the test releases it
+    val onFrame: Frame => Unit = _ => {
+      inFrame.countDown()
+      release.acquireUninterruptibly()
+    }
+    withTransport(onClosed = () => closedCount += 1, onFrame = onFrame) { (transport, peer) =>
+      peer.getOutputStream.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8))
+      peer.getOutputStream.flush()
+      assert(inFrame.await(5, TimeUnit.SECONDS), "the reader should reach onFrame")
+      @volatile var interruptedAfter = false
+      val closer                     = Thread.ofVirtual().start { () =>
+        transport.close()
+        interruptedAfter = Thread.currentThread().isInterrupted
+      }
+      (1 to 5).foreach { _ =>
+        closer.interrupt()
+        Thread.sleep(20)
+      }
+      assert(closer.isAlive, "close should still wait for the reader")
+      assertEquals(closedCount, 0)
+      release.release()
+      closer.join(5000)
+      assert(!closer.isAlive)
+      assert(interruptedAfter, "close should set the interrupt status again")
+      assertEquals(closedCount, 1)
+      assert(!transport.reader.isAlive)
+      assert(!transport.writer.isAlive)
+      assertEquals(peer.getInputStream.read(), -1, "the socket should be closed")
+    }
+  }
+
   test("close on an interrupted thread still waits for the I/O threads, drops queued items and runs onClosed") {
     @volatile var closedCount = 0
     val inWrite               = new CountDownLatch(1)

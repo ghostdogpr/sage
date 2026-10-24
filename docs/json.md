@@ -25,7 +25,7 @@ A value you write is raw JSON text. The built-in `String` codec passes it throug
 
 ::: code-group
 
-```scala [Ox]
+```scala [Ox · Direct]
 client.jsonSet("user:1", JsonPath.root, """{"name":"Ada","age":36,"tags":["a","b"]}""")
 val name = client.jsonGet[String]("user:1", JsonPath("$.name")) // Some("[\"Ada\"]")
 val age  = client.jsonGet[String]("user:1", JsonPath("$.age"))  // Some("[36]")
@@ -71,7 +71,7 @@ Numbers, strings, booleans, arrays, and objects each have their commands. All of
 
 ::: code-group
 
-```scala [Ox]
+```scala [Ox · Direct]
 client.jsonSet("doc", JsonPath.root, """{"n":1,"s":"ab","flag":false,"xs":[1,2,3]}""")
 client.jsonNumIncrBy("doc", JsonPath("$.n"), 5)        // Vector(Some(6.0))
 client.jsonStrAppend("doc", JsonPath("$.s"), "\"c\"")  // Vector(Some(3))

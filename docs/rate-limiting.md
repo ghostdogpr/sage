@@ -8,7 +8,7 @@ The limiter stores its state on the server rather than in process memory. The li
 
 ::: code-group
 
-```scala [Ox]
+```scala [Ox · Direct]
 val limiter  = client.rateLimiter[String](RateLimit.perSecond(100))
 val decision = limiter.tryAcquire("user:42")
 val allowed  = decision.isAllowed

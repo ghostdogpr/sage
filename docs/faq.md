@@ -15,6 +15,7 @@ One per Scala stack, all sharing the same runtime:
 - Kyo: `sage-client-kyo`
 - Ox: `sage-client-ox`
 - Pekko: `sage-client-pekko`
+- Plain blocking code, with no effect library: `sage-client-direct`
 
 `sage-core` comes in transitively, so you depend on the backend artifact only. See [Getting started](/getting-started).
 

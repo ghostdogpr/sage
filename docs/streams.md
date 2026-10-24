@@ -8,7 +8,7 @@ A stream is an append-only log. Each entry has an ID made from a millisecond tim
 
 ::: code-group
 
-```scala [Ox]
+```scala [Ox · Direct]
 client.del("stream:orders")
 client.xAdd("stream:orders")(("item", "book"), ("qty", "2"))
 client.xAdd("stream:orders")(("item", "pen"), ("qty", "5"))
@@ -37,7 +37,7 @@ A consumer group divides a stream's entries among several consumers without over
 
 ::: code-group
 
-```scala [Ox]
+```scala [Ox · Direct]
 // create the group reading from the start of the stream
 client.xGroupCreate(
   "stream:orders",
@@ -74,6 +74,8 @@ Each command uses a separate type for the ID values it accepts. `XADD` takes an 
 
 For a long-running worker, `xConsume` tails a group and runs your handler on each entry. It first replays entries that this consumer left pending during a previous run. It then blocks while waiting for new entries. Sage acknowledges an entry after the handler succeeds. If the handler fails, the entry remains in the PEL for another attempt.
 
+With the direct client, `xConsume` blocks the calling thread until the thread is interrupted or the handler throws. Run it on its own virtual thread and interrupt that thread to stop it.
+
 On Pekko, a `Future` cannot be canceled. The loop runs in the background, and `xConsume` returns a `RunningConsumer`. Call `stop()` to halt it between entries, then await `completion`.
 
 ::: tip At-least-once delivery
@@ -84,6 +86,13 @@ The same entry can be delivered again after a crash or a failed handler, so make
 
 ```scala [Ox]
 // runs inside a `supervised` scope; tails new entries forever
+client.xConsume[String, String]("workers", "w1", "stream:orders") {
+  entry => println(s"got ${entry.id}: ${entry.fields}")
+}
+```
+
+```scala [Direct]
+// blocks the calling thread until it is interrupted
 client.xConsume[String, String]("workers", "w1", "stream:orders") {
   entry => println(s"got ${entry.id}: ${entry.fields}")
 }
