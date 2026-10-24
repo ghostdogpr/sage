@@ -55,7 +55,7 @@ Lock checks share `dedicatedPool` with blocking commands and transactions. A ful
 
 If replicas do not acknowledge acquisition in time, Sage raises `SageException.TimedOut` without starting the body. Acquisition can also raise `SageException.LockLost` if the granting master changes role or the lease expires before the body starts. Sage retries temporary renewal failures while the usable lease remains. If it cannot recover, or loses ownership, the operation fails with `SageException.LockLost` and attempts to cancel the body. Server and connection errors propagate through your backend's normal failure channel. Cleanup preserves an existing body failure or cancellation.
 
-Cancellation is cooperative and cannot undo completed work. Uninterruptible work can delay completion. Pekko uses `Future`, so its body may continue after lock loss even though Sage stops renewing the lock. A timed-out or cancelled acquisition can leave the lock held until its lease expires.
+Cancellation is cooperative and cannot undo completed work. Uninterruptible work can delay completion. Pekko uses `Future`, so its body may continue after lock loss even though Sage stops renewing the lock. With the direct client, the body runs on the calling thread, so it sees that thread's thread-local values, such as a framework's transaction context. Sage interrupts that thread to stop the body. A timed-out or cancelled acquisition can leave the lock held until its lease expires.
 
 ## Limits
 

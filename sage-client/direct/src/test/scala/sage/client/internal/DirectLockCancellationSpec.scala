@@ -1,0 +1,36 @@
+package sage.client.internal
+
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+
+import scala.concurrent.duration.*
+import scala.util.control.ControlThrowable
+
+import kyo.compat.*
+
+import sage.backend.SageClient
+
+class DirectLockCancellationSpec extends LockCancellationSpec {
+
+  override protected def tryWithLock[A](commands: SharedRunner, lease: FiniteDuration)(body: CIO[A]): CIO[Option[A]] =
+    CIO.defer(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).tryWithLock("key")(body.lower))
+
+  override protected def withLock[A](commands: SharedRunner, lease: FiniteDuration, wait: FiniteDuration)(body: CIO[A]): CIO[A] =
+    CIO.defer(new SageClient.Lowered(new LockTestClient(commands)).lock[String](lease).withLock("key", wait)(body.lower))
+
+  test("a body control exception ends the scope and releases ownership") {
+    val released = new AtomicBoolean(false)
+    val renewals = new AtomicInteger(0)
+    val failure  = new ControlThrowable {}
+    CIO.defer {
+      val caught =
+        try {
+          tryWithLock(runner(released, renewals, false), 300.millis)(CIO.defer(throw failure)).lower
+          None
+        } catch {
+          case cause: ControlThrowable => Some(cause)
+        }
+      assertEquals(caught, Some(failure))
+      assert(released.get())
+    }.unsafeRun
+  }
+}

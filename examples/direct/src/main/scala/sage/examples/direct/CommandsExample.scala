@@ -1,0 +1,36 @@
+package sage.examples.direct
+
+import scala.concurrent.duration.*
+
+import sage.*
+import sage.backend.*
+import sage.examples.User
+
+/**
+  * Commands across several families. Each method blocks the calling thread until the reply arrives and returns the value directly.
+  */
+object CommandsExample {
+
+  def run(client: SageClient): Unit = {
+    // strings, numbers, and a conditional write with a TTL
+    client.set("greeting", "hello")
+    val greeting = client.get[String]("greeting")
+    client.incrBy("counter", 10)
+    client.set("session", "token", expiry = SetExpiry.In(1.minute), condition = SetCondition.IfNotExists)
+    // hashes
+    client.hSet("user:1", ("name", "Ada"), ("age", "36"))
+    val profile  = client.hGetAll[String, String]("user:1")
+    // lists: push data before the blocking pop so this example completes immediately
+    client.rPush("queue", "a", "b", "c")
+    val head     = client.blPop[String]("queue")(BlockTimeout.Forever)
+    // sets and sorted sets
+    client.sAdd("tags", "scala", "redis")
+    client.zAdd("scores")(("ada", 36.0))
+    // store and retrieve a custom type using its ValueCodec
+    client.set("user:ada", User("Ada", 36))
+    val ada      = client.get[User]("user:ada")
+    // a raw Lua eval yields a Frame; decode it with the strict helpers
+    val sum      = client.eval("return 1 + 1")
+    println(s"greeting=$greeting profile=$profile head=$head ada=$ada sum=${sum.asLong}")
+  }
+}

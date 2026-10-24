@@ -14,7 +14,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 args="$*"
-cells=(benchmarksZio:zio benchmarksCe:ce benchmarksOx:ox benchmarksPekko:pekko benchmarksKyo:kyo)
+cells=(benchmarksZio:zio benchmarksCe:ce benchmarksOx:ox benchmarksPekko:pekko benchmarksKyo:kyo benchmarksDirect:direct)
 failed=0
 
 rm -f benchmarks/results/*.json

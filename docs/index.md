@@ -4,7 +4,7 @@ layout: home
 hero:
   name: "Sage"
   text: "A Redis & Valkey client for Scala 3"
-  tagline: Native Scala clients for ZIO, Cats Effect, Kyo, Ox, and Pekko.
+  tagline: Native Scala clients for ZIO, Cats Effect, Kyo, Ox, Pekko, and plain blocking code.
   image:
     light: /sage.svg
     dark: /sage-dark.svg
@@ -19,7 +19,7 @@ hero:
 
 features:
   - title: Native backend types
-    details: Choose a ZIO, Cats Effect, Kyo, Ox, or Pekko artifact. Each one uses its ecosystem's effect and stream types.
+    details: Choose a ZIO, Cats Effect, Kyo, Ox, or Pekko artifact, each with its ecosystem's effect and stream types, or the direct artifact for plain blocking code.
   - title: Redis protocol in Scala
     details: Sage implements RESP3, commands, and codecs directly in Scala 3 instead of wrapping a Java client.
   - title: Redis and Valkey support
