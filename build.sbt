@@ -32,6 +32,10 @@ val PekkoLib = CompatBackendAxis.external("pekko", "Pekko", "-pekko", Set("jvm")
 // suffixes match the removed built-in, which keeps cell ids and artifact names unchanged.
 val CeLib = CompatBackendAxis.local("ce", "Ce", "-ce", Set("jvm"))
 
+// The direct backend binds `kyo.compat` to plain blocking code on JDK virtual threads, implemented locally in `sage-compat-direct`. Its
+// artifacts depend only on Sage modules and the Scala library.
+val DirectLib = CompatBackendAxis.local("direct", "Direct", "-direct", Set("jvm"))
+
 inThisBuild(
   List(
     scalaVersion     := scala3Version,
@@ -50,30 +54,34 @@ name := "sage"
 addCommandAlias(
   "fmt",
   "all scalafmtSbt scalafmt test:scalafmt " +
-    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo/scalafmt"
+    "benchmarksZio/scalafmt benchmarksCe/scalafmt benchmarksOx/scalafmt benchmarksPekko/scalafmt benchmarksKyo/scalafmt " +
+    "benchmarksDirect/scalafmt"
 )
 addCommandAlias(
   "check",
   "all scalafmtSbtCheck scalafmtCheck test:scalafmtCheck " +
-    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo/scalafmtCheck"
+    "benchmarksZio/scalafmtCheck benchmarksCe/scalafmtCheck benchmarksOx/scalafmtCheck benchmarksPekko/scalafmtCheck benchmarksKyo/scalafmtCheck " +
+    "benchmarksDirect/scalafmtCheck"
 )
 
 addCommandAlias(
   "testUnit",
-  "all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo/test " +
+  "all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo/test clientDirect/test " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
-    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo/compile " +
+    "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo/compile benchmarksDirect/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
-    "examplesKyo/Compile/compile examplesFuture/Compile/compile; " +
-    // The conformance suite has wall-clock parallelism checks. Run it after the parallel block so five forked test cells do not starve it.
-    "ceConformanceCe/test"
+    "examplesKyo/Compile/compile examplesDirect/Compile/compile examplesFuture/Compile/compile; " +
+    // The conformance suite has wall-clock parallelism checks. Run it after the parallel block so six forked test cells do not starve it.
+    "ceConformanceCe/test; directConformanceDirect/test"
 )
 addCommandAlias("conformanceCe", "ceConformanceCe/test")
+addCommandAlias("conformanceDirect", "directConformanceDirect/test")
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
 addCommandAlias("itPekko", "integrationTestsPekko/test")
 addCommandAlias("itKyo", "integrationTestsKyo/test")
+addCommandAlias("itDirect", "integrationTestsDirect/test")
 
 addCommandAlias("exampleKyo", "examplesKyo/run")
 
@@ -86,7 +94,7 @@ addCommandAlias(
 
 addCommandAlias(
   "docAll",
-  "all core/doc opentelemetry/doc compatCe/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc"
+  "all core/doc opentelemetry/doc compatCe/doc compatDirect/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc clientDirect/doc"
 )
 
 lazy val root = project
@@ -96,7 +104,7 @@ lazy val root = project
   // on-demand benchmark runs. Use benchAll or benchmarks<Cell>/Jmh/run to run them directly.
   .aggregate(
     core.projectRefs ++ client.projectRefs ++ opentelemetry.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs ++
-      Seq[ProjectReference](compatCe): _*
+      Seq[ProjectReference](compatCe, compatDirect): _*
   )
 
 // Pure sans-IO core: RESP3 protocol, command model, codecs. Zero external dependencies.
@@ -156,6 +164,20 @@ lazy val ceConformance = (projectMatrix in file("sage-compat-ce/.conformance"))
   .bindLocally(CeLib, compatCe)
   .compatConformance()
 
+// A dependency-free binding of the `kyo.compat` package for blocking code on virtual threads. The `direct` cells of the client matrices bind
+// to this project through `bindLocally`.
+lazy val compatDirect = project
+  .in(file("sage-compat-direct"))
+  .settings(name := "sage-compat-direct")
+  .settings(commonSettings)
+
+// Run the bundled `kyo.compat` conformance suite against the direct binding, as `ceConformance` does for the Cats Effect binding.
+lazy val directConformance = (projectMatrix in file("sage-compat-direct/.conformance"))
+  .settings(publish / skip := true)
+  .compatLibrary(DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .bindLocally(DirectLib, compatDirect)
+  .compatConformance()
+
 // Runtime written once against kyo-compat, cross-published per backend. JDK 21+.
 lazy val client = (projectMatrix in file("sage-client"))
   .dependsOn(core)
@@ -184,8 +206,9 @@ lazy val client = (projectMatrix in file("sage-client"))
       else Seq.empty
     }
   )
-  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
 
 // Run each backend's smoke suite against a real server. Run the shared command, security, cluster, master-replica, rate-limit, and lock suites
 // on one backend because those features use the same implementation in every backend.
@@ -218,10 +241,11 @@ lazy val integrationTests = (projectMatrix in file("integration-tests"))
       Tests.Filter(name => !isAnchor && (isDesignated || !onceOnly.exists(name.startsWith)))
     }
   )
-  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
 
-// Build runnable, unpublished examples for ZIO, Cats Effect, Ox, Kyo, and Pekko in separate cells so each uses its native client artifact. The
+// Build runnable, unpublished examples for ZIO, Cats Effect, Ox, Kyo, Pekko, and the direct client in separate cells so each uses its native client artifact. The
 // root project compiles them in CI through testUnit. The Future cell compiles examples/shared. Run an example against a local server with a
 // command such as `sbt examplesZio/run`. See examples/README.md.
 lazy val examples = (projectMatrix in file("examples"))
@@ -232,12 +256,13 @@ lazy val examples = (projectMatrix in file("examples"))
   // These runnable samples are not published. Skip API documentation because third-party parent types such as Cats Effect's IOApp contain
   // links that cannot be resolved here.
   .settings(Compile / doc / sources := Seq.empty)
-  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
 
 // Runtime end-to-end benchmark harness (JMH), used only during development. Each backend has a separate cell. The ZIO cell includes
-// zio-redis, the Cats Effect cell includes redis4cats, and the Ox cell includes Lettuce, Rediscala, and Jedis. The Kyo and Pekko cells include
-// only Sage. See benchmarks/README.md.
+// zio-redis, the Cats Effect cell includes redis4cats, and the Ox cell includes Lettuce, Rediscala, and Jedis. The Kyo, Pekko, and direct
+// cells include only Sage. See benchmarks/README.md.
 lazy val benchmarks = (projectMatrix in file("benchmarks"))
   .dependsOn(client)
   .enablePlugins(JmhPlugin)
@@ -262,8 +287,9 @@ lazy val benchmarks = (projectMatrix in file("benchmarks"))
       else Seq.empty
     }
   )
-  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
 
 // The runtime benchmark harness: runs every backend cell's JMH suite against its own self-provisioned Redis (the future anchor cell is skipped),
 // each writing JMH JSON to benchmarks/results/<cell>.json. benchmarks/merge-results.sh merges them into one all.json covering every client
@@ -274,7 +300,8 @@ addCommandAlias(
     ";benchmarksCe/Jmh/run -rf json -rff benchmarks/results/ce.json " +
     ";benchmarksOx/Jmh/run -rf json -rff benchmarks/results/ox.json " +
     ";benchmarksPekko/Jmh/run -rf json -rff benchmarks/results/pekko.json " +
-    ";benchmarksKyo/Jmh/run -rf json -rff benchmarks/results/kyo.json"
+    ";benchmarksKyo/Jmh/run -rf json -rff benchmarks/results/kyo.json " +
+    ";benchmarksDirect/Jmh/run -rf json -rff benchmarks/results/direct.json"
 )
 
 lazy val commonSettings = Def.settings(

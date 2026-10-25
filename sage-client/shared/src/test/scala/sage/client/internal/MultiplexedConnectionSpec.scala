@@ -688,6 +688,21 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
   }
 
+  test("close on an interrupted thread closes the connection, fails the straggler and keeps the interrupt") {
+    val (connection, _, transports)           = make(autoWrite = false, closeTimeout = 2.seconds)
+    @volatile var result: Option[Try[String]] = None
+    connection.submit(Connection.ping(), r => result = Some(r))
+    transports.head.writeNext() // written, no reply will arrive
+    Thread.currentThread().interrupt()
+    connection.close()
+    assert(Thread.interrupted(), "close should keep the interrupt status")
+    assertEquals(result, Some(Failure(ConnectionLost(mayHaveExecuted = true))))
+    assertEquals(connection.currentState, MultiplexedConnection.State.Closed)
+    assertEquals(transports.head.closeCount, 1)
+    connection.close()
+    assertEquals(transports.head.closeCount, 1)
+  }
+
   private def cachedConnection(
     events: Events = Events.disabled
   ): (MultiplexedConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {

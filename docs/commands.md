@@ -8,7 +8,7 @@ A `Command[Out]` describes a server command without running it. Client methods c
 
 ::: code-group
 
-```scala [Ox]
+```scala [Direct · Ox]
 // per-command sugar
 val greeting = client.get[String]("greeting")
 

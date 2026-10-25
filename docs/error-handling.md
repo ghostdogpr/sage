@@ -1,6 +1,6 @@
 # Error handling
 
-Every Sage failure is a `SageException` in a sealed hierarchy that you can match exhaustively. ZIO and Kyo include `SageException` in the error type as `IO[SageException, *]` and `Abort[SageException]`. Cats Effect raises the exception in `IO`, Ox throws it, and Pekko returns a failed `scala.concurrent.Future`.
+Every Sage failure is a `SageException` in a sealed hierarchy that you can match exhaustively. The direct client and Ox throw it. ZIO and Kyo include `SageException` in the error type as `IO[SageException, *]` and `Abort[SageException]`. Cats Effect raises the exception in `IO`, and Pekko returns a failed `scala.concurrent.Future`.
 
 ## The hierarchy
 
@@ -73,8 +73,9 @@ Sage does not retry `-CLUSTERDOWN` for [commands that run on every master](/conf
 
 Each ecosystem reports the same `SageException` through its normal failure channel. ZIO and Kyo also include it in the error type. In those backends, another exception is a defect, such as a ZIO die or Kyo `Panic`.
 
+- The direct client throws the exception from the blocking call. Handle it with `try` and `catch`.
+- Ox throws the exception in direct style. Handle it with `try` and `catch`.
 - ZIO returns a failed `IO[SageException, *]`. Recover with `catchAll` or `catchSome`.
 - Cats Effect raises the exception in `IO`. Recover with `handleErrorWith` or `recoverWith` and match on `SageException`.
 - Kyo returns an `Abort[SageException]`. Handle it with the `Abort` combinators.
-- Ox throws the exception in direct style. Handle it with `try` and `catch`.
 - Pekko returns a failed `scala.concurrent.Future`. Recover with `recover` or `recoverWith`.

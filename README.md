@@ -5,7 +5,7 @@
 
 Sage is a Redis and Valkey client for Scala 3. It implements the Redis protocol directly in Scala instead of wrapping a Java client.
 
-- Choose the artifact for [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), [Ox](https://ox.softwaremill.com), or [Pekko](https://pekko.apache.org). Each artifact uses its ecosystem's native types.
+- Use the direct artifact for plain blocking code with no effect library dependency, or choose the artifact for [Ox](https://ox.softwaremill.com), [ZIO](https://zio.dev), [Cats Effect](https://typelevel.org/cats-effect/), [Kyo](https://getkyo.io), or [Pekko](https://pekko.apache.org), which uses that ecosystem's native types.
 - The core implements RESP3, commands, and codecs in Scala 3.
 - Redis 8+ and Valkey 8+ support includes auto-pipelining, transactions, cluster routing, sharded pub/sub, client-side caching, rate limiting, distributed locks, and TLS.
 
