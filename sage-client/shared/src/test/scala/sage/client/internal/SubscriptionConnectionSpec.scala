@@ -1,5 +1,6 @@
 package sage.client.internal
 
+import java.util.Locale
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicReference
 
@@ -27,7 +28,8 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     command match {
       case List("PING")                                   => Seq(Replies.pong)
       case List("HELLO")                                  => Seq(Replies.hello)
-      case List(verb, name) if verb.endsWith("SUBSCRIBE") => Seq(Frame.Push(Vector(bulk(verb.toLowerCase), bulk(name), Frame.Integer(1))))
+      case List(verb, name) if verb.endsWith("SUBSCRIBE") =>
+        Seq(Frame.Push(Vector(bulk(verb.toLowerCase(Locale.ROOT)), bulk(name), Frame.Integer(1))))
       case _                                              => Nil
     }
 
@@ -45,7 +47,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
   // each subscribed name is its own command in the write, acknowledged by one confirmation push
   private def confirmations(kind: String, payload: String): Seq[Frame] = {
-    val names = payload.split("\r\n").count(_ == kind.toUpperCase)
+    val names = payload.split("\r\n").count(_ == kind.toUpperCase(Locale.ROOT))
     (1 to names).map(i => Frame.Push(Vector(bulk(kind), bulk("?"), Frame.Integer(i.toLong))))
   }
 
@@ -707,7 +709,8 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val respond: Bytes => Seq[Frame] = payload =>
       commands(payload).flatMap {
         case List("PING")                                     => Seq(Frame.SimpleError("NOPERM User u has no permissions to run the 'ping' command"))
-        case List(verb @ ("SUBSCRIBE" | "UNSUBSCRIBE"), name) => Seq(Frame.Push(Vector(bulk(verb.toLowerCase), bulk(name), Frame.Integer(1))))
+        case List(verb @ ("SUBSCRIBE" | "UNSUBSCRIBE"), name) =>
+          Seq(Frame.Push(Vector(bulk(verb.toLowerCase(Locale.ROOT)), bulk(name), Frame.Integer(1))))
         case _                                                => Nil
       }
     val (connection, _, transports)  = make(respond = respond)
@@ -742,7 +745,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
         case command @ (verb :: _) if verb.endsWith("SUBSCRIBE") || verb == "PING" || verb == "HELLO" => reply(command)
         case verb :: _                                                                                =>
           denials += 1
-          Seq(Frame.SimpleError(s"NOPERM User u has no permissions to run the '${verb.toLowerCase}' command"))
+          Seq(Frame.SimpleError(s"NOPERM User u has no permissions to run the '${verb.toLowerCase(Locale.ROOT)}' command"))
         case Nil                                                                                      => Nil
       }
   }
