@@ -24,6 +24,18 @@ class CeInMemorySpec extends munit.FunSuite {
     assertEquals(TestControl.executeEmbed(program).unsafeRunSync(), (Some("token"), None))
   }
 
+  test("a subscription read that times out leaves the next message for the following read") {
+    val client  = InMemorySageClient()
+    val program = client.subscribeResource[String]("news").use { messages =>
+      for {
+        missed   <- messages.head.compile.last.timeout(1.second).attempt
+        _        <- client.publish("news", "hello")
+        received <- messages.head.compile.last
+      } yield (missed.isLeft, received)
+    }
+    assertEquals(TestControl.executeEmbed(program).unsafeRunSync(), (true, Some(Message("news", "hello"))))
+  }
+
   test("transactions and scanAll run as Cats Effect programs") {
     val client  = InMemorySageClient()
     val program = for {

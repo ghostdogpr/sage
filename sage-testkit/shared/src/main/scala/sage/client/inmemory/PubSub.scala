@@ -6,78 +6,77 @@ import sage.Bytes
 import sage.protocol.Frame
 
 /**
-  * The pub/sub side of an in-memory server. Every method must be called while holding the store lock. Deliveries go into each
-  * subscription's queue, and a subscriber waiting for one is woken through [[Store.afterUnlock]] once the lock is released.
+  * The pub/sub side of an in-memory server. Every method must be called, and every subscriber created, while holding the store lock.
+  * Deliveries go into each subscription's queue, and a subscriber waiting for one is woken through [[Store.afterUnlock]] once the lock is
+  * released.
   */
 final private[sage] class Broker(store: Store) {
   import Broker.*
 
   private val subscriptions = mutable.LinkedHashSet.empty[Subscriber]
 
-  def add(subscriber: Subscriber): Unit = subscriptions += subscriber
-
-  def remove(subscriber: Subscriber): Unit = subscriptions -= subscriber
-
   /**
     * Delivers `payload` and returns the number of receivers. A classic message reaches the subscribers of the channel and of every
-    * matching pattern, counting one receiver per matching pattern subscription. A shard message reaches only shard subscribers.
+    * matching pattern. A shard message reaches only shard subscribers. As on a server, a client counts once for the channel and once per
+    * matching pattern, however many of its subscriptions name them, because the networked client subscribes each name once per client.
     */
   def publish(shard: Boolean, channel: String, payload: Bytes): Long = {
     val name       = Bytes.utf8(channel)
     val deliveries = subscriptions.iterator.flatMap { subscriber =>
       (subscriber.kind, shard) match {
         case (Kind.Shard, true) | (Kind.Channel, false) =>
-          Option.when(subscriber.names.contains(channel))(subscriber -> Delivery(None, channel, payload))
+          Option.when(subscriber.names.contains(channel))(subscriber -> Delivery(channel, channel, payload))
         case (Kind.Pattern, false)                      =>
-          subscriber.names.iterator.filter(p => Glob.matches(Bytes.utf8(p), name)).map(p => subscriber -> Delivery(Some(p), channel, payload))
+          subscriber.names.iterator.filter(p => Glob.matches(Bytes.utf8(p), name)).map(p => subscriber -> Delivery(p, channel, payload))
         case _                                          => Iterator.empty
       }
     }.toVector
     deliveries.foreach((subscriber, delivery) => subscriber.offer(delivery))
-    deliveries.length.toLong
+    deliveries.map((subscriber, delivery) => (subscriber.owner, subscriber.kind, delivery.matched)).distinct.length.toLong
   }
 
   def channels(kind: Kind): Vector[String] =
     subscriptions.iterator.filter(_.kind == kind).flatMap(_.names).toVector.distinct
 
-  def count(kind: Kind, name: String): Long = subscriptions.count(s => s.kind == kind && s.names.contains(name)).toLong
+  def count(kind: Kind, name: String): Long = subscriptions.filter(s => s.kind == kind && s.names.contains(name)).map(_.owner).size.toLong
+
+  def close(owner: AnyRef): Unit = subscriptions.filter(_.owner eq owner).foreach(_.close())
 
   /**
-    * One subscription, which reads its deliveries in order. `next` hands the oldest delivery to `callback`, or keeps `callback` until a
-    * delivery arrives. A closed subscription answers `None`.
+    * One subscription of the client `owner`, registered from its creation until it is closed. It reads its deliveries in order. `take`
+    * returns `Some` with the oldest delivery, or `Some(None)` once the subscription is closed, which drops undelivered messages as the
+    * networked client does. With nothing to return yet, it keeps `wakeUp` to run after the next delivery or the close, and returns `None`.
     */
-  final class Subscriber(val kind: Kind, val names: Vector[String]) {
+  final class Subscriber(val owner: AnyRef, val kind: Kind, val names: Vector[String]) {
+    subscriptions += this
 
-    private val queue                             = mutable.Queue.empty[Delivery]
-    private var waiting: Option[Delivery] => Unit = null
-    private var closed                            = false
+    private val queue                       = mutable.Queue.empty[Delivery]
+    private var waiting: Option[() => Unit] = None
+    private var closed                      = false
 
-    def offer(delivery: Delivery): Unit =
-      if (waiting == null) queue.enqueue(delivery)
+    def offer(delivery: Delivery): Unit = {
+      queue.enqueue(delivery)
+      wake()
+    }
+
+    def take(wakeUp: () => Unit): Option[Option[Delivery]] =
+      if (queue.nonEmpty) Some(Some(queue.dequeue()))
+      else if (closed) Some(None)
       else {
-        val callback = waiting
-        waiting = null
-        store.afterUnlock(() => callback(Some(delivery)))
+        waiting = Some(wakeUp)
+        None
       }
-
-    def next(callback: Option[Delivery] => Unit): Unit =
-      if (queue.nonEmpty) {
-        val delivery = queue.dequeue()
-        store.afterUnlock(() => callback(Some(delivery)))
-      } else if (closed) store.afterUnlock(() => callback(None))
-      else waiting = callback
-
-    // removes a callback whose `next` was interrupted, so that the next call can register its own
-    def cancel(callback: Option[Delivery] => Unit): Unit = if (waiting eq callback) waiting = null
 
     def close(): Unit = {
       closed = true
-      remove(this)
-      if (waiting != null) {
-        val callback = waiting
-        waiting = null
-        store.afterUnlock(() => callback(None))
-      }
+      queue.clear()
+      subscriptions -= this
+      wake()
+    }
+
+    private def wake(): Unit = {
+      waiting.foreach(store.afterUnlock)
+      waiting = None
     }
   }
 }
@@ -88,8 +87,8 @@ private[sage] object Broker {
     case Channel, Pattern, Shard
   }
 
-  // `pattern` is the matching pattern for a pattern subscription
-  final case class Delivery(pattern: Option[String], channel: String, payload: Bytes)
+  // `matched` is the subscribed channel or pattern that the message matched
+  final case class Delivery(matched: String, channel: String, payload: Bytes)
 }
 
 private[inmemory] object PubSubCommands {
@@ -97,27 +96,20 @@ private[inmemory] object PubSubCommands {
   import Replies.*
 
   val specs: Map[String, Spec] = Map(
-    "PUBLISH"  -> Spec(3, call => int(call.store.pubsub.publish(shard = false, call.text(0), call.args(1)))),
-    "SPUBLISH" -> Spec(3, call => int(call.store.pubsub.publish(shard = true, call.text(0), call.args(1)))),
-    "PUBSUB"   -> Spec(-2, introspect)
+    "PUBLISH"              -> Spec(3, call => int(call.store.pubsub.publish(shard = false, call.text(0), call.args(1)))),
+    "SPUBLISH"             -> Spec(3, call => int(call.store.pubsub.publish(shard = true, call.text(0), call.args(1)))),
+    "PUBSUB CHANNELS"      -> Spec(-1, names(_, Kind.Channel)),
+    "PUBSUB SHARDCHANNELS" -> Spec(-1, names(_, Kind.Shard)),
+    "PUBSUB NUMSUB"        -> Spec(-1, counts(_, Kind.Channel)),
+    "PUBSUB SHARDNUMSUB"   -> Spec(-1, counts(_, Kind.Shard)),
+    "PUBSUB NUMPAT"        -> Spec(1, call => int(call.store.pubsub.channels(Kind.Pattern).length.toLong))
   )
 
-  private def introspect(call: Call): Frame = {
-    val broker                    = call.store.pubsub
-    def names(kind: Kind): Frame  = {
-      val pattern = call.args.lift(1)
-      if (call.args.length > 2) throw new Reject(Errors.syntax)
-      Frame.Array(broker.channels(kind).filter(c => pattern.forall(Glob.matches(_, Bytes.utf8(c)))).map(bulk))
-    }
-    def counts(kind: Kind): Frame =
-      Frame.Array(call.args.drop(1).flatMap(name => Vector(bulk(name), int(broker.count(kind, name.asUtf8String)))))
-    call.keyword(0) match {
-      case "CHANNELS"                        => names(Kind.Channel)
-      case "SHARDCHANNELS"                   => names(Kind.Shard)
-      case "NUMSUB"                          => counts(Kind.Channel)
-      case "SHARDNUMSUB"                     => counts(Kind.Shard)
-      case "NUMPAT" if call.args.length == 1 => int(broker.channels(Kind.Pattern).length.toLong)
-      case _                                 => throw new Reject(Errors.syntax)
-    }
+  private def names(call: Call, kind: Kind): Frame = {
+    val pattern = call.optional(0)(call.args)
+    Frame.Array(call.store.pubsub.channels(kind).filter(c => pattern.forall(Glob.matches(_, Bytes.utf8(c)))).map(bulk))
   }
+
+  private def counts(call: Call, kind: Kind): Frame =
+    Frame.Array(call.args.flatMap(name => Vector(bulk(name), int(call.store.pubsub.count(kind, name.asUtf8String)))))
 }

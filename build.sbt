@@ -223,6 +223,11 @@ lazy val testkit = (projectMatrix in file("sage-testkit"))
   .settings(
     // the Future anchor row only checks that the shared sources compile
     publish / skip := moduleName.value.endsWith("-future"),
+    // every backend compiles the same factory against its own SageClient, which the Future anchor row does not have
+    Compile / unmanagedSourceDirectories ++= {
+      if (moduleName.value.endsWith("-future")) Nil
+      else Seq((ThisBuild / baseDirectory).value / "sage-testkit" / "backends" / "src" / "main" / "scala")
+    },
     // the test clocks that the ZIO and Cats Effect specs drive the in-memory client with
     libraryDependencies ++= {
       val m = moduleName.value
@@ -245,20 +250,11 @@ lazy val testkitConformance = (projectMatrix in file("sage-testkit/.conformance"
     publish / skip := true,
     Test / scalacOptions += "-Wnonunit-statement",
     Test / unmanagedSources ++= {
-      val base   = (ThisBuild / baseDirectory).value / "integration-tests" / "shared" / "src" / "test" / "scala" / "sage" / "integration"
-      val suites = Seq("Strings", "Keys", "Hashes", "Lists", "Sets", "SortedSets").map(name => base / "commands" / s"${name}Suite.scala")
-      val others = Seq(
-        base / "locking" / "LockSuite.scala",
-        base / "ratelimit" / "RateLimiterSuite.scala",
-        base / "commands" / "PubsubSuite.scala",
-        base / "commands" / "StreamsSuite.scala",
-        base / "commands" / "BitmapsSuite.scala",
-        base / "commands" / "HyperLogLogSuite.scala",
-        base / "commands" / "GeoSuite.scala",
-        base / "commands" / "CachingSuite.scala",
-        base / "RoundTripSuite.scala"
-      )
-      Seq(base / "Ttls.scala", base / "Eventually.scala") ++ suites ++ others
+      val base     = (ThisBuild / baseDirectory).value / "integration-tests" / "shared" / "src" / "test" / "scala" / "sage" / "integration"
+      val commands =
+        Seq("Strings", "Keys", "Hashes", "Lists", "Sets", "SortedSets", "Pubsub", "Streams", "Caching")
+      val others   = Seq("Ttls.scala", "Eventually.scala", "locking/LockSuite.scala", "ratelimit/RateLimiterSuite.scala", "RoundTripSuite.scala")
+      others.map(base / _) ++ commands.map(name => base / "commands" / s"${name}Suite.scala")
     }
   )
   .compatLibrary(DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))

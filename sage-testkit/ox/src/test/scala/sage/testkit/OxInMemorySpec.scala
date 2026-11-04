@@ -11,8 +11,8 @@ class OxInMemorySpec extends munit.FunSuite {
 
   test("the in-memory client runs direct-style Ox code") {
     supervised {
-      val clock   = TestClock.manual()
-      val client  = InMemorySageClient(clock)
+      val clock   = TestClock()
+      val client  = InMemorySageClient(InMemoryServer(clock))
       val _       = client.set("session", "token", expiry = SetExpiry.In(10.seconds))
       assertEquals(client.get[String]("session"), Some("token"))
       clock.advance(10.seconds)

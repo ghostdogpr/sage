@@ -49,16 +49,8 @@ private[inmemory] object Value {
     def typeName: String = "string"
   }
 
-  /**
-    * A hash field and its own expiry time, using [[Entry.NoExpiry]] when it has none. Fields keep their insertion order, as small hashes
-    * do on a real server.
-    */
-  final case class Field(value: Bytes, expiresAt: Long) {
-    def hasExpiry: Boolean            = expiresAt != Entry.NoExpiry
-    def expiredAt(now: Long): Boolean = hasExpiry && expiresAt <= now
-  }
-
-  final case class Hash(fields: VectorMap[Key, Field]) extends Value {
+  // fields keep their insertion order, as small hashes do on a real server
+  final case class Hash(fields: VectorMap[Key, Bytes]) extends Value {
     def typeName: String          = "hash"
     override def isEmpty: Boolean = fields.isEmpty
   }
@@ -93,44 +85,37 @@ private[inmemory] object Value {
 
   /**
     * A stream. `entries` holds the field/value pairs of each entry in id order. `lastId` is the last id the stream generated or was set
-    * to, which can be greater than the last remaining entry, and `maxDeletedId` is the greatest id removed so far. An empty stream keeps
-    * its key, as on a real server.
+    * to, which can be greater than the last remaining entry, and `maxDeletedId` is the greatest id that `XDEL` removed. Groups and their
+    * consumers are sorted by name, the order in which a server lists them. An empty stream keeps its key, as on a real server.
     */
   final case class Stream(
     entries: TreeMap[StreamId, Vector[(Bytes, Bytes)]],
     lastId: StreamId,
     entriesAdded: Long,
     maxDeletedId: StreamId,
-    groups: VectorMap[String, Group]
+    groups: TreeMap[String, Group]
   ) extends Value {
     def typeName: String = "stream"
   }
 
   object Stream {
-    val empty: Stream = Stream(TreeMap.empty, StreamId.Zero, 0L, StreamId.Zero, VectorMap.empty)
+    val empty: Stream = Stream(TreeMap.empty, StreamId.Zero, 0L, StreamId.Zero, TreeMap.empty)
   }
 
-  /**
-    * A consumer group. `pending` is the group's pending entries list, and `entriesRead` is how many entries the group has read when that
-    * number is known, which `XINFO` uses to report the lag.
-    */
-  final case class Group(
-    lastDelivered: StreamId,
-    entriesRead: Option[Long],
-    pending: TreeMap[StreamId, Pending],
-    consumers: VectorMap[String, Consumer]
-  )
+  final case class Group(lastDelivered: StreamId, pending: TreeMap[StreamId, Pending], consumers: TreeMap[String, Consumer])
 
-  // `deliveredAt` is a Unix time in milliseconds
-  final case class Pending(consumer: String, deliveredAt: Long, deliveries: Long)
+  // `deliveredAt` is a Unix time in milliseconds. A server checks no idle time for a minimum of 0, even when the clock went back.
+  final case class Pending(consumer: String, deliveredAt: Long, deliveries: Long) {
+    def idleFor(minimum: Long, now: Long): Boolean = minimum == 0 || now - deliveredAt >= minimum
+  }
 
-  // `activeAt` is -1 until the consumer has successfully read or claimed an entry
-  final case class Consumer(seenAt: Long, activeAt: Long)
+  // `activeAt` is empty until the consumer has successfully read or claimed an entry
+  final case class Consumer(seenAt: Long, activeAt: Option[Long])
 
   object Sorted {
 
     // -0.0 and 0.0 must sort as equal scores, so the comparison uses == rather than java.lang.Double.compare
-    private given Ordering[Double] = (a, b) => if (a < b) -1 else if (a > b) 1 else 0
+    given Ordering[Double] = (a, b) => if (a < b) -1 else if (a > b) 1 else 0
 
     val empty: Sorted = Sorted(Map.empty, TreeSet.empty[(Double, Key)])
 
@@ -147,31 +132,49 @@ final private[inmemory] case class Entry(value: Value, expiresAt: Long, seq: Lon
   def hasExpiry: Boolean = expiresAt != Entry.NoExpiry
 
   def expiredAt(now: Long): Boolean = hasExpiry && expiresAt <= now
+
+  def ttl: Ttl = if (hasExpiry) Ttl.At(expiresAt) else Ttl.Clear
 }
 
 private[inmemory] object Entry {
-  val NoExpiry: Long = -1L
+  // a time no clock reaches, since -1 is a valid expiry for a clock set before 1970
+  val NoExpiry: Long = Long.MinValue
 }
 
 /**
-  * Stops a command and replies with `frame`, which is usually an error. Command handlers throw it from argument parsing and type checks.
+  * How a write sets the expiry of a key: it keeps the current expiry, removes it, or sets it to a Unix time in milliseconds.
   */
-final private[inmemory] class Reject(val frame: Frame) extends RuntimeException with NoStackTrace
+private[inmemory] enum Ttl {
+  case Keep, Clear
+  case At(millis: Long)
+
+  def resolve(current: Long): Long =
+    this match {
+      case Keep       => current
+      case Clear      => Entry.NoExpiry
+      case At(millis) => millis
+    }
+}
+
+/**
+  * Stops a command and replies with the error `frame`. Command handlers throw it from argument parsing and type checks.
+  */
+final private[inmemory] class Reject(val frame: Frame.SimpleError) extends RuntimeException with NoStackTrace
 
 /**
   * The keyspace of one in-memory server. Every method must be called while holding `lock`, which [[Executor]] takes for each command, so
   * each command runs atomically like it does on a real server.
   *
-  * Expired keys are removed lazily, when a command reads them. Every change to a key increases that key's version, which `WATCH` compares
-  * to decide whether a transaction must abort. Versions are kept after a key is deleted because watching a missing key and then creating
-  * it must also abort the transaction.
+  * Expired keys are removed lazily, when a command reads them. Every change to a key that a server's `WATCH` sees increases that key's
+  * version, which `WATCH` compares to decide whether a transaction must abort. Versions are kept after a key is deleted because watching a
+  * missing key and then creating it must also abort the transaction.
   */
 final private[sage] class Store {
 
   val lock = new ReentrantLock()
 
-  // the SHA-1 digests of the cached Lua scripts; FLUSHALL keeps them, as on a real server
-  val scripts: mutable.Set[String] = mutable.Set.empty
+  // the cached Lua scripts by SHA-1 digest; FLUSHALL keeps them, as on a real server
+  val scripts: mutable.Map[String, Bytes] = mutable.Map.empty
 
   val pubsub: Broker = new Broker(this)
 
@@ -196,42 +199,30 @@ final private[sage] class Store {
 
   def lookup(key: Key, now: Long): Option[Entry] = data.get(key).flatMap(current(key, _, now))
 
-  // Removes the key when it has expired, and removes expired hash fields, deleting the hash when none are left.
+  // removes the key when it has expired
   private def current(key: Key, entry: Entry, now: Long): Option[Entry] =
-    entry.value match {
-      case _ if entry.expiredAt(now)                                            =>
-        data.remove(key)
-        touch(key)
-        None
-      case Value.Hash(fields) if fields.valuesIterator.exists(_.expiredAt(now)) =>
-        val live = fields.filter((_, field) => !field.expiredAt(now))
-        touch(key)
-        if (live.isEmpty) {
-          data.remove(key)
-          None
-        } else {
-          val updated = entry.copy(value = Value.Hash(live))
-          data.update(key, updated)
-          Some(updated)
-        }
-      case _                                                                    => Some(entry)
+    if (!entry.expiredAt(now)) Some(entry)
+    else {
+      data.remove(key)
+      touch(key)
+      None
     }
 
   /**
-    * Stores `value` at `key`. An existing key keeps its `SCAN` position.
+    * Stores `value` at `key` with the expiry that `ttl` gives, or deletes the key when `value` is an empty collection. An existing key keeps
+    * its `SCAN` position. A write with `watched` false does not abort a transaction that watches the key: a server's `WATCH` sees changes to
+    * a stream's entries, not to its consumer groups or to the id that `XSETID` sets.
     */
-  def put(key: Key, value: Value, expiresAt: Long, now: Long): Unit = {
-    val seq = lookup(key, now).fold(nextSeq())(_.seq)
-    data.update(key, Entry(value, expiresAt, seq))
-    touch(key)
+  def put(key: Key, value: Value, ttl: Ttl, now: Long, watched: Boolean): Unit = {
+    val existing = lookup(key, now)
+    if (!value.isEmpty) {
+      data.update(key, Entry(value, ttl.resolve(existing.fold(Entry.NoExpiry)(_.expiresAt)), existing.fold(nextSeq())(_.seq)))
+      touch(key, watched)
+    } else if (existing.isDefined) {
+      data.remove(key)
+      touch(key)
+    }
   }
-
-  /**
-    * Stores a new version of the collection at `key`, keeping the key's expiry, or deletes the key when the collection is empty.
-    */
-  def replace(key: Key, value: Value, now: Long): Unit =
-    if (value.isEmpty) delete(key, now): Unit
-    else put(key, value, lookup(key, now).fold(Entry.NoExpiry)(_.expiresAt), now)
 
   def setExpiry(key: Key, entry: Entry, expiresAt: Long): Unit = {
     data.update(key, entry.copy(expiresAt = expiresAt))
@@ -251,18 +242,22 @@ final private[sage] class Store {
   def live(now: Long): Vector[(Key, Entry)] = data.toVector.flatMap((key, entry) => current(key, entry, now).map(key -> _))
 
   def clear(): Unit = {
-    data.keysIterator.foreach(touch)
+    data.keysIterator.foreach(touch(_))
     data.clear()
   }
 
-  def version(key: Key): Long = versions.getOrElse(key, 0L)
+  // removes the key first when it has expired, so that an expiry counts as a change for WATCH, as it does on a server
+  def version(key: Key, now: Long): Long = {
+    lookup(key, now): Unit
+    versions.getOrElse(key, 0L)
+  }
 
   // increases on every change to any key
   def changeCount: Long = changes
 
-  private def touch(key: Key): Unit = {
+  private def touch(key: Key, watched: Boolean = true): Unit = {
     changes += 1
-    versions.update(key, changes)
+    if (watched) versions.update(key, changes)
   }
 
   private def nextSeq(): Long = {

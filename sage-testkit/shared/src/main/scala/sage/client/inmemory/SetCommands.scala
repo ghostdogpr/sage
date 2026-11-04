@@ -1,7 +1,5 @@
 package sage.client.inmemory
 
-import scala.util.Random
-
 import sage.protocol.Frame
 
 private[inmemory] object SetCommands {
@@ -9,7 +7,7 @@ private[inmemory] object SetCommands {
   import Value.Members
 
   val specs: Map[String, Spec] = Map(
-    "SADD"        -> Spec(-3, sAdd),
+    "SADD"        -> Spec(-3, changeMembers(_, add = true)),
     "SCARD"       -> Spec(2, call => int(members(call, call.key(0)).size.toLong)),
     "SDIFF"       -> Spec(-2, call => set(combine(call, call.args.indices.map(call.key), _ -- _))),
     "SDIFFSTORE"  -> Spec(-3, call => storeResult(call, combine(call, call.args.indices.drop(1).map(call.key), _ -- _))),
@@ -22,7 +20,7 @@ private[inmemory] object SetCommands {
     "SMOVE"       -> Spec(4, sMove),
     "SPOP"        -> Spec(-2, sPop),
     "SRANDMEMBER" -> Spec(-2, sRandMember),
-    "SREM"        -> Spec(-3, sRem),
+    "SREM"        -> Spec(-3, changeMembers(_, add = false)),
     "SSCAN"       -> Spec(-3, sScan),
     "SUNION"      -> Spec(-2, call => set(combine(call, call.args.indices.map(call.key), _ union _))),
     "SUNIONSTORE" -> Spec(-3, call => storeResult(call, combine(call, call.args.indices.drop(1).map(call.key), _ union _)))
@@ -33,32 +31,19 @@ private[inmemory] object SetCommands {
   private def set(items: Set[Key]): Frame = Frame.Set(items.iterator.map(k => bulk(k.bytes)).toVector)
 
   // every key is type-checked, including the ones after an empty intermediate result, as on a real server
-  private def combine(call: Call, keys: Seq[Key], op: (Set[Key], Set[Key]) => Set[Key]): Set[Key] = {
-    val sets = keys.map(members(call, _))
-    sets.tail.foldLeft(sets.head)(op)
-  }
+  private def combine(call: Call, keys: Seq[Key], op: (Set[Key], Set[Key]) => Set[Key]): Set[Key] =
+    keys.map(members(call, _)).reduceLeftOption(op).getOrElse(Set.empty)
 
-  private def storeResult(call: Call, result: Set[Key]): Frame = {
-    val destination = call.key(0)
-    call.store.delete(destination, call.now): Unit
-    call.replace(destination, Members(result))
-    int(result.size.toLong)
-  }
+  private def storeResult(call: Call, result: Set[Key]): Frame = call.stored(call.key(0), Members(result), result.size)
 
-  private def sAdd(call: Call): Frame = {
+  private def changeMembers(call: Call, add: Boolean): Frame = {
     val key     = call.key(0)
     val current = members(call, key)
-    val added   = call.args.indices.drop(1).map(call.key).toSet -- current
-    if (added.nonEmpty) call.replace(key, Members(current ++ added))
-    int(added.size.toLong)
-  }
-
-  private def sRem(call: Call): Frame = {
-    val key     = call.key(0)
-    val current = members(call, key)
-    val removed = call.args.indices.drop(1).map(call.key).toSet intersect current
-    if (removed.nonEmpty) call.replace(key, Members(current -- removed))
-    int(removed.size.toLong)
+    val named   = call.args.indices.drop(1).map(call.key)
+    val updated = if (add) current ++ named else current -- named
+    val changed = (updated.size - current.size).abs
+    if (changed > 0) call.put(key, Members(updated))
+    int(changed.toLong)
   }
 
   private def sMisMember(call: Call): Frame = {
@@ -75,8 +60,8 @@ private[inmemory] object SetCommands {
     if (!from.contains(member)) flag(false)
     else {
       if (source != destination) {
-        call.replace(source, Members(from - member))
-        call.replace(destination, Members(to + member))
+        call.put(source, Members(from - member))
+        call.put(destination, Members(to + member))
       }
       flag(true)
     }
@@ -84,53 +69,37 @@ private[inmemory] object SetCommands {
 
   private def sPop(call: Call): Frame = {
     val key     = call.key(0)
+    val count   = call.optional(1)(call.bounded(_, Errors.outOfRange)(_ >= 0))
     val current = members(call, key).toVector
-    call.args.length match {
-      case 1 =>
-        if (current.isEmpty) Frame.Null
-        else {
-          val member = current(Random.nextInt(current.length))
-          call.replace(key, Members(current.toSet - member))
-          bulk(member.bytes)
-        }
-      case 2 =>
-        val count = call.long(1)
-        if (count < 0) throw new Reject(Errors.outOfRange)
-        val taken = Sampling.pick(current, count)
-        if (taken.nonEmpty) call.replace(key, Members(current.toSet -- taken))
-        set(taken.toSet)
-      case _ => throw new Reject(Errors.syntax)
-    }
+    val taken   = count.fold(Sampling.one(current).toVector)(Sampling.pick(current, _))
+    if (taken.nonEmpty) call.put(key, Members(current.toSet -- taken))
+    count.fold(optional(taken.headOption.map(_.bytes)))(_ => set(taken.toSet))
   }
 
   private def sRandMember(call: Call): Frame = {
+    val count   = call.optional(1)(call.negatable)
     val current = members(call, call.key(0)).toVector
-    call.args.length match {
-      case 1 => if (current.isEmpty) Frame.Null else bulk(current(Random.nextInt(current.length)).bytes)
-      case 2 => keys(Sampling.pick(current, call.long(1)))
-      case _ => throw new Reject(Errors.syntax)
-    }
+    count.fold(optional(Sampling.one(current).map(_.bytes)))(n => keys(Sampling.pick(current, n)))
   }
 
   private def sInterCard(call: Call): Frame = {
-    val (keys, next) = call.numKeys(0)
-    val limit        = call.args.length - next match {
-      case 0                                  => 0L
-      case 2 if call.keyword(next) == "LIMIT" =>
-        val n = call.long(next + 1)
-        if (n < 0) throw new Reject(Errors.err("LIMIT can't be negative"))
-        n
-      case _                                  => throw new Reject(Errors.syntax)
-    }
-    val size         = combine(call, keys, _ intersect _).size.toLong
-    int(if (limit == 0) size else math.min(size, limit))
+    val keys = call.numKeys(0, Errors.err("Number of keys can't be greater than number of args"))
+    interCard(call)(combine(call, keys, _ intersect _).size.toLong)
   }
 
-  // small sets are scanned in one page on a real server, so the next cursor is always 0
-  private def sScan(call: Call): Frame = {
-    Scanning.cursor(call, 1)
-    val (pattern, _) = Scanning.options(call, 2)
-    val items        = members(call, call.key(0)).toVector.sorted.filter(m => pattern.forall(Glob.matches(_, m.bytes)))
-    Frame.Array(Vector(bulk("0"), keys(items)))
+  // the `[LIMIT limit]` of SINTERCARD and ZINTERCARD after their keys, where a server takes the last of repeated limits
+  def interCard(call: Call)(total: => Long): Frame = {
+    var limit = 0L
+    call.options(call.position) {
+      case "LIMIT" => limit = call.nextBounded(Errors.err("LIMIT can't be negative"))(_ >= 0)
+      case _       => throw new Reject(Errors.syntax)
+    }
+    val count = total
+    int(if (limit == 0) count else math.min(count, limit))
   }
+
+  private def sScan(call: Call): Frame =
+    Scanning.page(call, call.typed[Members](call.key(0))) { (set, options) =>
+      set.members.toVector.sorted.filter(m => options.matches(m.bytes)).map(m => bulk(m.bytes))
+    }
 }

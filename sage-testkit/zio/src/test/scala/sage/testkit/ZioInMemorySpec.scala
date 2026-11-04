@@ -40,7 +40,7 @@ object ZioInMemorySpec extends ZIOSpecDefault {
           messages  <- stream.take(2).runCollect
         } yield assertTrue(receivers == 1L, messages.toList == List(Message("news", "hello"), Message("news", "world")))
       }
-    },
+    } @@ TestAspect.timeout(zio.Duration.fromSeconds(5)),
     test("transactions and scanAll run as ZIO effects") {
       val client = InMemorySageClient()
       for {

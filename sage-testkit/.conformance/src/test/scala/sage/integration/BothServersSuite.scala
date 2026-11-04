@@ -27,12 +27,7 @@ abstract class BothServersSuite extends munit.FunSuite {
   given ExecutionContext = munitExecutionContext
 
   protected def clientTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
-    if (BothServersSuite.unsupported.exists(options.name.startsWith(_))) test(options.ignore)(())
-    else
-      test(options) {
-        val client = InMemoryClient()
-        CIO.ensure(client.close)(body(client)).unsafeRun
-      }
+    clientsTest(options)((client, _) => body(client))
 
   // two clients of one keyspace, like two connections to the same server
   protected def clientsTest(options: TestOptions)(body: (Client[CIO, String], Client[CIO, String]) => CIO[Any])(using Location): Unit =
@@ -128,19 +123,34 @@ abstract class BothServersSuite extends munit.FunSuite {
 object BothServersSuite {
 
   /**
-    * Tests of commands that the in-memory client deliberately does not implement, by the start of the test name. They are reported as
-    * ignored. `DIGEST` needs the server's XXH3 hash, `MOVE` needs several databases, `DUMP`, `RESTORE` and `MIGRATE` need the server's
-    * serialization format, and `OBJECT` and `CONFIG` describe server internals. The in-memory client also has no connections that can be
-    * lost.
+    * Tests of commands and options that the in-memory client deliberately does not implement, by the start of the test name. They are
+    * reported as ignored and still run against Redis and Valkey in the integration tests. The commands are listed in docs/testing.md.
     */
   val unsupported: Set[String] = Set(
     "DIGEST returns",
-    "DELEX deletes only when the value or digest condition matches",
+    "DELEX deletes",
+    "DELIFEQ deletes",
+    "INCREX increments",
+    "LCS finds",
+    "SORT orders",
+    "SORT BY/GET",
+    "SORT_RO reads",
     "MOVE relocates",
     "DUMP and RESTORE",
     "MIGRATE reports",
     "OBJECT exposes",
     "OBJECT FREQ",
+    "HEXPIRE/HTTL/HPERSIST",
+    "a field-TTL command",
+    "HEXPIREAT pins",
+    "HPTTL and HPEXPIRETIME",
+    "HGETEX returns",
+    "HSETEX sets",
+    "XINFO STREAM FULL",
+    "XCFGSET sets",
+    "XDELEX reports",
+    "XACKDEL acknowledges",
+    "XNACK releases",
     // the in-memory client has no connections to kill, and no INFO
     "a standalone lock survives connection loss",
     "closing the client releases its server connection"

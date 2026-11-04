@@ -43,7 +43,7 @@ private[inmemory] object Glob {
       if (p(i) == '\\' && i + 1 < p.length) {
         if (p(i + 1) == byte) matched = true
         i += 2
-      } else if (i + 2 < p.length && p(i + 1) == '-' && p(i + 2) != ']') {
+      } else if (i + 2 < p.length && p(i + 1) == '-') {
         val low  = math.min(p(i) & 0xff, p(i + 2) & 0xff)
         val high = math.max(p(i) & 0xff, p(i + 2) & 0xff)
         if ((byte & 0xff) >= low && (byte & 0xff) <= high) matched = true

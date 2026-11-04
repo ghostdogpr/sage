@@ -89,7 +89,7 @@ val subscriber = InMemorySageClient(server)
 
 ## Controlling time
 
-Key expiry, hash field expiry and `TIME` read the clock of the backend's effect system. A test clock of that effect system therefore controls them:
+Key expiry and `TIME` read the clock of the backend's effect system. A test clock of that effect system therefore controls them:
 
 - ZIO: `TestClock.adjust` from zio-test.
 - Cats Effect: `TestControl` from cats-effect-testkit, which advances its virtual time when every fiber is sleeping.
@@ -107,58 +107,63 @@ test("a session expires") {
 }
 ```
 
-The direct client, Ox and Pekko read the system clock. For them, pass a `TestClock.Manual`, which moves only when the test advances it. A manual clock also works with the other backends, and an `InMemoryServer` accepts one for all its clients.
+The direct client, Ox and Pekko read the system clock. For them, create the server with a `TestClock`, which moves only when the test advances it. Every client of that server reads time from the clock. A `TestClock` also works with the other backends.
 
 ```scala
-import sage.testkit.{InMemorySageClient, TestClock}
+import sage.testkit.{InMemoryServer, InMemorySageClient, TestClock}
 
-val clock  = TestClock.manual()
-val client = InMemorySageClient(clock)
+val clock  = TestClock()
+val client = InMemorySageClient(InMemoryServer(clock))
 client.set("session", "token", expiry = SetExpiry.In(10.seconds))
 clock.advance(10.seconds)
 client.get[String]("session") // None
 ```
 
-The timeout of a blocking command such as `BLPOP` is measured by the backend's own timer, so it follows the effect system's test clock in the same way. A manual clock does not shorten it.
+The timeout of a blocking command such as `BLPOP` is measured by the backend's own timer, so it follows the effect system's test clock in the same way. Advancing a `sage.testkit.TestClock` does not shorten it.
 
 ## What is supported
 
 The in-memory client implements:
 
-- String, key, hash (including field expiry), list, set and sorted-set commands, with `WRONGTYPE` errors and expiry.
-- Bitmaps, HyperLogLog and geo commands.
-- Streams, including consumer groups, pending entries, claiming and `XINFO`.
-- Blocking commands such as `BLPOP`, `BLMOVE`, `BZPOPMIN`, `XREAD BLOCK` and `XREADGROUP BLOCK`.
-- Pipelines and transactions, including `WATCH`.
+- String, key, hash, list, set and sorted-set commands, with key expiry and `WRONGTYPE` errors, including blocking commands such as `BLPOP`, `BLMOVE` and `BZPOPMIN`.
+- Streams: `XADD`, `XLEN`, `XRANGE`, `XREVRANGE`, `XDEL`, `XTRIM`, `XSETID` and `XREAD`, consumer groups with `XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM` and `XAUTOCLAIM`, and `XINFO`.
 - Pub/sub with channels, patterns and shard channels, and the `PUBSUB` introspection commands.
-- Distributed locks and rate limiters.
-- `SORT`, `LCS`, `SCAN` and its variants, `KEYS`, `DBSIZE`, `FLUSHALL`, `PING`, `ECHO` and `TIME`.
+- Pipelines and transactions, including `WATCH`.
+- Distributed locks and rate limiters. `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS` and `SCRIPT FLUSH` work for their scripts.
+- `SCAN` and its variants, `KEYS`, `DBSIZE`, `FLUSHALL`, `FLUSHDB`, `PING`, `ECHO` and `TIME`.
+
+Sage's own features therefore work with it: `cached` reads, subscriptions, transactions, locks, rate limiters, and the paging helpers such as `scanAll`, `xRangeAll`, `xTail`, `xConsume` and `xAutoClaimAll`.
 
 ## What is not supported
 
-A command that the client does not implement fails with a `ServerError` whose code is `ERR` and whose message names the command. A transaction that contains one is discarded before anything runs, as a server discards a transaction with an unknown command. The following commands are not implemented:
+A command that the client does not implement fails with a `ServerError` whose code is `ERR` and whose message names the command. A transaction that contains one is discarded before anything runs, as a server discards a transaction with an unknown command. An option that the client does not implement fails with an `ERR` error that names the option and the command, but only when its command runs. A Lua script that the client cannot run also fails with an `ERR` error when its `EVAL` or `EVALSHA` runs, so the rest of its transaction still runs.
 
-- JSON commands (`JSON.SET`, `JSON.GET` and the others).
-- Redis array commands (`ARSET`, `ARGET` and the others).
-- Lua scripts other than those of Sage's locks and rate limiters, and functions (`FUNCTION`, `FCALL`, `FCALL_RO`).
-- `DIGEST`, and the `IFDEQ` and `IFDNE` conditions of `DELEX`, which need the server's XXH3 digest. `DELEX` with `IFEQ` or `IFNE` works.
-- `MOVE`, because the client has a single database. The `database` setting of `SageConfig` does not apply to it.
-- `DUMP`, `RESTORE` and `MIGRATE`, which use the server's serialization format.
-- `OBJECT`, `WAIT` and `WAITAOF`.
-- Server administration and introspection: `ACL`, `CLIENT`, `CLUSTER`, `COMMAND`, `COMMANDLOG`, `CONFIG`, `INFO`, `LATENCY`, `MEMORY`, `ROLE` and `SLOWLOG`.
+These command families are not implemented:
+
+- Bitmaps (`SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITFIELD` and the others), HyperLogLog and geo commands.
+- Hash field expiry (`HEXPIRE`, `HTTL`, `HPERSIST`, `HGETEX`, `HSETEX` and the others).
+- Lua scripts other than those of Sage's locks and rate limiters, `EVAL_RO`, `EVALSHA_RO`, and functions (`FUNCTION`, `FCALL`, `FCALL_RO`).
+- JSON commands and Redis array commands.
+- Server administration and introspection, such as `ACL`, `CLIENT`, `CLUSTER`, `COMMAND`, `CONFIG`, `INFO`, `OBJECT`, `SLOWLOG` and `WAIT`, and the commands that copy data between servers or databases: `DUMP`, `RESTORE`, `MIGRATE` and `MOVE`.
+
+Within the implemented families, these commands and options are not implemented:
+
+- `LCS`, `SORT`, `SORT_RO`, `INCREX`, `DELEX`, `DELIFEQ` and `DIGEST`, and the `IFEQ`, `IFNE`, `IFDEQ` and `IFDNE` conditions of `SET`.
+- `XDELEX`, `XACKDEL`, `XNACK`, `XCFGSET` and `XINFO STREAM FULL`, and these stream options: `KEEPREF`, `DELREF` and `ACKED` of `XADD` and `XTRIM`, `ENTRIESREAD` of `XGROUP`, `ENTRIESADDED` and `MAXDELETEDID` of `XSETID`, `FORCE` and `LASTID` of `XCLAIM`, and `CLAIM` of `XREADGROUP`.
+- `SCRIPT KILL`, `SCRIPT SHOW`, `SCRIPT DEBUG` and the `HELP` subcommands, such as `XINFO HELP`.
 
 ## Differences from a server
 
 The in-memory client runs the integration tests that Sage runs against Redis for the features above. These behaviors differ:
 
-- `PFCOUNT` counts the elements exactly. A server estimates the cardinality with a small error, so both give the same answer for small sets, but for large sets a server's answer can be off by about 1%.
-- Lua scripts run only when they are the scripts of Sage's locks and rate limiters, which the client recognizes by their SHA-1 digest and runs as Scala code.
+- An error has the same code as a server's error, such as `ERR`, `WRONGTYPE`, `NOGROUP` or `BUSYGROUP`, but its message can be worded differently. When a command has several invalid arguments, the client can report a different one than a server.
+- Lua scripts run only when they are the scripts of Sage's locks and rate limiters, which the client recognizes by their SHA-1 digest and runs as Scala code. The rate limiter's arguments must be decimal integers, as Sage sends them, where a server's Lua interpreter also accepts other number formats such as `0x10` or `1e3`.
 - `cached` reads always read the keyspace. The client keeps no local cache, so the results are the same as with a networked client whose cache is always up to date.
 - The client takes no `SageConfig`, so listeners and tracers receive no events, and settings such as timeouts and pool sizes do not apply.
 - The client behaves like one standalone server. Commands that would fail in a cluster because their keys belong to different slots (`CROSSSLOT`) succeed, so tests of cluster key placement need a real cluster.
 - Keyspace notifications are not published.
 - Expiry is checked when a command reads a key, so an expired key disappears at the first read after its expiry time. A server also removes expired keys in the background, which is only visible through memory usage and keyspace notifications.
-- Approximate stream trimming (`~`) removes entries only in whole blocks of 100, the default node size of a server's streams. A server's blocks depend on how the entries were added, so the number of entries it keeps can differ, although a short stream is not trimmed by either.
-- `XCFGSET` accepts its settings and has no effect, because Sage's `XADD` has no idempotency options to use them.
-- `INCREX` and `XNACK` are recent Redis commands. Their main cases are tested against Redis, and their edge cases follow the Redis documentation.
+- Approximate stream trimming (`~`) trims exactly, and removes at most `LIMIT` entries when `LIMIT` is given. A server trims whole blocks of entries, so it can keep more entries than the threshold.
+- `XINFO GROUPS` reports `entries-read` as null, as a server does when it cannot tell, and reports as `lag` the number of entries after the group's last delivered id.
+- `XINFO STREAM` omits `radix-tree-keys` and `radix-tree-nodes`, which describe a server's memory layout, so Sage reports them as 0.
 - The client never loses its connection, so tests of reconnection and failover need a real server.

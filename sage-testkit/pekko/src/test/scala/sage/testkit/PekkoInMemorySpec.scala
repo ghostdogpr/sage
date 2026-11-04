@@ -18,8 +18,8 @@ class PekkoInMemorySpec extends munit.FunSuite {
   override def afterAll(): Unit = system.terminate()
 
   test("the in-memory client runs Future-based Pekko code") {
-    val clock                                                                               = TestClock.manual()
-    val client                                                                              = InMemorySageClient(clock)
+    val clock                                                                               = TestClock()
+    val client                                                                              = InMemorySageClient(InMemoryServer(clock))
     val result: Future[(Option[String], Option[String], Option[(Long, Long)], Seq[String])] = for {
       _       <- client.set("session", "token", expiry = SetExpiry.In(10.seconds))
       before  <- client.get[String]("session")
