@@ -157,10 +157,10 @@ final private[client] class MultiplexedConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      // A half-open peer can accept the socket without answering HELLO, so the handshake limits each wait and lets the reconnect loop continue.
+      // A half-open peer can accept the socket without answering the setup, so the handshake limits each wait and lets the reconnect loop continue.
       val protocol = conn.handshake(bootstrap, config.connectTimeout.toMillis)
       // A server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached (ADR-0045). RESP2 cannot
-      // deliver invalidations on the same connection, so a RESP2 connection serves them uncached too.
+      // push invalidations on the same connection, so a RESP2 connection never caches.
       conn.cache = Option
         .when(role.caches && config.clientCache.enabled && protocol == RespProtocol.Resp3)(config.clientCache.maxBytes)
         .filter(_ => conn.step(Connection.clientTrackingOnOptin, config.connectTimeout.toMillis).isEmpty)

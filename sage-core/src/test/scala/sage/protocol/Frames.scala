@@ -20,7 +20,7 @@ object Frames {
 
   def map(entries: (String, Frame)*): Frame = Frame.Map(entries.toVector.map { case (key, value) => bulk(key) -> value })
 
-  // parses one complete reply as a server writes it, so a spec can decode the exact bytes captured from Redis or Valkey
+  // parses one raw reply, so a spec can decode the exact bytes captured from Redis or Valkey
   def wire(raw: String): Frame =
     new RespParser().feed(Bytes.utf8(raw)) match {
       case Right(Vector(frame)) => frame

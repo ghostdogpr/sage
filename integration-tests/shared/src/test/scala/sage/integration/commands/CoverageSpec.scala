@@ -83,7 +83,7 @@ class CoverageSpec extends ContainerClient with TestContainersForAll {
         case Frame.Array(modules) =>
           Right(modules.flatMap {
             case Frame.Map(entries)  => moduleName(entries)
-            // RESP2 replies with a flat array of alternating field names and values instead of a map
+            // RESP2 sends each module as a flat field/value array
             case Frame.Array(fields) => moduleName(fields.grouped(2).collect { case Vector(key, value) => (key, value) }.toVector)
             case _                   => None
           })

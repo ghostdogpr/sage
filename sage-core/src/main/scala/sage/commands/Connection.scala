@@ -45,8 +45,8 @@ private[sage] object Connection {
   private val pingReply = Decode.shape("simple or bulk string") { case Decode.Text(value) => Right(value) }
 
   /**
-    * The RESP3 handshake. The reply is the protocol version the server selected, which is 3 unless the server accepted `HELLO` but kept an
-    * older protocol. Other reply entries are ignored.
+    * The RESP3 handshake. Returns the protocol version the server selected, which is 3 unless the server accepted `HELLO` but kept an older
+    * protocol. Other reply entries are ignored.
     */
   def hello(auth: Option[(String, String)] = None): Command[Long] =
     Command(

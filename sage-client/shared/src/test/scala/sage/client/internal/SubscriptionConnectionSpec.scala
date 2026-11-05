@@ -1154,8 +1154,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
 
   // --- RESP2 ------------------------------------------------------------------------------------------------------------------------------
 
-  // Like a server older than Redis 6.0, which does not know HELLO and sends pub/sub messages as arrays. In subscribed mode, it answers PING
-  // with the array ["pong", ""].
+  // replies like a server older than Redis 6.0, which rejects HELLO and answers PING in subscribed mode with ["pong", ""]
   private def resp2Reply(command: List[String]): Seq[Frame] =
     command match {
       case "HELLO" :: _                                   => Seq(Frame.SimpleError("ERR unknown command 'HELLO'"))
@@ -1204,7 +1203,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       case other           => fail(s"expected one marker channel, got $other")
     }
 
-  // Runs `body` on another thread and fails if it does not return within 2 seconds, as happens when a reply answers the wrong entry.
+  // fails if `body` does not return within 2 seconds, as happens when a reply answers the wrong entry
   private def returns[A](connection: SubscriptionConnection)(body: => A)(using munit.Location): A = {
     val result = new AtomicReference[scala.util.Try[A]]()
     val thread = new Thread(() => result.set(scala.util.Try(body)))
@@ -1265,7 +1264,6 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
   }
 
   test("on RESP2, the marker after an SUNSUBSCRIBE leaves the connection's classic subscriptions in place") {
-    // a server that tracks this connection's subscriptions and reports their count in each confirmation
     val (channels, shards)                                = (mutable.Set.empty[String], mutable.Set.empty[String])
     def confirmed(verb: String, name: String, count: Int) =
       Seq(Frame.Array(Vector(bulk(verb.toLowerCase(Locale.ROOT)), bulk(name), Frame.Integer(count.toLong))))

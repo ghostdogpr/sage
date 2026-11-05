@@ -30,7 +30,6 @@ object Replies {
     else if (isSetupHello(payload)) Seq(hello)
     else Seq(ok)
 
-  // a connection setup that runs only HELLO 3
   val helloOnly: Bootstrap = Bootstrap(RespProtocol.Auto, None, Vector.empty)
 
   val hello: Frame =

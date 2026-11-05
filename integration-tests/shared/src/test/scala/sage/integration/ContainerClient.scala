@@ -40,7 +40,7 @@ trait ContainerClient extends munit.FunSuite with TestContainersSuite {
   protected def containerTest(options: TestOptions)(body: Containers => CIO[Any])(using Location): Unit =
     test(options)(withContainers(body(_).unsafeRun))
 
-  // Every config the suites build starts here, so that SAGE_IT_PROTOCOL applies to all of them.
+  // the suites build every config from this, so SAGE_IT_PROTOCOL applies to all of them
   protected def configFor(topology: Topology): SageConfig = SageConfig(topology = topology, protocol = TestProtocol.selected)
 
   protected def configOf(server: GenericContainer): SageConfig = configFor(Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
@@ -102,7 +102,7 @@ trait ContainerClient extends munit.FunSuite with TestContainersSuite {
         Eventually(50)(read.is(Some("v2")))
     }
 
-  // RESP2 connections do not cache, so a cached read returns the writer's latest value without waiting for an invalidation.
+  // RESP2 connections do not cache, so a cached read sees each write without waiting for an invalidation
   protected def cachedReadIsLatest(reader: Client[CIO, String], writer: Client[CIO, String], key: String): CIO[Unit] = {
     val read = reader.cached(Commands.get[String, String](key), 1.minute)
     writer.set(key, "v1") >> read.is(Some("v1")) >> writer.set(key, "v2") >> read.is(Some("v2"))

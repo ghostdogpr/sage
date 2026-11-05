@@ -125,10 +125,9 @@ abstract private[internal] class Pipe(factory: MultiplexedConnection.TransportFa
 
   /**
     * Starts the transport, negotiates the protocol, authenticates and runs the setup commands in turn, blocking up to `timeoutMillis` for
-    * each reply. Under [[RespProtocol.Auto]], a server that rejects `HELLO 3` as described by [[Bootstrap.rejectsHello]], or accepts it but
-    * keeps protocol 2, is used with RESP2. Under [[RespProtocol.Resp3]], such a server fails with `UnsupportedServer`. Closes the connection
-    * and throws on a timeout or a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` is tolerated. Returns the
-    * negotiated protocol, `Resp3` or `Resp2`.
+    * each reply, and returns the negotiated protocol. A server that rejects `HELLO 3` (see [[Bootstrap.rejectsHello]]) or keeps protocol 2
+    * is used with RESP2 under [[RespProtocol.Auto]] and fails with `UnsupportedServer` under [[RespProtocol.Resp3]]. Closes the connection
+    * and throws on a timeout or a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` is tolerated.
     */
   final def handshake(bootstrap: Bootstrap, timeoutMillis: Long): RespProtocol = {
     def abort(error: Throwable): Nothing = {
@@ -139,7 +138,6 @@ abstract private[internal] class Pipe(factory: MultiplexedConnection.TransportFa
       UnsupportedServer(s"server $reason; set protocol to RespProtocol.Auto or RespProtocol.Resp2 to connect with RESP2")
     val auto                             = bootstrap.protocol == RespProtocol.Auto
     start()
-    // the negotiated protocol, and whether the connection still needs AUTH
     val (negotiated, needsAuth)          =
       if (bootstrap.protocol == RespProtocol.Resp2) (RespProtocol.Resp2, true)
       else
@@ -274,8 +272,7 @@ abstract private[internal] class WatchedPipe(factory: MultiplexedConnection.Tran
 
   protected def onPush(elements: Vector[Frame]): Unit
 
-  // RESP2 has no push type, so a RESP2 connection that receives pushes recognizes them among its arrays. Returns true for an array it
-  // handled as a push.
+  // RESP2 has no push type, so a subclass can handle an array as a push and return true
   protected def arrayPush(elements: Vector[Frame]): Boolean = false
 
   final override protected def onFrame(frame: Frame): Unit =
