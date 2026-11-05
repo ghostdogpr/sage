@@ -19,7 +19,7 @@ private[inmemory] object Expiry {
   private val options: Set[String] = Set("EX", "PX", "EXAT", "PXAT")
 
   /**
-    * The options of `SET`, `MSETEX` and `GETEX`. `mustExist` is `Some(false)` for NX, `Some(true)` for XX, and `None` without a condition.
+    * The options of `SET` and `GETEX`. `mustExist` is `Some(false)` for NX, `Some(true)` for XX, and `None` without a condition.
     */
   final case class Write(mustExist: Option[Boolean], ttl: Ttl, get: Boolean) {
     def allows(exists: Boolean): Boolean = mustExist.forall(_ == exists)
@@ -60,21 +60,6 @@ private[inmemory] object Expiry {
       val scaled = Math.multiplyExact(amount, scale)
       if (relative) Math.addExact(call.now, scaled) else scaled
     } catch { case _: ArithmeticException => throw new Reject(Errors.invalidExpire(call.name)) }
-
-  // the NX, XX, GT and LT conditions; no expiry counts as never expiring, so GT never applies to it and LT always does
-  enum Condition {
-    case NX, XX, GT, LT
-
-    def allows(current: Entry, at: Long): Boolean =
-      this match {
-        case NX => !current.hasExpiry
-        case XX => current.hasExpiry
-        case GT => current.hasExpiry && at > current.expiresAt
-        case LT => !current.hasExpiry || at < current.expiresAt
-      }
-  }
-
-  def condition(keyword: String): Option[Condition] = Condition.values.find(_.toString == keyword)
 }
 
 private[inmemory] object StringCommands {
@@ -87,26 +72,19 @@ private[inmemory] object StringCommands {
     "GET"         -> Spec(2, call => optional(call.string(call.key(0)))),
     "GETDEL"      -> Spec(2, getDel),
     "GETEX"       -> Spec(-2, getEx),
-    "GETRANGE"    -> Spec(4, getRange),
     "INCR"        -> Spec(2, call => incrBy(call, 1L)),
     "INCRBY"      -> Spec(3, call => incrBy(call, call.long(1))),
     "INCRBYFLOAT" -> Spec(3, incrByFloat),
     "MGET"        -> Spec(-2, mGet),
     "MSET"        -> Spec(-3, mSet),
-    "MSETEX"      -> Spec(-4, mSetEx),
-    "MSETNX"      -> Spec(-3, call => setAll(call, call.pairs(0), Expiry.Write(Some(false), Ttl.Clear, get = false))),
+    "MSETNX"      -> Spec(-3, mSetNx),
     "SET"         -> Spec(-3, set),
-    "SETRANGE"    -> Spec(4, setRange),
     "STRLEN"      -> Spec(2, call => int(call.string(call.key(0)).fold(0L)(_.length.toLong)))
   )
-
-  // Redis limits a string to 512 MB by default
-  private val MaxLength = 512L * 1024L * 1024L
 
   private def append(call: Call): Frame = {
     val key     = call.key(0)
     val current = call.string(key)
-    checkLength(current.fold(0L)(_.length.toLong), call.args(1).length)
     val updated = Bytes.concat(current.toVector :+ call.args(1))
     call.put(key, Value.Str(updated))
     int(updated.length.toLong)
@@ -132,17 +110,10 @@ private[inmemory] object StringCommands {
     bulk(text)
   }
 
-  // MSETEX numkeys key value … [NX | XX] [EX | PX | EXAT | PXAT time | KEEPTTL] writes every pair only when the condition holds for all keys
-  private def mSetEx(call: Call): Frame = {
-    val count = call.bounded(0, Errors.err("invalid numkeys value"))(n => n > 0 && n <= Int.MaxValue)
-    if (count * 2 > call.args.length - 1) throw new Reject(Errors.err("wrong number of key-value pairs"))
-    val pairs = Vector.tabulate(count.toInt)(i => (call.key(1 + i * 2), call.args(2 + i * 2)))
-    setAll(call, pairs, Expiry.write(call, 1 + count.toInt * 2))
-  }
-
-  private def setAll(call: Call, pairs: Vector[(Key, Bytes)], options: Expiry.Write): Frame = {
-    val allowed = pairs.forall((key, _) => options.allows(call.lookup(key).isDefined))
-    if (allowed) pairs.foreach((key, value) => call.put(key, Value.Str(value), options.ttl))
+  private def mSetNx(call: Call): Frame = {
+    val pairs   = call.pairs(0)
+    val allowed = pairs.forall((key, _) => call.lookup(key).isEmpty)
+    if (allowed) pairs.foreach((key, value) => call.put(key, Value.Str(value), Ttl.Clear))
     flag(allowed)
   }
 
@@ -166,17 +137,6 @@ private[inmemory] object StringCommands {
     optional(current)
   }
 
-  private def getRange(call: Call): Frame = {
-    val start  = call.long(1)
-    val end    = call.long(2)
-    val bytes  = call.string(call.key(0)).getOrElse(Bytes.empty)
-    val length = bytes.length.toLong
-    // both positions are clamped to the string, so an end before the string selects its first byte unless both count from the end
-    val from   = math.max(0L, if (start < 0) length + start else start)
-    val to     = math.min(length - 1, math.max(0L, if (end < 0) length + end else end))
-    if (from > to || start < 0 && end < 0 && start > end) bulk(Bytes.empty) else bulk(Bytes.wrap(bytes.toIArray.slice(from.toInt, to.toInt + 1)))
-  }
-
   private def mGet(call: Call): Frame =
     Frame.Array(call.args.indices.toVector.map { i =>
       call.lookup(call.key(i)).map(_.value).collect { case Value.Str(bytes) => bulk(bytes) }.getOrElse(Frame.Null)
@@ -195,25 +155,4 @@ private[inmemory] object StringCommands {
     if (allowed) call.put(key, Value.Str(call.args(1)), options.ttl)
     if (options.get) optional(previous) else if (allowed) ok else Frame.Null
   }
-
-  private def setRange(call: Call): Frame = {
-    val key     = call.key(0)
-    val offset  = call.long(1)
-    val value   = call.args(2)
-    if (offset < 0) throw new Reject(Errors.err("offset is out of range"))
-    val current = call.string(key)
-    if (value.length == 0) int(current.fold(0L)(_.length.toLong))
-    else {
-      checkLength(offset, value.length)
-      val base    = current.getOrElse(Bytes.empty).toArray
-      val updated = java.util.Arrays.copyOf(base, math.max(base.length, offset.toInt + value.length))
-      System.arraycopy(value.toArray, 0, updated, offset.toInt, value.length)
-      call.put(key, Value.Str(Bytes.wrap(IArray.unsafeFromArray(updated))))
-      int(updated.length.toLong)
-    }
-  }
-
-  // compares without adding, so that an offset near Long.MaxValue cannot overflow
-  private def checkLength(start: Long, added: Long): Unit =
-    if (start > MaxLength - added) throw new Reject(Errors.err("string exceeds maximum allowed size (proto-max-bulk-len)"))
 }

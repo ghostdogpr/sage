@@ -1,5 +1,6 @@
 package sage.client.inmemory
 
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.collection.mutable
@@ -9,8 +10,8 @@ import scala.util.control.NonFatal
 
 import kyo.compat.*
 
-import sage.{Message, PatternMessage, SageException}
-import sage.SageException.{DecodeError, InvalidArgument, NotCacheable, NotConnected, TransactionDiscarded}
+import sage.{Bytes, Message, PatternMessage, SageException}
+import sage.SageException.{DecodeError, InvalidArgument, NotCacheable, NotConnected, ServerError, TimedOut, TransactionDiscarded}
 import sage.client.internal.{Client, LockExecutor, RateLimitExecutor, SharedRunner, Subscription, TransactionScope}
 import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.{Attempt, Command, Pipeline, Reply}
@@ -67,14 +68,43 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
   def transaction[A](body: TransactionScope[CIO, String] => CIO[A]): CIO[A] =
     ifOpen(CIO.acquireReleaseWith(CIO.defer(new Scope))(scope => CIO.defer(scope.release()))(scope => body(scope)))
 
-  private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] =
-    executor.tryWithLock(this, key)(body)
+  private[sage] def lockTryWith[LK, A](lock: LockExecutor[LK], key: LK)(body: => CIO[A]): CIO[Option[A]] = tryWithLock(lock, key, this)(body)
 
-  private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
-    executor.withLock(this, key, waitTimeout)(body)
+  private[sage] def lockWith[LK, A](lock: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => CIO[A]): CIO[A] =
+    withLock(lock, key, waitTimeout, this)(body)
 
-  private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
-    executor.evalSha(this, subject, cost, peek)
+  override private[client] def tryWithLock[K, A](lock: LockExecutor[K], key: K, runner: SharedRunner)(body: CIO[A]): CIO[Option[A]] =
+    lock.validate(None).flatMap { _ =>
+      holding(lock.key(key))(take =>
+        currentMillis.flatMap(now => CIO.defer(executor.locked(take(now)))).flatMap { taken =>
+          if (taken) body.map(Some(_)) else CIO.value(None)
+        }
+      )
+    }
+
+  override private[client] def withLock[K, A](lock: LockExecutor[K], key: K, waitTimeout: FiniteDuration, runner: SharedRunner)(
+    body: CIO[A]
+  ): CIO[A] =
+    lock.validate(Some(waitTimeout)).flatMap { _ =>
+      holding(lock.key(key)) { take =>
+        waitFor(Some(waitTimeout))(now => Option.when(take(now))(())).flatMap {
+          case Some(_) => body
+          case None    => CIO.fail(TimedOut("distributed lock acquisition timed out"))
+        }
+      }
+    }
+
+  private[sage] def rateLimitAcquire[RK](limiter: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): CIO[Decision] =
+    limiter.definition.validate(cost) match {
+      case Some(problem) => CIO.fail(InvalidArgument(problem))
+      case None          =>
+        ifOpen(currentMillis.flatMap { now =>
+          CIO.defer {
+            try executor.locked(TokenBucket.acquire(executor.store, limiter.definition, subject, cost, peek, now))
+            catch { case reject: Reject => throw ServerError.of(reject.frame.value) }
+          }
+        })
+    }
 
   def subscribeChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
     subscribe(Broker.Kind.Channel, channel +: rest.toVector)(delivery => Message(delivery.channel, decodePayload[V](delivery.payload)))
@@ -85,7 +115,7 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
     )
 
   def subscribeShardChannels[V: ValueCodec](channel: String, rest: String*): CIO[Subscription[CIO, Message[V]]] =
-    subscribe(Broker.Kind.Shard, channel +: rest.toVector)(delivery => Message(delivery.channel, decodePayload[V](delivery.payload)))
+    CIO.fail(ServerError.of(Errors.unknown("SSUBSCRIBE").value))
 
   override private[sage] def runner: SharedRunner = this
 
@@ -111,32 +141,62 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
     }
 
   // a payload the codec cannot decode fails the stream, as it does with the networked client
-  private def decodePayload[V](payload: sage.Bytes)(using codec: ValueCodec[V]): V =
+  private def decodePayload[V](payload: Bytes)(using codec: ValueCodec[V]): V =
     try codec.decode(payload).fold(throw _, identity)
     catch {
       case error: SageException => throw error
       case NonFatal(error)      => throw DecodeError.fromThrowable(error)
     }
 
+  /**
+    * Runs `use` with a function that tries to take the lock at `key` at a given time, which must run under the store lock. A lock is held
+    * while its key stores this call's token, so clients of the same server exclude each other. It has no lease and stays held until `use`
+    * ends, fails or is interrupted.
+    */
+  private def holding[A](key: Bytes)(use: (Long => Boolean) => CIO[A]): CIO[A] = {
+    val held  = new Key(key)
+    val token = Bytes.utf8(UUID.randomUUID().toString)
+
+    def take(now: Long): Boolean =
+      executor.store.lookup(held, now).isEmpty && {
+        executor.store.put(held, Value.Str(token), Ttl.Clear, now)
+        true
+      }
+
+    // releasing checks the token, so it also runs when `use` was interrupted before it learned that it had taken the lock
+    val release: CIO[Unit] = currentMillis.flatMap { now =>
+      CIO.defer(executor.locked {
+        executor.store.lookup(held, now).map(_.value) match {
+          case Some(Value.Str(value)) if value.sameBytes(token) => executor.store.delete(held, now): Unit
+          case _                                                => ()
+        }
+      })
+    }
+    ifOpen(CIO.acquireReleaseWith(CIO.unit)(_ => release)(_ => use(take)))
+  }
+
   private def ifOpen[A](body: CIO[A]): CIO[A] = CIO.defer(closed.get).flatMap(isClosed => if (isClosed) CIO.fail(NotConnected()) else body)
 
   /**
     * Runs a blocking command such as `BLPOP`. When it has nothing to return, it waits until another command writes and then tries again,
-    * until the command's timeout passes and the reply is null. The timeout is measured with `CIO.timeout` on the backend's timer, which a
-    * `TestClock` does not control.
+    * until the command's timeout passes and the reply is null.
     */
   private def blocking(command: Command[?]): CIO[Frame] =
-    currentMillis.flatMap { now =>
-      executor.startBlocking(command.name, command.args, now) match {
-        case Left(error) => CIO.value(error)
-        case Right(wait) => wait.timeout.fold(waitFor(command, wait))(t => CIO.timeout(t)(waitFor(command, wait)).map(_.getOrElse(Frame.Null)))
-      }
+    CIO.defer(executor.startBlocking(command.name, command.args)).flatMap {
+      case Left(error)    => CIO.value(error)
+      case Right(timeout) => waitFor(timeout)(executor.attemptBlocking(command.name, command.args)).map(_.getOrElse(Frame.Null))
     }
 
-  private def waitFor(command: Command[?], wait: Wait): CIO[Frame] =
-    currentMillis
-      .flatMap(now => once(executor.attemptBlocking(command.name, command.args, wait, now, _)))
-      .flatMap(_.fold(waitFor(command, wait))(frame => CIO.value(frame)))
+  /**
+    * Runs `attempt` under the store lock, and again after every write, until it returns a value, or until `timeout` passes and this returns
+    * `None`. The timeout is measured with `CIO.timeout` on the backend's timer, which a `TestClock` does not control. The waiter is
+    * abandoned under the store lock once the timeout passes, so an attempt and the timeout never both succeed.
+    */
+  private def waitFor[A](timeout: Option[FiniteDuration])(attempt: Long => Option[A]): CIO[Option[A]] = {
+    val waiter       = new executor.Waiter(attempt)
+    def poll: CIO[A] = currentMillis.flatMap(now => once(waiter.poll(now, _))).flatMap(_.fold(poll)(CIO.value(_)))
+    timeout.fold(poll.map(Some(_)))(t => CIO.timeout(t)(poll).flatMap(_.fold(CIO.defer(waiter.abandon()))(value => CIO.value(Some(value)))))
+  }
 
   // runs `attempt` once; when it has nothing to return, it keeps the wake-up it receives, which completes this with None
   private def once[A](attempt: (() => Unit) => Option[A]): CIO[Option[A]] =

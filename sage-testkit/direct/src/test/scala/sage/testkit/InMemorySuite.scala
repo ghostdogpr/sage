@@ -36,7 +36,7 @@ abstract class InMemorySuite extends munit.FunSuite {
 // runs a command line with raw arguments, which can be ones the typed API never sends
 def raw(executor: Executor, command: String, now: Long = 0L): Frame = {
   val words = command.split(" ").toVector
-  executor.execute(words(0), words.drop(1).map(Bytes.utf8), now)
+  executor.execute(words.head, words.tail.map(Bytes.utf8), now)
 }
 
 def inBackground[A](body: => A): CompletableFuture[A] = {
@@ -45,7 +45,7 @@ def inBackground[A](body: => A): CompletableFuture[A] = {
   result
 }
 
-// waits up to five seconds until `count` blocking commands are waiting for a write on `server`
+// waits up to five seconds until `count` blocking commands or locks are waiting for a write on `server`
 def awaitWaiting(server: InMemoryServer, count: Int): Unit = {
   val deadline = System.nanoTime() + 5.seconds.toNanos
   while (server.executor.waiting != count) {

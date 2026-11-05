@@ -5,6 +5,8 @@ import scala.concurrent.duration.*
 import sage.*
 import sage.SageException.{NotConnected, ServerError, TransactionDiscarded}
 import sage.commands.{Keys, Strings}
+import sage.ratelimit.{Decision, RateLimit}
+import sage.ratelimit.Decision.{Allowed, Denied}
 
 class InMemorySageClientSpec extends InMemorySuite {
 
@@ -18,6 +20,30 @@ class InMemorySageClientSpec extends InMemorySuite {
     assertEquals(client.ttl("session"), Ttl.NoKey)
   }
 
+  // the decisions of RateLimiterSuite's injected-time tests, which the in-memory client cannot run because it has no EVAL
+  clocked.test("rate limiters refill, handle a backward clock and keep the balance across policies as the server's script does") { (client, clock) =>
+    val start                                            = clock.nowMillis
+    def at(offsetMillis: Long): Unit                     = clock.set(java.time.Instant.ofEpochMilli(start + offsetMillis))
+    val original                                         = client.rateLimiter[String](RateLimit(capacity = 10, refillTokens = 10, refillPeriod = 1.second))
+    val tightened                                        = client.rateLimiter[String](RateLimit(capacity = 1, refillTokens = 1, refillPeriod = 1.second))
+    def check(decisions: (Decision, Decision)*): Unit    = decisions.foreach((obtained, expected) => assertEquals(obtained, expected))
+    check(
+      original.tryAcquire("refill", 10)    -> Allowed(0, 1.second),
+      original.tryAcquire("refill")        -> Denied(0, 100.millis),
+      original.tryAcquire("clock", 10)     -> Allowed(0, 1.second),
+      original.tryAcquire("policy")        -> Allowed(9, 100.millis),
+      tightened.tryAcquire("policy")       -> Allowed(0, 1.second),
+      original.tryAcquire("policy")        -> Denied(0, 100.millis),
+      tightened.tryAcquire("policy")       -> Denied(0, 1.second)
+    )
+    at(-500)
+    check(original.tryAcquire("clock")     -> Denied(0, 600.millis), original.tryAcquire("policy") -> Denied(0, 600.millis))
+    at(100)
+    check(original.tryAcquire("clock")     -> Allowed(0, 1.second), original.tryAcquire("clock")   -> Denied(0, 100.millis))
+    at(300)
+    check(original.tryAcquire("refill", 3) -> Allowed(0, 1.second), original.tryAcquire("refill")  -> Denied(0, 100.millis))
+  }
+
   clients.test("WATCH sees a missing key being created and ignores writes that change nothing, as on a server") { client =>
     val watchedMissing = client.transaction { tx =>
       tx.watch("fresh")
@@ -28,39 +54,14 @@ class InMemorySageClientSpec extends InMemorySuite {
 
     client.zAdd("z")(("a", 1.0)): Unit
     client.rPush("l", "a"): Unit
-    val id        = client.xAdd("s")(("f", "v"))
-    client.xGroupCreate("s", "g", GroupStartId.At(StreamId.Zero))
     val unchanged = client.transaction { tx =>
-      tx.watch("z", "l", "s")
+      tx.watch("z", "l")
       assertEquals(client.zAdd("z", ZAddCondition.IfNotExists)(("a", 2.0)), 0L)
       assertEquals(client.zIncrBy("z", "a", 0.0), 1.0)
       assertEquals(client.lPopCount[String]("l", 0L), Vector.empty)
-      // a server's WATCH does not see consumer-group changes
-      client.xReadGroup[String, String]("g", "c")(("s", GroupReadId.New))(): Unit
-      assertEquals(client.xAck("s", "g")(id), 1L)
-      assert(client.xGroupCreateConsumer("s", "g", "c2"))
       tx.exec(Seq(Strings.set("other", "x")))
     }
     assertEquals(unchanged.map(_.length), Some(1))
-    val added     = client.transaction { tx =>
-      tx.watch("s")
-      client.xAdd("s")(("f", "w")): Unit
-      tx.exec(Seq(Strings.set("other", "x")))
-    }
-    assertEquals(added, None)
-    assert(client.copy("s", "copy"))
-    val copied    = client.transaction { tx =>
-      tx.watch("copy")
-      assert(client.copy("s", "copy", replace = true))
-      tx.exec(Seq(Strings.set("other", "x")))
-    }
-    assertEquals(copied, None)
-    val created   = client.transaction { tx =>
-      tx.watch("mk")
-      client.xGroupCreate("mk", "g", mkStream = true)
-      tx.exec(Seq(Strings.set("other", "x")))
-    }
-    assertEquals(created, None)
   }
 
   clocked.test("EXEC aborts when a watched key expires or GETEX sets its expiry again, and commits when it had expired before") { (client, clock) =>
@@ -95,10 +96,12 @@ class InMemorySageClientSpec extends InMemorySuite {
     assertEquals(client.get[String]("k"), None)
   }
 
-  clients.test("unsupported commands fail with an ERR server error that names them") { client =>
-    val error = intercept[ServerError](client.setBit("b", 0L, true))
-    assertEquals(error.code, "ERR")
-    assert(error.detail.contains("SETBIT"))
+  clients.test("unsupported commands and options fail with an ERR server error that names them") { client =>
+    client.set("k", "v"): Unit
+    val command = intercept[ServerError](client.copy("k", "copy"))
+    assertEquals((command.code, command.detail.contains("COPY")), ("ERR", true))
+    val option  = intercept[ServerError](client.expire("k", 10.seconds, ExpireCondition.IfNoExpiry))
+    assertEquals((option.code, option.detail.contains("NX")), ("ERR", true))
   }
 
   test("a closed client refuses commands") {

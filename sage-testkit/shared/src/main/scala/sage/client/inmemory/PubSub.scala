@@ -3,7 +3,6 @@ package sage.client.inmemory
 import scala.collection.mutable
 
 import sage.Bytes
-import sage.protocol.Frame
 
 /**
   * The pub/sub side of an in-memory server. Every method must be called, and every subscriber created, while holding the store lock.
@@ -16,29 +15,22 @@ final private[sage] class Broker(store: Store) {
   private val subscriptions = mutable.LinkedHashSet.empty[Subscriber]
 
   /**
-    * Delivers `payload` and returns the number of receivers. A classic message reaches the subscribers of the channel and of every
-    * matching pattern. A shard message reaches only shard subscribers. As on a server, a client counts once for the channel and once per
-    * matching pattern, however many of its subscriptions name them, because the networked client subscribes each name once per client.
+    * Delivers `payload` and returns the number of receivers. A message reaches the subscribers of the channel and of every matching
+    * pattern. As on a server, a client counts once for the channel and once per matching pattern, however many of its subscriptions name
+    * them, because the networked client subscribes each name once per client.
     */
-  def publish(shard: Boolean, channel: String, payload: Bytes): Long = {
+  def publish(channel: String, payload: Bytes): Long = {
     val name       = Bytes.utf8(channel)
     val deliveries = subscriptions.iterator.flatMap { subscriber =>
-      (subscriber.kind, shard) match {
-        case (Kind.Shard, true) | (Kind.Channel, false) =>
-          Option.when(subscriber.names.contains(channel))(subscriber -> Delivery(channel, channel, payload))
-        case (Kind.Pattern, false)                      =>
+      subscriber.kind match {
+        case Kind.Channel => Option.when(subscriber.names.contains(channel))(subscriber -> Delivery(channel, channel, payload))
+        case Kind.Pattern =>
           subscriber.names.iterator.filter(p => Glob.matches(Bytes.utf8(p), name)).map(p => subscriber -> Delivery(p, channel, payload))
-        case _                                          => Iterator.empty
       }
     }.toVector
     deliveries.foreach((subscriber, delivery) => subscriber.offer(delivery))
     deliveries.map((subscriber, delivery) => (subscriber.owner, subscriber.kind, delivery.matched)).distinct.length.toLong
   }
-
-  def channels(kind: Kind): Vector[String] =
-    subscriptions.iterator.filter(_.kind == kind).flatMap(_.names).toVector.distinct
-
-  def count(kind: Kind, name: String): Long = subscriptions.filter(s => s.kind == kind && s.names.contains(name)).map(_.owner).size.toLong
 
   def close(owner: AnyRef): Unit = subscriptions.filter(_.owner eq owner).foreach(_.close())
 
@@ -84,7 +76,7 @@ final private[sage] class Broker(store: Store) {
 private[sage] object Broker {
 
   enum Kind {
-    case Channel, Pattern, Shard
+    case Channel, Pattern
   }
 
   // `matched` is the subscribed channel or pattern that the message matched
@@ -92,24 +84,6 @@ private[sage] object Broker {
 }
 
 private[inmemory] object PubSubCommands {
-  import Broker.Kind
-  import Replies.*
 
-  val specs: Map[String, Spec] = Map(
-    "PUBLISH"              -> Spec(3, call => int(call.store.pubsub.publish(shard = false, call.text(0), call.args(1)))),
-    "SPUBLISH"             -> Spec(3, call => int(call.store.pubsub.publish(shard = true, call.text(0), call.args(1)))),
-    "PUBSUB CHANNELS"      -> Spec(-1, names(_, Kind.Channel)),
-    "PUBSUB SHARDCHANNELS" -> Spec(-1, names(_, Kind.Shard)),
-    "PUBSUB NUMSUB"        -> Spec(-1, counts(_, Kind.Channel)),
-    "PUBSUB SHARDNUMSUB"   -> Spec(-1, counts(_, Kind.Shard)),
-    "PUBSUB NUMPAT"        -> Spec(1, call => int(call.store.pubsub.channels(Kind.Pattern).length.toLong))
-  )
-
-  private def names(call: Call, kind: Kind): Frame = {
-    val pattern = call.optional(0)(call.args)
-    Frame.Array(call.store.pubsub.channels(kind).filter(c => pattern.forall(Glob.matches(_, Bytes.utf8(c)))).map(bulk))
-  }
-
-  private def counts(call: Call, kind: Kind): Frame =
-    Frame.Array(call.args.flatMap(name => Vector(bulk(name), int(call.store.pubsub.count(kind, name.asUtf8String)))))
+  val specs: Map[String, Spec] = Map("PUBLISH" -> Spec(3, call => Replies.int(call.store.pubsub.publish(call.text(0), call.args(1)))))
 }

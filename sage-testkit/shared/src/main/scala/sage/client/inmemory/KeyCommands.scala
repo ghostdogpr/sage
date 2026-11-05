@@ -6,7 +6,6 @@ private[inmemory] object KeyCommands {
   import Replies.*
 
   val specs: Map[String, Spec] = Map(
-    "COPY"        -> Spec(-3, copy),
     "DEL"         -> Spec(-2, delete),
     "EXISTS"      -> Spec(-2, call => int(call.args.indices.count(i => call.lookup(call.key(i)).isDefined).toLong)),
     "EXPIRE"      -> Spec(-3, call => expire(call, relative = true, scale = 1000L)),
@@ -18,9 +17,7 @@ private[inmemory] object KeyCommands {
     "PEXPIREAT"   -> Spec(-3, call => expire(call, relative = false, scale = 1L)),
     "PEXPIRETIME" -> Spec(2, call => ttl(call, absolute = true, millis = true)),
     "PTTL"        -> Spec(2, call => ttl(call, absolute = false, millis = true)),
-    "RANDOMKEY"   -> Spec(1, randomKey),
-    "RENAME"      -> Spec(3, call => rename(call, onlyIfAbsent = false)),
-    "RENAMENX"    -> Spec(3, call => rename(call, onlyIfAbsent = true)),
+    "RENAME"      -> Spec(3, rename),
     "SCAN"        -> Spec(-2, scan),
     "TOUCH"       -> Spec(-2, call => int(call.args.indices.count(i => call.lookup(call.key(i)).isDefined).toLong)),
     "TTL"         -> Spec(2, call => ttl(call, absolute = false, millis = false)),
@@ -28,42 +25,18 @@ private[inmemory] object KeyCommands {
     "UNLINK"      -> Spec(-2, delete)
   )
 
-  private def copy(call: Call): Frame = {
-    val source      = call.key(0)
-    val destination = call.key(1)
-    var replace     = false
-    call.options(2) {
-      case "REPLACE" => replace = true
-      case _         => throw new Reject(Errors.syntax)
-    }
-    if (source == destination) throw new Reject(Errors.err("source and destination objects are the same"))
-    call.lookup(source) match {
-      case None                                                      => flag(false)
-      case Some(_) if !replace && call.lookup(destination).isDefined => flag(false)
-      case Some(entry)                                               =>
-        call.put(destination, entry.value, entry.ttl)
-        flag(true)
-    }
-  }
-
   private def delete(call: Call): Frame = int(call.args.indices.count(i => call.store.delete(call.key(i), call.now)).toLong)
 
   private def expire(call: Call, relative: Boolean, scale: Long): Frame = {
-    val key        = call.key(0)
-    val conditions = call.args.indices.drop(2).map(i => Expiry.condition(call.keyword(i)).getOrElse(throw new Reject(Errors.syntax))).toSet
-    import Expiry.Condition.*
-    if (conditions.contains(NX) && conditions.size > 1 || conditions.contains(GT) && conditions.contains(LT))
-      throw new Reject(Errors.err("NX, XX, GT and LT options at the same time are not compatible"))
-    val at         = Expiry.at(call, call.long(1), relative, scale)
+    val key = call.key(0)
+    if (call.args.length > 2) call.unsupported(call.keyword(2))
+    val at  = Expiry.at(call, call.long(1), relative, scale)
     call.lookup(key) match {
       case None        => flag(false)
       case Some(entry) =>
-        if (!conditions.forall(_.allows(entry, at))) flag(false)
-        else {
-          if (at <= call.now) call.store.delete(key, call.now): Unit
-          else call.store.setExpiry(key, entry, at)
-          flag(true)
-        }
+        if (at <= call.now) call.store.delete(key, call.now): Unit
+        else call.store.setExpiry(key, entry, at)
+        flag(true)
     }
   }
 
@@ -92,19 +65,16 @@ private[inmemory] object KeyCommands {
     }
   }
 
-  private def randomKey(call: Call): Frame = optional(Sampling.one(call.store.live(call.now)).map(_._1.bytes))
-
-  private def rename(call: Call, onlyIfAbsent: Boolean): Frame = {
+  private def rename(call: Call): Frame = {
     val source      = call.key(0)
     val destination = call.key(1)
     call.lookup(source) match {
-      case None                                                          => throw new Reject(Errors.noSuchKey)
-      case Some(_) if source == destination                              => if (onlyIfAbsent) flag(false) else ok
-      case Some(_) if onlyIfAbsent && call.lookup(destination).isDefined => flag(false)
-      case Some(entry)                                                   =>
+      case None                             => throw new Reject(Errors.noSuchKey)
+      case Some(_) if source == destination => ok
+      case Some(entry)                      =>
         call.store.delete(source, call.now): Unit
-        call.put(destination, entry.value, entry.ttl)
-        if (onlyIfAbsent) flag(true) else ok
+        call.put(destination, entry.value, Ttl.At(entry.expiresAt))
+        ok
     }
   }
 
@@ -128,7 +98,6 @@ private[inmemory] object ServerCommands {
 
   val specs: Map[String, Spec] = Map(
     "DBSIZE"   -> Spec(1, call => int(call.store.live(call.now).length.toLong)),
-    "ECHO"     -> Spec(2, call => bulk(call.args(0))),
     "FLUSHALL" -> Spec(-1, flush),
     "FLUSHDB"  -> Spec(-1, flush),
     "PING"     -> Spec(-1, ping),

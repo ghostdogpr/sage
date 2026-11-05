@@ -1,8 +1,10 @@
 package sage.testkit
 
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+
 import scala.concurrent.duration.*
 
-import ox.supervised
+import ox.{forkCancellable, never, supervised}
 
 import sage.*
 import sage.backend.*
@@ -21,6 +23,21 @@ class OxInMemorySpec extends munit.FunSuite {
       assertEquals(counted, Some((1L, 5L)))
       assertEquals(client.scanAll().runToList(), List("visits"))
       client.close
+    }
+  }
+
+  test("a lock excludes another client of the same server until its holder is cancelled") {
+    supervised {
+      val server  = InMemoryServer()
+      val first   = InMemorySageClient(server).lock[String]()
+      val second  = InMemorySageClient(server).lock[String]()
+      val started = new CountDownLatch(1)
+      val holder  = forkCancellable(first.withLock("job", 5.seconds) { started.countDown(); never })
+      assert(started.await(5, TimeUnit.SECONDS))
+      assertEquals(second.tryWithLock("job")("ran"), None)
+      intercept[SageException.TimedOut](second.withLock("job", 50.millis)("ran"))
+      holder.cancel(): Unit
+      assertEquals(second.tryWithLock("job")("ran"), Some("ran"))
     }
   }
 }

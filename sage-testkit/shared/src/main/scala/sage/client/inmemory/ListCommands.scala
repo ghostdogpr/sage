@@ -25,37 +25,29 @@ private[inmemory] object ListCommands {
     "LINSERT" -> Spec(5, lInsert),
     "LLEN"    -> Spec(2, call => int(items(call, call.key(0)).length.toLong)),
     "LMOVE"   -> Spec(5, lMove),
-    "LMPOP"   -> Spec(-4, call => lmPop(call, 0)),
-    "BLMOVE"  -> Spec.blocking(6, lMove)(call => Timeouts.seconds(call.args(4), call.now)),
-    "BLMPOP"  -> Spec.blocking(-5, lmPop(_, 1))(call => Timeouts.seconds(call.args(0), call.now)),
-    "BLPOP"   -> Spec.blocking(-3, blockingPop(_, left = true))(call => Timeouts.seconds(call.args.last, call.now)),
-    "BRPOP"   -> Spec.blocking(-3, blockingPop(_, left = false))(call => Timeouts.seconds(call.args.last, call.now)),
+    "BLMOVE"  -> Spec(6, lMove, blocking = true),
+    "BLPOP"   -> Spec(-3, blockingPop(_, left = true), blocking = true),
+    "BRPOP"   -> Spec(-3, blockingPop(_, left = false), blocking = true),
     "LPOP"    -> Spec(-2, call => pop(call, left = true)),
-    "LPOS"    -> Spec(-3, lPos),
-    "LPUSH"   -> Spec(-3, call => push(call, left = true, onlyIfExists = false)),
-    "LPUSHX"  -> Spec(-3, call => push(call, left = true, onlyIfExists = true)),
+    "LPUSH"   -> Spec(-3, push(_, left = true)),
     "LRANGE"  -> Spec(4, lRange),
     "LREM"    -> Spec(4, lRem),
     "LSET"    -> Spec(4, lSet),
     "LTRIM"   -> Spec(4, lTrim),
     "RPOP"    -> Spec(-2, call => pop(call, left = false)),
-    "RPUSH"   -> Spec(-3, call => push(call, left = false, onlyIfExists = false)),
-    "RPUSHX"  -> Spec(-3, call => push(call, left = false, onlyIfExists = true))
+    "RPUSH"   -> Spec(-3, push(_, left = false))
   )
 
   private def items(call: Call, key: Key): Vector[Bytes] = call.typed[Lst](key).fold(Vector.empty[Bytes])(_.items)
 
-  private def push(call: Call, left: Boolean, onlyIfExists: Boolean): Frame = {
+  private def push(call: Call, left: Boolean): Frame = {
     val key     = call.key(0)
-    val current = call.typed[Lst](key)
-    if (onlyIfExists && current.isEmpty) int(0L)
-    else {
-      val values  = call.args.drop(1)
-      // LPUSH inserts the values one at a time at the head, so the last value ends up first
-      val updated = if (left) values.reverse ++ current.fold(Vector.empty[Bytes])(_.items) else current.fold(Vector.empty[Bytes])(_.items) ++ values
-      call.put(key, Lst(updated))
-      int(updated.length.toLong)
-    }
+    val current = items(call, key)
+    val values  = call.args.drop(1)
+    // LPUSH inserts the values one at a time at the head, so the last value ends up first
+    val updated = if (left) values.reverse ++ current else current ++ values
+    call.put(key, Lst(updated))
+    int(updated.length.toLong)
   }
 
   // the `count` items at one end of `items` in the order they are popped, and the rest
@@ -71,7 +63,7 @@ private[inmemory] object ListCommands {
 
   private def pop(call: Call, left: Boolean): Frame = {
     val key   = call.key(0)
-    val count = call.optional(1, Errors.arity(call.name))(call.bounded(_, Errors.outOfRange)(_ >= 0))
+    val count = call.optional(1, Errors.arity(call.name))(call.nonNegative(_, Errors.outOfRange))
     call.typed[Lst](key).fold(Frame.Null) { list =>
       count.fold(optional(take(call, key, list.items, 1, left).headOption))(n => bulks(take(call, key, list.items, Numbers.size(n), left)))
     }
@@ -142,28 +134,6 @@ private[inmemory] object ListCommands {
     ok
   }
 
-  private def lPos(call: Call): Frame = {
-    var rank      = 1L
-    var count     = Option.empty[Long]
-    var maxLen    = 0L
-    call.options(2) {
-      case "RANK"   =>
-        rank = call.negatable(call.nextIndex())
-        if (rank == 0) throw new Reject(Errors.err("RANK can't be zero"))
-      case "COUNT"  => count = Some(call.nextBounded(Errors.err("COUNT can't be negative"))(_ >= 0))
-      case "MAXLEN" => maxLen = call.nextBounded(Errors.err("MAXLEN can't be negative"))(_ >= 0)
-      case _        => throw new Reject(Errors.syntax)
-    }
-    val list      = items(call, call.key(0))
-    val positions = if (rank > 0) list.indices else list.indices.reverse
-    val scanned   = if (maxLen == 0) positions else positions.take(Numbers.size(maxLen))
-    val matches   = scanned.iterator.filter(i => list(i).sameBytes(call.args(1))).drop(Numbers.size(math.abs(rank) - 1))
-    count match {
-      case None    => matches.nextOption().fold(Frame.Null)(i => int(i.toLong))
-      case Some(n) => Frame.Array((if (n == 0) matches else matches.take(Numbers.size(n))).map(i => int(i.toLong)).toVector)
-    }
-  }
-
   private def lMove(call: Call): Frame = {
     val source      = call.key(0)
     val destination = call.key(1)
@@ -191,18 +161,4 @@ private[inmemory] object ListCommands {
 
   // the reply of the first of `keys` that `pop` takes from, or null; the keys after it are not read, as on a server
   def firstPop(keys: Iterator[Key])(pop: Key => Option[Frame]): Frame = keys.flatMap(pop).nextOption().getOrElse(Frame.Null)
-
-  // `at` is the index of numkeys, which BLMPOP puts after its timeout
-  private def lmPop(call: Call, at: Int): Frame =
-    multiPop(call, at, "LEFT", "RIGHT") { (key, left, count) =>
-      call.typed[Lst](key).map(list => bulks(take(call, key, list.items, count, left)))
-    }
-
-  // `numkeys key… first | second [COUNT count]` of LMPOP and ZMPOP from `at`; `popFrom` returns None for an empty key
-  def multiPop(call: Call, at: Int, first: String, second: String)(popFrom: (Key, Boolean, Int) => Option[Frame]): Frame = {
-    val keys  = call.numKeys(at)
-    val left  = call.choice(call.nextIndex(), first, second)
-    val count = call.trailing("COUNT").fold(1L)(call.bounded(_, Errors.err("count should be greater than 0"))(_ > 0))
-    firstPop(keys.iterator)(key => popFrom(key, left, Numbers.size(count)).map(popped => Frame.Array(Vector(bulk(key.bytes), popped))))
-  }
 }

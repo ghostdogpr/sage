@@ -26,6 +26,15 @@ private[sage] trait SharedRunner extends ScanTarget {
   // a standalone server has no replicas to wait for
   def lockWrite(command: Command[Boolean], @unused timeout: FiniteDuration, @unused replicaAcknowledgement: Boolean): CIO[Boolean] =
     run(command)
+
+  // LoweredClient runs locks through these with its own runner; the in-memory client overrides them to keep locks in its store
+  private[client] def tryWithLock[K, A](executor: LockExecutor[K], key: K, runner: SharedRunner)(body: CIO[A]): CIO[Option[A]] =
+    executor.tryWithLock(runner, key)(body)
+
+  private[client] def withLock[K, A](executor: LockExecutor[K], key: K, waitTimeout: FiniteDuration, runner: SharedRunner)(
+    body: CIO[A]
+  ): CIO[A] =
+    executor.withLock(runner, key, waitTimeout)(body)
 }
 
 private[sage] object SharedRunner {

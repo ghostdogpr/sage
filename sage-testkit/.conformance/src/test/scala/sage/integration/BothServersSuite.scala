@@ -1,7 +1,6 @@
 package sage.integration
 
 import scala.annotation.unused
-import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
 import scala.reflect.{classTag, ClassTag}
 import scala.util.Failure
@@ -13,7 +12,7 @@ import sage.Bytes
 import sage.client.LockClient
 import sage.client.SageConfig
 import sage.client.inmemory.InMemoryClient
-import sage.client.internal.{Client, Paged, Subscription}
+import sage.client.internal.{Client, Paged}
 import sage.commands.{Command, Commands}
 import sage.testkit.InMemoryServer
 
@@ -23,8 +22,6 @@ import sage.testkit.InMemoryServer
   * to behave like both.
   */
 abstract class BothServersSuite extends munit.FunSuite {
-
-  given ExecutionContext = munitExecutionContext
 
   protected def clientTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
     clientsTest(options)((client, _) => body(client))
@@ -84,9 +81,6 @@ abstract class BothServersSuite extends munit.FunSuite {
   protected def required[A](what: String, value: Option[A]): CIO[A] =
     CIO.get(value.toRight(new AssertionError(s"$what returned nothing")).toTry)
 
-  protected def withSubscription[M, A](subscribe: CIO[Subscription[CIO, M]])(body: Subscription[CIO, M] => CIO[A]): CIO[A] =
-    subscribe.flatMap(sub => body(sub).fold(result => sub.close.map(_ => result), error => sub.close.flatMap(_ => CIO.fail(error))))
-
   protected def failsWith[E <: Throwable: ClassTag](attempt: CIO[Any]): CIO[E] =
     attempt.liftToTry.flatMap {
       case Failure(error: E) => CIO.value(error)
@@ -123,15 +117,20 @@ abstract class BothServersSuite extends munit.FunSuite {
 object BothServersSuite {
 
   /**
-    * Tests of commands and options that the in-memory client deliberately does not implement, by the start of the test name. They are
-    * reported as ignored and still run against Redis and Valkey in the integration tests. The commands are listed in docs/testing.md.
+    * Tests of commands and options that the in-memory client does not implement, by the start of the test name. They are reported as
+    * ignored and still run against Redis and Valkey in the integration tests.
     */
   val unsupported: Set[String] = Set(
+    "GETRANGE SETRANGE STRLEN",
+    "LCS finds",
     "DIGEST returns",
     "DELEX deletes",
-    "DELIFEQ deletes",
+    "MSETEX sets",
     "INCREX increments",
-    "LCS finds",
+    "COPY copies",
+    "EXPIRE conditions",
+    "RANDOMKEY returns",
+    "RENAME moves",
     "SORT orders",
     "SORT BY/GET",
     "SORT_RO reads",
@@ -140,17 +139,46 @@ object BothServersSuite {
     "MIGRATE reports",
     "OBJECT exposes",
     "OBJECT FREQ",
+    "DELIFEQ deletes",
+    "HRANDFIELD returns",
     "HEXPIRE/HTTL/HPERSIST",
     "a field-TTL command",
     "HEXPIREAT pins",
     "HPTTL and HPEXPIRETIME",
+    "HGETDEL returns",
     "HGETEX returns",
     "HSETEX sets",
-    "XINFO STREAM FULL",
-    "XCFGSET sets",
-    "XDELEX reports",
-    "XACKDEL acknowledges",
-    "XNACK releases",
+    "LPUSHX and RPUSHX",
+    "LPOS finds",
+    "LMOVE shifts",
+    "BLMOVE and BLMPOP",
+    "SPOP and SRANDMEMBER",
+    "SMOVE relocates",
+    "SDIFF SINTER SUNION and their STORE forms",
+    "ZRANGE BYLEX",
+    "ZRANGESTORE copies",
+    "ZPOPMIN ZPOPMAX and ZMPOP",
+    "BZPOPMIN and BZMPOP",
+    "ZRANDMEMBER draws",
+    "ZUNION ZINTER",
+    "ZREMRANGEBYRANK BYSCORE and BYLEX",
+    // the in-memory client runs no Lua scripts, and its locks have no lease
+    "automatic renewal extends the lease",
+    "expired ownership cannot renew",
+    "script cache flush",
+    "the computed sha matches",
+    "the native EVALSHA path recovers from NOSCRIPT",
+    "the composable EVAL guard",
+    "RateLimiterClient.command exposes",
+    "accrues at the exact rate",
+    "refills continuously",
+    "a backward server clock",
+    "a non-integer refill rate",
+    "a clock rollback folds",
+    "a large refill period",
+    "reusing a namespace with alternating policies",
+    "malformed bucket fields",
+    "an already-full bucket",
     // the in-memory client has no connections to kill, and no INFO
     "a standalone lock survives connection loss",
     "closing the client releases its server connection"

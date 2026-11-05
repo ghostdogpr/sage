@@ -31,4 +31,26 @@ class PekkoInMemorySpec extends munit.FunSuite {
     } yield (before, after, counted, keys)
     result.map(assertEquals(_, (Some("token"), None, Some((1L, 5L)), Seq("visits"))))
   }
+
+  // a timeout cannot interrupt a Future, so the wait it abandons is still registered when the holder releases the lock
+  test("a lock wait that timed out does not take the lock once its holder releases it") {
+    val server = InMemoryServer()
+    val first  = InMemorySageClient(server).lock[String]()
+    val second = InMemorySageClient(server).lock[String]()
+    val result = for {
+      timedOut <- first.withLock("job", 5.seconds)(second.withLock("job", 100.millis)(Future.unit).failed)
+      after    <- second.tryWithLock("job")(Future.successful("ran"))
+    } yield (timedOut, after)
+    result.map((timedOut, after) => assertEquals((timedOut.isInstanceOf[SageException.TimedOut], after), (true, Some("ran"))))
+  }
+
+  test("a blocking pop that timed out does not take an element pushed afterwards") {
+    val client = InMemorySageClient()
+    val result = for {
+      popped <- client.blPop[String]("q")(BlockTimeout.After(100.millis))
+      _      <- client.rPush("q", "x")
+      length <- client.lLen("q")
+    } yield (popped, length)
+    result.map(assertEquals(_, (None, 1L)))
+  }
 }

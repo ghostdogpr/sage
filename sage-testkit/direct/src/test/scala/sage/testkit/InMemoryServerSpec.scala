@@ -34,4 +34,28 @@ class InMemoryServerSpec extends InMemorySuite {
     producer.rPush("jobs", "job-1"): Unit
     assertEquals(popped.get(5, java.util.concurrent.TimeUnit.SECONDS), Some(("jobs", "job-1")))
   }
+
+  shared.test("blocking pops whose timeouts race pushes lose no element") { (server, consumer, producer) =>
+    val poppers  = Vector.fill(4)(inBackground((1 to 200).count(_ => consumer.blPop[String]("jobs")(BlockTimeout.After(1.millis)).nonEmpty)))
+    val deadline = System.nanoTime() + 10.seconds.toNanos
+    var pushed   = 0L
+    // pushing only while a pop waits makes each push race that pop's timeout
+    while (!poppers.forall(_.isDone) && System.nanoTime() < deadline)
+      if (server.executor.waiting > 0) {
+        producer.rPush("jobs", "job"): Unit
+        pushed += 1
+      } else Thread.`yield`()
+    assertEquals(poppers.map(_.get(5, java.util.concurrent.TimeUnit.SECONDS).toLong).sum + producer.lLen("jobs"), pushed)
+  }
+
+  shared.test("a lock excludes another client of the server, and a waiting withLock takes it once the holder releases it") {
+    (server, holder, contender) =>
+      val waiting = holder.lock[String]().withLock("job", 5.seconds) {
+        assertEquals(contender.lock[String]().tryWithLock("job")("ran"), None)
+        val waiting = inBackground(contender.lock[String]().withLock("job", 5.seconds)("ran"))
+        awaitWaiting(server, 1)
+        waiting
+      }
+      assertEquals(waiting.get(5, java.util.concurrent.TimeUnit.SECONDS), "ran")
+  }
 }

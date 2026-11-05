@@ -64,7 +64,7 @@ final case class RateLimiter[K](limit: RateLimit, namespace: String = RateLimite
   private[sage] def tryAcquireAt(subject: K, cost: Long, nowMicros: Long): Command[Decision] =
     eval(cached = false, subject, cost, peek = false, Some(nowMicros))
 
-  private def keyBytes(subject: K): Bytes = namespaced(keyCodec.encode(subject))
+  private[sage] def keyBytes(subject: K): Bytes = namespaced(keyCodec.encode(subject))
 
   // a cached call sends the digest; NOSCRIPT recovery sends the body, which runs the check and caches the script on that node.
   private[sage] def eval(cached: Boolean, subject: K, cost: Long, peek: Boolean, now: Option[Long] = None): Command[Decision] = {

@@ -41,7 +41,7 @@ final private[client] class LockExecutor[K](
     val releaseDeadline = new AtomicReference[Deadline]()
   }
 
-  private[internal] def key(value: K): Bytes = namespaced(codec.encode(value))
+  private[client] def key(value: K): Bytes = namespaced(codec.encode(value))
 
   private[internal] def command(key: Bytes, token: String, operation: Operation, cached: Boolean): Command[Boolean] =
     Command(
@@ -85,7 +85,7 @@ final private[client] class LockExecutor[K](
     }
   }
 
-  private def validate(wait: Option[FiniteDuration]): CIO[Unit] =
+  private[client] def validate(wait: Option[FiniteDuration]): CIO[Unit] =
     if (leaseDuration < 30.millis) CIO.fail(InvalidArgument("leaseDuration must be at least 30 milliseconds"))
     else if (wait.exists(_ <= Duration.Zero)) CIO.fail(InvalidArgument("waitTimeout must be positive"))
     else CIO.unit

@@ -123,47 +123,15 @@ The timeout of a blocking command such as `BLPOP` is measured by the backend's o
 
 ## What is supported
 
-The in-memory client implements:
+The in-memory client supports Sage's own features: `cached` reads, subscriptions to channels and patterns, transactions with `WATCH`, locks, rate limiters created with `client.rateLimiter`, and the paging helpers `scanAll`, `hScanAll`, `sScanAll` and `zScanAll`.
 
-- String, key, hash, list, set and sorted-set commands, with key expiry and `WRONGTYPE` errors, including blocking commands such as `BLPOP`, `BLMOVE` and `BZPOPMIN`.
-- Streams: `XADD`, `XLEN`, `XRANGE`, `XREVRANGE`, `XDEL`, `XTRIM`, `XSETID` and `XREAD`, consumer groups with `XGROUP`, `XREADGROUP`, `XACK`, `XPENDING`, `XCLAIM` and `XAUTOCLAIM`, and `XINFO`.
-- Pub/sub with channels, patterns and shard channels, and the `PUBSUB` introspection commands.
-- Pipelines and transactions, including `WATCH`.
-- Distributed locks and rate limiters. `EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS` and `SCRIPT FLUSH` work for their scripts.
-- `SCAN` and its variants, `KEYS`, `DBSIZE`, `FLUSHALL`, `FLUSHDB`, `PING`, `ECHO` and `TIME`.
+It also supports the common commands of strings, keys with expiry, hashes, lists, sets and sorted sets, including blocking pops such as `BLPOP`, and `PUBLISH`. Streams are not supported. Code that uses them, including Sage's stream helpers such as `xTail` and `xConsume`, needs a real server.
 
-Sage's own features therefore work with it: `cached` reads, subscriptions, transactions, locks, rate limiters, and the paging helpers such as `scanAll`, `xRangeAll`, `xTail`, `xConsume` and `xAutoClaimAll`.
-
-## What is not supported
-
-A command that the client does not implement fails with a `ServerError` whose code is `ERR` and whose message names the command. A transaction that contains one is discarded before anything runs, as a server discards a transaction with an unknown command. An option that the client does not implement fails with an `ERR` error that names the option and the command, but only when its command runs. A Lua script that the client cannot run also fails with an `ERR` error when its `EVAL` or `EVALSHA` runs, so the rest of its transaction still runs.
-
-These command families are not implemented:
-
-- Bitmaps (`SETBIT`, `GETBIT`, `BITCOUNT`, `BITOP`, `BITFIELD` and the others), HyperLogLog and geo commands.
-- Hash field expiry (`HEXPIRE`, `HTTL`, `HPERSIST`, `HGETEX`, `HSETEX` and the others).
-- Lua scripts other than those of Sage's locks and rate limiters, `EVAL_RO`, `EVALSHA_RO`, and functions (`FUNCTION`, `FCALL`, `FCALL_RO`).
-- JSON commands and Redis array commands.
-- Server administration and introspection, such as `ACL`, `CLIENT`, `CLUSTER`, `COMMAND`, `CONFIG`, `INFO`, `OBJECT`, `SLOWLOG` and `WAIT`, and the commands that copy data between servers or databases: `DUMP`, `RESTORE`, `MIGRATE` and `MOVE`.
-
-Within the implemented families, these commands and options are not implemented:
-
-- `LCS`, `SORT`, `SORT_RO`, `INCREX`, `DELEX`, `DELIFEQ` and `DIGEST`, and the `IFEQ`, `IFNE`, `IFDEQ` and `IFDNE` conditions of `SET`.
-- `XDELEX`, `XACKDEL`, `XNACK`, `XCFGSET` and `XINFO STREAM FULL`, and these stream options: `KEEPREF`, `DELREF` and `ACKED` of `XADD` and `XTRIM`, `ENTRIESREAD` of `XGROUP`, `ENTRIESADDED` and `MAXDELETEDID` of `XSETID`, `FORCE` and `LASTID` of `XCLAIM`, and `CLAIM` of `XREADGROUP`.
-- `SCRIPT KILL`, `SCRIPT SHOW`, `SCRIPT DEBUG` and the `HELP` subcommands, such as `XINFO HELP`.
+Any other command or option fails with an `ERR` error that names what is not supported.
 
 ## Differences from a server
 
-The in-memory client runs the integration tests that Sage runs against Redis for the features above. These behaviors differ:
-
-- An error has the same code as a server's error, such as `ERR`, `WRONGTYPE`, `NOGROUP` or `BUSYGROUP`, but its message can be worded differently. When a command has several invalid arguments, the client can report a different one than a server.
-- Lua scripts run only when they are the scripts of Sage's locks and rate limiters, which the client recognizes by their SHA-1 digest and runs as Scala code. The rate limiter's arguments must be decimal integers, as Sage sends them, where a server's Lua interpreter also accepts other number formats such as `0x10` or `1e3`.
-- `cached` reads always read the keyspace. The client keeps no local cache, so the results are the same as with a networked client whose cache is always up to date.
-- The client takes no `SageConfig`, so listeners and tracers receive no events, and settings such as timeouts and pool sizes do not apply.
-- The client behaves like one standalone server. Commands that would fail in a cluster because their keys belong to different slots (`CROSSSLOT`) succeed, so tests of cluster key placement need a real cluster.
-- Keyspace notifications are not published.
-- Expiry is checked when a command reads a key, so an expired key disappears at the first read after its expiry time. A server also removes expired keys in the background, which is only visible through memory usage and keyspace notifications.
-- Approximate stream trimming (`~`) trims exactly, and removes at most `LIMIT` entries when `LIMIT` is given. A server trims whole blocks of entries, so it can keep more entries than the threshold.
-- `XINFO GROUPS` reports `entries-read` as null, as a server does when it cannot tell, and reports as `lag` the number of entries after the group's last delivered id.
-- `XINFO STREAM` omits `radix-tree-keys` and `radix-tree-nodes`, which describe a server's memory layout, so Sage reports them as 0.
-- The client never loses its connection, so tests of reconnection and failover need a real server.
+- Errors have the same code as a server's errors, such as `ERR` or `WRONGTYPE`, but their messages can be worded differently.
+- The client behaves like one standalone server that never disconnects. Use a real server to test clusters, reconnection or keyspace notifications.
+- A lock has no lease. It stays held until the code it protects ends, so a holder that stalls never loses it.
+- The client takes no `SageConfig`, so listeners, tracers, timeouts and pool settings do not apply.

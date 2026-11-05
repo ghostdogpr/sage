@@ -5,8 +5,8 @@ import sage.client.inmemory.InMemoryClient
 
 /**
   * Creates a [[sage.backend.SageClient]] backed by an in-memory keyspace, for tests that should not need a Redis server. The client
-  * supports the string, key, hash, list, set, sorted-set and stream commands, expiry, blocking commands, pipelines, transactions,
-  * pub/sub, distributed locks and rate limiters. Other commands fail with a `ServerError` whose code is `ERR`.
+  * supports the string, key, hash, list, set and sorted-set commands, expiry, blocking commands, pipelines, transactions, pub/sub,
+  * distributed locks and rate limiters. Other commands fail with a `ServerError` whose code is `ERR`.
   */
 object InMemorySageClient {
 

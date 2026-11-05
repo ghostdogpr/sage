@@ -2,7 +2,7 @@ package sage.testkit
 
 import scala.concurrent.duration.*
 
-import zio.ZIO
+import zio.{Promise, ZIO}
 import zio.test.{TestClock as ZioTestClock, *}
 
 import sage.*
@@ -40,6 +40,19 @@ object ZioInMemorySpec extends ZIOSpecDefault {
           messages  <- stream.take(2).runCollect
         } yield assertTrue(receivers == 1L, messages.toList == List(Message("news", "hello"), Message("news", "world")))
       }
+    } @@ TestAspect.timeout(zio.Duration.fromSeconds(5)),
+    test("a lock excludes another client of the same server until its holder is interrupted") {
+      val server = InMemoryServer()
+      val first  = InMemorySageClient(server).lock[String]()
+      val second = InMemorySageClient(server).lock[String]()
+      for {
+        started <- Promise.make[Nothing, Unit]
+        holder  <- first.withLock("job", 5.seconds)(started.succeed(()) *> ZIO.never).fork
+        _       <- started.await
+        busy    <- second.tryWithLock("job")(ZIO.unit)
+        _       <- holder.interrupt
+        after   <- second.tryWithLock("job")(ZIO.succeed("ran"))
+      } yield assertTrue(busy.isEmpty, after.contains("ran"))
     } @@ TestAspect.timeout(zio.Duration.fromSeconds(5)),
     test("transactions and scanAll run as ZIO effects") {
       val client = InMemorySageClient()
