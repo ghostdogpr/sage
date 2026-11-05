@@ -2,7 +2,7 @@
 
 ## How does Sage perform?
 
-Commands from every fiber share one auto-pipelined connection per node. Sage can combine concurrent commands into a single socket write and one round trip instead of sending each one separately. I/O runs on virtual threads with blocking reads and writes. Reading replies does not block new commands from being written, and the RESP3 parser and codecs decode replies directly into your types.
+Commands from every fiber share one auto-pipelined connection per node. Sage can combine concurrent commands into a single socket write and one round trip instead of sending each one separately. I/O runs on virtual threads with blocking reads and writes. Reading replies does not block new commands from being written, and the RESP parser and codecs decode replies directly into your types.
 
 Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) against a real server to compare concurrent workloads. Results depend on the client versions and hardware, so the repository does not publish fixed numbers.
 
