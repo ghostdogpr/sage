@@ -36,6 +36,7 @@ export default defineConfig({
           { text: 'Configuration', link: '/configuration' },
           { text: 'Error handling', link: '/error-handling' },
           { text: 'Observability', link: '/observability' },
+          { text: 'Testing', link: '/testing' },
         ]
       },
       {

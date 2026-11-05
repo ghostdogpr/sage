@@ -226,7 +226,7 @@ object SageClient {
   def scoped(config: SageConfig): SageClient < (Scope & Abort[SageException] & Async) =
     Scope.acquireRelease(connect(config))(client => Abort.run[SageException](client.close))
 
-  final private class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[A] =>> A < (Abort[SageException] & Async)](underlying) {
+  final private[sage] class Lowered(underlying: Client[CIO, String]) extends LoweredClient[[A] =>> A < (Abort[SageException] & Async)](underlying) {
     protected def lower[A](c: CIO[A]): A < (Abort[SageException] & Async) = refine(c.lower)
     protected def lift[A](fa: A < (Abort[SageException] & Async)): CIO[A] = CIO.lift(fa)
   }

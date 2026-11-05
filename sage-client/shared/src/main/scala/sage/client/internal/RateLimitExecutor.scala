@@ -10,7 +10,7 @@ import sage.ratelimit.{Decision, RateLimiter}
   * Runs one bound limiter: [[evalSha]] validates, runs by digest, and falls back once to sending the script body on a `NOSCRIPT`. The
   * fallback is keyed like the check itself, so in a cluster it routes to the one owning master and needs no all-masters `SCRIPT LOAD`.
   */
-final private[client] class RateLimitExecutor[K](definition: RateLimiter[K]) {
+final private[client] class RateLimitExecutor[K](private[client] val definition: RateLimiter[K]) {
 
   def command(subject: K, cost: Long): Command[Decision] = definition.tryAcquire(subject, cost)
 

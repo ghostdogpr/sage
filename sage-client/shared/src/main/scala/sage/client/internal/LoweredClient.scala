@@ -67,12 +67,12 @@ abstract class LoweredClient[F[_]](underlying: Client[CIO, String]) extends Clie
 
   final private[sage] def lockTryWith[LK, A](executor: LockExecutor[LK], key: LK)(body: => F[A]): F[Option[A]] = {
     val bodyThunk = () => body
-    lockScope(bodyThunk)(executor.tryWithLock(lockRunner, key)(_))
+    lockScope(bodyThunk)(underlying.runner.tryWithLock(executor, key, lockRunner)(_))
   }
 
   final private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A] = {
     val bodyThunk = () => body
-    lockScope(bodyThunk)(executor.withLock(lockRunner, key, waitTimeout)(_))
+    lockScope(bodyThunk)(underlying.runner.withLock(executor, key, waitTimeout, lockRunner)(_))
   }
 
   final def close: F[Unit] = lower(underlying.close)

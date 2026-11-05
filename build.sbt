@@ -67,6 +67,8 @@ addCommandAlias(
 addCommandAlias(
   "testUnit",
   "all core/test opentelemetry/test clientZio/test clientCe/test clientOx/test clientPekko/test clientKyo/test clientDirect/test " +
+    "testkitZio/test testkitCe/test testkitOx/test testkitPekko/test testkitKyo/test testkitDirect/test testkitFuture/Test/compile " +
+    "testkitConformanceDirect/test testkitConformanceFuture/Test/compile " +
     "clientFuture/Test/compile integrationTestsFuture/Test/compile integrationTestsPekko/Test/compile " +
     "benchmarksZio/compile benchmarksCe/compile benchmarksOx/compile benchmarksPekko/compile benchmarksKyo/compile benchmarksDirect/compile " +
     "examplesZio/Compile/compile examplesCe/Compile/compile examplesOx/Compile/compile examplesPekko/Compile/compile " +
@@ -76,6 +78,7 @@ addCommandAlias(
 )
 addCommandAlias("conformanceCe", "ceConformanceCe/test")
 addCommandAlias("conformanceDirect", "directConformanceDirect/test")
+addCommandAlias("conformanceTestkit", "testkitConformanceDirect/test")
 addCommandAlias("itZio", "integrationTestsZio/test")
 addCommandAlias("itCe", "integrationTestsCe/test")
 addCommandAlias("itOx", "integrationTestsOx/test")
@@ -89,12 +92,13 @@ addCommandAlias(
   "mima",
   "all core/mimaReportBinaryIssues opentelemetry/mimaReportBinaryIssues compatCe/mimaReportBinaryIssues " +
     "clientZio/mimaReportBinaryIssues clientCe/mimaReportBinaryIssues clientOx/mimaReportBinaryIssues " +
-    "clientPekko/mimaReportBinaryIssues clientKyo/mimaReportBinaryIssues"
+    "clientPekko/mimaReportBinaryIssues clientKyo/mimaReportBinaryIssues compatDirect/mimaReportBinaryIssues clientDirect/mimaReportBinaryIssues"
 )
 
 addCommandAlias(
   "docAll",
-  "all core/doc opentelemetry/doc compatCe/doc compatDirect/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc clientDirect/doc"
+  "all core/doc opentelemetry/doc compatCe/doc compatDirect/doc clientZio/doc clientCe/doc clientOx/doc clientPekko/doc clientKyo/doc clientDirect/doc " +
+    "testkitZio/doc testkitCe/doc testkitOx/doc testkitPekko/doc testkitKyo/doc testkitDirect/doc"
 )
 
 lazy val root = project
@@ -103,7 +107,7 @@ lazy val root = project
   // Exclude benchmarks from root aggregation because their JMH, testcontainers, and competitor-client dependencies are needed only for
   // on-demand benchmark runs. Use benchAll or benchmarks<Cell>/Jmh/run to run them directly.
   .aggregate(
-    core.projectRefs ++ client.projectRefs ++ opentelemetry.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs ++
+    core.projectRefs ++ client.projectRefs ++ testkit.projectRefs ++ testkitConformance.projectRefs ++ opentelemetry.projectRefs ++ integrationTests.projectRefs ++ examples.projectRefs ++
       Seq[ProjectReference](compatCe, compatDirect): _*
   )
 
@@ -170,6 +174,7 @@ lazy val compatDirect = project
   .in(file("sage-compat-direct"))
   .settings(name := "sage-compat-direct")
   .settings(commonSettings)
+  .settings(mimaSettings)
 
 // Run the bundled `kyo.compat` conformance suite against the direct binding, as `ceConformance` does for the Cats Effect binding.
 lazy val directConformance = (projectMatrix in file("sage-compat-direct/.conformance"))
@@ -208,6 +213,51 @@ lazy val client = (projectMatrix in file("sage-client"))
   )
   .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
+
+// An in-memory implementation of the client for tests that should not need a server, cross-published per backend like the client.
+lazy val testkit = (projectMatrix in file("sage-testkit"))
+  .dependsOn(client)
+  .settings(name := "sage-testkit")
+  .settings(commonSettings)
+  .settings(parallelUnitTests)
+  .settings(
+    // the Future anchor row only checks that the shared sources compile
+    publish / skip := moduleName.value.endsWith("-future"),
+    // every backend compiles the same factory against its own SageClient, which the Future anchor row does not have
+    Compile / unmanagedSourceDirectories ++= {
+      if (moduleName.value.endsWith("-future")) Nil
+      else Seq((ThisBuild / baseDirectory).value / "sage-testkit" / "backends" / "src" / "main" / "scala")
+    },
+    // the test clocks that the ZIO and Cats Effect specs drive the in-memory client with
+    libraryDependencies ++= {
+      val m = moduleName.value
+      if (m.endsWith("-zio")) Seq("dev.zio" %% "zio-test" % zioVersion % Test, "dev.zio" %% "zio-test-sbt" % zioVersion % Test)
+      else if (m.endsWith("-ce")) Seq("org.typelevel" %% "cats-effect-testkit" % catsEffectVersion % Test)
+      else Seq.empty
+    }
+  )
+  .compatLibrary(KyoLib, ZioLib, CeLib, OxLib, PekkoLib, DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
+  .bindLocally(CeLib, compatCe)
+  .bindLocally(DirectLib, compatDirect)
+
+// Run the integration tests' command suites unchanged against the in-memory client, as a check that it behaves like a real server. A
+// local `BothServersSuite` replaces the one that starts containers. Only the suites for the commands and features the client implements
+// are included.
+lazy val testkitConformance = (projectMatrix in file("sage-testkit/.conformance"))
+  .dependsOn(testkit)
+  .settings(commonSettings)
+  .settings(
+    publish / skip := true,
+    Test / scalacOptions += "-Wnonunit-statement",
+    Test / unmanagedSources ++= {
+      val base     = (ThisBuild / baseDirectory).value / "integration-tests" / "shared" / "src" / "test" / "scala" / "sage" / "integration"
+      val commands = Seq("Strings", "Keys", "Hashes", "Lists", "Sets", "SortedSets", "Caching")
+      val others   = Seq("Ttls.scala", "Eventually.scala", "locking/LockSuite.scala", "ratelimit/RateLimiterSuite.scala", "RoundTripSuite.scala")
+      others.map(base / _) ++ commands.map(name => base / "commands" / s"${name}Suite.scala")
+    }
+  )
+  .compatLibrary(DirectLib)(VirtualAxis.jvm)(Seq(scala3Version))
   .bindLocally(DirectLib, compatDirect)
 
 // Run each backend's smoke suite against a real server. Run the shared command, security, cluster, master-replica, rate-limit, and lock suites
