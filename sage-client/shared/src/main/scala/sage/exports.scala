@@ -20,6 +20,7 @@ export sage.client.{
   MasterReplicaConfig,
   PubSubConfig,
   ReadFrom,
+  RespProtocol,
   SageConfig,
   TlsConfig,
   Topology,
