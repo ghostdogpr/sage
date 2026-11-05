@@ -92,7 +92,7 @@ addCommandAlias(
   "mima",
   "all core/mimaReportBinaryIssues opentelemetry/mimaReportBinaryIssues compatCe/mimaReportBinaryIssues " +
     "clientZio/mimaReportBinaryIssues clientCe/mimaReportBinaryIssues clientOx/mimaReportBinaryIssues " +
-    "clientPekko/mimaReportBinaryIssues clientKyo/mimaReportBinaryIssues"
+    "clientPekko/mimaReportBinaryIssues clientKyo/mimaReportBinaryIssues compatDirect/mimaReportBinaryIssues clientDirect/mimaReportBinaryIssues"
 )
 
 addCommandAlias(
@@ -174,6 +174,7 @@ lazy val compatDirect = project
   .in(file("sage-compat-direct"))
   .settings(name := "sage-compat-direct")
   .settings(commonSettings)
+  .settings(mimaSettings)
 
 // Run the bundled `kyo.compat` conformance suite against the direct binding, as `ceConformance` does for the Cats Effect binding.
 lazy val directConformance = (projectMatrix in file("sage-compat-direct/.conformance"))
