@@ -243,7 +243,7 @@ final private[client] class SubscriptionConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      try conn.handshake(Bootstrap.commands(config), config.connectTimeout.toMillis)
+      try conn.handshake(Bootstrap(config), config.connectTimeout.toMillis): Unit
       catch { case NonFatal(e) => throw Client.translateHandshake(e) }
       conn
     } finally locked(establishing -= conn): Unit
@@ -376,10 +376,14 @@ final private[client] class SubscriptionConnection(
     // An UNSUBSCRIBE or PUNSUBSCRIBE is answered by its own push. The push of an SUNSUBSCRIBE is ambiguous: a cluster node sends the same
     // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). One HELLO
     // written after the SUNSUBSCRIBEs ends their replies: an error before the HELLO's reply is one of theirs, and their pushes go to onPush.
-    // Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
+    // Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots. A RESP2 connection in
+    // subscribed mode refuses HELLO, so it writes PING instead.
     def unsubscribe(kind: Kind, names: Vector[String]): Unit =
       if (kind != Kind.Shard) sendEach(names.map(name => new Entry(kind.unsubscribe(name), _ => ())))
-      else if (names.nonEmpty) sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilHello)) :+ new Entry(Pubsub.helloInfo, afterHello))
+      else if (names.nonEmpty) {
+        val marker = if (isResp2) Pubsub.pingInfo else Pubsub.helloInfo
+        sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilHello)) :+ new Entry(marker, afterHello))
+      }
 
     // used on the reader thread only, while the HELLO's reply is passed on to its own entry
     private var passing = false
@@ -396,7 +400,8 @@ final private[client] class SubscriptionConnection(
       case _                          => ()
     }
 
-    // ACL does not refuse an argument-less HELLO, so an error here means that replies no longer match their entries
+    // ACL does not refuse an argument-less HELLO, so an error here means that replies no longer match their entries. The PING that a RESP2
+    // connection writes instead relies on the user being allowed PING.
     private val afterHello: Try[Frame] => Unit = { result =>
       reached = true
       result match {
@@ -420,9 +425,19 @@ final private[client] class SubscriptionConnection(
       if (!readerBlocked) // deliberate backpressure on a slow consumer; the connection is alive, not stuck
         checkLiveness(lastBackpressureMillis + config.watchdog.pingTimeout.toMillis)
 
-    protected def onPush(elements: Vector[Frame]): Unit =
-      Pubsub.decode(elements).foreach {
-        case Pubsub.Event.Confirmed                               => answer(Frame.Push(elements))
+    protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, Frame.Push(elements)))
+
+    // A RESP2 connection receives its pub/sub pushes as arrays. Its replies never match Pubsub.decode: in subscribed mode, it answers PING
+    // with the array ["pong", ""].
+    override protected def arrayPush(elements: Vector[Frame]): Boolean =
+      isResp2 && Pubsub.decode(elements).exists { event =>
+        handle(event, Frame.Array(elements))
+        true
+      }
+
+    private def handle(event: Pubsub.Event, frame: => Frame): Unit =
+      event match {
+        case Pubsub.Event.Confirmed                               => answer(frame)
         case Pubsub.Event.Delivered(kind, subscription, delivery) => dispatch(this, sinksFor(kind), subscription, delivery)
         // The server dropped the channel only if it is still registered and confirmed here. An unsubscribed channel has left the registry.
         case Pubsub.Event.ShardUnsubscribed(channel)              =>

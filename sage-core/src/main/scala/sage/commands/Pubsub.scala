@@ -64,6 +64,9 @@ private[sage] object Pubsub {
   // connection may run it, since its setup did.
   val helloInfo: Command[Frame] = Command("HELLO", Command.NoKeys, Vector.empty, Decode.frame)
 
+  // PING without arguments, for a RESP2 subscription connection, which answers it with +PONG or, in subscribed mode, with ["pong", ""]
+  val pingInfo: Command[Frame] = Command("PING", Command.NoKeys, Vector.empty, Decode.frame)
+
   type Delivery = Message[Bytes] | PatternMessage[Bytes]
 
   /**
@@ -80,8 +83,8 @@ private[sage] object Pubsub {
   }
 
   /**
-    * Classifies the elements of a pub/sub push frame. Returns `None` for malformed frames and for other push kinds, such as client-side
-    * cache invalidations handled by the multiplexed connection.
+    * Classifies the elements of a pub/sub push frame, or of the array that a RESP2 connection receives instead. Returns `None` for malformed
+    * frames and for other push kinds, such as client-side cache invalidations handled by the multiplexed connection.
     */
   def decode(elements: Vector[Frame]): Option[Event] =
     elements match {

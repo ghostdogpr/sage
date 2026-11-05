@@ -2460,7 +2460,7 @@ object Client {
   private def atLeastOneMilliOrInfinite(value: Duration, label: String): Option[String] =
     cond(value == Duration.Inf || (value.isFinite && value.toMillis >= 1L), s"$label must be at least 1ms (or Inf)")
 
-  // run the HELLO 3 bootstrap for every connection. The initial connection reports a handshake failure; reconnects retry it.
+  // run the connection setup for every connection. The initial connection reports a handshake failure; reconnects retry it.
   private[client] def connectWith(
     factory: MultiplexedConnection.TransportFactory,
     scheduler: Scheduler = Scheduler.real,
@@ -2469,14 +2469,12 @@ object Client {
   ): CIO[Client[CIO, String]] =
     start(new Live(factory, scheduler, config, events))
 
-  // Redis versions before 6.0 report HELLO as an unknown command. Newer servers use NOPROTO for unsupported protocol versions. A setup reply
-  // that times out or loses its socket is a failed connect, and a raw network error would otherwise escape the sealed hierarchy.
+  // The handshake reports a rejected HELLO 3 itself. A setup reply that times out or loses its socket is a failed connect, and a raw network
+  // error would otherwise escape the sealed hierarchy.
   private[internal] def translateHandshake(error: Throwable): Throwable =
     error match {
-      case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase(java.util.Locale.ROOT).contains("unknown command") =>
-        UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: ${e.getMessage}")
-      case e: SageException if !e.isInstanceOf[ConnectionLost]                                                                  => e
-      case other                                                                                                                =>
+      case e: SageException if !e.isInstanceOf[ConnectionLost] => e
+      case other                                               =>
         val failed = ConnectionFailed(s"could not connect: $other")
         failed.initCause(other)
         failed

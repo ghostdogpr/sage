@@ -5,15 +5,32 @@ import java.util.concurrent.atomic.AtomicReference
 
 import scala.util.{Failure, Try}
 
-import sage.client.{BuildInfo, SageConfig}
+import sage.SageException.ServerError
+import sage.client.{AuthConfig, BuildInfo, RespProtocol, SageConfig}
 import sage.commands.{Command, Connection}
+
+/**
+  * The setup a connection runs before its first command. [[Pipe.handshake]] negotiates `protocol` and authenticates with `auth`, then runs
+  * the `setup` commands in order.
+  */
+final private[client] case class Bootstrap(protocol: RespProtocol, auth: Option[AuthConfig], setup: Vector[Command[?]]) {
+
+  def andThen(more: Vector[Command[?]]): Bootstrap = copy(setup = setup ++ more)
+
+  def hello: Command[Long] = Connection.hello(auth.map(a => a.username -> a.password))
+
+  // the one-argument form authenticates the default user and is the only form servers older than Redis 6.0 accept
+  def resp2Auth: Option[Command[Unit]] = auth.map(a => Connection.auth(Option.when(a.username != "default")(a.username), a.password))
+}
 
 private[client] object Bootstrap {
 
+  def apply(config: SageConfig): Bootstrap = Bootstrap(config.protocol, config.auth, commands(config))
+
   /**
-    * The setup commands every connection runs after `HELLO` and re-runs on reconnection. Standalone, cluster, and master-replica clients
-    * share this list, keeping connection identification consistent across topologies. `SELECT` lives here rather than as a runtime command
-    * because it would move the database under every fiber sharing the connection.
+    * The setup commands every connection runs after negotiating its protocol and re-runs on reconnection. Standalone, cluster, and
+    * master-replica clients share this list, keeping connection identification consistent across topologies. `SELECT` lives here rather
+    * than as a runtime command because it would move the database under every fiber sharing the connection.
     */
   def commands(config: SageConfig): Vector[Command[?]] = {
     val identification = Vector(
@@ -21,8 +38,15 @@ private[client] object Bootstrap {
       Connection.clientSetInfo("LIB-VER", BuildInfo.version)
     ) ++ config.clientName.map(Connection.clientSetName).toVector
     val selectDb       = if (config.database > 0) Vector(Connection.select(config.database)) else Vector.empty
-    (Connection.hello(config.auth.map(a => a.username -> a.password)) +: identification) ++ selectDb
+    identification ++ selectDb
   }
+
+  /**
+    * Whether `error` rejects `HELLO 3` because the server does not support RESP3. Redis versions before 6.0 report HELLO as an unknown
+    * command, and newer servers use NOPROTO for unsupported protocol versions.
+    */
+  def rejectsHello(error: ServerError): Boolean =
+    error.code == "NOPROTO" || error.getMessage.toLowerCase(java.util.Locale.ROOT).contains("unknown command")
 
   /**
     * Submits one command and blocks the calling thread for its reply, failing with `timedOut` when none arrives in time.

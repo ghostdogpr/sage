@@ -47,3 +47,4 @@ Caching works with every topology. A cached read always runs against a master, r
 - Replacing a connection clears its cache. A reconnect, a cluster failover, or a resharding that moves the slot to another master starts with an empty cache.
 - During a live slot migration, a cached read of a migrating key runs uncached and follows the `ASK` redirect once. Caching resumes after the migration.
 - A server can support RESP3 but reject `CLIENT TRACKING` because of an ACL or proxy restriction. The client still connects, but cached reads run uncached as if caching were disabled.
+- Caching needs RESP3. When a connection uses RESP2, because the server rejected `HELLO 3` or `protocol` is `RespProtocol.Resp2`, cached reads on it run uncached.

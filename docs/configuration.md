@@ -146,6 +146,16 @@ val config = SageConfig(
 `TrustSource.Insecure` is for local development only. It trusts every certificate and skips hostname verification, leaving the connection open to machine-in-the-middle attacks. Never use it in production.
 :::
 
+## Protocol version
+
+`protocol` selects the RESP version that connections use. The default, `RespProtocol.Auto`, sends `HELLO 3` and continues with RESP2 when the server rejects it, as servers older than Redis 6.0 and some proxies do. `RespProtocol.Resp3` fails to connect with `UnsupportedServer` instead. `RespProtocol.Resp2` skips `HELLO` and uses RESP2 from the start.
+
+```scala
+val config = SageConfig(protocol = RespProtocol.Resp2)
+```
+
+On a RESP2 connection, Sage authenticates with `AUTH`. For the `"default"` user it sends `AUTH <password>`, which servers older than Redis 6.0 also accept. Commands return the same result types under both versions. Commands that return a raw `Frame`, such as `eval`, `fCall` and `jsonResp`, show the reply as the server sent it: under RESP2, maps arrive as flat arrays of keys and values, doubles as bulk strings, and booleans as integers. [Client-side caching](/client-side-caching) needs RESP3, so on a RESP2 connection a `cached` read runs against the server without caching.
+
 ## Connection tuning
 
 The remaining fields control connection lifetime, pooling, and observability. Each config type has defaults, so set only the fields you need.

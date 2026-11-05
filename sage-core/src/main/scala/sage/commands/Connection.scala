@@ -1,7 +1,6 @@
 package sage.commands
 
 import sage.Bytes
-import sage.SageException.DecodeError
 import sage.codec.KeyCodec
 import sage.protocol.Frame
 
@@ -46,23 +45,23 @@ private[sage] object Connection {
   private val pingReply = Decode.shape("simple or bulk string") { case Decode.Text(value) => Right(value) }
 
   /**
-    * The protocol handshake. The reply must confirm RESP3, the only supported protocol. Other reply entries are ignored.
+    * The RESP3 handshake. The reply is the protocol version the server selected, which is 3 unless the server accepted `HELLO` but kept an
+    * older protocol. Other reply entries are ignored.
     */
-  def hello(auth: Option[(String, String)] = None): Command[Unit] =
+  def hello(auth: Option[(String, String)] = None): Command[Long] =
     Command(
       "HELLO",
       keyIndices = Command.NoKeys,
       args = Bytes.utf8("3") +: auth.toVector.flatMap { case (username, password) => Vector("AUTH", username, password).map(Bytes.utf8) },
-      decode = Decode.fields(_.required("proto", proto3))
+      decode = Decode.fields(_.required("proto", Decode.long))
     )
 
-  private val proto3: Frame => Either[DecodeError, Unit] = Decode.shape("integer for 'proto'") {
-    case Frame.Integer(3)     => Right(())
-    case Frame.Integer(value) => Left(DecodeError("proto 3", s"proto $value"))
-  }
+  // authenticates a RESP2 connection; without a username, the server authenticates the default user
+  def auth(username: Option[String], password: String): Command[Unit] =
+    Command("AUTH", Command.NoKeys, (username.toVector :+ password).map(Bytes.utf8), Decode.ok)
 
-  // These commands configure connection state during the HELLO setup and run again after reconnecting. They are not exposed as ordinary
-  // operations because concurrent users of a shared connection would all observe the changed state.
+  // These commands configure connection state during the connection setup and run again after reconnecting. They are not exposed as
+  // ordinary operations because concurrent users of a shared connection would all observe the changed state.
 
   def select(database: Int): Command[Unit] =
     Command("SELECT", Command.NoKeys, Vector(Args.long(database)), Decode.ok)

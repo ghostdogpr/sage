@@ -1,6 +1,7 @@
 package sage.client.internal
 
 import sage.Bytes
+import sage.client.RespProtocol
 import sage.cluster.{Node, Slot}
 import sage.protocol.Frame
 
@@ -28,6 +29,9 @@ object Replies {
     if (!isSetup(payload)) respond(payload)
     else if (isSetupHello(payload)) Seq(hello)
     else Seq(ok)
+
+  // a connection setup that runs only HELLO 3
+  val helloOnly: Bootstrap = Bootstrap(RespProtocol.Auto, None, Vector.empty)
 
   val hello: Frame =
     Frame.Map(

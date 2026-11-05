@@ -7,8 +7,8 @@ import scala.concurrent.duration.Duration
 import scala.util.{Failure, Success, Try}
 
 import sage.{Bytes, SageException}
-import sage.SageException.{ConnectionLost, ServerError}
-import sage.client.WatchdogConfig
+import sage.SageException.{ConnectionLost, ServerError, UnsupportedServer}
+import sage.client.{RespProtocol, WatchdogConfig}
 import sage.commands.{Command, Connection, Reply}
 import sage.protocol.Frame
 
@@ -124,31 +124,60 @@ abstract private[internal] class Pipe(factory: MultiplexedConnection.TransportFa
   }
 
   /**
-    * Starts the transport and runs the setup commands in turn, blocking up to `timeoutMillis` for each reply. Closes the connection and
-    * throws on a timeout or a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` is tolerated.
+    * Starts the transport, negotiates the protocol, authenticates and runs the setup commands in turn, blocking up to `timeoutMillis` for
+    * each reply. Under [[RespProtocol.Auto]], a server that rejects `HELLO 3` as described by [[Bootstrap.rejectsHello]], or accepts it but
+    * keeps protocol 2, is used with RESP2. Under [[RespProtocol.Resp3]], such a server fails with `UnsupportedServer`. Closes the connection
+    * and throws on a timeout or a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` is tolerated. Returns the
+    * negotiated protocol, `Resp3` or `Resp2`.
     */
-  final def handshake(commands: Vector[Command[?]], timeoutMillis: Long): Unit = {
-    start()
-    commands.foreach { command =>
-      step(command, timeoutMillis).filterNot(_ => Bootstrap.bestEffort(command)).foreach { error =>
-        close()
-        throw error
-      }
+  final def handshake(bootstrap: Bootstrap, timeoutMillis: Long): RespProtocol = {
+    def abort(error: Throwable): Nothing = {
+      close()
+      throw error
     }
+    def unsupported(reason: String)      =
+      UnsupportedServer(s"server $reason; set protocol to RespProtocol.Auto or RespProtocol.Resp2 to connect with RESP2")
+    val auto                             = bootstrap.protocol == RespProtocol.Auto
+    start()
+    // the negotiated protocol, and whether the connection still needs AUTH
+    val (negotiated, needsAuth)          =
+      if (bootstrap.protocol == RespProtocol.Resp2) (RespProtocol.Resp2, true)
+      else
+        reply(bootstrap.hello, timeoutMillis) match {
+          case Right(3L)                                            => (RespProtocol.Resp3, false)
+          case Right(2L) if auto                                    => (RespProtocol.Resp2, false)
+          case Right(proto)                                         => abort(unsupported(s"answered HELLO 3 with protocol $proto"))
+          case Left(error) if Bootstrap.rejectsHello(error) && auto => (RespProtocol.Resp2, true)
+          case Left(error) if Bootstrap.rejectsHello(error)         => abort(unsupported(s"rejected HELLO 3 (${error.getMessage})"))
+          case Left(error)                                          => abort(error)
+        }
+    protocol = negotiated
+    val authentication                   = if (needsAuth) bootstrap.resp2Auth.toVector else Vector.empty
+    (authentication ++ bootstrap.setup).foreach { command =>
+      step(command, timeoutMillis).filterNot(_ => Bootstrap.bestEffort(command)).foreach(abort)
+    }
+    negotiated
   }
+
+  // set by the handshake before any other command is written
+  @volatile private var protocol: RespProtocol = RespProtocol.Resp3
+
+  final def isResp2: Boolean = protocol == RespProtocol.Resp2
 
   /**
     * Runs one setup command and returns the server's error reply, or `None` on success. Closes the connection and throws on a timeout or any
     * other failure.
     */
-  final def step(command: Command[?], timeoutMillis: Long): Option[ServerError] =
+  final def step(command: Command[?], timeoutMillis: Long): Option[ServerError] = reply(command, timeoutMillis).left.toOption
+
+  private def reply[A](command: Command[A], timeoutMillis: Long): Either[ServerError, A] =
     onThrow {
-      Bootstrap.awaitReply[Any](timeoutMillis, ConnectionLost(mayHaveExecuted = false))(submit(command, _)) match {
-        case Failure(error: ServerError) => Some(error)
+      Bootstrap.awaitReply[A](timeoutMillis, ConnectionLost(mayHaveExecuted = false))(submit(command, _)) match {
+        case Failure(error: ServerError) => Left(error)
         // a lost setup reply means the caller's own command was never sent
         case Failure(_: ConnectionLost)  => throw ConnectionLost(mayHaveExecuted = false)
         case Failure(error)              => throw error
-        case Success(_)                  => None
+        case Success(value)              => Right(value)
       }
     }(_ => close())
 
@@ -245,10 +274,15 @@ abstract private[internal] class WatchedPipe(factory: MultiplexedConnection.Tran
 
   protected def onPush(elements: Vector[Frame]): Unit
 
+  // RESP2 has no push type, so a RESP2 connection that receives pushes recognizes them among its arrays. Returns true for an array it
+  // handled as a push.
+  protected def arrayPush(elements: Vector[Frame]): Boolean = false
+
   final override protected def onFrame(frame: Frame): Unit =
     frame match {
-      case Frame.Push(elements) => onPush(elements)
-      case reply                =>
+      case Frame.Push(elements)                         => onPush(elements)
+      case Frame.Array(elements) if arrayPush(elements) => ()
+      case reply                                        =>
         lastReplyAtMillis = scheduler.nowMillis
         super.onFrame(reply)
     }

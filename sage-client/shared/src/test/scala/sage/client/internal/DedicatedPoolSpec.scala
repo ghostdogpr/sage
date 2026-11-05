@@ -32,7 +32,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       transports += transport
       transport
     }
-    val pool                                            = new DedicatedPool(factory, Vector(Connection.hello()), scheduler, isLive, config, 1000L)
+    val pool                                            = new DedicatedPool(factory, Replies.helloOnly, scheduler, isLive, config, 1000L)
     (pool, scheduler, transports)
   }
 
@@ -245,7 +245,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       lazy val transport: FakeTransport = new FakeTransport(onFrame, onClosed, _ => { transport.close(); Nil })
       transport
     }
-    val pool                                            = new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
+    val pool                                            = new DedicatedPool(factory, Replies.helloOnly, scheduler, () => true, DedicatedPoolConfig(), 1000L)
     var result: Option[Try[Option[(String, String)]]]   = None
     pool.use(blPop, r => result = Some(r))
     scheduler.advance(Duration.Zero)
@@ -411,7 +411,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       t
     }
     val conn                                            = new DedicatedConnection(factory, new ManualScheduler)
-    conn.handshake(Vector(Connection.hello()), 1000L)
+    conn.handshake(Replies.helloOnly, 1000L)
     transports.head.autoWrite = false // keep the command in the queue so transport teardown reports it as unsent
 
     var healthyWhenFailed: Option[Boolean] = None
@@ -616,7 +616,7 @@ class DedicatedPoolSpec extends munit.FunSuite {
       transport
     }
     val pool                                            =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
+      new DedicatedPool(factory, Replies.helloOnly, scheduler, () => true, DedicatedPoolConfig(), 1000L)
 
     pool.use(blPop, _ => ())
     val establishing = new Thread(() => scheduler.advance(Duration.Zero)) // blocks inside ConnectingTransport.start()

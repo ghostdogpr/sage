@@ -45,7 +45,7 @@ final case class EngineStats(librariesCount: Long, functionsCount: Long)
 final case class FunctionStats(runningScript: Option[RunningScript], engines: Map[String, EngineStats])
 
 /**
-  * The FUNCTION programmability family. `FCALL`/`FCALL_RO` return the raw RESP3 [[Frame]] like `EVAL`, since a function's reply is shaped
+  * The FUNCTION programmability family. `FCALL`/`FCALL_RO` return the raw [[Frame]] like `EVAL`, since a function's reply is shaped
   * by user code. The library mutations (`LOAD`, `DELETE`, `FLUSH`, `RESTORE`) run on every master so a key-routed `FCALL` finds them.
   */
 private[sage] object Functions {

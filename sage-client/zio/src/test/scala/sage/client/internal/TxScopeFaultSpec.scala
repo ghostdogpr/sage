@@ -8,7 +8,7 @@ import kyo.compat.*
 import sage.Bytes
 import sage.SageException.{ConnectionLost, TransactionDiscarded}
 import sage.client.DedicatedPoolConfig
-import sage.commands.{Connection, Strings}
+import sage.commands.Strings
 import sage.protocol.Frame
 
 class TxScopeFaultSpec extends munit.FunSuite {
@@ -21,7 +21,7 @@ class TxScopeFaultSpec extends munit.FunSuite {
     val scheduler                                       = new ManualScheduler
     val factory: MultiplexedConnection.TransportFactory = ScriptedTransport.factory(respond)
     val pool                                            =
-      new DedicatedPool(factory, Vector(Connection.hello()), scheduler, () => true, DedicatedPoolConfig(), 1000L)
+      new DedicatedPool(factory, Replies.helloOnly, scheduler, () => true, DedicatedPoolConfig(), 1000L)
     val faults                                          = mutable.ArrayBuffer.empty[RefreshPolicy]
     (new Client.TxScope(pool.acquireForTransaction(), pool.releaseTransaction, faults += _), faults)
   }

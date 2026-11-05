@@ -53,19 +53,28 @@ class ConnectSpec extends munit.FunSuite {
     }
   }
 
-  test("a server without RESP3 is rejected with UnsupportedServer and the connection is released") {
+  test("under Resp3, a server without RESP3 is rejected with UnsupportedServer and the connection is released") {
     val (factory, transport) = ScriptedTransport(_ => Seq(Frame.SimpleError("ERR unknown command 'HELLO'")))
-    Client.connectWith(factory).unsafeRun.failed.map { error =>
+    Client.connectWith(factory, config = SageConfig(protocol = RespProtocol.Resp3)).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
       assertEquals(transport().closeCount, 1)
     }
   }
 
-  test("a NOPROTO rejection maps to UnsupportedServer") {
+  test("under Resp3, a NOPROTO rejection maps to UnsupportedServer") {
     val (factory, _) = ScriptedTransport(_ => Seq(Frame.SimpleError("NOPROTO unsupported protocol version")))
-    Client.connectWith(factory).unsafeRun.failed.map { error =>
+    Client.connectWith(factory, config = SageConfig(protocol = RespProtocol.Resp3)).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
     }
+  }
+
+  test("by default, a server without RESP3 is used with RESP2") {
+    val (factory, _) = ScriptedTransport { payload =>
+      if (payload.asUtf8String.contains("HELLO")) Seq(Frame.SimpleError("ERR unknown command 'HELLO'"))
+      else if (payload.asUtf8String.contains("PING")) Seq(pong)
+      else Seq(ok)
+    }
+    Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map(result => assertEquals(result, "PONG"))
   }
 
   test("readFrom = Replica on a Standalone topology is rejected before connecting") {

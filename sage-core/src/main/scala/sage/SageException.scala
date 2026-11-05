@@ -65,8 +65,8 @@ object SageException {
   final case class NotConnected() extends SageException("not connected")
 
   /**
-    * The server cannot serve what this client requires: it rejected `HELLO 3` (predates RESP3, or is a RESP2-only proxy), or a cluster
-    * client was pointed at a server that is not part of a formed cluster.
+    * The server cannot serve what this client requires: it rejected `HELLO 3` (predates RESP3, or is a RESP2-only proxy) while the client
+    * was configured with `RespProtocol.Resp3`, or a cluster client was pointed at a server that is not part of a formed cluster.
     */
   final case class UnsupportedServer(message: String) extends SageException(message)
 
