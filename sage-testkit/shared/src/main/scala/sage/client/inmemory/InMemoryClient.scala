@@ -119,7 +119,11 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
 
   override private[sage] def runner: SharedRunner = this
 
-  def close: CIO[Unit] = CIO.defer(if (!closed.getAndSet(true)) executor.locked(executor.store.pubsub.close(this)))
+  def close: CIO[Unit] =
+    CIO.defer(if (!closed.getAndSet(true)) executor.locked {
+      executor.store.pubsub.close(this)
+      executor.wakeClosed(this)
+    })
 
   /**
     * Registers a subscription with the broker. The subscription is active once the effect completes, so a message published afterwards is
@@ -193,9 +197,15 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
     * abandoned under the store lock once the timeout passes, so an attempt and the timeout never both succeed.
     */
   private def waitFor[A](timeout: Option[FiniteDuration])(attempt: Long => Option[A]): CIO[Option[A]] = {
-    val waiter       = new executor.Waiter(attempt)
-    def poll: CIO[A] = currentMillis.flatMap(now => once(waiter.poll(now, _))).flatMap(_.fold(poll)(CIO.value(_)))
-    timeout.fold(poll.map(Some(_)))(t => CIO.timeout(t)(poll).flatMap(_.fold(CIO.defer(waiter.abandon()))(value => CIO.value(Some(value)))))
+    val waiter       = new executor.Waiter(this, () => closed.get, attempt)
+    def poll: CIO[A] = currentMillis.flatMap(now => once(waiter.poll(now, _))).flatMap {
+      case Some(value)        => CIO.value(value)
+      case None if closed.get => CIO.fail(NotConnected())
+      case None               => poll
+    }
+    val waited       =
+      timeout.fold(poll.map(Some(_)))(t => CIO.timeout(t)(poll).flatMap(_.fold(CIO.defer(waiter.abandon()))(value => CIO.value(Some(value)))))
+    CIO.ensure(CIO.defer(waiter.abandon(): Unit))(waited)
   }
 
   // runs `attempt` once; when it has nothing to return, it keeps the wake-up it receives, which completes this with None
@@ -255,7 +265,7 @@ final private[sage] class InMemoryClient(server: InMemoryServer = InMemoryServer
 
     private def active[A](body: CIO[A]): CIO[A] =
       CIO.defer(released).flatMap { isReleased =>
-        if (isReleased) CIO.fail(new IllegalStateException("transaction scope used after its block returned")) else body
+        if (isReleased) CIO.fail(new IllegalStateException("transaction scope used after its block returned")) else ifOpen(body)
       }
   }
 }

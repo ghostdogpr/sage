@@ -214,9 +214,10 @@ final private[sage] class Executor {
     * A blocking command or lock that runs `attempt` until it returns a value. Its fields are guarded by the store lock. After [[abandon]],
     * `attempt` never runs again and the wait never resumes, so a wait that its timeout could not interrupt, as on Pekko, cannot act later.
     */
-  final class Waiter[A](attempt: Long => Option[A]) {
-    private var result: Option[A] = None
-    private var abandoned         = false
+  final class Waiter[A](val owner: AnyRef, isClosed: () => Boolean, attempt: Long => Option[A]) {
+    private var result: Option[A]                    = None
+    private var abandoned                            = false
+    private[Executor] var wakeUp: Option[() => Unit] = None
 
     /**
       * Runs `attempt` at `now`. When it returns `None`, this registers `onChange` to be called after the next write. Both happen under the
@@ -224,9 +225,13 @@ final private[sage] class Executor {
       */
     def poll(now: Long, onChange: () => Unit): Option[A] =
       locked {
-        if (!abandoned) {
+        if (isClosed()) store.afterUnlock(onChange)
+        else if (!abandoned) {
           result = attempt(now)
-          if (result.isEmpty) waiters += onChange
+          if (result.isEmpty) {
+            wakeUp = Some(onChange)
+            waiters += this
+          }
         }
         result
       }
@@ -235,6 +240,7 @@ final private[sage] class Executor {
     def abandon(): Option[A] =
       locked {
         abandoned = true
+        waiters -= this
         result
       }
   }
@@ -267,10 +273,22 @@ final private[sage] class Executor {
     }
 
   // callers waiting for a write; guarded by the store lock
-  private val waiters = mutable.ArrayBuffer.empty[() => Unit]
+  private val waiters = mutable.LinkedHashSet.empty[Waiter[?]]
 
   // lets tests wait until a blocking command is registered
-  private[sage] def waiting: Int = locked(waiters.length)
+  private[sage] def waiting: Int = locked(waiters.size)
+
+  // must run under the store lock
+  def wakeClosed(owner: AnyRef): Unit = {
+    val closing = waiters.filter(_.owner eq owner)
+    waiters --= closing
+    closing.foreach(wake)
+  }
+
+  private def wake(waiter: Waiter[?]): Unit = {
+    waiter.wakeUp.foreach(store.afterUnlock)
+    waiter.wakeUp = None
+  }
 
   /**
     * Runs `body` under the store lock. When `body` changed any key, wakes every blocking command and lock that waits for a write. Wake-ups,
@@ -282,7 +300,7 @@ final private[sage] class Executor {
     try {
       val result = body
       if (store.changeCount != before && waiters.nonEmpty) {
-        waiters.foreach(store.afterUnlock)
+        waiters.foreach(wake)
         waiters.clear()
       }
       result

@@ -48,6 +48,20 @@ class InMemoryServerSpec extends InMemorySuite {
     assertEquals(poppers.map(_.get(5, java.util.concurrent.TimeUnit.SECONDS).toLong).sum + producer.lLen("jobs"), pushed)
   }
 
+  shared.test("closing a client ends its waiting blocking pop, which leaves a later push in the list") { (server, consumer, producer) =>
+    val popped = inBackground(intercept[SageException.NotConnected](consumer.blPop[String]("jobs")(BlockTimeout.Forever)))
+    awaitWaiting(server, 1)
+    consumer.close
+    popped.get(5, java.util.concurrent.TimeUnit.SECONDS): Unit
+    producer.rPush("jobs", "job-1"): Unit
+    assertEquals((server.executor.waiting, producer.lLen("jobs")), (0, 1L))
+  }
+
+  shared.test("blocking pops that time out stop waiting for a write") { (server, consumer, _) =>
+    (1 to 20).foreach(_ => assertEquals(consumer.blPop[String]("jobs")(BlockTimeout.After(1.millis)), None))
+    assertEquals(server.executor.waiting, 0)
+  }
+
   shared.test("a lock excludes another client of the server, and a waiting withLock takes it once the holder releases it") {
     (server, holder, contender) =>
       val waiting = holder.lock[String]().withLock("job", 5.seconds) {

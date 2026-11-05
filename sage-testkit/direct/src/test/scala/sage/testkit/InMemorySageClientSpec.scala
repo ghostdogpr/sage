@@ -110,6 +110,14 @@ class InMemorySageClientSpec extends InMemorySuite {
     intercept[NotConnected](client.get[String]("k")): Unit
   }
 
+  shared.test("a transaction cannot commit after its client is closed") { (_, client, other) =>
+    client.transaction { tx =>
+      client.close
+      intercept[NotConnected](tx.exec(Seq(Strings.set("k", "v"))))
+    }: Unit
+    assertEquals(other.get[String]("k"), None)
+  }
+
   FunFixture.map2(clients, clients).test("each client has its own keyspace") { (first, second) =>
     first.set("k", "v"): Unit
     assertEquals(second.get[String]("k"), None)
