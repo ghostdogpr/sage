@@ -7,10 +7,10 @@ import sage.Bytes
 import sage.SageException.ProtocolError
 
 /**
-  * Incremental RESP3 parser. Each call accepts newly received bytes and returns any frames completed by them. A parser belongs to one
-  * connection and is not thread-safe. RESP3 has no resynchronization point, so a `ProtocolError` makes the parser unusable and the
-  * connection must be closed. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]. Streamed types are not supported because Redis and
-  * Valkey do not send them.
+  * Incremental parser for RESP3 and its RESP2 subset. Each call accepts newly received bytes and returns any frames completed by them. A
+  * parser belongs to one connection and is not thread-safe. RESP has no resynchronization point, so a `ProtocolError` makes the parser
+  * unusable and the connection must be closed. RESP2 null forms (`$-1`, `*-1`) parse as [[Frame.Null]]. Streamed types are not supported
+  * because Redis and Valkey do not send them.
   *
   * An explicit stack holds partially parsed aggregates between calls. This avoids recursion and avoids scanning the start of a large reply
   * again when it arrives over several reads. Each completed element advances `readPos`, allowing the input buffer to retain only the

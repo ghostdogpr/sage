@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 import sage.protocol.{Frame, RespParser}
 
 /**
-  * Uses a blocking socket with two virtual threads. The reader parses RESP3 replies, and the writer sends queued requests. `start` resolves
+  * Uses a blocking socket with two virtual threads. The reader parses RESP replies, and the writer sends queued requests. `start` resolves
   * the hostname, connects, and passes the connected socket to `upgrade`, which either returns it unchanged for plaintext or performs a TLS
   * handshake. `close` can stop a connection attempt or TLS handshake by closing the plain socket. It also prevents the I/O threads from
   * starting afterward. The JDK cannot interrupt a DNS lookup inside `start`; it returns when the operating system resolver times out. If

@@ -103,7 +103,7 @@ final case class Command[+Out](
   def hasMalformedKeys: Boolean = keyIndices.exists(index => index < 0 || index >= args.length)
 
   /**
-    * The full RESP3 wire encoding of this command.
+    * The full RESP wire encoding of this command.
     */
   def encode: Bytes = RespWriter.writeCommand(name, args)
 
