@@ -153,17 +153,17 @@ private[sage] object SortedSets {
       "ZADD",
       Command.FirstKey,
       (keyCodec.encode(key) +: conditionArgs(condition)) ++ Vector(Incr, Args.double(score), valueCodec.encode(member)),
-      Decode.optionalScore
+      Decode.optionalDouble
     )
 
   def zCard[K](key: K)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command.read("ZCARD", Command.FirstKey, Vector(keyCodec.encode(key)), Decode.long)
 
   def zScore[K, V](key: K, member: V)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Option[Double]] =
-    Command.read("ZSCORE", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalScore)
+    Command.read("ZSCORE", Command.FirstKey, Vector(keyCodec.encode(key), valueCodec.encode(member)), Decode.optionalDouble)
 
   def zMScore[K, V](key: K, first: V, rest: V*)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Vector[Option[Double]]] =
-    Command.read("ZMSCORE", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.vector(Decode.optionalScore))
+    Command.read("ZMSCORE", Command.FirstKey, Args.keyThen(key, first, rest)(valueCodec.encode), Decode.vector(Decode.optionalDouble))
 
   def zIncrBy[K, V](key: K, member: V, increment: Double)(using keyCodec: KeyCodec[K], valueCodec: ValueCodec[V]): Command[Double] =
     Command("ZINCRBY", Command.FirstKey, Vector(keyCodec.encode(key), Args.double(increment), valueCodec.encode(member)), Decode.double)

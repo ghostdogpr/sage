@@ -340,18 +340,14 @@ private[sage] object Server {
 
   private val decodeHistograms: Frame => Either[DecodeError, Map[String, CommandHistogram]] = {
     val entry = Decode.pair(Decode.utf8String, decodeHistogram).tupled
-    Decode.shape("latency histogram map") { case Frame.Map(entries) => Decode.mapEntries(entries)(entry) }
+    frame => Decode.entries(frame).flatMap(Decode.mapEntries(_)(entry))
   }
 
   private def decodeHistogram(frame: Frame): Either[DecodeError, CommandHistogram] =
     Decode.fieldMap(frame).map { fields =>
       val calls   = fields.get("calls").collect { case Frame.Integer(n) => n }.getOrElse(0L)
-      val buckets = fields.get("histogram_usec") match {
-        case Some(Frame.Map(bs)) =>
-          bs.collect { case (Frame.Integer(bucket), Frame.Integer(count)) => bucket -> count }.toMap
-        case _                   => Map.empty[Long, Long]
-      }
-      CommandHistogram(calls, buckets)
+      val buckets = fields.get("histogram_usec").flatMap(Decode.entries(_).toOption).getOrElse(Vector.empty)
+      CommandHistogram(calls, buckets.collect { case (Frame.Integer(bucket), Frame.Integer(count)) => bucket -> count }.toMap)
     }
 
   // a server may frame a flag list as a RESP3 Set or an Array

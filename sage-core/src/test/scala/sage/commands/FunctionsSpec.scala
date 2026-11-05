@@ -6,7 +6,7 @@ import sage.Bytes
 import sage.protocol.Frame
 import sage.protocol.Frames.{bulk, map}
 
-class FunctionsSpec extends munit.FunSuite {
+class FunctionsSpec extends munit.FunSuite with BothProtocols {
 
   test("FCALL returns the raw frame and computes key indices") {
     assertEquals(Reply.decode(Functions.fCall("f", Seq("k"), Seq("a")), Frame.Integer(7L)).toEither, Right(Frame.Integer(7L)))
@@ -70,6 +70,33 @@ class FunctionsSpec extends munit.FunSuite {
     )
     val idle  = map("running_script" -> Frame.Null, "engines" -> Frame.Map(Vector.empty))
     assertEquals(Reply.decode(Functions.functionStats, idle).toEither, Right(FunctionStats(None, Map.empty)))
+  }
+
+  test("FUNCTION LIST and FUNCTION STATS decode the RESP2 flat arrays like the RESP3 maps") {
+    val code = "#!lua name=mylib"
+    decodesAlike(
+      Functions.functionList(withCode = true),
+      "*1\r\n*8\r\n$12\r\nlibrary_name\r\n$5\r\nmylib\r\n$6\r\nengine\r\n$3\r\nLUA\r\n$9\r\nfunctions\r\n*2\r\n*6\r\n$4\r\nname\r\n$5\r\nother\r\n" +
+        "$11\r\ndescription\r\n$-1\r\n$5\r\nflags\r\n*0\r\n*6\r\n$4\r\nname\r\n$6\r\nmyfunc\r\n$11\r\ndescription\r\n$4\r\ndesc\r\n$5\r\nflags\r\n" +
+        "*1\r\n+no-writes\r\n$12\r\nlibrary_code\r\n$16\r\n" + code + "\r\n",
+      "*1\r\n%4\r\n$12\r\nlibrary_name\r\n$5\r\nmylib\r\n$6\r\nengine\r\n$3\r\nLUA\r\n$9\r\nfunctions\r\n*2\r\n%3\r\n$4\r\nname\r\n$5\r\nother\r\n" +
+        "$11\r\ndescription\r\n_\r\n$5\r\nflags\r\n~0\r\n%3\r\n$4\r\nname\r\n$6\r\nmyfunc\r\n$11\r\ndescription\r\n$4\r\ndesc\r\n$5\r\nflags\r\n" +
+        "~1\r\n+no-writes\r\n$12\r\nlibrary_code\r\n$16\r\n" + code + "\r\n",
+      Vector(
+        LibraryInfo(
+          "mylib",
+          "LUA",
+          Vector(FunctionInfo("other", None, Set.empty), FunctionInfo("myfunc", Some("desc"), Set("no-writes"))),
+          Some(code)
+        )
+      )
+    )
+    decodesAlike(
+      Functions.functionStats,
+      "*4\r\n$14\r\nrunning_script\r\n$-1\r\n$7\r\nengines\r\n*2\r\n$3\r\nLUA\r\n*4\r\n$15\r\nlibraries_count\r\n:1\r\n$15\r\nfunctions_count\r\n:2\r\n",
+      "%2\r\n$14\r\nrunning_script\r\n_\r\n$7\r\nengines\r\n%1\r\n$3\r\nLUA\r\n%2\r\n$15\r\nlibraries_count\r\n:1\r\n$15\r\nfunctions_count\r\n:2\r\n",
+      FunctionStats(None, Map("LUA" -> EngineStats(1L, 2L)))
+    )
   }
 
   test("FUNCTION DUMP decodes the opaque payload as bytes") {

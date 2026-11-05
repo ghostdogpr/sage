@@ -85,7 +85,7 @@ private[sage] object Acl {
         context = string(fields, "context"),
         obj = string(fields, "object"),
         username = string(fields, "username"),
-        ageSeconds = fields.get("age-seconds").collect { case Frame.Double(v) => v }.getOrElse(0.0),
+        ageSeconds = fields.get("age-seconds").flatMap(Decode.double(_).toOption).getOrElse(0.0),
         clientInfo = string(fields, "client-info"),
         entryId = long(fields, "entry-id")
       )

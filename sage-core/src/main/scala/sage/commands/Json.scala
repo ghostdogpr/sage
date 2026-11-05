@@ -224,9 +224,11 @@ private[sage] object Json {
     case Frame.BulkString(b)   => Right(Some(JsonType.fromWireName(b.asUtf8String)))
   }
 
-  // JSON.TYPE: Redis wraps the whole type list in one outer array, Valkey replies it flat; unify to one type name per match
+  // JSON.TYPE: Redis wraps the whole type list in one outer array under RESP3 and replies it flat under RESP2, as Valkey does under both. A
+  // missing key replies [null] from Redis under RESP3 and a bare null otherwise, so both decode to one absent type.
   private val typeReply: Frame => Either[DecodeError, Vector[Option[JsonType]]] =
     Decode.shape("a JSONPath ($) reply array of type names (legacy '.' paths are unsupported)") {
+      case Frame.Null                              => Right(Vector(None))
       case Frame.Array(Vector(Frame.Array(inner))) => Decode.each(inner)(optionalTypeName)
       case Frame.Array(elements)                   => Decode.each(elements)(optionalTypeName)
     }

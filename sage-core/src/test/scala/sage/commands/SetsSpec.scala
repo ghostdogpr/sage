@@ -3,15 +3,31 @@ package sage.commands
 import sage.protocol.Frame
 import sage.protocol.Frames.bulk
 
-class SetsSpec extends munit.FunSuite {
+class SetsSpec extends munit.FunSuite with BothProtocols {
 
   test("SMEMBERS decodes a RESP3 set frame into a Set, empty included") {
     assertEquals(Reply.decode(Sets.sMembers[String, String]("s"), Frame.Set(Vector(bulk("a"), bulk("b")))).toEither, Right(Set("a", "b")))
     assertEquals(Reply.decode(Sets.sMembers[String, String]("s"), Frame.Set(Vector.empty)).toEither, Right(Set.empty[String]))
   }
 
-  test("a set reply rejects a plain array frame") {
-    assert(Reply.decode(Sets.sMembers[String, String]("s"), Frame.Array(Vector(bulk("a")))).toEither.isLeft)
+  test("set replies decode the RESP2 array like the RESP3 set frame") {
+    val resp2    = "*3\r\n$1\r\na\r\n$1\r\nc\r\n$1\r\nb\r\n"
+    val resp3    = "~3\r\n$1\r\na\r\n$1\r\nc\r\n$1\r\nb\r\n"
+    val commands = Vector(
+      Sets.sMembers[String, String]("s"),
+      Sets.sPopCount[String, String]("s", 3L),
+      Sets.sDiff[String, String]("s"),
+      Sets.sInter[String, String]("s", "t"),
+      Sets.sUnion[String, String]("s", "t")
+    )
+    commands.foreach { command =>
+      decodesAlike(command, resp2, resp3, Set("a", "b", "c"))
+      decodesAlike(command, "*0\r\n", "~0\r\n", Set.empty[String])
+    }
+  }
+
+  test("a set reply rejects a frame that is neither a set nor an array") {
+    assert(Reply.decode(Sets.sMembers[String, String]("s"), bulk("a")).toEither.isLeft)
   }
 
   test("SPOP decodes null as None and a bulk string as the member; a count reads a set") {

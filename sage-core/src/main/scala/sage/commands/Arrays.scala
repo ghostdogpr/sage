@@ -253,8 +253,8 @@ private[sage] object Arrays {
     fields.get(name).collect { case Frame.Integer(n) => n }
 
   private def optDouble(fields: Decode.Fields, name: String): Option[Double] =
-    fields.get(name).collect {
-      case Frame.Double(d)  => d
-      case Frame.Integer(n) => n.toDouble
+    fields.get(name).flatMap {
+      case Frame.Integer(n) => Some(n.toDouble)
+      case other            => Decode.double(other).toOption
     }
 }

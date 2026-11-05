@@ -116,7 +116,7 @@ private[commands] object Decode {
       Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
   }
 
-  // GEODIST replies the distance as a double, or null when a member is absent
+  // a double, or null when the value is absent (GEODIST, ZSCORE, ZADD INCR when its condition skipped the write)
   val optionalDouble: Frame => Either[DecodeError, Option[Double]] = nullable(double)
 
   def nullable[A](decode: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Option[A]] = {
@@ -145,17 +145,30 @@ private[commands] object Decode {
     buildEach(items, Vector.newBuilder[B])(f)
 
   def flatPairsOf[B](label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Frame => Either[DecodeError, Vector[B]] = {
-    case array: Frame.Array => buildPairs(array, label)(f)
+    case array: Frame.Array => buildPairs(array, label, Vector.newBuilder[B])(f)
     case other              => Left(DecodeError(label, Frame.describe(other)))
   }
 
+  // RESP3 nests each pair in a two-element array, while RESP2 sends the same pairs as one flat alternating array. The first element tells
+  // the shapes apart because a flat pair list starts with a string, never an array.
+  def pairsOf[B](label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Frame => Either[DecodeError, Vector[B]] = {
+    case Frame.Array(elements @ (Frame.Array(_) +: _)) =>
+      buildEach(elements, Vector.newBuilder[B]) {
+        case Frame.Array(Vector(a, b)) => f(a, b)
+        case other                     => Left(DecodeError(label, Frame.describe(other)))
+      }
+    case array: Frame.Array                            => buildPairs(array, label, Vector.newBuilder[B])(f)
+    case other                                         => Left(DecodeError(label, Frame.describe(other)))
+  }
+
   // steps a flat alternating array two elements at a time, without grouped(2)'s throwaway 2-element Vector per pair
-  private def buildPairs[B](array: Frame.Array, label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Either[DecodeError, Vector[B]] = {
+  private def buildPairs[B, C](array: Frame.Array, label: String, builder: mutable.Builder[B, C])(
+    f: (Frame, Frame) => Either[DecodeError, B]
+  ): Either[DecodeError, C] = {
     val elements = array.elements
     if (elements.length % 2 != 0) return Left(DecodeError(label, Frame.describe(array)))
-    val builder = Vector.newBuilder[B]
     builder.sizeHint(elements.length / 2)
-    var i       = 0
+    var i = 0
     while (i < elements.length) {
       f(elements(i), elements(i + 1)) match {
         case Right(value) => builder += value
@@ -223,11 +236,15 @@ private[commands] object Decode {
     case other      => decode(other)
   }
 
-  // a RESP3 map, or the flat RESP2 array of alternating key/value some introspection replies still use; non-string keys are dropped
-  val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] = shape("map") {
-    case Frame.Map(entries) => Right(entries.collect { case (Text(k), v) => k -> v }.toMap)
-    case array: Frame.Array => buildPairs(array, "map")((k, v) => Right(Text.unapply(k).map(_ -> v))).map(_.flatten.toMap)
+  // the entries of a RESP3 map, or of the flat alternating key/value array that RESP2 sends in its place
+  val entries: Frame => Either[DecodeError, Vector[(Frame, Frame)]] = shape("map") {
+    case Frame.Map(entries) => Right(entries)
+    case array: Frame.Array => buildPairs(array, "map", Vector.newBuilder[(Frame, Frame)])((k, v) => Right(k -> v))
   }
+
+  // an introspection reply map keyed by name; non-string keys are dropped
+  val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] =
+    frame => entries(frame).map(_.collect { case (Text(k), v) => k -> v }.toMap)
 
   def fields[A](read: Fields => Either[DecodeError, A]): Frame => Either[DecodeError, A] = frame => fieldMap(frame).flatMap(m => read(new Fields(m)))
 
@@ -274,17 +291,22 @@ private[commands] object Decode {
   def pair[A, B](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B]): (Frame, Frame) => Either[DecodeError, (A, B)] =
     (x, y) => a(x).flatMap(first => b(y).map(first -> _))
 
+  // HGETALL replies a RESP3 map, or a flat field, value, field, value, … array under RESP2
   def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
-    val entry = pair(key[K], value[V]).tupled
-    shape("map") { case Frame.Map(entries) => mapEntries(entries)(entry) }
+    val entry = pair(key[K], value[V])
+    shape("map") {
+      case Frame.Map(entries) => mapEntries(entries)(entry.tupled)
+      case array: Frame.Array => buildPairs(array, "map", Map.newBuilder[K, V])(entry)
+    }
   }
 
-  // HSCAN's items are a flat field, value, field, value, … array; HRANDFIELD WITHVALUES nests each pair in its own array.
+  // HSCAN's items are a flat field, value, field, value, … array under both protocols
   def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
     flatPairsOf("array of field/value pairs")(pair(key[K], value[V]))
 
-  def nestedPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
-    vector(array2(key[K], value[V], "field/value pair")(_ -> _), "array of field/value pairs")
+  // HRANDFIELD WITHVALUES nests each pair under RESP3 and sends a flat array under RESP2
+  def fieldValuePairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
+    pairsOf("array of field/value pairs")(pair(key[K], value[V]))
 
   private val scanCursor: Frame => Either[DecodeError, Option[ScanCursor]] = shape("cursor bulk string") { case Frame.BulkString(bytes) =>
     Right(if (bytes.sameBytes(ScanCursor.bytes(ScanCursor.start))) None else Some(ScanCursor.wrap(bytes)))
@@ -293,25 +315,22 @@ private[commands] object Decode {
   def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] =
     array2(scanCursor, items, "array of cursor and items")((next, decoded) => ScanPage(decoded, next))
 
-  // RESP3 returns set-typed replies (SMEMBERS, SINTER, …) as a Set frame, never an Array
+  // set-typed replies (SMEMBERS, SINTER, …) arrive as a RESP3 Set frame, or as an Array under RESP2
   def set[V](using ValueCodec[V]): Frame => Either[DecodeError, Set[V]] = {
-    case Frame.Set(elements) => buildEach(elements, Set.newBuilder[V])(value)
-    case other               => Left(DecodeError("set", Frame.describe(other)))
-  }
-
-  val optionalScore: Frame => Either[DecodeError, Option[Double]] = shape("double or null") {
-    case Frame.Null          => Right(None)
-    case Frame.Double(value) => Right(Some(value))
+    case Frame.Set(elements)   => buildEach(elements, Set.newBuilder[V])(value)
+    case Frame.Array(elements) => buildEach(elements, Set.newBuilder[V])(value)
+    case other                 => Left(DecodeError("set", Frame.describe(other)))
   }
 
   private def memberScore[V](using ValueCodec[V]): Frame => Either[DecodeError, (V, Double)] =
     array2(value[V], double, "member/score pair")(_ -> _)
 
-  // RESP3 nests each member with its Double score in a two-element array (ZRANGE WITHSCORES, ZPOPMIN count, …)
+  // ZRANGE WITHSCORES, ZPOPMIN with a count, and similar replies: RESP3 nests each member with its score and RESP2 sends a flat array.
+  // ZMPOP nests its pairs under both protocols.
   def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] =
-    vector(memberScore[V], "array of member/score pairs")
+    pairsOf("array of member/score pairs")(pair(value[V], double))
 
-  // ZPOPMIN/ZPOPMAX without a count: a flat [member, score], or an empty array when the key is absent
+  // ZPOPMIN/ZPOPMAX without a count: a flat [member, score] under both protocols, or an empty array when the key is absent
   def optionalScoredMember[V](using ValueCodec[V]): Frame => Either[DecodeError, Option[(V, Double)]] = {
     case Frame.Null                      => Right(None)
     case Frame.Array(Vector())           => Right(None)

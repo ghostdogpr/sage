@@ -3,8 +3,9 @@ package sage.commands
 import sage.codec.{KeyCodec, ValueCodec}
 
 /**
-  * Set members are values (a [[ValueCodec]]), like list elements. The set-returning reads decode the RESP3 Set frame into a `Set[V]`;
-  * `SRANDMEMBER` with a count decodes an Array instead, because a negative count deliberately yields duplicates a `Set` would collapse.
+  * Set members are values (a [[ValueCodec]]), like list elements. The set-returning reads decode the RESP3 Set frame, or the Array that
+  * RESP2 sends in its place, into a `Set[V]`. `SRANDMEMBER` with a count decodes into a `Vector` instead, because a negative count
+  * deliberately yields duplicates a `Set` would collapse.
   */
 private[sage] object Sets {
 
