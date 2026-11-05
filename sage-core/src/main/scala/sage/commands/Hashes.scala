@@ -135,7 +135,7 @@ private[sage] object Hashes {
       "HRANDFIELD",
       Command.FirstKey,
       Vector(keyCodec.encode(key), Args.long(count), WithValues),
-      Decode.nestedPairs[F, V]
+      Decode.fieldValuePairs[F, V]
     )
 
   def hScan[K, F, V](key: K, cursor: ScanCursor, pattern: Option[String] = None, count: Option[Long] = None)(

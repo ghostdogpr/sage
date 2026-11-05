@@ -3,7 +3,7 @@ package sage.integration.commands
 import com.dimafeng.testcontainers.GenericContainer
 import kyo.compat.*
 
-import sage.SageException.DecodeError
+import sage.SageException.{DecodeError, ServerError}
 import sage.codec.ValueCodec
 import sage.commands.{JsonPath, JsonSetCondition, JsonType}
 import sage.integration.{BothServersSuite, Images}
@@ -85,6 +85,24 @@ class JsonSuite extends BothServersSuite {
     failsWith[DecodeError](
       client.jsonSet("legacy", JsonPath.root, """{"xs":[1,2,3]}""").flatMap(_ => client.jsonArrLen("legacy", JsonPath(".xs")))
     ).satisfies(_.getMessage.contains("legacy"))
+  }
+
+  clientTest("JSON.DEBUG MEMORY on a missing key returns no matches") { client =>
+    client.jsonDebugMemory("nojson").is(Vector.empty)
+  }
+
+  valkeyTest("JSON length and key queries on a missing key return no matches on Valkey") { client =>
+    client.jsonStrLen("nojson").is(Vector.empty) >>
+      client.jsonArrLen("nojson", JsonPath("$.x")).is(Vector.empty) >>
+      client.jsonObjLen("nojson").is(Vector.empty) >>
+      client.jsonObjKeys("nojson").is(Vector.empty)
+  }
+
+  redisTest("JSON length and key queries on a missing key fail with a server error on Redis") { client =>
+    failsWith[ServerError](client.jsonStrLen("nojson")) >>
+      failsWith[ServerError](client.jsonArrLen("nojson", JsonPath("$.x"))) >>
+      failsWith[ServerError](client.jsonObjLen("nojson")) >>
+      failsWith[ServerError](client.jsonObjKeys("nojson"))
   }
 
   // JSON.MERGE exists on Redis but not on Valkey Bundle.

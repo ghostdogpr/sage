@@ -39,7 +39,9 @@ final case class DedicatedPoolConfig(
 )
 
 /**
-  * Credentials sent via `HELLO 3 AUTH`. Legacy `requirepass` is the default user with a password, hence the `"default"` username.
+  * Credentials sent during connection setup, with `HELLO 3 AUTH` or, on a RESP2 connection, with `AUTH`. Legacy `requirepass` is the
+  * default user with a password, hence the `"default"` username. On RESP2, the default user is sent as `AUTH <password>`, which servers
+  * older than Redis 6.0 also accept.
   */
 final case class AuthConfig(password: String, username: String = "default") {
   // keep the secret out of logs and error messages that print a SageConfig
@@ -85,12 +87,22 @@ final case class TlsConfig(trust: TrustSource = TrustSource.System)
 final case class PubSubConfig(bufferSize: Int = 128)
 
 /**
-  * Settings for client-side caching. When `enabled` is true, the multiplexed connection enables RESP3 opt-in tracking during bootstrap.
-  * A `cached` read can then return a local value. `maxBytes` limits the estimated retained size of each connection generation's cache.
-  * The cache evicts least-recently-used entries and skips values larger than the whole limit. Set `enabled = false` when an ACL or proxy
-  * permits `HELLO` and ordinary commands but denies `CLIENT TRACKING`. A `cached` call then reads from the server without caching.
+  * Settings for client-side caching. When `enabled` is true, a multiplexed connection that negotiated RESP3 enables opt-in tracking during
+  * bootstrap. A `cached` read can then return a local value. `maxBytes` limits the estimated retained size of each connection generation's
+  * cache. The cache evicts least-recently-used entries and skips values larger than the whole limit. Set `enabled = false` when an ACL or
+  * proxy permits `HELLO` and ordinary commands but denies `CLIENT TRACKING`. A `cached` call then reads from the server without caching.
   */
 final case class CacheConfig(enabled: Boolean = true, maxBytes: Long = 64L * 1024 * 1024)
+
+/**
+  * The RESP protocol version that connections use. `Auto`, the default, sends `HELLO 3` and falls back to RESP2 when the server rejects it,
+  * as servers older than Redis 6.0 and some proxies do. `Resp3` fails to connect with [[sage.SageException.UnsupportedServer]] instead.
+  * `Resp2` skips `HELLO` and authenticates with `AUTH`. Each connection negotiates its version separately. Command results have the same
+  * types under both versions. Client-side caching requires RESP3, so `cached` reads on a RESP2 connection read from the server.
+  */
+enum RespProtocol {
+  case Auto, Resp3, Resp2
+}
 
 /**
   * A server address. The standalone address and each cluster seed are both an Endpoint. In cluster mode the seeds are contacted to discover
@@ -148,14 +160,14 @@ enum Topology {
   * The client configuration. The fields default to a local standalone server. Nested configuration types group settings for individual
   * client behavior.
   *
-  * @param connectTimeout how long to wait for a connection (and its `HELLO 3` setup) to complete before failing
+  * @param connectTimeout how long to wait for a connection (and its setup commands) to complete before failing
   * @param reconnect      exponential reconnect backoff. See [[BackoffConfig]]
   * @param watchdog       connection liveness checks. See [[WatchdogConfig]]
   * @param closeTimeout   how long [[sage.client.internal.Client.close]] waits for in-flight commands to finish before forcing the close
   * @param dedicatedPool  the pool for blocking commands and transactions. See [[DedicatedPoolConfig]]
   * @param pubsub         pub/sub buffering. See [[PubSubConfig]]
   * @param clientCache    client-side caching. See [[CacheConfig]]
-  * @param auth           credentials for `HELLO 3 AUTH`. `None` connects without authentication. See [[AuthConfig]]
+  * @param auth           credentials sent during connection setup. `None` connects without authentication. See [[AuthConfig]]
   * @param tls            TLS settings. `None` connects in plaintext. See [[TlsConfig]]
   * @param topology       standalone, cluster, or master-replica configuration and server locations. See [[Topology]]
   * @param readFrom       which node can run read-only commands. See [[ReadFrom]]
@@ -166,6 +178,7 @@ enum Topology {
   * @param listeners      observers of runtime [[sage.SageEvent]] values. See [[sage.SageListener]]
   * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active
   *                       span. See [[sage.CommandTracer]]. `None`, the default, emits no spans
+  * @param protocol       the RESP version to negotiate. See [[RespProtocol]]
   */
 final case class SageConfig(
   connectTimeout: FiniteDuration = 10.seconds,
@@ -182,7 +195,8 @@ final case class SageConfig(
   database: Int = 0,
   clientName: Option[String] = None,
   listeners: Vector[SageListener] = Vector.empty,
-  tracer: Option[CommandTracer] = None
+  tracer: Option[CommandTracer] = None,
+  protocol: RespProtocol = RespProtocol.Auto
 )
 
 object SageConfig {

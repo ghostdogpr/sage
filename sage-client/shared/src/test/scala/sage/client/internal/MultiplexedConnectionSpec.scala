@@ -835,38 +835,40 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assert(tracer.log.last.startsWith("settled:Failed"))
   }
 
-  test("a server that rejects CLIENT TRACKING degrades cached reads to uncached rather than failing (ADR-0045)") {
-    val scheduler                                       = new ManualScheduler
-    val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
-    val respond: Bytes => Seq[Frame]                    = payload => {
-      val text = payload.asUtf8String
-      if (text.contains("TRACKING")) Seq(Frame.SimpleError("ERR unknown subcommand TRACKING"))
-      else if (text.contains("GET")) Seq(bulk("bar"))
-      else Nil
-    }
-    val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
-      val transport = new FakeTransport(onFrame, onClosed, Replies.withSetup(respond))
-      transports += transport
-      transport
-    }
-    val connection                                      = new MultiplexedConnection(
-      factory,
-      scheduler,
-      cachingConfig,
-      MultiplexedConnection.NodeRole.Master
-    ).start()
-    val get                                             = Strings.get[String, String]("foo")
+  test("a server that rejects CLIENT TRACKING, or a connection that falls back to RESP2, serves cached reads uncached (ADR-0045)") {
+    Seq("TRACKING" -> "ERR unknown subcommand TRACKING", "HELLO" -> "NOPROTO unsupported protocol version").foreach { case (rejected, error) =>
+      val scheduler                                       = new ManualScheduler
+      val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
+      val respond: Bytes => Seq[Frame]                    = payload => {
+        val text = payload.asUtf8String
+        if (text.contains(rejected)) Seq(Frame.SimpleError(error))
+        else if (text.contains("GET")) Seq(bulk("bar"))
+        else Replies.withSetup(_ => Seq(Replies.ok))(payload)
+      }
+      val factory: MultiplexedConnection.TransportFactory = (onFrame, onClosed) => {
+        val transport = new FakeTransport(onFrame, onClosed, respond)
+        transports += transport
+        transport
+      }
+      val connection                                      = new MultiplexedConnection(
+        factory,
+        scheduler,
+        cachingConfig,
+        MultiplexedConnection.NodeRole.Master
+      ).start()
+      val get                                             = Strings.get[String, String]("foo")
 
-    var first: Option[Try[Option[String]]]  = None
-    connection.cachedSubmit(get, 60000L, r => first = Some(r), Events.untraced)
-    var second: Option[Try[Option[String]]] = None
-    connection.cachedSubmit(get, 60000L, r => second = Some(r), Events.untraced)
+      var first: Option[Try[Option[String]]]  = None
+      connection.cachedSubmit(get, 60000L, r => first = Some(r), Events.untraced)
+      var second: Option[Try[Option[String]]] = None
+      connection.cachedSubmit(get, 60000L, r => second = Some(r), Events.untraced)
 
-    assertEquals(first, Some(Success(Some("bar"))))
-    assertEquals(second, Some(Success(Some("bar"))))
-    val writes = transports.head.written.map(_.asUtf8String)
-    assert(!writes.exists(_.contains("CACHING")), "no CLIENT CACHING YES when tracking is unavailable")
-    assertEquals(writes.count(_.contains("GET")), 2, "each cached read re-contacts the server: nothing is cached without tracking")
+      assertEquals(first, Some(Success(Some("bar"))), rejected)
+      assertEquals(second, Some(Success(Some("bar"))), rejected)
+      val writes = transports.head.written.map(_.asUtf8String)
+      assert(!writes.exists(_.contains("CACHING")), s"no CLIENT CACHING YES when tracking is unavailable ($rejected)")
+      assertEquals(writes.count(_.contains("GET")), 2, s"each cached read re-contacts the server: nothing is cached without tracking ($rejected)")
+    }
   }
 
   // traces the read once per call, as the client runtimes do

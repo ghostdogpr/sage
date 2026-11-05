@@ -11,7 +11,7 @@ import Replies.bulk
 
 import sage.{Bytes, Message, PatternMessage}
 import sage.SageException.{NotConnected, ServerError, TlsError}
-import sage.client.{BackoffConfig, PubSubConfig, SageConfig, WatchdogConfig}
+import sage.client.{BackoffConfig, PubSubConfig, RespProtocol, SageConfig, WatchdogConfig}
 import sage.cluster.{ClusterTopology, Node, Slot, SlotRange}
 import sage.protocol.Frame
 
@@ -57,7 +57,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     bufferSize: Int = 16,
     respond: Bytes => Seq[Frame] = serverResponder,
     reconnect: BackoffConfig = fixedBackoff,
-    refuseHello: () => Boolean = () => false
+    refuseHello: () => Boolean = () => false,
+    protocol: RespProtocol = RespProtocol.Auto,
+    onLoss: SubscriptionConnection.OnLoss = SubscriptionConnection.OnLoss.Reconnect(() => (), Events.disabled)
   ): (SubscriptionConnection, ManualScheduler, mutable.ArrayBuffer[FakeTransport]) = {
     val scheduler                                       = new ManualScheduler
     val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]
@@ -69,13 +71,9 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
       transports += transport
       transport
     }
-    val connection                                      = new SubscriptionConnection(
-      factory,
-      scheduler,
-      SageConfig(reconnect = reconnect, watchdog = watchdog, connectTimeout = 1000.millis, pubsub = PubSubConfig(bufferSize = bufferSize)),
-      isLive
-    )
-    (connection, scheduler, transports)
+    val config                                          =
+      SageConfig(reconnect = reconnect, watchdog = watchdog, connectTimeout = 1000.millis, pubsub = PubSubConfig(bufferSize = bufferSize))
+    (new SubscriptionConnection(factory, scheduler, config.copy(protocol = protocol), isLive, onLoss), scheduler, transports)
   }
 
   // A SUBSCRIBE token is "\r\nSUBSCRIBE\r\n" on the wire. It cannot match UN/PSUBSCRIBE because those tokens start with UN/P.
@@ -1150,5 +1148,100 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     scheduler.advance(1.second)
     assert(transports.exists(wrote(_, "SSUBSCRIBE")), "the retry never placed the channel")
     manager.close()
+  }
+
+  // --- RESP2 ------------------------------------------------------------------------------------------------------------------------------
+
+  // replies like a RESP2 server, which answers PING in subscribed mode with ["pong", ""]
+  private def resp2Reply(command: List[String]): Seq[Frame] =
+    if (command == List("PING")) Seq(Frame.Array(Vector(bulk("pong"), bulk(""))))
+    else reply(command).map { case Frame.Push(elements) => Frame.Array(elements); case other => other }
+
+  test("on RESP2, SUNSUBSCRIBEs end with an UNSUBSCRIBE marker that keeps classic subscriptions, and an error before its reply is theirs") {
+    // the connection holds one classic channel, so the marker's confirmation reports 1 classic subscription
+    val respond: Bytes => Seq[Frame] = commands(_).flatMap {
+      case List("SUNSUBSCRIBE", "moved") => Seq(Frame.SimpleError("MOVED 1234 10.0.0.2:6379"))
+      case command                       => resp2Reply(command)
+    }
+    var (terminated, dropped, moved) = (false, 0, 0)
+    val (connection, _, transports)  =
+      make(
+        respond = respond,
+        protocol = RespProtocol.Resp2,
+        onLoss = SubscriptionConnection.OnLoss.Report(_ => terminated = true, () => dropped += 1, () => moved += 1)
+      )
+    def shardSink(names: String*)    = new SubscriptionConnection.Sink(names.toVector, SubscriptionConnection.Kind.Shard, 16)
+    val (gone, kept, late)           = (shardSink("x", "y", "moved"), shardSink("kept"), shardSink("late"))
+    val news                         = connection.subscribeChannels(Vector("news"))
+    Seq(gone, kept).foreach(sink => connection.attach(sink, sink.names))
+    connection.detach(gone, gone.names)
+    val written                      = transports.head.written.flatMap(commands)
+    val marker                       = PartialFunction.cond(written.last) { case List("UNSUBSCRIBE", channel) => channel.startsWith("__sage:") }
+    assert(marker && written.count(_.headOption.contains("UNSUBSCRIBE")) == 1, written.toString)
+    // a reply that answers the wrong entry leaves attach waiting
+    val attaching                    = new Thread(() => connection.attach(late, late.names))
+    attaching.start()
+    attaching.join(2000)
+    if (attaching.isAlive) {
+      connection.close()
+      attaching.join()
+      fail("a reply answered another command")
+    }
+
+    assertEquals((connection.namesOf(late), connection.namesOf(kept)), (Vector("late"), Vector("kept")))
+    assertEquals((terminated, dropped, moved, transports.head.closeCount), (false, 0, 0, 0))
+    transports.head.emit(Frame.Array(Vector(bulk("smessage"), bulk("kept"), bulk("still here"))))
+    assertChannel(nextBlocking(new SubscriptionConnection.RawSubscription(kept, () => ())), "kept", "still here")
+    transports.head.emit(Frame.Array(Vector(bulk("message"), bulk("news"), bulk("hello"))))
+    assertChannel(nextBlocking(news), "news", "hello")
+  }
+
+  // The SUNSUBSCRIBE succeeds and the server refuses the marker with `error`. Without the watchdog, the connection must close at once and
+  // restore the remaining subscriptions on a new one.
+  private def assertRefusedMarkerReconnects(error: String)(using munit.Location): Unit = {
+    val respond: Bytes => Seq[Frame]        = commands(_).flatMap {
+      case List("UNSUBSCRIBE", channel) if channel.startsWith("__sage:") => Seq(Frame.SimpleError(error))
+      case command                                                       => resp2Reply(command)
+    }
+    val (connection, scheduler, transports) = make(respond = respond, protocol = RespProtocol.Resp2)
+    val news                                = connection.subscribeChannels(Vector("news"))
+    val kept                                = connection.subscribeShard(Vector("kept"))
+    connection.subscribeShard(Vector("gone")).close()
+    assertEquals(transports.head.closeCount, 1, "replies after a refused marker no longer match their commands")
+
+    scheduler.advance(1.milli)
+    assertEquals(transports.size, 2)
+    val restored = transports(1).written.flatMap(commands)
+    assert(restored.contains(List("SSUBSCRIBE", "kept")) && !restored.contains(List("SSUBSCRIBE", "gone")), restored.toString)
+    transports(1).emit(Frame.Array(Vector(bulk("smessage"), bulk("kept"), bulk("still here"))))
+    assertChannel(nextBlocking(kept), "kept", "still here")
+    transports(1).emit(Frame.Array(Vector(bulk("message"), bulk("news"), bulk("hello"))))
+    assertChannel(nextBlocking(news), "news", "hello")
+  }
+
+  test("on RESP2, a marker that ACL denies closes the connection at once, and the reconnect restores the remaining subscriptions") {
+    assertRefusedMarkerReconnects("NOPERM User u has no permissions to run the 'unsubscribe' command")
+  }
+
+  test("on RESP2, a marker refused during a busy script closes the connection at once, and the reconnect restores the subscriptions") {
+    assertRefusedMarkerReconnects("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSCRIPT.")
+  }
+
+  test("on RESP2, the watchdog counts the subscribed-mode PING reply [\"pong\", \"\"] as a reply and keeps the connection") {
+    val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
+    val (connection, scheduler, transports) = make(watchdog = watchdog, respond = commands(_).flatMap(resp2Reply), protocol = RespProtocol.Resp2)
+    val sub                                 = connection.subscribeChannels(Vector("news"))
+    scheduler.advance(350.millis)
+    assert(wrote(transports.head, "PING"), "the watchdog never probed")
+    assertEquals((transports.size, transports.head.closeCount), (1, 0))
+    transports.head.emit(Frame.Array(Vector(bulk("message"), bulk("news"), bulk("hello"))))
+    assertChannel(nextBlocking(sub), "news", "hello")
+  }
+
+  test("on RESP3, an array that looks like a message is a reply, not a delivery") {
+    val (connection, _, transports) = make()
+    connection.subscribeChannels(Vector("news"))
+    transports.head.emit(Frame.Array(Vector(bulk("message"), bulk("news"), bulk("hello"))))
+    assertEquals(transports.head.closeCount, 1, "a reply with nothing pending drops the connection")
   }
 }

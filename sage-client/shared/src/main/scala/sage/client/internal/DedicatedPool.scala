@@ -26,7 +26,7 @@ import sage.protocol.Frame
   */
 final private[client] class DedicatedPool(
   factory: MultiplexedConnection.TransportFactory,
-  bootstrap: Vector[Command[?]],
+  bootstrap: Bootstrap,
   scheduler: Scheduler,
   isLive: () => Boolean,
   config: DedicatedPoolConfig,
@@ -257,7 +257,7 @@ final private[client] class DedicatedPool(
 /**
   * A connection borrowed exclusively from the [[DedicatedPool]]. It does not reconnect or run a watchdog. If the connection is lost, the
   * pool discards it and in-flight work fails with `ConnectionLost(mayHaveExecuted = true)`. Replies are matched in order. This allows the
-  * synchronous `HELLO` setup to finish before the connection is borrowed and keeps a transaction's `MULTI`, queued-command, and `EXEC`
+  * synchronous connection setup to finish before the connection is borrowed and keeps a transaction's `MULTI`, queued-command, and `EXEC`
   * replies aligned with their commands.
   */
 final private[client] class DedicatedConnection(factory: MultiplexedConnection.TransportFactory, scheduler: Scheduler)

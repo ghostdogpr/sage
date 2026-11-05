@@ -6,13 +6,13 @@ Every Sage failure is a `SageException` in a sealed hierarchy that you can match
 
 | Case | Meaning |
 | --- | --- |
-| `ProtocolError(message)` | Malformed RESP3 on the wire; the connection is discarded. |
+| `ProtocolError(message)` | Malformed RESP on the wire; the connection is discarded. |
 | `DecodeError(expected, actual)` | A reply was well-formed but not the shape a decoder or codec required (the built-in codecs decode strictly). |
 | `ServerError(code, detail)` | An error reply from the server. `code` is the leading token (`WRONGTYPE`, `NOSCRIPT`, `BUSYGROUP`, the generic `ERR`, …). |
-| `ConnectionFailed(message)` | The initial connection could not be established: the host is unreachable, the connection is refused or times out, the server does not answer `HELLO` within `connectTimeout`, or it closes the socket during setup. Distinct from `ConnectionLost`, which is a live connection dropping. |
+| `ConnectionFailed(message)` | The initial connection could not be established: the host is unreachable, the connection is refused or times out, the server does not answer a setup command such as `HELLO` within `connectTimeout`, or it closes the socket during setup. Distinct from `ConnectionLost`, which is a live connection dropping. |
 | `ConnectionLost(mayHaveExecuted)` | The connection dropped around this command. |
 | `NotConnected()` | The client was never started, or has been closed. |
-| `UnsupportedServer(message)` | The server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). |
+| `UnsupportedServer(message)` | With `protocol = RespProtocol.Resp3`, the server rejected `HELLO 3` (it predates RESP3, or is a RESP2-only proxy). The default, `RespProtocol.Auto`, connects to such a server with RESP2 instead. |
 | `TlsError(message)` | TLS could not be established (rejected certificate or unusable trust material). |
 | `CrossSlot(message)` | An unsupported multi-key command or a transaction touched keys in more than one cluster slot. `MGET`, `MSET`, `EXISTS`, `DEL`, `UNLINK`, and `TOUCH` are transparently split outside transactions. |
 | `TimedOut(message)` | A pooled connection wait exceeded `dedicatedPool.acquireTimeout`, a topology probe exceeded `connectTimeout` (a master-replica `connect` fails this way when its `ROLE` probes time out), or distributed lock acquisition exceeded its wait, lease, or replica confirmation budget. |

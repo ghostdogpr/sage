@@ -37,7 +37,7 @@ class ClusterSuite extends BothServersSuite {
     }
 
   private def clusterConfig(server: GenericContainer, database: Int = 0): SageConfig =
-    SageConfig(topology = Topology.Cluster(Vector(Endpoint(server.host, server.mappedPort(6379)))), database = database)
+    configFor(Topology.Cluster(Vector(Endpoint(server.host, server.mappedPort(6379))))).copy(database = database)
 
   private def clusterTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
     serverTest(options)(server => connectAndUse(clusterConfig(server))(body))
@@ -88,6 +88,20 @@ class ClusterSuite extends BothServersSuite {
       }
     }
   }
+  // unlike the PubsubSuite test, the node's shard connection holds only shard channels
+  clusterTest("closing one shard subscription keeps the node's other shard subscriptions, and later ones are confirmed") { client =>
+    withSubscription(client.subscribeShardChannels[String]("orders")) { kept =>
+      withSubscription(client.subscribeShardChannels[String]("refunds"))(_ => client.pubsubShardChannels().satisfies(_.contains("refunds"))) >>
+        Eventually(50)(client.pubsubShardChannels().satisfies(!_.contains("refunds"))) >>
+        withSubscription(client.subscribeShardChannels[String]("returns")) { late =>
+          client.sPublish("orders", "placed").is(1L) >>
+            kept.next.is(Some(Message("orders", "placed"))) >>
+            client.sPublish("returns", "opened").is(1L) >>
+            late.next.is(Some(Message("returns", "opened")))
+        }
+    }
+  }
+
   // scanTargets returns one target per slot-owning master, and each target runs every page on the node that created its cursor. This fixture
   // has one master for all slots, so one target is expected.
   clusterTest("scanAll sweeps every slot-owning master through node-pinned scan targets") { client =>

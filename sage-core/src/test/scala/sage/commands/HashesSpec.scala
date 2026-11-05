@@ -3,12 +3,36 @@ package sage.commands
 import sage.protocol.Frame
 import sage.protocol.Frames.{bulk, map}
 
-class HashesSpec extends munit.FunSuite {
+class HashesSpec extends munit.FunSuite with BothProtocols {
 
   test("HGETALL decodes a RESP3 map frame into a field-keyed map") {
     val reply = map("f1" -> bulk("v1"), "f2" -> bulk("v2"))
     assertEquals(Reply.decode(Hashes.hGetAll[String, String, String]("h"), reply).toEither, Right(Map("f1" -> "v1", "f2" -> "v2")))
     assertEquals(Reply.decode(Hashes.hGetAll[String, String, String]("h"), Frame.Map(Vector.empty)).toEither, Right(Map.empty[String, String]))
+  }
+
+  test("HGETALL decodes the flat RESP2 field/value array like the RESP3 map") {
+    decodesAlike(
+      Hashes.hGetAll[String, String, String]("h"),
+      "%2\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n",
+      Map("f1" -> "v1", "f2" -> "v2")
+    )
+    decodesAlike(Hashes.hGetAll[String, String, String]("h"), "%0\r\n", Map.empty[String, String])
+    assert(Reply.decode(Hashes.hGetAll[String, String, String]("h"), Frame.Array(Vector(bulk("f1")))).toEither.isLeft)
+  }
+
+  test("HRANDFIELD WITHVALUES decodes the flat RESP2 array like the nested RESP3 pairs, keeping repeats") {
+    decodesAlike(
+      Hashes.hRandFieldWithValues[String, String, String]("h", -3L),
+      "*6\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n$2\r\nf1\r\n$2\r\nv1\r\n",
+      "*3\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n*2\r\n$2\r\nf2\r\n$2\r\nv2\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n",
+      Vector("f1" -> "v1", "f2" -> "v2", "f1" -> "v1")
+    )
+    decodesAlike(Hashes.hRandFieldWithValues[String, String, String]("h", 2L), "*0\r\n", Vector.empty)
+    assertEquals(
+      expectedShape(Hashes.hRandFieldWithValues[String, String, String]("h", 1L), Frame.Array(Vector(Frame.Array(Vector(bulk("f1")))))),
+      Some("field/value pair")
+    )
   }
 
   test("HMGET keeps missing fields as None positionally") {

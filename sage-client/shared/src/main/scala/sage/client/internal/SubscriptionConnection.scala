@@ -1,5 +1,6 @@
 package sage.client.internal
 
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 
@@ -11,7 +12,7 @@ import sage.SageEvent
 import sage.SageException.{NotConnected, ServerError}
 import sage.client.SageConfig
 import sage.cluster.Node
-import sage.commands.Pubsub
+import sage.commands.{Command, Pubsub}
 import sage.protocol.Frame
 
 /**
@@ -243,7 +244,7 @@ final private[client] class SubscriptionConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      try conn.handshake(Bootstrap.commands(config), config.connectTimeout.toMillis)
+      try conn.handshake(Bootstrap(config), config.connectTimeout.toMillis)
       catch { case NonFatal(e) => throw Client.translateHandshake(e) }
       conn
     } finally locked(establishing -= conn): Unit
@@ -374,30 +375,38 @@ final private[client] class SubscriptionConnection(
     def subscribe(names: Vector[Name]): Unit = sendEach(names.map(name => new Entry(name.kind.subscribe(name.name), confirm(this, name))))
 
     // An UNSUBSCRIBE or PUNSUBSCRIBE is answered by its own push. The push of an SUNSUBSCRIBE is ambiguous: a cluster node sends the same
-    // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). One HELLO
-    // written after the SUNSUBSCRIBEs ends their replies: an error before the HELLO's reply is one of theirs, and their pushes go to onPush.
-    // Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
+    // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). A marker
+    // command written after the SUNSUBSCRIBEs ends their replies: an error before the marker's reply is one of theirs, and their pushes go to
+    // onPush. Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
     def unsubscribe(kind: Kind, names: Vector[String]): Unit =
       if (kind != Kind.Shard) sendEach(names.map(name => new Entry(kind.unsubscribe(name), _ => ())))
-      else if (names.nonEmpty) sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilHello)) :+ new Entry(Pubsub.helloInfo, afterHello))
+      else if (names.nonEmpty) sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilMarker)) :+ new Entry(marker, afterMarker))
 
-    // used on the reader thread only, while the HELLO's reply is passed on to its own entry
+    // RESP2 refuses HELLO in subscribed mode, so the marker there unsubscribes a never-subscribed channel instead. Its confirmation answers
+    // the oldest pending entry like any other, and its subscription count is ignored.
+    private def marker: Command[Frame] =
+      if (isResp2) Kind.Channel.unsubscribe(s"__sage:batch-end:${UUID.randomUUID()}") else Pubsub.helloInfo
+
+    // used on the reader thread only, while the marker's reply is passed on to its own entry
     private var passing = false
     private var reached = false
 
-    // The first SUNSUBSCRIBE still pending receives the HELLO's reply and passes it on in a loop, not recursively, so a long batch cannot
+    // The first SUNSUBSCRIBE still pending receives the marker's reply and passes it on in a loop, not recursively, so a long batch cannot
     // overflow the stack.
-    private val untilHello: Try[Frame] => Unit = {
-      case Success(reply) if !passing =>
+    private val untilMarker: Try[Frame] => Unit = {
+      case Success(reply) if !passing                                  =>
         passing = true
         reached = false
         try while (!reached && !isDead) answer(reply)
         finally passing = false
-      case _                          => ()
+      case Failure(error: ServerError) if isResp2 && !misrouted(error) => this.close()
+      case _                                                           => ()
     }
 
-    // ACL does not refuse an argument-less HELLO, so an error here means that replies no longer match their entries
-    private val afterHello: Try[Frame] => Unit = { result =>
+    // HELLO never fails, but a RESP2 UNSUBSCRIBE fails when ACL denies the command or a script is busy. Its error answers the marker if
+    // every SUNSUBSCRIBE also failed, and a SUNSUBSCRIBE otherwise. Only a cluster routing error such as MOVED is known to come from a
+    // SUNSUBSCRIBE, so on RESP2 any other error closes the connection, and its subscriptions are restored on a new one.
+    private val afterMarker: Try[Frame] => Unit = { result =>
       reached = true
       result match {
         case Failure(_: ServerError) => this.close()
@@ -420,8 +429,18 @@ final private[client] class SubscriptionConnection(
       if (!readerBlocked) // deliberate backpressure on a slow consumer; the connection is alive, not stuck
         checkLiveness(lastBackpressureMillis + config.watchdog.pingTimeout.toMillis)
 
-    protected def onPush(elements: Vector[Frame]): Unit =
-      Pubsub.decode(elements).foreach {
+    protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, elements))
+
+    // RESP2 sends pub/sub pushes as arrays. No other reply matches Pubsub.decode, including the subscribed-mode PING reply ["pong", ""].
+    override protected def arrayPush(elements: Vector[Frame]): Boolean =
+      isResp2 && Pubsub.decode(elements).exists { event =>
+        handle(event, elements)
+        true
+      }
+
+    // a confirmation answers its entry as a push under both protocols, since no entry reads the frame
+    private def handle(event: Pubsub.Event, elements: Vector[Frame]): Unit =
+      event match {
         case Pubsub.Event.Confirmed                               => answer(Frame.Push(elements))
         case Pubsub.Event.Delivered(kind, subscription, delivery) => dispatch(this, sinksFor(kind), subscription, delivery)
         // The server dropped the channel only if it is still registered and confirmed here. An unsubscribed channel has left the registry.
@@ -458,6 +477,10 @@ private[client] object SubscriptionConnection {
 
   // The errors a subscribe gets every time it is sent: an ACL denial, or a command or argument the server does not support.
   private def refuses(error: ServerError): Boolean = error.code == "NOPERM" || error.code == "ERR"
+
+  // The errors a cluster node returns for a command whose keys or shard channels it does not serve. Commands without them never get one.
+  private val misroutedCodes                         = Set("MOVED", "ASK", "TRYAGAIN", "CLUSTERDOWN", "CROSSSLOT")
+  private def misrouted(error: ServerError): Boolean = misroutedCodes(error.code)
 
   // Connects each attempt to the node `pick` names at that time. `retain` closes that connection once its node leaves the deployment, and
   // the connection then reconnects to a current node.

@@ -1299,6 +1299,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the length of each string at `path`, `None` where the path was not a string.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonStrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonStrLen(key, path))
 
@@ -1332,6 +1333,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the length of each array at `path`, `None` where the path was not an array.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonArrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonArrLen(key, path))
 
@@ -1349,16 +1351,19 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the key names of each object at `path`, `None` where the path was not an object.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonObjKeys(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Vector[String]]]] = run(Json.jsonObjKeys(key, path))
 
   /**
     * Returns the number of keys in each object at `path`, `None` where the path was not an object.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonObjLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonObjLen(key, path))
 
   /**
-    * Returns the memory footprint in bytes of the value at each matched location. A diagnostic; not client-side cached.
+    * Returns the memory footprint in bytes of the value at each matched location, and an empty `Vector` for a missing key. A diagnostic;
+    * not client-side cached.
     */
   final def jsonDebugMemory(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonDebugMemory(key, path))
 
@@ -2368,8 +2373,8 @@ object Client {
 
   /**
     * The construction entry point each backend's `connect`/`scoped` builds on: validates `config`, then connects per its [[Topology]]. It
-    * fails with [[sage.SageException.ConnectionFailed]] when the server does not answer `HELLO` within `connectTimeout` or closes the
-    * socket during setup, and a master-replica connect fails with [[sage.SageException.TimedOut]] when its `ROLE` probes time out.
+    * fails with [[sage.SageException.ConnectionFailed]] when the server does not answer a setup command within `connectTimeout` or closes
+    * the socket during setup, and a master-replica connect fails with [[sage.SageException.TimedOut]] when its `ROLE` probes time out.
     */
   def connect(config: SageConfig): CIO[Client[CIO, String]] =
     validate(config) match {
@@ -2460,7 +2465,7 @@ object Client {
   private def atLeastOneMilliOrInfinite(value: Duration, label: String): Option[String] =
     cond(value == Duration.Inf || (value.isFinite && value.toMillis >= 1L), s"$label must be at least 1ms (or Inf)")
 
-  // run the HELLO 3 bootstrap for every connection. The initial connection reports a handshake failure; reconnects retry it.
+  // run the connection setup for every connection. The initial connection reports a handshake failure; reconnects retry it.
   private[client] def connectWith(
     factory: MultiplexedConnection.TransportFactory,
     scheduler: Scheduler = Scheduler.real,
@@ -2469,14 +2474,11 @@ object Client {
   ): CIO[Client[CIO, String]] =
     start(new Live(factory, scheduler, config, events))
 
-  // Redis versions before 6.0 report HELLO as an unknown command. Newer servers use NOPROTO for unsupported protocol versions. A setup reply
-  // that times out or loses its socket is a failed connect, and a raw network error would otherwise escape the sealed hierarchy.
+  // A setup reply that times out or loses its socket is a failed connect, and a raw network error would otherwise escape the sealed hierarchy.
   private[internal] def translateHandshake(error: Throwable): Throwable =
     error match {
-      case e: ServerError if e.code == "NOPROTO" || e.getMessage.toLowerCase(java.util.Locale.ROOT).contains("unknown command") =>
-        UnsupportedServer(s"sage requires RESP3 (Redis 6.0+ or any Valkey); server rejected HELLO 3: ${e.getMessage}")
-      case e: SageException if !e.isInstanceOf[ConnectionLost]                                                                  => e
-      case other                                                                                                                =>
+      case e: SageException if !e.isInstanceOf[ConnectionLost] => e
+      case other                                               =>
         val failed = ConnectionFailed(s"could not connect: $other")
         failed.initCause(other)
         failed

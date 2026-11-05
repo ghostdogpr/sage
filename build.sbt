@@ -190,6 +190,7 @@ lazy val client = (projectMatrix in file("sage-client"))
   .settings(name := "sage-client")
   .settings(commonSettings)
   .settings(mimaSettings)
+  .settings(mimaBinaryIssueFilters ++= sageConfigProtocolFilters)
   .settings(parallelUnitTests)
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
@@ -376,6 +377,12 @@ lazy val mimaSettings = Def.settings(
     else previousStableVersion.value.map(organization.value %% moduleName.value % _).toSet
   }
 )
+
+// Accept the SageConfig.protocol addition; these can be removed once the next release is the MiMa baseline (previousStableVersion).
+lazy val sageConfigProtocolFilters = {
+  import com.typesafe.tools.mima.core._
+  Seq("this", "apply", "copy").map(method => ProblemFilters.exclude[DirectMissingMethodProblem](s"sage.client.SageConfig.$method"))
+}
 
 // Only for container-free cells: integration suites each boot their own container, so running them in
 // parallel would multiply peak load and invite timing races

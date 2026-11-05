@@ -2,7 +2,7 @@
 
 ## How does Sage perform?
 
-Commands from every fiber share one auto-pipelined connection per node. Sage can combine concurrent commands into a single socket write and one round trip instead of sending each one separately. I/O runs on virtual threads with blocking reads and writes. Reading replies does not block new commands from being written, and the RESP3 parser and codecs decode replies directly into your types.
+Commands from every fiber share one auto-pipelined connection per node. Sage can combine concurrent commands into a single socket write and one round trip instead of sending each one separately. I/O runs on virtual threads with blocking reads and writes. Reading replies does not block new commands from being written, and the RESP parser and codecs decode replies directly into your types.
 
 Run [the benchmarks](https://github.com/ghostdogpr/sage/tree/main/benchmarks) against a real server to compare concurrent workloads. Results depend on the client versions and hardware, so the repository does not publish fixed numbers.
 
@@ -25,7 +25,7 @@ No. Ordinary commands are auto-pipelined onto one multiplexed connection per nod
 
 ## Redis or Valkey? Which versions?
 
-Both. Sage targets Redis 8+ and Valkey 8+, where every command it exposes is available. It can connect to any RESP3 server, including Redis 6.0 or later. An older server supports only the commands available in that version. For example, hash-field TTL requires 7.4, while `HGETEX`, `HGETDEL`, and `HSETEX` require 8.0. An older server returns an error for these commands.
+Both. Sage targets Redis 8+ and Valkey 8+, where every command it exposes is available. It connects with RESP3 when the server supports it (Redis 6.0 or later, and every Valkey version) and falls back to RESP2 otherwise. See [Protocol version](/configuration#protocol-version). An older server supports only the commands available in that version. For example, hash-field TTL requires 7.4, while `HGETEX`, `HGETDEL`, and `HSETEX` require 8.0. An older server returns an error for these commands.
 
 ## What Scala and JDK versions are required?
 

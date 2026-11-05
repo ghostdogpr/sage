@@ -11,7 +11,7 @@ class ConnectionSpec extends munit.FunSuite {
     assertEquals(Reply.decode(Connection.ping(Some("hi")), bulk("hi")).toEither, Right("hi"))
   }
 
-  test("HELLO accepts a proto 3 reply and ignores other entries") {
+  test("HELLO decodes the proto of the reply and ignores other entries") {
     val reply = map(
       "server"  -> bulk("redis"),
       "version" -> bulk("7.4.0"),
@@ -21,22 +21,20 @@ class ConnectionSpec extends munit.FunSuite {
       "role"    -> bulk("master"),
       "modules" -> Frame.Array(Vector.empty)
     )
-    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(()))
+    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(false))
   }
 
-  test("HELLO rejects a proto other than 3, including values beyond Int range") {
-    def reply(proto: Long) =
-      map("server" -> bulk("redis"), "version" -> bulk("7.4.0"), "proto" -> Frame.Integer(proto), "role" -> bulk("master"))
-    Reply.decode(Connection.hello(), reply(2)).toEither match {
-      case Left(error: DecodeError) =>
-        assertEquals(error.expected, "proto 3")
-        assertEquals(error.actual, "proto 2")
-      case other                    => fail(s"expected a DecodeError, got $other")
-    }
-    Reply.decode(Connection.hello(), reply(2147483648L)).toEither match {
-      case Left(error: DecodeError) => assertEquals(error.actual, "proto 2147483648")
-      case other                    => fail(s"expected a DecodeError, got $other")
-    }
+  test("HELLO decodes a proto other than 3 from a flat RESP2 reply") {
+    val reply = Frame.Array(Vector(bulk("server"), bulk("redis"), bulk("proto"), Frame.Integer(2)))
+    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(true))
+  }
+
+  test("HELLO rejects a proto other than 2 or 3, including values beyond Int range") {
+    for (proto <- Vector(5L, 2147483648L))
+      Reply.decode(Connection.hello(), map("proto" -> Frame.Integer(proto))).toEither match {
+        case Left(error: DecodeError) => assertEquals((error.expected, error.actual), ("proto 2 or 3", s"integer $proto"))
+        case other                    => fail(s"expected a DecodeError, got $other")
+      }
   }
 
   test("HELLO reports a missing proto field") {

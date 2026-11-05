@@ -1,16 +1,75 @@
 package sage.commands
 
 import sage.protocol.Frame
-import sage.protocol.Frames.bulk
+import sage.protocol.Frames.{bulk, wire}
 
-class SortedSetsSpec extends munit.FunSuite {
+class SortedSetsSpec extends munit.FunSuite with BothProtocols {
 
   private def pair(member: String, score: Double): Frame = Frame.Array(Vector(bulk(member), Frame.Double(score)))
 
-  test("ZSCORE decodes a RESP3 double, null as None, and rejects a bulk string") {
+  test("ZSCORE decodes a RESP3 double, null as None, and rejects a bulk string that is not a number") {
     assertEquals(Reply.decode(SortedSets.zScore[String, String]("z", "a"), Frame.Double(1.5)).toEither, Right(Some(1.5)))
     assertEquals(Reply.decode(SortedSets.zScore[String, String]("z", "a"), Frame.Null).toEither, Right(None))
-    assert(Reply.decode(SortedSets.zScore[String, String]("z", "a"), bulk("1.5")).toEither.isLeft)
+    assert(Reply.decode(SortedSets.zScore[String, String]("z", "a"), bulk("one")).toEither.isLeft)
+    assertEquals(expectedShape(SortedSets.zScore[String, String]("z", "a"), Frame.Integer(1)), Some("double or null"))
+  }
+
+  test("ZSCORE, ZMSCORE, ZINCRBY and ZADD INCR decode the RESP2 bulk-string score like the RESP3 double") {
+    decodesAlike(SortedSets.zScore[String, String]("z", "b"), ",2.5\r\n", Some(2.5))
+    decodesAlike(SortedSets.zScore[String, String]("z", "b"), "_\r\n", None)
+    decodesAlike(SortedSets.zScore[String, String]("z", "b"), ",-inf\r\n", Some(Double.NegativeInfinity))
+    decodesAlike(SortedSets.zMScore[String, String]("z", "a", "x", "b"), "*3\r\n,1\r\n_\r\n,2.5\r\n", Vector(Some(1.0), None, Some(2.5)))
+    decodesAlike(SortedSets.zIncrBy("z", "a", 1.5), ",2.5\r\n", 2.5)
+    decodesAlike(SortedSets.zAddIncr("z")("b", 2.0), ",4.5\r\n", Some(4.5))
+    decodesAlike(SortedSets.zAddIncr("z", ZAddCondition.IfNotExists)("b", 2.0), "_\r\n", None)
+  }
+
+  test("WITHSCORES replies decode the flat RESP2 array like the nested RESP3 pairs") {
+    val resp2    = "*6\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n$3\r\n2.5\r\n$1\r\nc\r\n$1\r\n3\r\n"
+    val resp3    = "*3\r\n*2\r\n$1\r\na\r\n,1\r\n*2\r\n$1\r\nb\r\n,2.5\r\n*2\r\n$1\r\nc\r\n,3\r\n"
+    val expected = Vector("a" -> 1.0, "b" -> 2.5, "c" -> 3.0)
+    val commands = Vector(
+      SortedSets.zRangeWithScores[String, String]("z", ZRange.ByRank(0L, -1L)),
+      SortedSets.zPopMinCount[String, String]("z", 3L),
+      SortedSets.zPopMaxCount[String, String]("z", 3L),
+      SortedSets.zUnionWithScores[String, String]("z", "z2")(),
+      SortedSets.zInterWithScores[String, String]("z", "z2")(),
+      SortedSets.zDiffWithScores[String, String]("z", "z2"),
+      SortedSets.zRandMemberWithScores[String, String]("z", 3L)
+    )
+    commands.foreach { command =>
+      decodesAlike(command, resp2, resp3, expected)
+      decodesAlike(command, "*0\r\n", Vector.empty)
+    }
+  }
+
+  test("a WITHSCORES count of one stays a pair list under RESP2, and an odd flat array is rejected") {
+    decodesAlike(
+      SortedSets.zPopMinCount[String, String]("z", 1L),
+      "*2\r\n$1\r\na\r\n$1\r\n1\r\n",
+      "*1\r\n*2\r\n$1\r\na\r\n,1\r\n",
+      Vector("a" -> 1.0)
+    )
+    assert(Reply.decode(SortedSets.zPopMinCount[String, String]("z", 2L), wire("*3\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nb\r\n")).toEither.isLeft)
+    assertEquals(
+      expectedShape(SortedSets.zPopMinCount[String, String]("z", 1L), wire("*1\r\n*3\r\n$1\r\na\r\n,1\r\n,2\r\n")),
+      Some("member/score pair")
+    )
+  }
+
+  test("ZPOPMIN without a count, ZRANK WITHSCORE, ZMPOP and BZPOPMIN decode their RESP2 replies like RESP3") {
+    decodesAlike(SortedSets.zPopMin[String, String]("z"), "*2\r\n$1\r\na\r\n,1\r\n", Some("a" -> 1.0))
+    decodesAlike(SortedSets.zPopMax[String, String]("z"), "*0\r\n", None)
+    decodesAlike(SortedSets.zRankWithScore[String, String]("z", "b"), "*2\r\n:1\r\n,2.5\r\n", Some((1L, 2.5)))
+    decodesAlike(SortedSets.zRankWithScore[String, String]("z", "x"), "_\r\n", None)
+    decodesAlike(
+      SortedSets.zMpop[String, String]("z")(MinMax.Min, Some(2L)),
+      "*2\r\n$1\r\nz\r\n*2\r\n*2\r\n$1\r\na\r\n,1\r\n*2\r\n$1\r\nb\r\n,2.5\r\n",
+      Some(("z", Vector("a" -> 1.0, "b" -> 2.5)))
+    )
+    decodesAlike(SortedSets.bzMpop[String, String]("z")(MinMax.Max, BlockTimeout.Forever), "_\r\n", None)
+    decodesAlike(SortedSets.bzPopMin[String, String]("z")(BlockTimeout.Forever), "*3\r\n$1\r\nz\r\n$1\r\na\r\n,1\r\n", Some(("z", "a", 1.0)))
+    decodesAlike(SortedSets.bzPopMax[String, String]("z")(BlockTimeout.Forever), "_\r\n", None)
   }
 
   test("ZADD INCR decodes the new score or None when the condition skipped the write") {

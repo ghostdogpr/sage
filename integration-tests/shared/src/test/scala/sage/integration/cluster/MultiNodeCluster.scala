@@ -33,7 +33,7 @@ trait MultiNodeCluster(image: String, serverBinary: String, nodeCount: Int, repl
 
   // short refresh interval so the topology refresh keeps pace with the caller's retries during an election
   protected val clusterConfig: SageConfig =
-    SageConfig(topology = Topology.Cluster(ports.map(p => Endpoint("127.0.0.1", p)).toVector, ClusterConfig(minRefreshInterval = 500.millis)))
+    configFor(Topology.Cluster(ports.map(p => Endpoint("127.0.0.1", p)).toVector, ClusterConfig(minRefreshInterval = 500.millis)))
 
   protected def clusterTest(options: TestOptions)(body: (FixedHostPortGenericContainer, Client[CIO, String]) => CIO[Any])(using Location): Unit =
     containerTest(options)(container => connectAndUse(clusterConfig)(body(container, _)))
@@ -72,7 +72,7 @@ trait MultiNodeCluster(image: String, serverBinary: String, nodeCount: Int, repl
     result.getStdout + result.getStderr
   }
 
-  final protected def node(port: Int): SageConfig = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", port)))
+  final protected def node(port: Int): SageConfig = configFor(Topology.Standalone(Endpoint("127.0.0.1", port)))
 
   final protected def onNode[A](port: Int)(body: Client[CIO, String] => CIO[A]): CIO[A] = connectAndUse(node(port))(body)
 

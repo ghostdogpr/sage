@@ -15,8 +15,8 @@ import sage.protocol.Frame
 
 /**
   * Maintains one auto-pipelined connection for ordinary commands and matches replies in order. It reconnects with jittered backoff, runs
-  * `HELLO` on each new connection, sends idle `PING` checks, and waits for accepted commands while closing. Each reconnect invokes the
-  * [[TransportFactory]] again and resolves the hostname again, allowing DNS changes after failover to select the new master.
+  * the connection setup on each new connection, sends idle `PING` checks, and waits for accepted commands while closing. Each reconnect
+  * invokes the [[TransportFactory]] again and resolves the hostname again, allowing DNS changes after failover to select the new master.
   *
   * A new connection gets a new `pending` queue, which prevents late frames from a closed connection from affecting the current one. The
   * [[Scheduler]] runs reconnect delays outside the reader thread. The connection owns its node's [[DedicatedPool]] and sends blocking
@@ -39,7 +39,7 @@ final private[client] class MultiplexedConnection(
   private var current: Conn          = null
   private var establishing: Conn     = null
   private val reconnects             = new Reconnects(scheduler, config.reconnect, lock)
-  private val bootstrap              = Bootstrap.commands(config) ++ role.setup
+  private val bootstrap              = Bootstrap(config, role.setup)
   private[internal] val pool         =
     new DedicatedPool(factory, bootstrap, scheduler, () => isLive, config.dedicatedPool, config.connectTimeout.toMillis)
 
@@ -157,11 +157,12 @@ final private[client] class MultiplexedConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      // A half-open peer can accept the socket without answering HELLO, so the handshake limits each wait and lets the reconnect loop continue.
+      // A half-open peer can accept the socket without answering the setup, so the handshake limits each wait and lets the reconnect loop continue.
       conn.handshake(bootstrap, config.connectTimeout.toMillis)
-      // a server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached (ADR-0045)
+      // A server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached (ADR-0045). RESP2 cannot
+      // push invalidations on the same connection, so a RESP2 connection never caches.
       conn.cache = Option
-        .when(role.caches && config.clientCache.enabled)(config.clientCache.maxBytes)
+        .when(role.caches && config.clientCache.enabled && !conn.isResp2)(config.clientCache.maxBytes)
         .filter(_ => conn.step(Connection.clientTrackingOnOptin, config.connectTimeout.toMillis).isEmpty)
         .map(new ClientCache(_))
       conn

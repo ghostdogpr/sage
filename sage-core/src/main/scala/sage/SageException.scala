@@ -8,12 +8,12 @@ sealed abstract class SageException(message: String) extends Exception(message)
 object SageException {
 
   /**
-    * Malformed RESP3 on the wire; the connection must be discarded.
+    * Malformed RESP on the wire; the connection must be discarded.
     */
   final case class ProtocolError(message: String) extends SageException(message)
 
   /**
-    * A reply could not be decoded into the expected type: the wire value was well-formed RESP3 but not the shape the command's decoder or a
+    * A reply could not be decoded into the expected type: the wire value was well-formed RESP but not the shape the command's decoder or a
     * codec required (the built-in codecs decode strictly). `expected` names the shape that was wanted, `actual` what arrived.
     */
   final case class DecodeError(expected: String, actual: String) extends SageException(s"expected $expected, got $actual")
@@ -65,8 +65,8 @@ object SageException {
   final case class NotConnected() extends SageException("not connected")
 
   /**
-    * The server cannot serve what this client requires: it rejected `HELLO 3` (predates RESP3, or is a RESP2-only proxy), or a cluster
-    * client was pointed at a server that is not part of a formed cluster.
+    * The server cannot serve what this client requires: it rejected `HELLO 3` (predates RESP3, or is a RESP2-only proxy) while the client
+    * was configured with `RespProtocol.Resp3`, or a cluster client was pointed at a server that is not part of a formed cluster.
     */
   final case class UnsupportedServer(message: String) extends SageException(message)
 

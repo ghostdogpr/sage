@@ -63,7 +63,7 @@ object Coverage {
     "SWAPDB"                           -> "whole-database administration, out of scope",
     "QUIT"                             -> "deprecated: close the client instead of sending QUIT",
     "RESET"                            -> "would reset state on the shared Multiplexed Connection across all fibers; not exposed",
-    "AUTH"                             -> "established at handshake via HELLO AUTH; re-auth on the shared Multiplexed Connection would affect all fibers",
+    "AUTH"                             -> "established at handshake via HELLO AUTH, or AUTH on RESP2; re-auth on the shared Multiplexed Connection would affect all fibers",
     "READONLY"                         -> "issued internally by the cluster read-routing runtime when reading from replicas, never as a user command",
     "READWRITE"                        -> "issued internally by the cluster read-routing runtime, never as a user command",
     "MODULE"                           -> "loadable modules are out of scope",

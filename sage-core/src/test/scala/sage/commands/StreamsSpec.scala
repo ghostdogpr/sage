@@ -7,7 +7,7 @@ import scala.concurrent.duration.FiniteDuration
 import sage.protocol.Frame
 import sage.protocol.Frames.{bulk, map}
 
-class StreamsSpec extends munit.FunSuite {
+class StreamsSpec extends munit.FunSuite with BothProtocols {
 
   private def entry(id: String, fields: String*): Frame = Frame.Array(Vector(bulk(id), Frame.Array(fields.toVector.map(bulk))))
 
@@ -164,6 +164,20 @@ class StreamsSpec extends munit.FunSuite {
     assertEquals(
       Reply.decode(StreamInfo.xInfoGroups("k"), reply).toEither,
       Right(Vector(GroupInfo("g1", 2L, 3L, StreamId(5L, 0L), Some(5L), None)))
+    )
+  }
+
+  test("XINFO GROUPS and XINFO CONSUMERS decode the RESP2 flat arrays like the RESP3 maps") {
+    decodesAlike(
+      StreamInfo.xInfoGroups("st"),
+      "*1\r\n%6\r\n$4\r\nname\r\n$1\r\ng\r\n$9\r\nconsumers\r\n:1\r\n$7\r\npending\r\n:1\r\n$17\r\nlast-delivered-id\r\n$3\r\n1-1\r\n" +
+        "$12\r\nentries-read\r\n:1\r\n$3\r\nlag\r\n:1\r\n",
+      Vector(GroupInfo("g", 1L, 1L, StreamId(1L, 1L), Some(1L), Some(1L)))
+    )
+    decodesAlike(
+      StreamInfo.xInfoConsumers("st", "g"),
+      "*1\r\n%4\r\n$4\r\nname\r\n$5\r\nalice\r\n$7\r\npending\r\n:1\r\n$4\r\nidle\r\n:5\r\n$8\r\ninactive\r\n:7\r\n",
+      Vector(ConsumerInfo("alice", 1L, FiniteDuration(5L, TimeUnit.MILLISECONDS), Some(FiniteDuration(7L, TimeUnit.MILLISECONDS))))
     )
   }
 

@@ -5,7 +5,7 @@ import sage.SageException.DecodeError
 import sage.protocol.Frame
 import sage.protocol.Frames.bulk
 
-class StringsSpec extends munit.FunSuite {
+class StringsSpec extends munit.FunSuite with BothProtocols {
 
   test("GET decodes a present value as Some and a missing key as None") {
     assertEquals(Reply.decode(Strings.get[String, String]("k"), bulk("v")).toEither, Right(Some("v")))
@@ -53,6 +53,15 @@ class StringsSpec extends munit.FunSuite {
       case Left(error: DecodeError) => assertEquals(error.actual, "bulk string 'abc'")
       case other                    => fail(s"expected a DecodeError, got $other")
     }
+  }
+
+  test("LCS IDX and INCREX BYFLOAT decode their RESP2 replies like RESP3") {
+    decodesAlike(
+      Strings.lcsIdx("a", "b", withMatchLen = true),
+      "%2\r\n$7\r\nmatches\r\n*1\r\n*3\r\n*2\r\n:4\r\n:7\r\n*2\r\n:5\r\n:8\r\n:4\r\n$3\r\nlen\r\n:6\r\n",
+      LcsMatches(Vector(LcsMatch(MatchRange(4L, 7L), MatchRange(5L, 8L), Some(4L))), 6L)
+    )
+    decodesAlike(Strings.increxByFloat("k", 1.5), "*2\r\n,3\r\n,1.5\r\n", IncrExResult(3.0, 1.5))
   }
 
   test("GETRANGE decodes an empty bulk string for a missing key") {

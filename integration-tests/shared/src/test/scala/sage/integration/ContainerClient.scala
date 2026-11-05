@@ -40,8 +40,10 @@ trait ContainerClient extends munit.FunSuite with TestContainersSuite {
   protected def containerTest(options: TestOptions)(body: Containers => CIO[Any])(using Location): Unit =
     test(options)(withContainers(body(_).unsafeRun))
 
-  protected def configOf(server: GenericContainer): SageConfig =
-    SageConfig(topology = Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
+  // the suites build every config from this, so SAGE_IT_PROTOCOL applies to all of them
+  protected def configFor(topology: Topology): SageConfig = SageConfig(topology = topology, protocol = TestProtocol.selected)
+
+  protected def configOf(server: GenericContainer): SageConfig = configFor(Topology.Standalone(Endpoint(server.host, server.mappedPort(6379))))
 
   protected def connectAndUse[A](config: SageConfig)(body: Client[CIO, String] => CIO[A]): CIO[A] = opened(Client.connect(config))(_.close)(body)
 
