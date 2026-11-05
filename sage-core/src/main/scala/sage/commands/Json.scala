@@ -106,7 +106,7 @@ private[sage] object Json {
     )
 
   def jsonStrLen[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Long]]] =
-    Command.read("JSON.STRLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), pathMulti(Decode.optionalLong))
+    Command.read("JSON.STRLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), missingKeyEmpty(Decode.optionalLong))
 
   def jsonNumIncrBy[K](key: K, path: JsonPath, increment: Double)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Double]]] =
     Command(
@@ -158,7 +158,7 @@ private[sage] object Json {
     )
 
   def jsonArrLen[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Long]]] =
-    Command.read("JSON.ARRLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), pathMulti(Decode.optionalLong))
+    Command.read("JSON.ARRLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), missingKeyEmpty(Decode.optionalLong))
 
   def jsonArrPop[K, V](key: K, path: JsonPath = JsonPath.root, index: Long = -1)(
     using keyCodec: KeyCodec[K],
@@ -180,17 +180,17 @@ private[sage] object Json {
     )
 
   def jsonObjKeys[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Vector[String]]]] =
-    Command.read("JSON.OBJKEYS", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), pathMulti(optionalKeys))
+    Command.read("JSON.OBJKEYS", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), missingKeyEmpty(optionalKeys))
 
   def jsonObjLen[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Long]]] =
-    Command.read("JSON.OBJLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), pathMulti(Decode.optionalLong))
+    Command.read("JSON.OBJLEN", Command.FirstKey, Vector(keyCodec.encode(key), JsonPath.encode(path)), missingKeyEmpty(Decode.optionalLong))
 
   def jsonDebugMemory[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Vector[Option[Long]]] =
     Command.readUncacheable(
       "JSON.DEBUG MEMORY",
       Command.FirstKey,
       Vector(keyCodec.encode(key), JsonPath.encode(path)),
-      pathMulti(Decode.optionalLong)
+      missingKeyEmpty(Decode.optionalLong)
     )
 
   def jsonResp[K](key: K, path: JsonPath = JsonPath.root)(using keyCodec: KeyCodec[K]): Command[Frame] =
@@ -199,6 +199,10 @@ private[sage] object Json {
   // JSONPath commands return an array with one value for each match. A legacy path without $ returns a single value and is rejected here.
   private def pathMulti[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] =
     Decode.vector(element, "a JSONPath ($) reply array (legacy '.' paths are unsupported)")
+
+  // Valkey replies a bare null for a missing key, decoded here as no matches. Redis replies an error, except JSON.DEBUG MEMORY replies [].
+  private def missingKeyEmpty[A](element: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Vector[A]] =
+    Decode.orEmpty(pathMulti(element))
 
   private def conditionArgs(condition: JsonSetCondition): Vector[Bytes] =
     condition match {

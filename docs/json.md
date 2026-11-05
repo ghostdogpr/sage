@@ -122,3 +122,4 @@ Most commands behave the same on Redis and Valkey. The known differences are:
 
 - `jsonMerge` (RFC 7386 merge) works on Redis only. Valkey does not ship `JSON.MERGE` yet.
 - `jsonSet` into a missing intermediate path that cannot be created returns `false` on Redis but fails with a server error on Valkey.
+- `jsonStrLen`, `jsonArrLen`, `jsonObjLen`, and `jsonObjKeys` on a missing key fail with a server error on Redis but return an empty `Vector` on Valkey. `jsonDebugMemory` returns an empty `Vector` for a missing key on both.
