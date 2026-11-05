@@ -86,8 +86,7 @@ class BootstrapSpec extends munit.FunSuite {
     assert(closed(), "connection must be closed when a load-bearing command fails")
   }
 
-  // A server that answers HELLO with `hello`, AUTH with `auth` and every other command with OK, and records each written command as a line.
-  // Each setup command is its own write.
+  // answers HELLO with `hello`, AUTH with `auth` and anything else with OK, and records each command; the setup writes one command at a time
   private def recording(hello: Frame, auth: Frame = Replies.ok): (DedicatedConnection, mutable.ArrayBuffer[String], () => Boolean) = {
     val written        = mutable.ArrayBuffer.empty[String]
     val (conn, closed) = connection { (payload, _) =>

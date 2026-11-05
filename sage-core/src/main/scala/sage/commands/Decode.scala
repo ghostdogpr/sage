@@ -149,8 +149,8 @@ private[commands] object Decode {
     case other              => Left(DecodeError(label, Frame.describe(other)))
   }
 
-  // RESP3 nests each pair in a two-element array, while RESP2 sends the same pairs as one flat alternating array. The first element tells
-  // the shapes apart because a flat pair list starts with a string, never an array.
+  // RESP3 nests each pair in a two-element array and RESP2 sends one flat alternating array. A flat list starts with a string, never an
+  // array, so the first element tells the shapes apart.
   def pairsOf[B](label: String)(f: (Frame, Frame) => Either[DecodeError, B]): Frame => Either[DecodeError, Vector[B]] = {
     case Frame.Array(elements @ (Frame.Array(_) +: _)) =>
       buildEach(elements, Vector.newBuilder[B]) {
@@ -236,7 +236,7 @@ private[commands] object Decode {
     case other      => decode(other)
   }
 
-  // the entries of a RESP3 map, or of the flat alternating key/value array that RESP2 sends in its place
+  // the entries of a RESP3 map, or of the flat key/value array that RESP2 sends instead
   val entries: Frame => Either[DecodeError, Vector[(Frame, Frame)]] = shape("map") {
     case Frame.Map(entries) => Right(entries)
     case array: Frame.Array => buildPairs(array, "map", Vector.newBuilder[(Frame, Frame)])((k, v) => Right(k -> v))
@@ -291,7 +291,7 @@ private[commands] object Decode {
   def pair[A, B](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B]): (Frame, Frame) => Either[DecodeError, (A, B)] =
     (x, y) => a(x).flatMap(first => b(y).map(first -> _))
 
-  // HGETALL replies a RESP3 map, or a flat field, value, field, value, … array under RESP2
+  // HGETALL replies a map under RESP3 and a flat field/value array under RESP2
   def map[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Map[K, V]] = {
     val entry = pair(key[K], value[V])
     shape("map") {
@@ -300,7 +300,7 @@ private[commands] object Decode {
     }
   }
 
-  // HSCAN's items are a flat field, value, field, value, … array under both protocols
+  // HSCAN's items are a flat field/value array under both protocols
   def flatPairs[K, V](using KeyCodec[K], ValueCodec[V]): Frame => Either[DecodeError, Vector[(K, V)]] =
     flatPairsOf("array of field/value pairs")(pair(key[K], value[V]))
 
@@ -315,7 +315,7 @@ private[commands] object Decode {
   def scanPage[A](items: Frame => Either[DecodeError, Vector[A]]): Frame => Either[DecodeError, ScanPage[A]] =
     array2(scanCursor, items, "array of cursor and items")((next, decoded) => ScanPage(decoded, next))
 
-  // set-typed replies (SMEMBERS, SINTER, …) arrive as a RESP3 Set frame, or as an Array under RESP2
+  // RESP2 sends set-typed replies (SMEMBERS, SINTER, …) as an Array
   def set[V](using ValueCodec[V]): Frame => Either[DecodeError, Set[V]] = {
     case Frame.Set(elements)   => buildEach(elements, Set.newBuilder[V])(value)
     case Frame.Array(elements) => buildEach(elements, Set.newBuilder[V])(value)
@@ -325,8 +325,7 @@ private[commands] object Decode {
   private def memberScore[V](using ValueCodec[V]): Frame => Either[DecodeError, (V, Double)] =
     array2(value[V], double, "member/score pair")(_ -> _)
 
-  // ZRANGE WITHSCORES, ZPOPMIN with a count, and similar replies: RESP3 nests each member with its score and RESP2 sends a flat array.
-  // ZMPOP nests its pairs under both protocols.
+  // ZRANGE WITHSCORES, ZPOPMIN with a count, and similar replies nest each pair under RESP3 and are flat under RESP2. ZMPOP nests under both.
   def scoredMembers[V](using ValueCodec[V]): Frame => Either[DecodeError, Vector[(V, Double)]] =
     pairsOf("array of member/score pairs")(pair(value[V], double))
 

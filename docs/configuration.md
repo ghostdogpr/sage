@@ -154,7 +154,7 @@ val config = SageConfig(
 val config = SageConfig(protocol = RespProtocol.Resp2)
 ```
 
-On a RESP2 connection, Sage authenticates with `AUTH`. For the `"default"` user it sends `AUTH <password>`, which servers older than Redis 6.0 also accept. Commands return the same result types under both versions. Commands that return a raw `Frame`, such as `eval`, `fCall` and `jsonResp`, show the reply as the server sent it: under RESP2, maps arrive as flat arrays of keys and values, doubles as bulk strings, and booleans as integers. [Client-side caching](/client-side-caching) needs RESP3, so on a RESP2 connection a `cached` read runs against the server without caching.
+On a RESP2 connection, Sage authenticates with `AUTH`, and sends `AUTH <password>` for the `"default"` user so that servers older than Redis 6.0 accept it. Commands return the same result types under both versions. Commands that return a raw `Frame`, such as `eval`, `fCall` and `jsonResp`, show the reply as the server sent it: under RESP2, maps arrive as flat arrays of keys and values, doubles as bulk strings, and booleans as integers. [Client-side caching](/client-side-caching) needs RESP3, so `cached` reads on a RESP2 connection go to the server.
 
 ## Connection tuning
 

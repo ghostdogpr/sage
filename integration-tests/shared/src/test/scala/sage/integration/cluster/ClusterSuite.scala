@@ -88,7 +88,7 @@ class ClusterSuite extends BothServersSuite {
       }
     }
   }
-  // the node's shard connection holds only shard channels
+  // unlike the PubsubSuite test, the node's shard connection holds only shard channels
   clusterTest("closing one shard subscription keeps the node's other shard subscriptions, and later ones are confirmed") { client =>
     withSubscription(client.subscribeShardChannels[String]("orders")) { kept =>
       withSubscription(client.subscribeShardChannels[String]("refunds"))(_ => client.pubsubShardChannels().satisfies(_.contains("refunds"))) >>

@@ -16,15 +16,14 @@ import sage.client.internal.Client
 import sage.commands.{BlockTimeout, Commands}
 
 /**
-  * RESP2 connections against Redis 5, which has no `HELLO`, and against the current Redis with RESP2 forced. Redis 5 runs twice, once without
-  * a password and once with `requirepass`. The current Redis has an extra ACL user, `app`. The Redis 5 tests use only commands that Redis 5
-  * supports.
+  * RESP2 connections against Redis 5, which has no `HELLO`, and against the current Redis with RESP2 forced. Tests against Redis 5 must use
+  * only commands that Redis 5 supports.
   */
 class Resp2Suite extends ContainerClient with TestContainersForAll {
 
   override type Containers = GenericContainer and GenericContainer and GenericContainer
 
-  // PING fails before authentication, so the password-protected server is ready once it logs that it accepts connections
+  // the default PING wait fails before authentication, so wait for the ready log line instead
   private val passwordServer: GenericContainer.Def[GenericContainer] =
     GenericContainer.Def(
       Images.preHelloRedis,
@@ -38,7 +37,7 @@ class Resp2Suite extends ContainerClient with TestContainersForAll {
       passwordServer.start() and
       serverDef(Images.redis, command = Seq("--user", "app", "on", ">apppass", "~*", "+@all")).start()
 
-  // A server without HELLO cannot use RESP3, so when SAGE_IT_PROTOCOL selects RESP3 the Redis 5 tests use Auto instead.
+  // Redis 5 cannot use RESP3, so a RESP3 run connects to it with Auto
   private def legacy(server: GenericContainer): SageConfig =
     configOf(server).copy(protocol = if (TestProtocol.selected == RespProtocol.Resp3) RespProtocol.Auto else TestProtocol.selected)
 
@@ -50,7 +49,7 @@ class Resp2Suite extends ContainerClient with TestContainersForAll {
   private def currentTest(options: TestOptions)(body: GenericContainer => CIO[Any])(using Location): Unit =
     containerTest(options) { case _ and _ and current => body(current) }
 
-  // Hashes and sorted sets have different reply types under RESP2 and RESP3, so they check that both decode to the same results.
+  // includes hashes and sorted sets because their replies differ between RESP2 and RESP3
   private def basicCommands(client: Client[CIO, String], prefix: String): CIO[Unit] =
     client.ping().is("PONG") >>
       client.set(s"$prefix:greeting", "hello") >>

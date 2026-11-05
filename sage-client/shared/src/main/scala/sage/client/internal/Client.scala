@@ -2373,8 +2373,8 @@ object Client {
 
   /**
     * The construction entry point each backend's `connect`/`scoped` builds on: validates `config`, then connects per its [[Topology]]. It
-    * fails with [[sage.SageException.ConnectionFailed]] when the server does not answer `HELLO` within `connectTimeout` or closes the
-    * socket during setup, and a master-replica connect fails with [[sage.SageException.TimedOut]] when its `ROLE` probes time out.
+    * fails with [[sage.SageException.ConnectionFailed]] when the server does not answer a setup command within `connectTimeout` or closes
+    * the socket during setup, and a master-replica connect fails with [[sage.SageException.TimedOut]] when its `ROLE` probes time out.
     */
   def connect(config: SageConfig): CIO[Client[CIO, String]] =
     validate(config) match {
@@ -2474,8 +2474,7 @@ object Client {
   ): CIO[Client[CIO, String]] =
     start(new Live(factory, scheduler, config, events))
 
-  // The handshake reports a rejected HELLO 3 itself. A setup reply that times out or loses its socket is a failed connect, and a raw network
-  // error would otherwise escape the sealed hierarchy.
+  // A setup reply that times out or loses its socket is a failed connect, and a raw network error would otherwise escape the sealed hierarchy.
   private[internal] def translateHandshake(error: Throwable): Throwable =
     error match {
       case e: SageException if !e.isInstanceOf[ConnectionLost] => e

@@ -18,6 +18,6 @@ object TestProtocol {
       case Some(other)         => throw new IllegalArgumentException(s"SAGE_IT_PROTOCOL must be auto, resp3, or resp2, but it is '$other'")
     }
 
-  // Only a forced RESP2 run turns client-side caching off, because Auto negotiates RESP3 with every server that the shared suites start.
+  // Auto negotiates RESP3 with every server the shared suites start, so only a forced RESP2 run turns caching off
   val isResp2: Boolean = selected == RespProtocol.Resp2
 }

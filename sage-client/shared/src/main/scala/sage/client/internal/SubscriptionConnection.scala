@@ -385,8 +385,8 @@ final private[client] class SubscriptionConnection(
         sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilMarker)) :+ new Entry(marker, afterMarker))
       }
 
-    // A RESP2 connection in subscribed mode refuses HELLO, so its marker unsubscribes this channel, which it never subscribes to. The
-    // confirmation answers the oldest pending entry like any other, and its subscription count is not used.
+    // RESP2 refuses HELLO in subscribed mode, so the marker unsubscribes this never-subscribed channel instead. Its confirmation answers the
+    // oldest pending entry like any other, and its subscription count is ignored.
     private val markerChannel = s"__sage:batch-end:${UUID.randomUUID()}"
 
     // used on the reader thread only, while the marker's reply is passed on to its own entry
@@ -404,8 +404,7 @@ final private[client] class SubscriptionConnection(
       case _                          => ()
     }
 
-    // ACL does not refuse an argument-less HELLO, and its channel rules do not apply to UNSUBSCRIBE, so an error here means that replies
-    // no longer match their entries.
+    // ACL refuses neither an argument-less HELLO nor UNSUBSCRIBE, so an error here means that replies no longer match their entries
     private val afterMarker: Try[Frame] => Unit = { result =>
       reached = true
       result match {
@@ -431,8 +430,7 @@ final private[client] class SubscriptionConnection(
 
     protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, Frame.Push(elements)))
 
-    // A RESP2 connection receives its pub/sub pushes as arrays. Its other replies never match Pubsub.decode: in subscribed mode, it answers
-    // PING with the array ["pong", ""].
+    // RESP2 sends pub/sub pushes as arrays. No other reply matches Pubsub.decode, including the subscribed-mode PING reply ["pong", ""].
     override protected def arrayPush(elements: Vector[Frame]): Boolean =
       isResp2 && Pubsub.decode(elements).exists { event =>
         handle(event, Frame.Array(elements))

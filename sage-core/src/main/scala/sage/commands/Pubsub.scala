@@ -61,7 +61,7 @@ private[sage] object Pubsub {
   }
 
   // HELLO without arguments returns the connection's server information. It runs while the server is loading, stale or busy, and every
-  // connection may run it, since its setup did.
+  // RESP3 connection may run it, since its setup did.
   val helloInfo: Command[Frame] = Command("HELLO", Command.NoKeys, Vector.empty, Decode.frame)
 
   type Delivery = Message[Bytes] | PatternMessage[Bytes]
