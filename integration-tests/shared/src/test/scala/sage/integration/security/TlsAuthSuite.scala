@@ -74,7 +74,7 @@ class TlsAuthSuite extends BothServersSuite {
     connectAndUse(configWith(server, TrustSource.Insecure))(_.ping().is("PONG"))
   }
 
-  serverTest("ACL auth over TLS succeeds for a named user via HELLO, and round-trips a command") { server =>
+  serverTest("ACL auth over TLS succeeds for a named user and round-trips a command") { server =>
     connectAndUse(configWith(server, TrustSource.Pem(caPath))) { client =>
       client.set("tls:key", "value").flatMap(_ => client.get[String]("tls:key").is(Some("value")))
     }

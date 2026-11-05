@@ -15,4 +15,7 @@ object Images {
 
   // a pre-7.2 server (lacks `CLIENT SETINFO`), used only by the bootstrap version-floor test, not by command coverage
   val legacyRedis: String = "redis:6.2"
+
+  // a pre-6.0 server that has no `HELLO` and speaks only RESP2, used only by the RESP2 fallback tests
+  val preHelloRedis: String = "redis:5.0.14"
 }

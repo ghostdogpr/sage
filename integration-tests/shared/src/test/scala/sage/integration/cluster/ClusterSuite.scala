@@ -37,7 +37,7 @@ class ClusterSuite extends BothServersSuite {
     }
 
   private def clusterConfig(server: GenericContainer, database: Int = 0): SageConfig =
-    SageConfig(topology = Topology.Cluster(Vector(Endpoint(server.host, server.mappedPort(6379)))), database = database)
+    configFor(Topology.Cluster(Vector(Endpoint(server.host, server.mappedPort(6379))))).copy(database = database)
 
   private def clusterTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
     serverTest(options)(server => connectAndUse(clusterConfig(server))(body))

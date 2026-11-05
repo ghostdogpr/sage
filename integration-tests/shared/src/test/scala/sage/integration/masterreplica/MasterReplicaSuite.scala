@@ -38,14 +38,11 @@ abstract class MasterReplicaSuiteBase(image: String, serverBinary: String) exten
 
   final protected class Deployment(server: GenericContainer) {
     private def at(port: Int) = Endpoint(server.host, server.mappedPort(port))
-    val master: SageConfig    = SageConfig(topology = Topology.Standalone(at(masterPort)))
-    val replica: SageConfig   = SageConfig(topology = Topology.Standalone(at(replicaPort)))
+    val master: SageConfig    = configFor(Topology.Standalone(at(masterPort)))
+    val replica: SageConfig   = configFor(Topology.Standalone(at(replicaPort)))
 
     def reading(policy: ReadFrom, minRefreshInterval: FiniteDuration = 5.seconds): SageConfig =
-      SageConfig(
-        topology = Topology.MasterReplica(Vector(at(masterPort)), MasterReplicaConfig(minRefreshInterval = minRefreshInterval)),
-        readFrom = policy
-      )
+      configFor(Topology.MasterReplica(Vector(at(masterPort)), MasterReplicaConfig(minRefreshInterval = minRefreshInterval))).copy(readFrom = policy)
   }
 
   protected def replicationTest(options: TestOptions)(body: Deployment => CIO[Any])(using Location): Unit =

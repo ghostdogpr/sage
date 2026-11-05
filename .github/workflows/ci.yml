@@ -85,11 +85,21 @@ jobs:
           fi
 
   integration:
+    # the default runs keep their existing check names
+    name: integration (${{ matrix.backend }}${{ matrix.protocol == 'resp2' && ', RESP2' || '' }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         backend: [Zio, Ce, Ox, Pekko, Kyo, Direct]
+        protocol: [auto]
+        # RESP2 runs only on two backends to limit CI time. Zio is the only cell that runs the shared command, cluster, and security suites,
+        # and Direct covers the blocking backend.
+        include:
+          - backend: Zio
+            protocol: resp2
+          - backend: Direct
+            protocol: resp2
     steps:
       - name: Checkout current branch
         uses: actions/checkout@v6
@@ -108,12 +118,12 @@ jobs:
         with:
           path: ~/.docker-images
           # keep the tags here in sync with integration-tests Images.scala; bump the key when they change
-          key: docker-images-v2-redis8.8.0-valkey9.1.0-redis6.2
+          key: docker-images-v3-redis8.8.0-valkey9.1.0-redis6.2-redis5.0.14
       - name: Pull and save server images
         if: steps.images.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.docker-images
-          for img in redis:8.8.0 valkey/valkey:9.1.0 redis:6.2; do
+          for img in redis:8.8.0 valkey/valkey:9.1.0 redis:6.2 redis:5.0.14; do
             docker pull "$img"
             docker save "$img" -o ~/.docker-images/"${img//[\/:]/_}".tar
           done
@@ -125,6 +135,7 @@ jobs:
         env:
           # ryuk adds a mandatory Docker Hub pull per run (rate-limit exposure) and ephemeral runners need no reaper
           TESTCONTAINERS_RYUK_DISABLED: "true"
+          SAGE_IT_PROTOCOL: ${{ matrix.protocol }}
 
   publish:
     runs-on: ubuntu-24.04

@@ -81,14 +81,18 @@ class CoverageSpec extends ContainerClient with TestContainersForAll {
       args = Vector(Bytes.utf8("LIST")),
       decode = {
         case Frame.Array(modules) =>
-          Right(modules.collect { case Frame.Map(entries) =>
-            entries.collectFirst {
-              case (Frame.BulkString(key), Frame.BulkString(value)) if key.asUtf8String == "name" => value.asUtf8String
-            }
-          }.flatten)
+          Right(modules.flatMap {
+            case Frame.Map(entries)  => moduleName(entries)
+            // RESP2 replies with a flat array of alternating field names and values instead of a map
+            case Frame.Array(fields) => moduleName(fields.grouped(2).collect { case Vector(key, value) => (key, value) }.toVector)
+            case _                   => None
+          })
         case other                => Left(DecodeError("array of module maps", Frame.describe(other)))
       }
     )
+
+  private def moduleName(fields: Vector[(Frame, Frame)]): Option[String] =
+    fields.collectFirst { case (Frame.BulkString(key), Frame.BulkString(value)) if key.asUtf8String == "name" => value.asUtf8String }
 
   // the server reports lowercase names with pipe-separated subcommands; Command names are uppercase words
   private def normalize(name: String): String = name.toUpperCase.replace('|', ' ')
