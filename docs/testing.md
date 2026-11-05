@@ -123,11 +123,11 @@ The timeout of a blocking command such as `BLPOP` is measured by the backend's o
 
 ## What is supported
 
-The in-memory client supports Sage's own features: `cached` reads, subscriptions to channels and patterns, transactions with `WATCH`, locks, rate limiters created with `client.rateLimiter`, and the paging helpers `scanAll`, `hScanAll`, `sScanAll` and `zScanAll`.
+The in-memory client supports the common commands of strings, keys with expiry, hashes, lists, sets and sorted sets, including blocking pops such as `BLPOP`. It also supports pipelines, transactions with `WATCH`, and pub/sub with `PUBLISH` and subscriptions to channels and patterns.
 
-It also supports the common commands of strings, keys with expiry, hashes, lists, sets and sorted sets, including blocking pops such as `BLPOP`, and `PUBLISH`. Streams are not supported. Code that uses them, including Sage's stream helpers such as `xTail` and `xConsume`, needs a real server.
+On top of these commands, it supports Sage's own features: `cached` reads, locks, rate limiters created with `client.rateLimiter`, and the paging helpers `scanAll`, `hScanAll`, `sScanAll` and `zScanAll`.
 
-Any other command or option fails with an `ERR` error that names what is not supported.
+Streams, bitmaps, HyperLogLog, geo, JSON, Lua scripts and shard channels are not supported, so code that uses them needs a real server. Any other command or option that the client does not support fails with an `ERR` error that names it.
 
 ## Differences from a server
 
