@@ -394,17 +394,18 @@ final private[client] class SubscriptionConnection(
     // The first SUNSUBSCRIBE still pending receives the marker's reply and passes it on in a loop, not recursively, so a long batch cannot
     // overflow the stack.
     private val untilMarker: Try[Frame] => Unit = {
-      case Success(reply) if !passing =>
+      case Success(reply) if !passing                                  =>
         passing = true
         reached = false
         try while (!reached && !isDead) answer(reply)
         finally passing = false
-      case _                          => ()
+      case Failure(error: ServerError) if isResp2 && !misrouted(error) => this.close()
+      case _                                                           => ()
     }
 
-    // HELLO never fails, but a RESP2 UNSUBSCRIBE fails when ACL denies the command or a script is busy. That error closes the connection here
-    // only if every SUNSUBSCRIBE also failed; otherwise it answers a SUNSUBSCRIBE, and the watchdog closes the connection once the entries
-    // left unanswered time out. The remaining subscriptions are then restored on a new connection.
+    // HELLO never fails, but a RESP2 UNSUBSCRIBE fails when ACL denies the command or a script is busy. Its error answers the marker if
+    // every SUNSUBSCRIBE also failed, and a SUNSUBSCRIBE otherwise. Only a cluster routing error such as MOVED is known to come from a
+    // SUNSUBSCRIBE, so on RESP2 any other error closes the connection, and its subscriptions are restored on a new one.
     private val afterMarker: Try[Frame] => Unit = { result =>
       reached = true
       result match {
@@ -476,6 +477,10 @@ private[client] object SubscriptionConnection {
 
   // The errors a subscribe gets every time it is sent: an ACL denial, or a command or argument the server does not support.
   private def refuses(error: ServerError): Boolean = error.code == "NOPERM" || error.code == "ERR"
+
+  // The errors a cluster node returns for a command whose keys or shard channels it does not serve. Commands without them never get one.
+  private val misroutedCodes                         = Set("MOVED", "ASK", "TRYAGAIN", "CLUSTERDOWN", "CROSSSLOT")
+  private def misrouted(error: ServerError): Boolean = misroutedCodes(error.code)
 
   // Connects each attempt to the node `pick` names at that time. `retain` closes that connection once its node leaves the deployment, and
   // the connection then reconnects to a current node.

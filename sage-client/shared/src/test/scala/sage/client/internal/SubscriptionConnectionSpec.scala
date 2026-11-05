@@ -1196,6 +1196,37 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assertChannel(nextBlocking(news), "news", "hello")
   }
 
+  // The SUNSUBSCRIBE succeeds and the server refuses the marker with `error`. Without the watchdog, the connection must close at once and
+  // restore the remaining subscriptions on a new one.
+  private def assertRefusedMarkerReconnects(error: String)(using munit.Location): Unit = {
+    val respond: Bytes => Seq[Frame]        = commands(_).flatMap {
+      case List("UNSUBSCRIBE", channel) if channel.startsWith("__sage:") => Seq(Frame.SimpleError(error))
+      case command                                                       => resp2Reply(command)
+    }
+    val (connection, scheduler, transports) = make(respond = respond, protocol = RespProtocol.Resp2)
+    val news                                = connection.subscribeChannels(Vector("news"))
+    val kept                                = connection.subscribeShard(Vector("kept"))
+    connection.subscribeShard(Vector("gone")).close()
+    assertEquals(transports.head.closeCount, 1, "replies after a refused marker no longer match their commands")
+
+    scheduler.advance(1.milli)
+    assertEquals(transports.size, 2)
+    val restored = transports(1).written.flatMap(commands)
+    assert(restored.contains(List("SSUBSCRIBE", "kept")) && !restored.contains(List("SSUBSCRIBE", "gone")), restored.toString)
+    transports(1).emit(Frame.Array(Vector(bulk("smessage"), bulk("kept"), bulk("still here"))))
+    assertChannel(nextBlocking(kept), "kept", "still here")
+    transports(1).emit(Frame.Array(Vector(bulk("message"), bulk("news"), bulk("hello"))))
+    assertChannel(nextBlocking(news), "news", "hello")
+  }
+
+  test("on RESP2, a marker that ACL denies closes the connection at once, and the reconnect restores the remaining subscriptions") {
+    assertRefusedMarkerReconnects("NOPERM User u has no permissions to run the 'unsubscribe' command")
+  }
+
+  test("on RESP2, a marker refused during a busy script closes the connection at once, and the reconnect restores the subscriptions") {
+    assertRefusedMarkerReconnects("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSCRIPT.")
+  }
+
   test("on RESP2, the watchdog counts the subscribed-mode PING reply [\"pong\", \"\"] as a reply and keeps the connection") {
     val watchdog                            = WatchdogConfig(pingInterval = 100.millis, pingTimeout = 50.millis, enabled = true)
     val (connection, scheduler, transports) = make(watchdog = watchdog, respond = commands(_).flatMap(resp2Reply), protocol = RespProtocol.Resp2)
