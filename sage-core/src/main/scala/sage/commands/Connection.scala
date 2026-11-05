@@ -1,6 +1,7 @@
 package sage.commands
 
 import sage.Bytes
+import sage.SageException.DecodeError
 import sage.codec.KeyCodec
 import sage.protocol.Frame
 
@@ -45,16 +46,21 @@ private[sage] object Connection {
   private val pingReply = Decode.shape("simple or bulk string") { case Decode.Text(value) => Right(value) }
 
   /**
-    * The RESP3 handshake. Returns the protocol version the server selected, which is 3 unless the server accepted `HELLO` but kept an older
-    * protocol. Other reply entries are ignored.
+    * The RESP3 handshake. Returns true when the server accepted `HELLO` but kept protocol 2, and fails on a protocol other than 2 or 3.
+    * Other reply entries are ignored.
     */
-  def hello(auth: Option[(String, String)] = None): Command[Long] =
+  def hello(auth: Option[(String, String)] = None): Command[Boolean] =
     Command(
       "HELLO",
       keyIndices = Command.NoKeys,
       args = Bytes.utf8("3") +: auth.toVector.flatMap { case (username, password) => Vector("AUTH", username, password).map(Bytes.utf8) },
-      decode = Decode.fields(_.required("proto", Decode.long))
+      decode = Decode.fields(_.required("proto", keptResp2))
     )
+
+  private val keptResp2: Frame => Either[DecodeError, Boolean] = Decode.shape("proto 2 or 3") {
+    case Frame.Integer(3) => Right(false)
+    case Frame.Integer(2) => Right(true)
+  }
 
   // authenticates a RESP2 connection; without a username, the server authenticates the default user
   def auth(username: Option[String], password: String): Command[Unit] =

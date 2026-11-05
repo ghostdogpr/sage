@@ -36,12 +36,6 @@ class BootstrapSpec extends munit.FunSuite {
     assertEquals(line(Bootstrap(SageConfig(auth = Some(AuthConfig("pw", "alice")))).hello), "HELLO 3 AUTH alice pw")
   }
 
-  test("RESP2 authenticates the default user with AUTH <password> and a named user with AUTH <username> <password>") {
-    assertEquals(Bootstrap(SageConfig(auth = Some(AuthConfig("pw")))).resp2Auth.map(line), Some("AUTH pw"))
-    assertEquals(Bootstrap(SageConfig(auth = Some(AuthConfig("pw", "alice")))).resp2Auth.map(line), Some("AUTH alice pw"))
-    assertEquals(Bootstrap(SageConfig()).resp2Auth, None)
-  }
-
   // a dedicated connection whose transport answers each written command through `reply`; the second value reports whether it was closed
   private def connection(reply: (String, FakeTransport) => Seq[Frame]): (DedicatedConnection, () => Boolean) = {
     var transport: FakeTransport                        = null
@@ -57,7 +51,7 @@ class BootstrapSpec extends munit.FunSuite {
 
   test("a CLIENT SETINFO error does not abort setup, so a pre-7.2 server still connects") {
     val (conn, closed) = connection(setupReply(_ => Seq(Frame.SimpleError("ERR Unknown subcommand or wrong number of arguments for 'SETINFO'."))))
-    conn.handshake(Bootstrap(SageConfig()), 1000): Unit
+    conn.handshake(Bootstrap(SageConfig()), 1000)
     assert(!closed(), "connection must stay open when only library identification fails")
   }
 
@@ -86,6 +80,12 @@ class BootstrapSpec extends munit.FunSuite {
     assert(closed(), "connection must be closed when a load-bearing command fails")
   }
 
+  test("on RESP2 without credentials, a NOAUTH reply to CLIENT SETINFO aborts setup, as HELLO 3's does on RESP3") {
+    val (conn, closed) = connection((_, _) => Seq(Frame.SimpleError("NOAUTH Authentication required.")))
+    intercept[ServerError](conn.handshake(Bootstrap(SageConfig(protocol = RespProtocol.Resp2)), 1000))
+    assert(closed(), "connection must be closed when the server requires authentication")
+  }
+
   // answers HELLO with `hello`, AUTH with `auth` and anything else with OK, and records each command; the setup writes one command at a time
   private def recording(hello: Frame, auth: Frame = Replies.ok): (DedicatedConnection, mutable.ArrayBuffer[String], () => Boolean) = {
     val written        = mutable.ArrayBuffer.empty[String]
@@ -103,74 +103,36 @@ class BootstrapSpec extends munit.FunSuite {
   }
 
   private val noProto        = Frame.SimpleError("NOPROTO unsupported protocol version")
-  private val unknownCommand = Frame.SimpleError("ERR unknown command 'HELLO'")
+  // Redis 5 echoes the first arguments, which include the credentials
+  private val unknownCommand = Frame.SimpleError("ERR unknown command `HELLO`, with args beginning with: `3`, `AUTH`, `alice`, `pw`, ")
+  private val proto2Hello    = Frame.Array(Vector(Replies.bulk("server"), Replies.bulk("proxy"), Replies.bulk("proto"), Frame.Integer(2)))
   private val credentials    = Some(AuthConfig("pw", "alice"))
 
-  test("under Auto, a server that answers HELLO 3 with NOPROTO is used with RESP2 and authenticated with AUTH") {
-    val (conn, written, closed) = recording(noProto)
-    val protocol                = conn.handshake(Bootstrap(SageConfig(auth = credentials)), 1000)
-    assertEquals((protocol, conn.isResp2, closed()), (RespProtocol.Resp2, true, false))
-    assertEquals(written.take(3).toVector, Vector("HELLO 3 AUTH alice pw", "AUTH alice pw", "CLIENT SETINFO LIB-NAME sage"))
-  }
-
-  test("under Auto, a server that does not know HELLO is used with RESP2, and the default user authenticates with AUTH <password>") {
-    val (conn, written, closed) = recording(unknownCommand)
-    val protocol                = conn.handshake(Bootstrap(SageConfig(auth = Some(AuthConfig("pw")))), 1000)
-    assertEquals((protocol, closed()), (RespProtocol.Resp2, false))
-    assertEquals(written.take(2).toVector, Vector("HELLO 3 AUTH default pw", "AUTH pw"))
-  }
-
-  test("under Auto, a RESP2 fallback without credentials sends no AUTH") {
-    val (conn, written, _) = recording(unknownCommand)
-    assertEquals(conn.handshake(Bootstrap(SageConfig()), 1000), RespProtocol.Resp2)
-    assert(!written.exists(_.startsWith("AUTH")), written.toString)
-  }
-
-  test("a server that accepts HELLO 3 is used with RESP3 under Auto") {
-    val (conn, written, _) = recording(Replies.hello)
-    assertEquals((conn.handshake(Bootstrap(SageConfig(auth = credentials)), 1000), conn.isResp2), (RespProtocol.Resp3, false))
-    assert(!written.exists(_.startsWith("AUTH")), written.toString)
-  }
-
-  test("under Resp3, a server that rejects HELLO 3 fails with UnsupportedServer and the connection closes") {
-    Seq(noProto, unknownCommand).foreach { rejection =>
-      val (conn, written, closed) = recording(rejection)
-      val thrown                  = intercept[UnsupportedServer](conn.handshake(Bootstrap(SageConfig(protocol = RespProtocol.Resp3)), 1000))
-      assert(thrown.getMessage.contains("RespProtocol.Auto"), thrown.getMessage)
-      assert(closed(), "connection must be closed when the server rejects HELLO 3")
-      assertEquals(written.toVector, Vector("HELLO 3"))
+  test("the setup negotiates the protocol, and authenticates with AUTH only when HELLO 3 was skipped or rejected") {
+    Seq(
+      (RespProtocol.Auto, noProto, credentials, true, Vector("HELLO 3 AUTH alice pw", "AUTH alice pw", "CLIENT SETINFO LIB-NAME sage")),
+      (RespProtocol.Auto, unknownCommand, Some(AuthConfig("pw")), true, Vector("HELLO 3 AUTH default pw", "AUTH pw", "CLIENT SETINFO LIB-NAME sage")),
+      (RespProtocol.Auto, unknownCommand, None, true, Vector("HELLO 3", "CLIENT SETINFO LIB-NAME sage")),
+      (RespProtocol.Auto, Replies.hello, credentials, false, Vector("HELLO 3 AUTH alice pw", "CLIENT SETINFO LIB-NAME sage")),
+      (RespProtocol.Auto, proto2Hello, credentials, true, Vector("HELLO 3 AUTH alice pw", "CLIENT SETINFO LIB-NAME sage")),
+      (RespProtocol.Resp2, Replies.hello, credentials, true, Vector("AUTH alice pw", "CLIENT SETINFO LIB-NAME sage"))
+    ).foreach { case (protocol, hello, auth, resp2, expected) =>
+      val (conn, written, closed) = recording(hello)
+      conn.handshake(Bootstrap(SageConfig(auth = auth, protocol = protocol)), 1000)
+      assertEquals((conn.isResp2, closed(), written.take(expected.size).toVector), (resp2, false, expected))
     }
   }
 
-  private val proto2Hello = Frame.Array(Vector(Replies.bulk("server"), Replies.bulk("proxy"), Replies.bulk("proto"), Frame.Integer(2)))
-
-  test("under Auto, a server that accepts HELLO 3 but keeps protocol 2 is used with RESP2, already authenticated by HELLO") {
-    val (conn, written, _) = recording(proto2Hello)
-    assertEquals(conn.handshake(Bootstrap(SageConfig(auth = credentials)), 1000), RespProtocol.Resp2)
-    assert(!written.exists(_.startsWith("AUTH")), written.toString)
-  }
-
-  test("under Resp3, a server that accepts HELLO 3 but keeps protocol 2 fails with UnsupportedServer") {
-    val (conn, _, closed) = recording(proto2Hello)
-    val thrown            = intercept[UnsupportedServer](conn.handshake(Bootstrap(SageConfig(protocol = RespProtocol.Resp3)), 1000))
-    assert(thrown.getMessage.contains("protocol 2"), thrown.getMessage)
-    assert(closed())
-  }
-
-  test("under Resp2, the setup skips HELLO and authenticates with AUTH") {
-    val (conn, written, _) = recording(Replies.hello)
-    assertEquals(conn.handshake(Bootstrap(SageConfig(auth = credentials, protocol = RespProtocol.Resp2)), 1000), RespProtocol.Resp2)
-    assertEquals(written.head, "AUTH alice pw")
-    assert(!written.exists(_.startsWith("HELLO")), written.toString)
-  }
-
-  test("a wrong password in HELLO 3 fails the setup without falling back to RESP2") {
-    val wrongPass               = Frame.SimpleError("WRONGPASS invalid username-password pair or user is disabled.")
-    val (conn, written, closed) = recording(wrongPass)
-    val thrown                  = intercept[ServerError](conn.handshake(Bootstrap(SageConfig(auth = credentials)), 1000))
-    assertEquals(thrown.code, "WRONGPASS")
-    assert(closed(), "connection must be closed when authentication fails")
-    assertEquals(written.toVector, Vector("HELLO 3 AUTH alice pw"))
+  test("under Resp3, a server that rejects HELLO 3 or keeps protocol 2 fails with UnsupportedServer and the connection closes") {
+    Seq(noProto -> "(NOPROTO)", unknownCommand -> "(ERR)", proto2Hello -> "protocol 2").foreach { case (hello, reason) =>
+      val (conn, written, closed) = recording(hello)
+      val thrown                  =
+        intercept[UnsupportedServer](conn.handshake(Bootstrap(SageConfig(auth = credentials, protocol = RespProtocol.Resp3)), 1000))
+      val message                 = thrown.getMessage
+      assert(message.contains(reason) && message.contains("RespProtocol.Auto") && !message.contains("pw"), message)
+      assert(closed(), "connection must be closed when the server rejects HELLO 3")
+      assertEquals(written.toVector, Vector("HELLO 3 AUTH alice pw"))
+    }
   }
 
   test("a wrong password in the RESP2 AUTH fails the setup") {

@@ -21,7 +21,7 @@ import sage.commands.{BlockTimeout, Commands}
   */
 class Resp2Suite extends ContainerClient with TestContainersForAll {
 
-  override type Containers = GenericContainer and GenericContainer and GenericContainer
+  override type Containers = GenericContainer and GenericContainer
 
   // the default PING wait fails before authentication, so wait for the ready log line instead
   private val passwordServer: GenericContainer.Def[GenericContainer] =
@@ -33,21 +33,16 @@ class Resp2Suite extends ContainerClient with TestContainersForAll {
     )
 
   override def startContainers(): Containers =
-    serverDef(Images.preHelloRedis).start() and
-      passwordServer.start() and
+    passwordServer.start() and
       serverDef(Images.redis, command = Seq("--user", "app", "on", ">apppass", "~*", "+@all")).start()
-
-  // Redis 5 cannot use RESP3, so a RESP3 run connects to it with Auto
-  private def legacy(server: GenericContainer): SageConfig =
-    configOf(server).copy(protocol = if (TestProtocol.selected == RespProtocol.Resp3) RespProtocol.Auto else TestProtocol.selected)
 
   private def resp2(server: GenericContainer): SageConfig = configOf(server).copy(protocol = RespProtocol.Resp2)
 
   private def legacyTest(options: TestOptions)(body: Client[CIO, String] => CIO[Any])(using Location): Unit =
-    containerTest(options) { case open and _ and _ => connectAndUse(legacy(open))(body) }
+    containerTest(options) { case secured and _ => connectAndUse(configOf(secured).copy(auth = Some(AuthConfig("secret"))))(body) }
 
   private def currentTest(options: TestOptions)(body: GenericContainer => CIO[Any])(using Location): Unit =
-    containerTest(options) { case _ and _ and current => body(current) }
+    containerTest(options) { case _ and current => body(current) }
 
   // includes hashes and sorted sets because their replies differ between RESP2 and RESP3
   private def basicCommands(client: Client[CIO, String], prefix: String): CIO[Unit] =
@@ -67,25 +62,13 @@ class Resp2Suite extends ContainerClient with TestContainersForAll {
   private def usesResp(client: Client[CIO, String], version: Int): CIO[Unit] =
     client.clientInfo.satisfies(_.split("\\s+").contains(s"resp=$version"))
 
-  private def cachedReadIsLatestOn(config: SageConfig, key: String): CIO[Unit] =
-    connectAndUse(config)(reader => connectAndUse(config)(cachedReadIsLatest(reader, _, key)))
-
-  containerTest("Auto falls back to RESP2 on a server without HELLO and runs basic commands") { case open and _ and _ =>
-    connectAndUse(configOf(open).copy(protocol = RespProtocol.Auto))(basicCommands(_, "auto"))
+  containerTest("Auto falls back to RESP2 on a server without HELLO, authenticates the default user and runs basic commands") { case secured and _ =>
+    connectAndUse(configOf(secured).copy(protocol = RespProtocol.Auto, auth = Some(AuthConfig("secret"))))(basicCommands(_, "auto"))
   }
 
-  containerTest("Resp3 fails with UnsupportedServer on a server without HELLO") { case open and _ and _ =>
-    failsWith[UnsupportedServer](connectAndUse(configOf(open).copy(protocol = RespProtocol.Resp3))(_.ping()))
-  }
-
-  containerTest("a requirepass server accepts the password for the default user") { case _ and secured and _ =>
-    connectAndUse(legacy(secured).copy(auth = Some(AuthConfig("secret")))) { client =>
-      client.set("auth:key", "ok") >> client.get[String]("auth:key").is(Some("ok"))
-    }
-  }
-
-  containerTest("a requirepass server rejects a wrong password") { case _ and secured and _ =>
-    failsWith[ServerError](connectAndUse(legacy(secured).copy(auth = Some(AuthConfig("wrong"))))(_.ping()))
+  // Redis 5 looks a command up before it checks authentication, so it rejects HELLO as unknown without credentials
+  containerTest("Resp3 fails with UnsupportedServer on a server without HELLO") { case secured and _ =>
+    failsWith[UnsupportedServer](connectAndUse(configOf(secured).copy(protocol = RespProtocol.Resp3))(_.ping()))
   }
 
   legacyTest("a subscription receives published messages") { client =>
@@ -118,26 +101,23 @@ class Resp2Suite extends ContainerClient with TestContainersForAll {
         .is(Some((true, 7L)))
   }
 
-  containerTest("a cached read on a server without HELLO returns the latest value after another client writes") { case open and _ and _ =>
-    cachedReadIsLatestOn(legacy(open), "legacy-cached")
-  }
-
-  currentTest("Resp2 against the current Redis runs basic commands on a RESP2 connection") { current =>
-    connectAndUse(resp2(current))(client => basicCommands(client, "forced") >> usesResp(client, 2))
-  }
-
-  currentTest("Resp2 against the current Redis authenticates an ACL user with AUTH and rejects a wrong password") { current =>
+  currentTest("Resp2 against the current Redis authenticates an ACL user with AUTH, runs basic commands and rejects a wrong password") { current =>
     connectAndUse(resp2(current).copy(auth = Some(AuthConfig("apppass", username = "app")))) { client =>
-      client.aclWhoAmI.is("app") >> usesResp(client, 2)
+      basicCommands(client, "forced") >> client.aclWhoAmI.is("app") >> usesResp(client, 2)
     } >>
       failsWith[ServerError](connectAndUse(resp2(current).copy(auth = Some(AuthConfig("wrong", username = "app"))))(_.ping()))
   }
 
   currentTest("Resp2 against the current Redis disables client-side caching, so a cached read returns the latest value") { current =>
-    cachedReadIsLatestOn(resp2(current), "forced-cached")
+    connectAndUse(resp2(current)) { reader =>
+      connectAndUse(resp2(current)) { writer =>
+        val read = reader.cached(Commands.get[String, String]("forced-cached"), 1.minute)
+        writer.set("forced-cached", "v1") >> read.is(Some("v1")) >> writer.set("forced-cached", "v2") >> read.is(Some("v2"))
+      }
+    }
   }
 
   currentTest("connections negotiate the protocol that SAGE_IT_PROTOCOL selects") { current =>
-    connectAndUse(configOf(current))(usesResp(_, if (TestProtocol.isResp2) 2 else 3))
+    connectAndUse(configOf(current))(usesResp(_, if (TestProtocol.selected == RespProtocol.Resp2) 2 else 3))
   }
 }

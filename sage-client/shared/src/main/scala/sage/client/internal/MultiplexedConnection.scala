@@ -8,7 +8,7 @@ import scala.util.{Failure, Success, Try}
 
 import sage.{Bytes, SageEvent}
 import sage.SageException.NotConnected
-import sage.client.{RespProtocol, SageConfig}
+import sage.client.SageConfig
 import sage.cluster.Node
 import sage.commands.{Command, Connection, Invalidation, Reply}
 import sage.protocol.Frame
@@ -39,7 +39,7 @@ final private[client] class MultiplexedConnection(
   private var current: Conn          = null
   private var establishing: Conn     = null
   private val reconnects             = new Reconnects(scheduler, config.reconnect, lock)
-  private val bootstrap              = Bootstrap(config).andThen(role.setup)
+  private val bootstrap              = Bootstrap(config, role.setup)
   private[internal] val pool         =
     new DedicatedPool(factory, bootstrap, scheduler, () => isLive, config.dedicatedPool, config.connectTimeout.toMillis)
 
@@ -158,11 +158,11 @@ final private[client] class MultiplexedConnection(
     }
     try {
       // A half-open peer can accept the socket without answering the setup, so the handshake limits each wait and lets the reconnect loop continue.
-      val protocol = conn.handshake(bootstrap, config.connectTimeout.toMillis)
+      conn.handshake(bootstrap, config.connectTimeout.toMillis)
       // A server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached (ADR-0045). RESP2 cannot
       // push invalidations on the same connection, so a RESP2 connection never caches.
       conn.cache = Option
-        .when(role.caches && config.clientCache.enabled && protocol == RespProtocol.Resp3)(config.clientCache.maxBytes)
+        .when(role.caches && config.clientCache.enabled && !conn.isResp2)(config.clientCache.maxBytes)
         .filter(_ => conn.step(Connection.clientTrackingOnOptin, config.connectTimeout.toMillis).isEmpty)
         .map(new ClientCache(_))
       conn

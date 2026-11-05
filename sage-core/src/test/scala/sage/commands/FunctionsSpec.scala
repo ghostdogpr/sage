@@ -76,9 +76,6 @@ class FunctionsSpec extends munit.FunSuite with BothProtocols {
     val code = "#!lua name=mylib"
     decodesAlike(
       Functions.functionList(withCode = true),
-      "*1\r\n*8\r\n$12\r\nlibrary_name\r\n$5\r\nmylib\r\n$6\r\nengine\r\n$3\r\nLUA\r\n$9\r\nfunctions\r\n*2\r\n*6\r\n$4\r\nname\r\n$5\r\nother\r\n" +
-        "$11\r\ndescription\r\n$-1\r\n$5\r\nflags\r\n*0\r\n*6\r\n$4\r\nname\r\n$6\r\nmyfunc\r\n$11\r\ndescription\r\n$4\r\ndesc\r\n$5\r\nflags\r\n" +
-        "*1\r\n+no-writes\r\n$12\r\nlibrary_code\r\n$16\r\n" + code + "\r\n",
       "*1\r\n%4\r\n$12\r\nlibrary_name\r\n$5\r\nmylib\r\n$6\r\nengine\r\n$3\r\nLUA\r\n$9\r\nfunctions\r\n*2\r\n%3\r\n$4\r\nname\r\n$5\r\nother\r\n" +
         "$11\r\ndescription\r\n_\r\n$5\r\nflags\r\n~0\r\n%3\r\n$4\r\nname\r\n$6\r\nmyfunc\r\n$11\r\ndescription\r\n$4\r\ndesc\r\n$5\r\nflags\r\n" +
         "~1\r\n+no-writes\r\n$12\r\nlibrary_code\r\n$16\r\n" + code + "\r\n",
@@ -93,7 +90,6 @@ class FunctionsSpec extends munit.FunSuite with BothProtocols {
     )
     decodesAlike(
       Functions.functionStats,
-      "*4\r\n$14\r\nrunning_script\r\n$-1\r\n$7\r\nengines\r\n*2\r\n$3\r\nLUA\r\n*4\r\n$15\r\nlibraries_count\r\n:1\r\n$15\r\nfunctions_count\r\n:2\r\n",
       "%2\r\n$14\r\nrunning_script\r\n_\r\n$7\r\nengines\r\n%1\r\n$3\r\nLUA\r\n%2\r\n$15\r\nlibraries_count\r\n:1\r\n$15\r\nfunctions_count\r\n:2\r\n",
       FunctionStats(None, Map("LUA" -> EngineStats(1L, 2L)))
     )

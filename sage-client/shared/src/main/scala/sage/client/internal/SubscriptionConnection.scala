@@ -12,7 +12,7 @@ import sage.SageEvent
 import sage.SageException.{NotConnected, ServerError}
 import sage.client.SageConfig
 import sage.cluster.Node
-import sage.commands.Pubsub
+import sage.commands.{Command, Pubsub}
 import sage.protocol.Frame
 
 /**
@@ -244,7 +244,7 @@ final private[client] class SubscriptionConnection(
       if (state == State.Closed) conn.close()
     }
     try {
-      try conn.handshake(Bootstrap(config), config.connectTimeout.toMillis): Unit
+      try conn.handshake(Bootstrap(config), config.connectTimeout.toMillis)
       catch { case NonFatal(e) => throw Client.translateHandshake(e) }
       conn
     } finally locked(establishing -= conn): Unit
@@ -380,14 +380,12 @@ final private[client] class SubscriptionConnection(
     // onPush. Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
     def unsubscribe(kind: Kind, names: Vector[String]): Unit =
       if (kind != Kind.Shard) sendEach(names.map(name => new Entry(kind.unsubscribe(name), _ => ())))
-      else if (names.nonEmpty) {
-        val marker = if (isResp2) Kind.Channel.unsubscribe(markerChannel) else Pubsub.helloInfo
-        sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilMarker)) :+ new Entry(marker, afterMarker))
-      }
+      else if (names.nonEmpty) sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilMarker)) :+ new Entry(marker, afterMarker))
 
-    // RESP2 refuses HELLO in subscribed mode, so the marker unsubscribes this never-subscribed channel instead. Its confirmation answers the
-    // oldest pending entry like any other, and its subscription count is ignored.
-    private val markerChannel = s"__sage:batch-end:${UUID.randomUUID()}"
+    // RESP2 refuses HELLO in subscribed mode, so the marker there unsubscribes a never-subscribed channel instead. Its confirmation answers
+    // the oldest pending entry like any other, and its subscription count is ignored.
+    private def marker: Command[Frame] =
+      if (isResp2) Kind.Channel.unsubscribe(s"__sage:batch-end:${UUID.randomUUID()}") else Pubsub.helloInfo
 
     // used on the reader thread only, while the marker's reply is passed on to its own entry
     private var passing = false
@@ -404,7 +402,9 @@ final private[client] class SubscriptionConnection(
       case _                          => ()
     }
 
-    // ACL refuses neither an argument-less HELLO nor UNSUBSCRIBE, so an error here means that replies no longer match their entries
+    // HELLO never fails, but a RESP2 UNSUBSCRIBE fails when ACL denies the command or a script is busy. That error closes the connection here
+    // only if every SUNSUBSCRIBE also failed; otherwise it answers a SUNSUBSCRIBE, and the watchdog closes the connection once the entries
+    // left unanswered time out. The remaining subscriptions are then restored on a new connection.
     private val afterMarker: Try[Frame] => Unit = { result =>
       reached = true
       result match {
@@ -428,18 +428,19 @@ final private[client] class SubscriptionConnection(
       if (!readerBlocked) // deliberate backpressure on a slow consumer; the connection is alive, not stuck
         checkLiveness(lastBackpressureMillis + config.watchdog.pingTimeout.toMillis)
 
-    protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, Frame.Push(elements)))
+    protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, elements))
 
     // RESP2 sends pub/sub pushes as arrays. No other reply matches Pubsub.decode, including the subscribed-mode PING reply ["pong", ""].
     override protected def arrayPush(elements: Vector[Frame]): Boolean =
       isResp2 && Pubsub.decode(elements).exists { event =>
-        handle(event, Frame.Array(elements))
+        handle(event, elements)
         true
       }
 
-    private def handle(event: Pubsub.Event, frame: => Frame): Unit =
+    // a confirmation answers its entry as a push under both protocols, since no entry reads the frame
+    private def handle(event: Pubsub.Event, elements: Vector[Frame]): Unit =
       event match {
-        case Pubsub.Event.Confirmed                               => answer(frame)
+        case Pubsub.Event.Confirmed                               => answer(Frame.Push(elements))
         case Pubsub.Event.Delivered(kind, subscription, delivery) => dispatch(this, sinksFor(kind), subscription, delivery)
         // The server dropped the channel only if it is still registered and confirmed here. An unsubscribed channel has left the registry.
         case Pubsub.Event.ShardUnsubscribed(channel)              =>

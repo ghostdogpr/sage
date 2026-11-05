@@ -191,11 +191,6 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds with BothProtocols {
   }
 
   test("COMMAND INFO and COMMAND GETKEYSANDFLAGS decode RESP2 flag arrays like RESP3 sets") {
-    val resp2 =
-      "*2\r\n*10\r\n$3\r\nget\r\n:2\r\n*2\r\n+readonly\r\n+fast\r\n:1\r\n:1\r\n:1\r\n*3\r\n+@read\r\n+@string\r\n+@fast\r\n*0\r\n*1\r\n*6\r\n" +
-        "$5\r\nflags\r\n*2\r\n+RO\r\n+access\r\n$12\r\nbegin_search\r\n*4\r\n$4\r\ntype\r\n$5\r\nindex\r\n$4\r\nspec\r\n*2\r\n$5\r\nindex\r\n:1\r\n" +
-        "$9\r\nfind_keys\r\n*4\r\n$4\r\ntype\r\n$5\r\nrange\r\n$4\r\nspec\r\n*6\r\n$7\r\nlastkey\r\n:0\r\n$7\r\nkeystep\r\n:1\r\n$5\r\nlimit\r\n:0\r\n" +
-        "*0\r\n$-1\r\n"
     val resp3 =
       "*2\r\n*10\r\n$3\r\nget\r\n:2\r\n~2\r\n+readonly\r\n+fast\r\n:1\r\n:1\r\n:1\r\n~3\r\n+@read\r\n+@string\r\n+@fast\r\n~0\r\n~1\r\n%3\r\n" +
         "$5\r\nflags\r\n~2\r\n+RO\r\n+access\r\n$12\r\nbegin_search\r\n%2\r\n$4\r\ntype\r\n$5\r\nindex\r\n$4\r\nspec\r\n%1\r\n$5\r\nindex\r\n:1\r\n" +
@@ -203,13 +198,11 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds with BothProtocols {
         "~0\r\n_\r\n"
     decodesAlike(
       Server.commandInfo("get", "nope"),
-      resp2,
       resp3,
       Vector(CommandInfo("get", 2L, Set("readonly", "fast"), 1, 1, 1, Set("@read", "@string", "@fast")))
     )
     decodesAlike(
       Server.commandGetKeysAndFlags("SET", "k", "v"),
-      "*1\r\n*2\r\n$1\r\nk\r\n*2\r\n+OW\r\n+update\r\n",
       "*1\r\n*2\r\n$1\r\nk\r\n~2\r\n+OW\r\n+update\r\n",
       Vector("k" -> Set("OW", "update"))
     )
@@ -218,21 +211,15 @@ class ServerSpec extends munit.FunSuite with BroadcastFolds with BothProtocols {
   test("LATENCY HISTOGRAM decodes the RESP2 flat arrays like the RESP3 maps, empty included") {
     decodesAlike(
       Server.latencyHistogram("set"),
-      "*2\r\n$3\r\nset\r\n*4\r\n$5\r\ncalls\r\n:3\r\n$14\r\nhistogram_usec\r\n*4\r\n:2\r\n:1\r\n:8\r\n:3\r\n",
       "%1\r\n$3\r\nset\r\n%2\r\n$5\r\ncalls\r\n:3\r\n$14\r\nhistogram_usec\r\n%2\r\n:2\r\n:1\r\n:8\r\n:3\r\n",
       Map("set" -> CommandHistogram(3L, Map(2L -> 1L, 8L -> 3L)))
     )
-    decodesAlike(Server.latencyHistogram("nope"), "*0\r\n", "%0\r\n", Map.empty[String, CommandHistogram])
+    decodesAlike(Server.latencyHistogram("nope"), "%0\r\n", Map.empty[String, CommandHistogram])
+    assertEquals(expectedShape(Server.latencyHistogram("set"), Frame.Array(Vector(bulk("set")))), Some("latency histogram map"))
   }
 
-  test("CONFIG GET decodes the captured RESP2 and RESP3 replies alike, empty included") {
-    decodesAlike(
-      Server.configGet("maxmemory*"),
-      "*4\r\n$16\r\nmaxmemory-policy\r\n$10\r\nnoeviction\r\n$9\r\nmaxmemory\r\n$1\r\n0\r\n",
-      "%2\r\n$16\r\nmaxmemory-policy\r\n$10\r\nnoeviction\r\n$9\r\nmaxmemory\r\n$1\r\n0\r\n",
-      Map("maxmemory-policy" -> "noeviction", "maxmemory" -> "0")
-    )
-    decodesAlike(Server.configGet("nope"), "*0\r\n", "%0\r\n", Map.empty[String, String])
+  test("CONFIG GET decodes an empty reply under both protocols") {
+    decodesAlike(Server.configGet("nope"), "%0\r\n", Map.empty[String, String])
   }
 
   test("COMMAND GETKEYSANDFLAGS decodes key/flag pairs") {

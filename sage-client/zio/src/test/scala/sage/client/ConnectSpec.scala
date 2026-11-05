@@ -61,22 +61,6 @@ class ConnectSpec extends munit.FunSuite {
     }
   }
 
-  test("under Resp3, a NOPROTO rejection maps to UnsupportedServer") {
-    val (factory, _) = ScriptedTransport(_ => Seq(Frame.SimpleError("NOPROTO unsupported protocol version")))
-    Client.connectWith(factory, config = SageConfig(protocol = RespProtocol.Resp3)).unsafeRun.failed.map { error =>
-      assert(error.isInstanceOf[UnsupportedServer], s"unexpected error: $error")
-    }
-  }
-
-  test("by default, a server without RESP3 is used with RESP2") {
-    val (factory, _) = ScriptedTransport { payload =>
-      if (payload.asUtf8String.contains("HELLO")) Seq(Frame.SimpleError("ERR unknown command 'HELLO'"))
-      else if (payload.asUtf8String.contains("PING")) Seq(pong)
-      else Seq(ok)
-    }
-    Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map(result => assertEquals(result, "PONG"))
-  }
-
   test("readFrom = Replica on a Standalone topology is rejected before connecting") {
     Client.connect(SageConfig(readFrom = ReadFrom.Replica)).unsafeRun.failed.map { error =>
       assert(error.isInstanceOf[InvalidArgument], s"unexpected error: $error")

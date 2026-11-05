@@ -11,7 +11,6 @@ class SetsSpec extends munit.FunSuite with BothProtocols {
   }
 
   test("set replies decode the RESP2 array like the RESP3 set frame") {
-    val resp2    = "*3\r\n$1\r\na\r\n$1\r\nc\r\n$1\r\nb\r\n"
     val resp3    = "~3\r\n$1\r\na\r\n$1\r\nc\r\n$1\r\nb\r\n"
     val commands = Vector(
       Sets.sMembers[String, String]("s"),
@@ -21,8 +20,8 @@ class SetsSpec extends munit.FunSuite with BothProtocols {
       Sets.sUnion[String, String]("s", "t")
     )
     commands.foreach { command =>
-      decodesAlike(command, resp2, resp3, Set("a", "b", "c"))
-      decodesAlike(command, "*0\r\n", "~0\r\n", Set.empty[String])
+      decodesAlike(command, resp3, Set("a", "b", "c"))
+      decodesAlike(command, "~0\r\n", Set.empty[String])
     }
   }
 

@@ -125,42 +125,42 @@ abstract private[internal] class Pipe(factory: MultiplexedConnection.TransportFa
 
   /**
     * Starts the transport, negotiates the protocol, authenticates and runs the setup commands in turn, blocking up to `timeoutMillis` for
-    * each reply, and returns the negotiated protocol. A server that rejects `HELLO 3` (see [[Bootstrap.rejectsHello]]) or keeps protocol 2
-    * is used with RESP2 under [[RespProtocol.Auto]] and fails with `UnsupportedServer` under [[RespProtocol.Resp3]]. Closes the connection
-    * and throws on a timeout or a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` is tolerated.
+    * each reply. A server that rejects `HELLO 3` (see [[Bootstrap.rejectsHello]]) or keeps protocol 2 is used with RESP2 under
+    * [[RespProtocol.Auto]] and fails with `UnsupportedServer` under [[RespProtocol.Resp3]]. Closes the connection and throws on a timeout or
+    * a failed reply, except that a [[Bootstrap.bestEffort]] command's `ServerError` other than `NOAUTH` is tolerated.
     */
-  final def handshake(bootstrap: Bootstrap, timeoutMillis: Long): RespProtocol = {
-    def abort(error: Throwable): Nothing = {
+  final def handshake(bootstrap: Bootstrap, timeoutMillis: Long): Unit = {
+    def abort(error: Throwable): Nothing               = {
       close()
       throw error
     }
-    def unsupported(reason: String)      =
+    // without credentials on RESP2, CLIENT SETINFO is the first command to report that the server requires authentication
+    def run(command: Command[?]): Unit                 =
+      step(command, timeoutMillis).filterNot(error => Bootstrap.bestEffort(command) && error.code != "NOAUTH").foreach(abort)
+    def unsupported(reason: String): UnsupportedServer =
       UnsupportedServer(s"server $reason; set protocol to RespProtocol.Auto or RespProtocol.Resp2 to connect with RESP2")
-    val auto                             = bootstrap.protocol == RespProtocol.Auto
-    start()
-    val (negotiated, needsAuth)          =
-      if (bootstrap.protocol == RespProtocol.Resp2) (RespProtocol.Resp2, true)
-      else
-        reply(bootstrap.hello, timeoutMillis) match {
-          case Right(3L)                                            => (RespProtocol.Resp3, false)
-          case Right(2L) if auto                                    => (RespProtocol.Resp2, false)
-          case Right(proto)                                         => abort(unsupported(s"answered HELLO 3 with protocol $proto"))
-          case Left(error) if Bootstrap.rejectsHello(error) && auto => (RespProtocol.Resp2, true)
-          case Left(error) if Bootstrap.rejectsHello(error)         => abort(unsupported(s"rejected HELLO 3 (${error.getMessage})"))
-          case Left(error)                                          => abort(error)
-        }
-    protocol = negotiated
-    val authentication                   = if (needsAuth) bootstrap.resp2Auth.toVector else Vector.empty
-    (authentication ++ bootstrap.setup).foreach { command =>
-      step(command, timeoutMillis).filterNot(_ => Bootstrap.bestEffort(command)).foreach(abort)
+    // HELLO 3 was skipped or rejected, so it did not authenticate the connection
+    def fallback(): Unit                               = {
+      resp2 = true
+      bootstrap.resp2Auth.foreach(run)
     }
-    negotiated
+    val auto                                           = bootstrap.protocol == RespProtocol.Auto
+    start()
+    if (bootstrap.protocol == RespProtocol.Resp2) fallback()
+    else
+      reply(bootstrap.hello, timeoutMillis) match {
+        case Right(false)                                 => ()
+        case Right(true)                                  => if (auto) resp2 = true else abort(unsupported("answered HELLO 3 with protocol 2"))
+        case Left(error) if Bootstrap.rejectsHello(error) => if (auto) fallback() else abort(unsupported(s"rejected HELLO 3 (${error.code})"))
+        case Left(error)                                  => abort(error)
+      }
+    bootstrap.setup.foreach(run)
   }
 
   // set by the handshake before any other command is written
-  @volatile private var protocol: RespProtocol = RespProtocol.Resp3
+  @volatile private var resp2: Boolean = false
 
-  final def isResp2: Boolean = protocol == RespProtocol.Resp2
+  final def isResp2: Boolean = resp2
 
   /**
     * Runs one setup command and returns the server's error reply, or `None` on success. Closes the connection and throws on a timeout or any

@@ -15,9 +15,7 @@ import sage.commands.{Command, Connection}
   */
 final private[client] case class Bootstrap(protocol: RespProtocol, auth: Option[AuthConfig], setup: Vector[Command[?]]) {
 
-  def andThen(more: Vector[Command[?]]): Bootstrap = copy(setup = setup ++ more)
-
-  def hello: Command[Long] = Connection.hello(auth.map(a => a.username -> a.password))
+  def hello: Command[Boolean] = Connection.hello(auth.map(a => a.username -> a.password))
 
   // the one-argument form authenticates the default user and is the only form servers older than Redis 6.0 accept
   def resp2Auth: Option[Command[Unit]] = auth.map(a => Connection.auth(Option.when(a.username != "default")(a.username), a.password))
@@ -25,20 +23,18 @@ final private[client] case class Bootstrap(protocol: RespProtocol, auth: Option[
 
 private[client] object Bootstrap {
 
-  def apply(config: SageConfig): Bootstrap = Bootstrap(config.protocol, config.auth, commands(config))
-
   /**
-    * The setup commands every connection runs after negotiating its protocol and re-runs on reconnection. Standalone, cluster, and
-    * master-replica clients share this list, keeping connection identification consistent across topologies. `SELECT` lives here rather
-    * than as a runtime command because it would move the database under every fiber sharing the connection.
+    * The setup commands every connection runs after negotiating its protocol and re-runs on reconnection, followed by `more`. Standalone,
+    * cluster, and master-replica clients share this list, keeping connection identification consistent across topologies. `SELECT` lives
+    * here rather than as a runtime command because it would move the database under every fiber sharing the connection.
     */
-  def commands(config: SageConfig): Vector[Command[?]] = {
+  def apply(config: SageConfig, more: Vector[Command[?]] = Vector.empty): Bootstrap = {
     val identification = Vector(
       Connection.clientSetInfo("LIB-NAME", "sage"),
       Connection.clientSetInfo("LIB-VER", BuildInfo.version)
     ) ++ config.clientName.map(Connection.clientSetName).toVector
     val selectDb       = if (config.database > 0) Vector(Connection.select(config.database)) else Vector.empty
-    identification ++ selectDb
+    Bootstrap(config.protocol, config.auth, identification ++ selectDb ++ more)
   }
 
   /**

@@ -98,7 +98,6 @@ class ArraysSpec extends munit.FunSuite with BothProtocols {
         "$17\r\nsuper-dir-entries\r\n:0\r\n$10\r\nslice-size\r\n:4096\r\n$12\r\ndense-slices\r\n:0\r\n$13\r\nsparse-slices\r\n:1\r\n"
     decodesAlike(
       Arrays.arInfoFull("arr"),
-      "*24\r\n" + fields + "$14\r\navg-dense-size\r\n$1\r\n0\r\n$14\r\navg-dense-fill\r\n$1\r\n0\r\n$15\r\navg-sparse-size\r\n$3\r\n8.5\r\n",
       "%12\r\n" + fields + "$14\r\navg-dense-size\r\n,0\r\n$14\r\navg-dense-fill\r\n,0\r\n$15\r\navg-sparse-size\r\n,8.5\r\n",
       ArrayInfoFull(5L, 12L, 0L, Some(1L), Some(1L), Some(0L), Some(4096L), Some(0L), Some(1L), Some(0.0), Some(0.0), Some(8.5))
     )

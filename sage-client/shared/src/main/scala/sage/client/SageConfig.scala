@@ -168,7 +168,6 @@ enum Topology {
   * @param pubsub         pub/sub buffering. See [[PubSubConfig]]
   * @param clientCache    client-side caching. See [[CacheConfig]]
   * @param auth           credentials sent during connection setup. `None` connects without authentication. See [[AuthConfig]]
-  * @param protocol       the RESP version to negotiate. See [[RespProtocol]]
   * @param tls            TLS settings. `None` connects in plaintext. See [[TlsConfig]]
   * @param topology       standalone, cluster, or master-replica configuration and server locations. See [[Topology]]
   * @param readFrom       which node can run read-only commands. See [[ReadFrom]]
@@ -179,6 +178,7 @@ enum Topology {
   * @param listeners      observers of runtime [[sage.SageEvent]] values. See [[sage.SageListener]]
   * @param tracer         an optional distributed tracer, driven synchronously on the command path so its spans nest under the caller's active
   *                       span. See [[sage.CommandTracer]]. `None`, the default, emits no spans
+  * @param protocol       the RESP version to negotiate. See [[RespProtocol]]
   */
 final case class SageConfig(
   connectTimeout: FiniteDuration = 10.seconds,
@@ -189,14 +189,14 @@ final case class SageConfig(
   pubsub: PubSubConfig = PubSubConfig(),
   clientCache: CacheConfig = CacheConfig(),
   auth: Option[AuthConfig] = None,
-  protocol: RespProtocol = RespProtocol.Auto,
   tls: Option[TlsConfig] = None,
   topology: Topology = Topology.Standalone(),
   readFrom: ReadFrom = ReadFrom.Master,
   database: Int = 0,
   clientName: Option[String] = None,
   listeners: Vector[SageListener] = Vector.empty,
-  tracer: Option[CommandTracer] = None
+  tracer: Option[CommandTracer] = None,
+  protocol: RespProtocol = RespProtocol.Auto
 )
 
 object SageConfig {

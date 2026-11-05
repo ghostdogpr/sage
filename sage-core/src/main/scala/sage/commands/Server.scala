@@ -338,10 +338,8 @@ private[sage] object Server {
     case Frame.Array(Vector(Frame.Integer(ts), Frame.Integer(latency))) => Right((Instant.ofEpochSecond(ts), latency.millis))
   }
 
-  private val decodeHistograms: Frame => Either[DecodeError, Map[String, CommandHistogram]] = {
-    val entry = Decode.pair(Decode.utf8String, decodeHistogram).tupled
-    frame => Decode.entries(frame).flatMap(Decode.mapEntries(_)(entry))
-  }
+  private val decodeHistograms: Frame => Either[DecodeError, Map[String, CommandHistogram]] =
+    Decode.mapOf("latency histogram map")(Decode.pair(Decode.utf8String, decodeHistogram))
 
   private def decodeHistogram(frame: Frame): Either[DecodeError, CommandHistogram] =
     Decode.fieldMap(frame).map { fields =>

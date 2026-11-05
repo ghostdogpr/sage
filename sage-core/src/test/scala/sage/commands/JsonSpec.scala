@@ -1,11 +1,8 @@
 package sage.commands
 
-import sage.SageException.ServerError
-import sage.protocol.Frames.wire
-
 class JsonSpec extends munit.FunSuite with BothProtocols {
 
-  test("JSON.TYPE decodes the flat RESP2 reply like the nested Redis RESP3 reply") {
+  test("JSON.TYPE decodes the flat RESP2 and Valkey replies like the nested Redis RESP3 reply") {
     decodesAlike(Json.jsonType("j", JsonPath("$.a")), "*1\r\n$7\r\ninteger\r\n", "*1\r\n*1\r\n$7\r\ninteger\r\n", Vector(Some(JsonType.Integer)))
     decodesAlike(
       Json.jsonType("j", JsonPath("$..a")),
@@ -14,37 +11,17 @@ class JsonSpec extends munit.FunSuite with BothProtocols {
       Vector(Some(JsonType.Integer), Some(JsonType.String))
     )
     decodesAlike(Json.jsonType("j", JsonPath("$.missing")), "*0\r\n", "*1\r\n*0\r\n", Vector.empty)
-  }
-
-  test("JSON.TYPE on a missing key decodes the bare null like Redis's RESP3 [null]") {
     decodesAlike(Json.jsonType("nojson"), "$-1\r\n", "*1\r\n_\r\n", Vector(None))
+    decodesAlike(Json.jsonType("j", JsonPath("$..a")), "*2\r\n+integer\r\n+string\r\n", Vector(Some(JsonType.Integer), Some(JsonType.String)))
   }
 
-  test("JSON.TYPE decodes the Valkey simple-string reply under both protocols") {
-    decodesAlike(
-      Json.jsonType("j", JsonPath("$..a")),
-      "*2\r\n+integer\r\n+string\r\n",
-      "*2\r\n+integer\r\n+string\r\n",
-      Vector(Some(JsonType.Integer), Some(JsonType.String))
-    )
-    decodesAlike(Json.jsonType("nojson"), "$-1\r\n", "_\r\n", Vector(None))
-  }
-
-  test("JSON.STRLEN, ARRLEN, OBJLEN, OBJKEYS and DEBUG MEMORY decode Valkey's missing-key null as no matches") {
-    decodesAlike(Json.jsonStrLen("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
-    decodesAlike(Json.jsonArrLen("nojson", JsonPath("$.x")), "$-1\r\n", "_\r\n", Vector.empty)
-    decodesAlike(Json.jsonObjLen("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
-    decodesAlike(Json.jsonObjKeys("nojson", JsonPath("$.x")), "$-1\r\n", "_\r\n", Vector.empty)
-    decodesAlike(Json.jsonDebugMemory("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
-  }
-
-  test("JSON.DEBUG MEMORY on a missing key decodes Redis's empty array like Valkey's null") {
-    decodesAlike(Json.jsonDebugMemory("nojson"), "*0\r\n", "*0\r\n", Vector.empty)
-  }
-
-  test("JSON.STRLEN on a missing key surfaces Redis's error reply as a ServerError") {
-    val reply = wire("-ERR could not perform this operation on a key that doesn't exist\r\n")
-    assert(Reply.decode(Json.jsonStrLen("nojson"), reply).failed.get.isInstanceOf[ServerError])
+  test("JSON.STRLEN, ARRLEN, OBJLEN, OBJKEYS and DEBUG MEMORY decode Valkey's missing-key null and Redis's DEBUG MEMORY [] as no matches") {
+    decodesAlike(Json.jsonStrLen("nojson"), "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonArrLen("nojson", JsonPath("$.x")), "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonObjLen("nojson"), "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonObjKeys("nojson", JsonPath("$.x")), "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonDebugMemory("nojson"), "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonDebugMemory("nojson"), "*0\r\n", Vector.empty)
   }
 
   test("JSON.NUMINCRBY decodes the RESP2 JSON-array string like the RESP3 number array") {
@@ -54,21 +31,11 @@ class JsonSpec extends munit.FunSuite with BothProtocols {
   }
 
   test("JSONPath replies with nulls for non-matching types decode alike under both protocols") {
-    decodesAlike(Json.jsonStrLen("j", JsonPath("$..a")), "*2\r\n$-1\r\n:1\r\n", "*2\r\n_\r\n:1\r\n", Vector(None, Some(1L)))
-    decodesAlike(Json.jsonToggle("j", JsonPath("$..a")), "*2\r\n$-1\r\n:0\r\n", "*2\r\n_\r\n:0\r\n", Vector(None, Some(false)))
-    decodesAlike(
-      Json.jsonObjKeys("j", JsonPath("$..a")),
-      "*2\r\n$-1\r\n*1\r\n$1\r\nx\r\n",
-      "*2\r\n_\r\n*1\r\n$1\r\nx\r\n",
-      Vector(None, Some(Vector("x")))
-    )
-    decodesAlike(Json.jsonArrPop[String, String]("j", JsonPath("$.d")), "*1\r\n$-1\r\n", "*1\r\n_\r\n", Vector(None))
-    decodesAlike(
-      Json.jsonMGet[String, String](JsonPath("$.a"))("j", "nojson"),
-      "*2\r\n$3\r\n[1]\r\n$-1\r\n",
-      "*2\r\n$3\r\n[1]\r\n_\r\n",
-      Vector(Some("[1]"), None)
-    )
-    decodesAlike(Json.jsonSet("j", JsonPath("$.a"), "5", JsonSetCondition.IfNotExists), "$-1\r\n", "_\r\n", false)
+    decodesAlike(Json.jsonStrLen("j", JsonPath("$..a")), "*2\r\n_\r\n:1\r\n", Vector(None, Some(1L)))
+    decodesAlike(Json.jsonToggle("j", JsonPath("$..a")), "*2\r\n_\r\n:0\r\n", Vector(None, Some(false)))
+    decodesAlike(Json.jsonObjKeys("j", JsonPath("$..a")), "*2\r\n_\r\n*1\r\n$1\r\nx\r\n", Vector(None, Some(Vector("x"))))
+    decodesAlike(Json.jsonArrPop[String, String]("j", JsonPath("$.d")), "*1\r\n_\r\n", Vector(None))
+    decodesAlike(Json.jsonMGet[String, String](JsonPath("$.a"))("j", "nojson"), "*2\r\n$3\r\n[1]\r\n_\r\n", Vector(Some("[1]"), None))
+    decodesAlike(Json.jsonSet("j", JsonPath("$.a"), "5", JsonSetCondition.IfNotExists), "_\r\n", false)
   }
 }

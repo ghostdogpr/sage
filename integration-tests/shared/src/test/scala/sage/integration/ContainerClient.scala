@@ -90,22 +90,14 @@ trait ContainerClient extends munit.FunSuite with TestContainersSuite {
     Command(name, Command.NoKeys, args.toVector.map(Bytes.utf8), _ => Right(()))
 
   // The writer uses a separate connection, so each write is a server-side change for the reader's cache.
-  protected def cachedReadIsInvalidated(reader: Client[CIO, String], writer: Client[CIO, String], key: String): CIO[Unit] =
-    if (TestProtocol.isResp2) cachedReadIsLatest(reader, writer, key)
-    else {
-      val read = reader.cached(Commands.get[String, String](key), 1.minute)
-      writer.set(key, "v1") >>
-        read.is(Some("v1")) >>
-        read.is(Some("v1")) >>
-        writer.set(key, "v2") >>
-        // a cached read does not contact the server again. Poll until the invalidation message from an external write has been processed.
-        Eventually(50)(read.is(Some("v2")))
-    }
-
-  // RESP2 connections do not cache, so a cached read sees each write without waiting for an invalidation
-  protected def cachedReadIsLatest(reader: Client[CIO, String], writer: Client[CIO, String], key: String): CIO[Unit] = {
+  protected def cachedReadIsInvalidated(reader: Client[CIO, String], writer: Client[CIO, String], key: String): CIO[Unit] = {
     val read = reader.cached(Commands.get[String, String](key), 1.minute)
-    writer.set(key, "v1") >> read.is(Some("v1")) >> writer.set(key, "v2") >> read.is(Some("v2"))
+    writer.set(key, "v1") >>
+      read.is(Some("v1")) >>
+      read.is(Some("v1")) >>
+      writer.set(key, "v2") >>
+      // a cached read does not contact the server again. Poll until the invalidation message from an external write has been processed.
+      Eventually(50)(read.is(Some("v2")))
   }
 
   protected def contend(

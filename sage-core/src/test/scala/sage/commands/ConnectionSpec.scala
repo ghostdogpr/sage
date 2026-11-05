@@ -21,12 +21,20 @@ class ConnectionSpec extends munit.FunSuite {
       "role"    -> bulk("master"),
       "modules" -> Frame.Array(Vector.empty)
     )
-    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(3L))
+    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(false))
   }
 
   test("HELLO decodes a proto other than 3 from a flat RESP2 reply") {
     val reply = Frame.Array(Vector(bulk("server"), bulk("redis"), bulk("proto"), Frame.Integer(2)))
-    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(2L))
+    assertEquals(Reply.decode(Connection.hello(), reply).toEither, Right(true))
+  }
+
+  test("HELLO rejects a proto other than 2 or 3, including values beyond Int range") {
+    for (proto <- Vector(5L, 2147483648L))
+      Reply.decode(Connection.hello(), map("proto" -> Frame.Integer(proto))).toEither match {
+        case Left(error: DecodeError) => assertEquals((error.expected, error.actual), ("proto 2 or 3", s"integer $proto"))
+        case other                    => fail(s"expected a DecodeError, got $other")
+      }
   }
 
   test("HELLO reports a missing proto field") {

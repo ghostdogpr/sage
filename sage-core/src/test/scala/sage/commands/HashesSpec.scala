@@ -14,11 +14,10 @@ class HashesSpec extends munit.FunSuite with BothProtocols {
   test("HGETALL decodes the flat RESP2 field/value array like the RESP3 map") {
     decodesAlike(
       Hashes.hGetAll[String, String, String]("h"),
-      "*4\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n",
       "%2\r\n$2\r\nf1\r\n$2\r\nv1\r\n$2\r\nf2\r\n$2\r\nv2\r\n",
       Map("f1" -> "v1", "f2" -> "v2")
     )
-    decodesAlike(Hashes.hGetAll[String, String, String]("h"), "*0\r\n", "%0\r\n", Map.empty[String, String])
+    decodesAlike(Hashes.hGetAll[String, String, String]("h"), "%0\r\n", Map.empty[String, String])
     assert(Reply.decode(Hashes.hGetAll[String, String, String]("h"), Frame.Array(Vector(bulk("f1")))).toEither.isLeft)
   }
 
@@ -29,7 +28,11 @@ class HashesSpec extends munit.FunSuite with BothProtocols {
       "*3\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n*2\r\n$2\r\nf2\r\n$2\r\nv2\r\n*2\r\n$2\r\nf1\r\n$2\r\nv1\r\n",
       Vector("f1" -> "v1", "f2" -> "v2", "f1" -> "v1")
     )
-    decodesAlike(Hashes.hRandFieldWithValues[String, String, String]("h", 2L), "*0\r\n", "*0\r\n", Vector.empty)
+    decodesAlike(Hashes.hRandFieldWithValues[String, String, String]("h", 2L), "*0\r\n", Vector.empty)
+    assertEquals(
+      expectedShape(Hashes.hRandFieldWithValues[String, String, String]("h", 1L), Frame.Array(Vector(Frame.Array(Vector(bulk("f1")))))),
+      Some("field/value pair")
+    )
   }
 
   test("HMGET keeps missing fields as None positionally") {
