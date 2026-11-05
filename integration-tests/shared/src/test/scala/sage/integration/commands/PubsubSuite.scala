@@ -32,6 +32,23 @@ class PubsubSuite extends BothServersSuite {
     }
   }
 
+  clientTest("closing one shard subscription keeps the connection's other subscriptions, and later replies match their commands") { client =>
+    withSubscription(client.subscribeChannels[String]("news")) { classic =>
+      withSubscription(client.subscribeShardChannels[String]("orders")) { kept =>
+        withSubscription(client.subscribeShardChannels[String]("refunds"))(_ => client.pubsubShardChannels().satisfies(_.contains("refunds"))) >>
+          Eventually(50)(client.pubsubShardChannels().satisfies(!_.contains("refunds"))) >>
+          withSubscription(client.subscribeChannels[String]("late")) { late =>
+            client.publish("news", "hello").is(1L) >>
+              classic.next.is(Some(Message("news", "hello"))) >>
+              client.sPublish("orders", "placed").is(1L) >>
+              kept.next.is(Some(Message("orders", "placed"))) >>
+              client.publish("late", "hello").is(1L) >>
+              late.next.is(Some(Message("late", "hello")))
+          }
+      }
+    }
+  }
+
   clientTest("closing the last subscriber unsubscribes on the server") { client =>
     withSubscription(client.subscribeChannels[String]("bye"))(_ => client.pubsubChannels().satisfies(_.contains("bye"))) >>
       // a subscribe blocks until the server confirms it, but UNSUBSCRIBE is fire-and-forget, so poll until it propagates

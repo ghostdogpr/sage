@@ -1,5 +1,6 @@
 package sage.client.internal
 
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 
@@ -374,24 +375,27 @@ final private[client] class SubscriptionConnection(
     def subscribe(names: Vector[Name]): Unit = sendEach(names.map(name => new Entry(name.kind.subscribe(name.name), confirm(this, name))))
 
     // An UNSUBSCRIBE or PUNSUBSCRIBE is answered by its own push. The push of an SUNSUBSCRIBE is ambiguous: a cluster node sends the same
-    // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). One HELLO
-    // written after the SUNSUBSCRIBEs ends their replies: an error before the HELLO's reply is one of theirs, and their pushes go to onPush.
-    // Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots. A RESP2 connection in
-    // subscribed mode refuses HELLO, so it writes PING instead.
+    // push when it drops a channel whose slot moved, and then answers the SUNSUBSCRIBE with another push (Redis) or MOVED (Valkey). A marker
+    // command written after the SUNSUBSCRIBEs ends their replies: an error before the marker's reply is one of theirs, and their pushes go to
+    // onPush. Each name has its own SUNSUBSCRIBE because Valkey answers CROSSSLOT to one naming channels in several slots.
     def unsubscribe(kind: Kind, names: Vector[String]): Unit =
       if (kind != Kind.Shard) sendEach(names.map(name => new Entry(kind.unsubscribe(name), _ => ())))
       else if (names.nonEmpty) {
-        val marker = if (isResp2) Pubsub.pingInfo else Pubsub.helloInfo
-        sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilHello)) :+ new Entry(marker, afterHello))
+        val marker = if (isResp2) Kind.Channel.unsubscribe(markerChannel) else Pubsub.helloInfo
+        sendEach(names.map(name => new Entry(kind.unsubscribe(name), untilMarker)) :+ new Entry(marker, afterMarker))
       }
 
-    // used on the reader thread only, while the HELLO's reply is passed on to its own entry
+    // A RESP2 connection in subscribed mode refuses HELLO, so its marker unsubscribes this channel, which it never subscribes to. The
+    // confirmation answers the oldest pending entry like any other, and its subscription count is not used.
+    private val markerChannel = s"__sage:batch-end:${UUID.randomUUID()}"
+
+    // used on the reader thread only, while the marker's reply is passed on to its own entry
     private var passing = false
     private var reached = false
 
-    // The first SUNSUBSCRIBE still pending receives the HELLO's reply and passes it on in a loop, not recursively, so a long batch cannot
+    // The first SUNSUBSCRIBE still pending receives the marker's reply and passes it on in a loop, not recursively, so a long batch cannot
     // overflow the stack.
-    private val untilHello: Try[Frame] => Unit = {
+    private val untilMarker: Try[Frame] => Unit = {
       case Success(reply) if !passing =>
         passing = true
         reached = false
@@ -400,9 +404,9 @@ final private[client] class SubscriptionConnection(
       case _                          => ()
     }
 
-    // ACL does not refuse an argument-less HELLO, so an error here means that replies no longer match their entries. The PING that a RESP2
-    // connection writes instead relies on the user being allowed PING.
-    private val afterHello: Try[Frame] => Unit = { result =>
+    // ACL does not refuse an argument-less HELLO, and its channel rules do not apply to UNSUBSCRIBE, so an error here means that replies
+    // no longer match their entries.
+    private val afterMarker: Try[Frame] => Unit = { result =>
       reached = true
       result match {
         case Failure(_: ServerError) => this.close()
@@ -427,8 +431,8 @@ final private[client] class SubscriptionConnection(
 
     protected def onPush(elements: Vector[Frame]): Unit = Pubsub.decode(elements).foreach(handle(_, Frame.Push(elements)))
 
-    // A RESP2 connection receives its pub/sub pushes as arrays. Its replies never match Pubsub.decode: in subscribed mode, it answers PING
-    // with the array ["pong", ""].
+    // A RESP2 connection receives its pub/sub pushes as arrays. Its other replies never match Pubsub.decode: in subscribed mode, it answers
+    // PING with the array ["pong", ""].
     override protected def arrayPush(elements: Vector[Frame]): Boolean =
       isResp2 && Pubsub.decode(elements).exists { event =>
         handle(event, Frame.Array(elements))

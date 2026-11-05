@@ -88,6 +88,20 @@ class ClusterSuite extends BothServersSuite {
       }
     }
   }
+  // the node's shard connection holds only shard channels
+  clusterTest("closing one shard subscription keeps the node's other shard subscriptions, and later ones are confirmed") { client =>
+    withSubscription(client.subscribeShardChannels[String]("orders")) { kept =>
+      withSubscription(client.subscribeShardChannels[String]("refunds"))(_ => client.pubsubShardChannels().satisfies(_.contains("refunds"))) >>
+        Eventually(50)(client.pubsubShardChannels().satisfies(!_.contains("refunds"))) >>
+        withSubscription(client.subscribeShardChannels[String]("returns")) { late =>
+          client.sPublish("orders", "placed").is(1L) >>
+            kept.next.is(Some(Message("orders", "placed"))) >>
+            client.sPublish("returns", "opened").is(1L) >>
+            late.next.is(Some(Message("returns", "opened")))
+        }
+    }
+  }
+
   // scanTargets returns one target per slot-owning master, and each target runs every page on the node that created its cursor. This fixture
   // has one master for all slots, so one target is expected.
   clusterTest("scanAll sweeps every slot-owning master through node-pinned scan targets") { client =>

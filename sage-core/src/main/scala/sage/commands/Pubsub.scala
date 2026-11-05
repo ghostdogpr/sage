@@ -64,9 +64,6 @@ private[sage] object Pubsub {
   // connection may run it, since its setup did.
   val helloInfo: Command[Frame] = Command("HELLO", Command.NoKeys, Vector.empty, Decode.frame)
 
-  // PING without arguments, for a RESP2 subscription connection, which answers it with +PONG or, in subscribed mode, with ["pong", ""]
-  val pingInfo: Command[Frame] = Command("PING", Command.NoKeys, Vector.empty, Decode.frame)
-
   type Delivery = Message[Bytes] | PatternMessage[Bytes]
 
   /**
