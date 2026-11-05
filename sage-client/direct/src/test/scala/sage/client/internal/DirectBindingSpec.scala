@@ -59,12 +59,15 @@ class DirectBindingSpec extends munit.FunSuite {
   }
 
   test("a recursive loop through every combinator that runs a nested CIO on the same thread completes without overflowing the stack") {
-    val local                  = CLocal.init(0).lower
-    val meter                  = CMeter.init(Int.MaxValue).lower
-    def loop(n: Int): CIO[Int] =
+    val local                    = CLocal.init(0).lower
+    val meter                    = CMeter.init(Int.MaxValue).lower
+    def loop(n: Int): CIO[Int]   =
       if (n == 0) local.get
       else CIO.ensure(CIO.unit)(local.let(n)(meter.run(CIO.unit.flatMap(_ => loop(n - 1))))).recover(CIO.fail)
+    // without a `flatMap`, only the depth that the other combinators count moves the loop to fresh threads
+    def nested(n: Int): CIO[Int] = if (n == 0) local.get else CIO.ensure(CIO.unit)(local.let(n)(meter.run(nested(n - 1))))
     assertEquals(loop(100000).lower, 1)
+    assertEquals(nested(100000).lower, 1)
   }
 
   test("race runs its first computation on the calling thread at every depth around the flatMap limit") {

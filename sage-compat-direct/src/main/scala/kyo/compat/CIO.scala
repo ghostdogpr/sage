@@ -9,10 +9,11 @@ import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
 /**
-  * Uses a function from the current `flatMap` nesting depth to the result. `lift` wraps ordinary blocking code, and `lower` calls the
-  * function at depth 0 on the calling thread. Errors are thrown exceptions and cancellation is thread interruption. `flatMap` passes the
-  * depth on and calls its functions directly. Once the depth reaches 256, the rest of the chain runs on a fresh virtual thread that the
-  * caller waits for, so long chains and recursive loops do not overflow the stack. `race` still runs its first argument on the caller. `async` blocks the calling thread until the callback
+  * Uses a function from the current nesting depth to the result. `lift` wraps ordinary blocking code, and `lower` calls the function at
+  * depth 0 on the calling thread. Errors are thrown exceptions and cancellation is thread interruption. `flatMap` and the other combinators
+  * that run a nested `CIO`, such as `ensure`, `liftToTry`, `CLocal.let` and `CMeter.run`, call it directly one level deeper. Once the depth
+  * reaches 256, the nested `CIO` runs on a fresh virtual thread that the caller waits for, so long chains and recursive loops do not
+  * overflow the stack. `race` still runs its first argument on the caller. `async` blocks the calling thread until the callback
   * fires, which is cheap on a virtual thread. Concurrent operators such as `race`, `timeout`, `zip`, and `foreach` run work on virtual
   * threads and wait for every thread they start before returning.
   */
@@ -20,8 +21,12 @@ opaque type CIO[+A] = Int => A
 
 object CIO {
 
-  // The maximum `flatMap` nesting on one thread's stack. Deeper chains continue on a fresh virtual thread.
+  // The maximum nesting on one thread's stack. Deeper chains continue on a fresh virtual thread.
   private inline val Limit = 256
+
+  // Every combinator that runs a nested `CIO` counts a level, so the frames on one thread stay bounded whichever combinators a loop uses.
+  private inline def nest[A](depth: Int)(inline body: Int => A): A =
+    if (depth < Limit) body(depth + 1) else DirectRuntime.bounce(() => body(0))
 
   /**
     * Wraps blocking code as a `CIO`. The code runs each time the `CIO` runs.
@@ -80,26 +85,27 @@ object CIO {
   )(
     use: A => CIO[B]
   ): CIO[B] =
-    depth => {
-      val resource                = acquire(depth)
-      // Release runs on its own thread and the caller waits for it without reacting to interrupts, so a pending interrupt cannot cut it
-      // short. The caller's interrupt status is restored afterward.
-      def releaseResource(): Unit = DirectRuntime.uninterruptible(release(resource).lower)
-      val result                  =
-        try use(resource)(depth)
-        catch {
-          case useFailure: Throwable =>
-            try releaseResource()
-            catch { case releaseFailure: Throwable if releaseFailure ne useFailure => useFailure.addSuppressed(releaseFailure) }
-            throw useFailure
-        }
-      releaseResource()
-      result
-    }
+    depth =>
+      nest(depth) { d =>
+        val resource                = acquire(d)
+        // Release runs on its own thread and the caller waits for it without reacting to interrupts, so a pending interrupt cannot cut it
+        // short. The caller's interrupt status is restored afterward.
+        def releaseResource(): Unit = DirectRuntime.uninterruptible(release(resource).lower)
+        val result                  =
+          try use(resource)(d)
+          catch {
+            case useFailure: Throwable =>
+              try releaseResource()
+              catch { case releaseFailure: Throwable if releaseFailure ne useFailure => useFailure.addSuppressed(releaseFailure) }
+              throw useFailure
+          }
+        releaseResource()
+        result
+      }
 
-  // Runs `c` inside `wrap` on the calling thread at the depth of the enclosing `CIO`, so a recursion through `wrap` still reaches the
-  // `flatMap` limit. Calling `c.lower` there would restart the depth at 0 on every level and overflow the stack.
-  private[compat] def around[A, B](c: => CIO[A])(wrap: (() => A) => B): CIO[B] = depth => wrap(() => c(depth))
+  // Runs `c` inside `wrap` one level deeper than the enclosing `CIO`, so a recursion through `wrap` still reaches the depth limit. Calling
+  // `c.lower` there would restart the depth at 0 on every level and overflow the stack.
+  private[compat] def around[A, B](c: => CIO[A])(wrap: (() => A) => B): CIO[B] = depth => nest(depth)(d => wrap(() => c(d)))
 
   /**
     * Runs `c` and then `cleanup` on every exit path.
@@ -128,8 +134,10 @@ object CIO {
       */
     def liftToTry: CIO[Try[A]] =
       depth =>
-        try Success(self(depth))
-        catch { case NonFatal(t) => Failure(t) }
+        nest(depth) { d =>
+          try Success(self(d))
+          catch { case NonFatal(t) => Failure(t) }
+        }
 
     /**
       * Runs `handler` on failure to produce a recovery `CIO`.
@@ -175,9 +183,7 @@ object CIO {
       * first argument of each `race` in the chain.
       */
     def flatMap[B](f: A => CIO[B]): CIO[B] =
-      depth =>
-        if (depth < Limit) f(self(depth + 1))(depth + 1)
-        else DirectRuntime.bounce(() => f(self.lower).lower)
+      depth => nest(depth)(d => f(self(d))(d))
 
     /**
       * Runs this `CIO` on a new virtual thread and returns a `Future` with its outcome.
