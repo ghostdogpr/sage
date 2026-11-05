@@ -1,5 +1,8 @@
 package sage.commands
 
+import sage.SageException.ServerError
+import sage.protocol.Frames.wire
+
 class JsonSpec extends munit.FunSuite with BothProtocols {
 
   test("JSON.TYPE decodes the flat RESP2 reply like the nested Redis RESP3 reply") {
@@ -25,6 +28,23 @@ class JsonSpec extends munit.FunSuite with BothProtocols {
       Vector(Some(JsonType.Integer), Some(JsonType.String))
     )
     decodesAlike(Json.jsonType("nojson"), "$-1\r\n", "_\r\n", Vector(None))
+  }
+
+  test("JSON.STRLEN, ARRLEN, OBJLEN, OBJKEYS and DEBUG MEMORY decode Valkey's missing-key null as no matches") {
+    decodesAlike(Json.jsonStrLen("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonArrLen("nojson", JsonPath("$.x")), "$-1\r\n", "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonObjLen("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonObjKeys("nojson", JsonPath("$.x")), "$-1\r\n", "_\r\n", Vector.empty)
+    decodesAlike(Json.jsonDebugMemory("nojson"), "$-1\r\n", "_\r\n", Vector.empty)
+  }
+
+  test("JSON.DEBUG MEMORY on a missing key decodes Redis's empty array like Valkey's null") {
+    decodesAlike(Json.jsonDebugMemory("nojson"), "*0\r\n", "*0\r\n", Vector.empty)
+  }
+
+  test("JSON.STRLEN on a missing key surfaces Redis's error reply as a ServerError") {
+    val reply = wire("-ERR could not perform this operation on a key that doesn't exist\r\n")
+    assert(Reply.decode(Json.jsonStrLen("nojson"), reply).failed.get.isInstanceOf[ServerError])
   }
 
   test("JSON.NUMINCRBY decodes the RESP2 JSON-array string like the RESP3 number array") {

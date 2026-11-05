@@ -1299,6 +1299,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the length of each string at `path`, `None` where the path was not a string.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonStrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonStrLen(key, path))
 
@@ -1332,6 +1333,7 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the length of each array at `path`, `None` where the path was not an array.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonArrLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonArrLen(key, path))
 
@@ -1349,16 +1351,19 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
 
   /**
     * Returns the key names of each object at `path`, `None` where the path was not an object.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonObjKeys(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Vector[String]]]] = run(Json.jsonObjKeys(key, path))
 
   /**
     * Returns the number of keys in each object at `path`, `None` where the path was not an object.
+    * A missing key returns an empty `Vector` on Valkey and fails with a server error on Redis.
     */
   final def jsonObjLen(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonObjLen(key, path))
 
   /**
-    * Returns the memory footprint in bytes of the value at each matched location. A diagnostic; not client-side cached.
+    * Returns the memory footprint in bytes of the value at each matched location, and an empty `Vector` for a missing key. A diagnostic;
+    * not client-side cached.
     */
   final def jsonDebugMemory(key: K, path: JsonPath = JsonPath.root): F[Vector[Option[Long]]] = run(Json.jsonDebugMemory(key, path))
 
