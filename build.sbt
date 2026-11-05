@@ -190,6 +190,7 @@ lazy val client = (projectMatrix in file("sage-client"))
   .settings(name := "sage-client")
   .settings(commonSettings)
   .settings(mimaSettings)
+  .settings(mimaBinaryIssueFilters ++= sageConfigProtocolFilters)
   .settings(parallelUnitTests)
   .settings(
     // compatLibrary emits an implicit Future anchor row; it's a compile-only baseline, never published
@@ -376,6 +377,34 @@ lazy val mimaSettings = Def.settings(
     else previousStableVersion.value.map(organization.value %% moduleName.value % _).toSet
   }
 )
+
+// Accept the SageConfig.protocol addition; these can be removed once the next release is the MiMa baseline (previousStableVersion).
+lazy val sageConfigProtocolFilters = {
+  import com.typesafe.tools.mima.core._
+  val oldParams     =
+    "scala.concurrent.duration.FiniteDuration,sage.client.BackoffConfig,sage.client.WatchdogConfig,scala.concurrent.duration.FiniteDuration," +
+      "sage.client.DedicatedPoolConfig,sage.client.PubSubConfig,sage.client.CacheConfig,scala.Option,scala.Option,sage.client.Topology," +
+      "sage.client.ReadFrom,Int,scala.Option,scala.collection.immutable.Vector,scala.Option"
+  // the old result type of each field from position 9 onwards, which moved one position to the right
+  val shiftedFields = Seq(
+    9  -> "scala.Option",
+    10 -> "sage.client.Topology",
+    11 -> "sage.client.ReadFrom",
+    12 -> "Int",
+    13 -> "scala.Option",
+    14 -> "scala.collection.immutable.Vector",
+    15 -> "scala.Option"
+  )
+  Seq(
+    ProblemFilters.exclude[DirectMissingMethodProblem](s"sage.client.SageConfig.this($oldParams)Unit"),
+    ProblemFilters.exclude[DirectMissingMethodProblem](s"sage.client.SageConfig.apply($oldParams)sage.client.SageConfig"),
+    ProblemFilters.exclude[DirectMissingMethodProblem](s"sage.client.SageConfig.copy($oldParams)sage.client.SageConfig")
+  ) ++ shiftedFields.flatMap { case (i, tpe) =>
+    Seq("_", "copy$default$", "<init>$default$").map(prefix =>
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](s"sage.client.SageConfig.$prefix$i()$tpe")
+    )
+  }
+}
 
 // Only for container-free cells: integration suites each boot their own container, so running them in
 // parallel would multiply peak load and invite timing races
