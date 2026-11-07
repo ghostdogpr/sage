@@ -14,7 +14,7 @@ val zioVersion        = "2.1.27"
 val catsEffectVersion = "3.7.1"
 val fs2Version        = "3.14.0"
 val oxVersion         = "1.1.0"
-val pekkoVersion      = "1.7.1"
+val pekkoVersion      = "2.0.0"
 
 // These competing clients are development-only baselines for the runtime benchmarks. See benchmarks/README.md.
 val zioRedisVersion   = "1.2.1"
