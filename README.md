@@ -12,5 +12,3 @@ Sage is a Redis and Valkey client for Scala 3. It implements the Redis protocol 
 Sage supports Scala 3.9.x LTS and later and requires JDK 21 or later.
 
 ### Consult the [Documentation](https://ghostdogpr.github.io/sage/) to learn how to use Sage.
-
-### Part of the [ghostdogpr stack](https://ghostdogpr.github.io/).
