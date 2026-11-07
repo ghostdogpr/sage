@@ -9,4 +9,6 @@ Other projects include:
 - [Proteus](https://github.com/ghostdogpr/proteus), a code-first Protobuf and gRPC library for Scala
 - [PureLogic](https://github.com/ghostdogpr/purelogic), a direct-style, pure domain logic library for Scala
 
+See them all on the [ghostdogpr stack](https://ghostdogpr.github.io/) page.
+
 If you find Sage useful, consider [sponsoring me on GitHub](https://github.com/sponsors/ghostdogpr) to support continued development.
