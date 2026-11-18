@@ -20,13 +20,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       - name: Lint code
         run: sbt check
 
@@ -41,13 +39,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       - name: Run unit tests
         run: sbt testUnit
 
@@ -62,13 +58,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       - name: Check binary compatibility
         run: sbt mima
 
@@ -83,13 +77,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       # scaladoc drops -Werror and never fails on warnings, so capture the log and fail on any link/markup warning ourselves
       - name: Build API docs (no Scaladoc warnings)
         run: |
@@ -125,13 +117,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       - name: Restore server images
         id: images
         uses: actions/cache@v5
@@ -170,13 +160,11 @@ jobs:
         uses: coursier/cache-action@v8
       - name: Setup Java
         uses: actions/setup-java@v6
-        timeout-minutes: 5
         with:
           distribution: temurin
           java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
-        timeout-minutes: 5
       - name: Release artifacts
         run: sbt ci-release
         env:
