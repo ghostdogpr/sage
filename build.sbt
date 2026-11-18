@@ -36,6 +36,8 @@ val CeLib = CompatBackendAxis.local("ce", "Ce", "-ce", Set("jvm"))
 // artifacts depend only on Sage modules and the Scala library.
 val DirectLib = CompatBackendAxis.local("direct", "Direct", "-direct", Set("jvm"))
 
+Global / onChangedBuildSource := ReloadOnSourceChanges
+
 inThisBuild(
   List(
     scalaVersion     := scala3Version,
