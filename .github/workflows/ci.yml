@@ -10,76 +10,32 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       - name: Lint code
         run: sbt check
 
   unit:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       - name: Run unit tests
         run: sbt testUnit
 
   mima:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       - name: Check binary compatibility
         run: sbt mima
 
   docs:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       # scaladoc drops -Werror and never fails on warnings, so capture the log and fail on any link/markup warning ourselves
       - name: Build API docs (no Scaladoc warnings)
         run: |
@@ -107,19 +63,8 @@ jobs:
           - backend: Direct
             protocol: resp2
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       - name: Restore server images
         id: images
         uses: actions/cache@v5
@@ -150,19 +95,8 @@ jobs:
     needs: [lint, unit, mima, integration]
     if: github.event_name != 'pull_request'
     steps:
-      - name: Checkout current branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Cache scala dependencies
-        uses: coursier/cache-action@v8
-      - name: Setup Java
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      - name: Setup sbt
-        uses: sbt/setup-sbt@v1
+      - name: Setup
+        uses: ghostdogpr/.github/actions/setup@v1
       - name: Release artifacts
         run: sbt ci-release
         env:
