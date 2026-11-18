@@ -18,17 +18,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
-      # setup-sbt downloads the launcher from GitHub releases, while coursier would query Maven Central, which rate-limits parallel jobs
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
@@ -44,16 +39,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
@@ -69,16 +60,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
@@ -94,16 +81,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
@@ -140,16 +123,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
@@ -189,16 +168,12 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
-        with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
       - name: Setup Java
-        uses: coursier/setup-action@v3
+        uses: actions/setup-java@v6
         timeout-minutes: 5
         with:
-          jvm: temurin:25
+          distribution: temurin
+          java-version: 25
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
         timeout-minutes: 5
