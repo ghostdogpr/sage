@@ -18,16 +18,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       - name: Lint code
         run: sbt check
 
@@ -40,16 +37,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       - name: Run unit tests
         run: sbt testUnit
 
@@ -62,16 +56,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       - name: Check binary compatibility
         run: sbt mima
 
@@ -84,16 +75,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       # scaladoc drops -Werror and never fails on warnings, so capture the log and fail on any link/markup warning ourselves
       - name: Build API docs (no Scaladoc warnings)
         run: |
@@ -127,16 +115,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       - name: Restore server images
         id: images
         uses: actions/cache@v5
@@ -173,16 +158,13 @@ jobs:
           fetch-depth: 0
       - name: Cache scala dependencies
         uses: coursier/cache-action@v8
-      - name: Cache Coursier binary
-        uses: actions/cache@v6
+      - name: Setup Java
+        uses: actions/setup-java@v6
         with:
-          path: /opt/hostedtoolcache/cs
-          key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
-        uses: coursier/setup-action@v3
-        with:
-          jvm: temurin:25
-          apps: sbt
+          distribution: temurin
+          java-version: 25
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
       - name: Release artifacts
         run: sbt ci-release
         env:
