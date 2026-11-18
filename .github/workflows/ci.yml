@@ -23,11 +23,15 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      # setup-sbt downloads the launcher from GitHub releases, while coursier would query Maven Central, which rate-limits parallel jobs
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       - name: Lint code
         run: sbt check
 
@@ -45,11 +49,14 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       - name: Run unit tests
         run: sbt testUnit
 
@@ -67,11 +74,14 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       - name: Check binary compatibility
         run: sbt mima
 
@@ -89,11 +99,14 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       # scaladoc drops -Werror and never fails on warnings, so capture the log and fail on any link/markup warning ourselves
       - name: Build API docs (no Scaladoc warnings)
         run: |
@@ -132,11 +145,14 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       - name: Restore server images
         id: images
         uses: actions/cache@v5
@@ -178,11 +194,14 @@ jobs:
         with:
           path: /opt/hostedtoolcache/cs
           key: coursier-binary-${{ runner.os }}-${{ runner.arch }}-setup-action-v3
-      - name: Setup Scala and Java
+      - name: Setup Java
         uses: coursier/setup-action@v3
+        timeout-minutes: 5
         with:
           jvm: temurin:25
-          apps: sbt
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+        timeout-minutes: 5
       - name: Release artifacts
         run: sbt ci-release
         env:
