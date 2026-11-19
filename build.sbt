@@ -12,7 +12,7 @@ val circeVersion          = "0.14.17" // test-only: verifies ValueCodec.emap wit
 val kyoVersion        = "1.0.0-RC6"
 val zioVersion        = "2.1.27"
 val catsEffectVersion = "3.7.1"
-val fs2Version        = "3.14.0"
+val fs2Version        = "3.16.0"
 val oxVersion         = "1.1.1"
 val pekkoVersion      = "2.0.0"
 
