@@ -12,9 +12,6 @@ import sage.client.{RespProtocol, WatchdogConfig}
 import sage.commands.{Command, Connection, Reply}
 import sage.protocol.Frame
 
-/**
-  * Runs `undo` when `body` throws anything, including an `InterruptedException` from a cancelled wait, then rethrows.
-  */
 private[internal] inline def onThrow[A](inline body: A)(inline undo: Throwable => Unit): A =
   try body
   catch {
@@ -284,7 +281,6 @@ abstract private[internal] class WatchedPipe(factory: MultiplexedConnection.Tran
         super.onFrame(reply)
     }
 
-  // Runs tick every PING interval from go-live until unwatch or close.
   final def watch(): Unit =
     if (watchdog.enabled) {
       val handle = scheduler.every(watchdog.pingInterval)(tick())
@@ -303,7 +299,6 @@ abstract private[internal] class WatchedPipe(factory: MultiplexedConnection.Tran
     super.onClosed()
   }
 
-  // Close when the oldest unanswered write is older than the timeout and graceUntilMillis has passed; otherwise PING when idle.
   final protected def checkLiveness(graceUntilMillis: Long): Unit = {
     val now = scheduler.nowMillis
     oldestWriteMillis match {

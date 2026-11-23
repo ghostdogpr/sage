@@ -60,7 +60,6 @@ extension [K](client: Client[IO, K])(using @unused ev: KeyCodec[K]) {
   ): fs2.Stream[IO, (V, Double)] =
     paged(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
-  // convert pages from the shared Paged helper into individual fs2 Stream elements
   private def paged[S, A](pages: Paged.Pages[S, A]): fs2.Stream[IO, A] =
     CStream.unfold[S, Vector[A]](pages.init)(pages.step).flatMap(items => CStream.init(items)).lower
 

@@ -187,7 +187,6 @@ private[client] object Events {
   private def cachedEmit[A](events: Events, command: Command[?], callback: Try[A] => Unit): (Try[A] => Unit) & Fetching =
     new CachedEmit[A](command, events, callback, deferSpan(events, command))
 
-  // Record the final routed node before the command completes. Ignore callbacks that do not track command events.
   def attributeNode(callback: AnyRef, node: Node): Unit =
     callback match {
       case emit: CommandEmit[?] => emit.at(node)

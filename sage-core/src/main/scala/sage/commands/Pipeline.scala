@@ -19,9 +19,6 @@ type Attempt[A] = Either[SageException, A]
   * command. The internal `Any` values do not appear in the public result.
   */
 final private[sage] class Pipeline[R] private (
-  /**
-    * The composed commands, in send order.
-    */
   val commands: Vector[Command[?]],
   val finish: Vector[Attempt[Any]] => Attempt[R]
 )

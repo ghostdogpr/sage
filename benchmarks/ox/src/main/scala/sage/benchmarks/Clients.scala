@@ -16,9 +16,6 @@ import sage.*
 import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
-/**
-  * Clients included in the Ox benchmark: Sage in direct style and Lettuce using its asynchronous auto-pipelined API.
-  */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {
     case "sage-ox"   => new SageOxBench(host, port)
@@ -164,7 +161,6 @@ final class JedisBench(host: String, port: Int) extends BenchClient {
   private val pool     = new JedisPool(poolCfg, new HostAndPort(host, port), config)
   private val executor = Executors.newVirtualThreadPerTaskExecutor()
 
-  // one lane per group on a virtual thread, each with its own borrowed connection running blocking commands sequentially
   private def lanes(work: Payloads.Workload)(run: (redis.clients.jedis.Jedis, String) => Any): Unit =
     work.lanes
       .map(g => executor.submit[Unit](() => borrow(j => g.foreach(run(j, _)))))

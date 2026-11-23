@@ -63,8 +63,7 @@ class HashesSuite extends BothServersSuite {
       client.hScanNoValues[String]("hash-scan", ScanCursor.start).map(_.items.toSet).is(Set("a", "b", "c"))
   }
 
-  // Hash field expiration exists only on Redis.
-  redisTest("HEXPIRE/HTTL/HPERSIST set, read, and clear per-field TTLs") { client =>
+  clientTest("HEXPIRE/HTTL/HPERSIST set, read, and clear per-field TTLs") { client =>
     for {
       _   <- client.hSet("hfe-ttl", ("a", "1"), ("b", "2"))
       _   <- client.hExpire("hfe-ttl", 100.seconds)("a", "missing").is(Vector(FieldExpiry.Updated, FieldExpiry.NoField))
@@ -78,18 +77,18 @@ class HashesSuite extends BothServersSuite {
     }
   }
 
-  redisTest("a field-TTL command on a missing key reports NoField per field, not a null") { client =>
+  clientTest("a field-TTL command on a missing key reports NoField per field, not a null") { client =>
     client.hExpire("hfe-missing", 100.seconds)("a", "b").is(Vector(FieldExpiry.NoField, FieldExpiry.NoField))
   }
 
-  redisTest("HEXPIREAT pins an absolute deadline that HEXPIRETIME reads back") { client =>
+  clientTest("HEXPIREAT pins an absolute deadline that HEXPIRETIME reads back") { client =>
     val at = Instant.ofEpochSecond(Instant.now().getEpochSecond + 3600)
     client.hSet("hfe-at", ("a", "1")) >>
       client.hExpireAt("hfe-at", at)("a").is(Vector(FieldExpiry.Updated)) >>
       client.hExpireTime("hfe-at")("a").is(Vector(FieldExpiryTime.At(at)))
   }
 
-  redisTest("HPTTL and HPEXPIRETIME read the millisecond-precision TTL and absolute deadline") { client =>
+  clientTest("HPTTL and HPEXPIRETIME read the millisecond-precision TTL and absolute deadline") { client =>
     for {
       now <- client.time
       at   = Instant.ofEpochSecond(now.getEpochSecond + 3600)
@@ -103,19 +102,19 @@ class HashesSuite extends BothServersSuite {
     }
   }
 
-  redisTest("HGETDEL returns field values and removes them") { client =>
+  clientTest("HGETDEL returns field values and removes them") { client =>
     client.hSet("hfe-getdel", ("a", "1"), ("b", "2")) >>
       client.hGetDel[String, String]("hfe-getdel")("a", "missing").is(Vector(Some("1"), None)) >>
       client.hGetAll[String, String]("hfe-getdel").is(Map("b" -> "2"))
   }
 
-  redisTest("HGETEX returns field values and sets their TTL") { client =>
+  clientTest("HGETEX returns field values and sets their TTL") { client =>
     client.hSet("hfe-getex", ("a", "1")) >>
       client.hGetEx[String, String]("hfe-getex", GetExpiry.In(100.seconds))("a").is(Vector(Some("1"))) >>
       client.hTtl("hfe-getex")("a").satisfies(ttl => expiresWithin(ttl(0), 100.seconds))
   }
 
-  redisTest("HSETEX sets fields with a shared TTL and honors FNX/FXX") { client =>
+  clientTest("HSETEX sets fields with a shared TTL and honors FNX/FXX") { client =>
     client.hSetEx("hfe-setex", SetExpiry.In(100.seconds), HSetExCondition.IfNoneExist)(("a", "1"), ("b", "2")).is(true) >>
       client.hTtl("hfe-setex")("a").satisfies(ttl => expiresWithin(ttl(0), 100.seconds)) >>
       client.hSetEx("hfe-setex", condition = HSetExCondition.IfNoneExist)(("a", "9")).is(false) >>

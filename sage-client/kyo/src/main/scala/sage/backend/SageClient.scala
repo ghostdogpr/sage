@@ -19,7 +19,6 @@ import sage.commands.*
   */
 type SageClient = Client[[A] =>> A < (Abort[SageException] & Async), String]
 
-// keep SageException in the typed failure channel and convert other throwables to Panic.
 private val toSageException: Throwable => Nothing < Abort[SageException] = {
   case e: SageException => Abort.fail(e)
   case e                => Abort.panic(e)

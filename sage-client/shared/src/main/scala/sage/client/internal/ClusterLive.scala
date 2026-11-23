@@ -101,8 +101,6 @@ final private[client] class ClusterLive(
   // sharded subscription connection for its slot's node, and the subscription follows ownership changes.
   protected def pubsub: SubscriptionConnection.PubSub = subscriptions
 
-  // --- routing -------------------------------------------------------------------------------------------------------------------------
-
   final private case class Request[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease, mode: DispatchMode)
 
   private def dispatch[A](req: Request[A], redirectsLeft: Int): Unit =
@@ -262,7 +260,6 @@ final private[client] class ClusterLive(
     }
   }
 
-  // after every part replies, completes with the first failure by part index or with the decoded combination of all frames
   private def gather[A](command: Command[A], parts: Int, complete: Try[A] => Unit)(combine: Vector[Frame] => Frame) =
     new TxSupport.IndexedCollector[Try[Frame]](
       parts,
@@ -421,8 +418,6 @@ final private[client] class ClusterLive(
   private def malformedKeys(name: String): InvalidArgument =
     InvalidArgument(s"$name: declared key positions fall outside its arguments")
 
-  // --- pipelines (split per node, batch each, merge in submission order) ----------------------------------------------------------------
-
   protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
     // A pipeline batches commands per node, but all-masters commands must run on every master. Reject them before submission because running
     // one on a single node could break a later key-routed EVALSHA or FCALL, or return only part of the keyspace.
@@ -538,8 +533,6 @@ final private[client] class ClusterLive(
         indices.foreach(positions(_).reroute())
   }
 
-  // --- transactions (one leased connection, optionally pinned to a key's slot) ---------------------------------------------------------
-
   protected def openTransaction: CIO[LiveTransactionScope] =
     if (closed) CIO.fail(NotConnected()) else CIO.value(new ClusterTxScope)
 
@@ -585,7 +578,7 @@ final private[client] class ClusterLive(
         )
       else super.sendMultiExec(p)
 
-    // validate every pipeline slot before sending MULTI. Reject a cross-slot transaction before submitting any commands.
+    // Leasing the transaction's connection can block, so withConn runs its work on the scheduler instead of the caller's thread.
     protected def withConn[A](target: Target, complete: Try[A] => Unit)(use: DedicatedConnection => Unit): Unit =
       scheduler.offload(onConn(target, complete)(use))
 
@@ -700,8 +693,6 @@ final private[client] class ClusterLive(
     if (nc != null) nc.flushCache()
   }
 
-  // --- topology refresh (single-flight, throttled) -------------------------------------------------------------------------------------
-
   protected def rediscover(): Unit =
     querySlots(refreshCandidates()) match {
       case Some(ranges) => adopt(ranges)
@@ -730,7 +721,6 @@ final private[client] class ClusterLive(
     }
   }
 
-  // Prune bundles for masters that are no longer listed. This stops reconnect loops for nodes that have left.
   private def adopt(ranges: Vector[SlotRange]): Unit = {
     val oldTopology  = topologyRef.get()
     val previous     = if (events.emitsEvents) oldTopology.masters.toSet else Set.empty[Node]
@@ -743,9 +733,9 @@ final private[client] class ClusterLive(
       val current = newTopology.masters
       if (current.toSet != previous) events.emit(SageEvent.TopologyChanged(current))
     }
+    // Each pool closes its connections to nodes that no longer hold its role, which stops their reconnect loops.
     val masters      = ranges.map(_.master).toSet
     masterPool.retain(masters.contains)
-    // prune replica connections and their cursors for replicas the new topology no longer lists, mirroring the master prune
     val replicaNodes = ranges.iterator.flatMap(_.replicas).toSet
     replicaPool.retain(replicaNodes.contains)
     // replicas also receive PUBLISH, so a master demoted in place keeps the classic subscriptions

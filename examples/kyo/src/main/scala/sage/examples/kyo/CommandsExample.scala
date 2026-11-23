@@ -19,21 +19,17 @@ object CommandsExample {
 
   def run(client: SageClient): Unit < (Abort[Throwable] & Async) =
     for {
-      // strings, numbers, and a conditional write with a TTL
       _        <- client.set("greeting", "hello")
       greeting <- client.get[String]("greeting")
       _        <- client.incrBy("counter", 10)
       _        <- client.set("session", "token", expiry = SetExpiry.In(oneMinute), condition = SetCondition.IfNotExists)
-      // hashes
       _        <- client.hSet("user:1", ("name", "Ada"), ("age", "36"))
       profile  <- client.hGetAll[String, String]("user:1")
       // lists: push data before the blocking pop so this example completes immediately
       _        <- client.rPush("queue", "a", "b", "c")
       head     <- client.blPop[String]("queue")(BlockTimeout.Forever)
-      // sets and sorted sets
       _        <- client.sAdd("tags", "scala", "redis")
       _        <- client.zAdd("scores")(("ada", 36.0))
-      // store and retrieve a custom type using its ValueCodec
       _        <- client.set("user:ada", User("Ada", 36))
       ada      <- client.get[User]("user:ada")
       // a raw Lua eval yields a Frame; decode it with the strict helpers

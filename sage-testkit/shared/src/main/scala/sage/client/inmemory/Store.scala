@@ -160,7 +160,6 @@ final private[sage] class Store {
 
   def lookup(key: Key, now: Long): Option[Entry] = data.get(key).flatMap(current(key, _, now))
 
-  // removes the key when it has expired
   private def current(key: Key, entry: Entry, now: Long): Option[Entry] =
     if (!entry.expiredAt(now)) Some(entry)
     else {
@@ -196,9 +195,6 @@ final private[sage] class Store {
       true
     }
 
-  /**
-    * Every key that has not expired, after removing the expired ones.
-    */
   def live(now: Long): Vector[(Key, Entry)] = data.toVector.flatMap((key, entry) => current(key, entry, now).map(key -> _))
 
   def clear(): Unit = {
@@ -212,7 +208,6 @@ final private[sage] class Store {
     versions.getOrElse(key, 0L)
   }
 
-  // increases on every change to any key
   def changeCount: Long = changes
 
   private def touch(key: Key): Unit = {

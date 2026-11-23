@@ -272,7 +272,6 @@ final private[sage] class RespParser {
     else if (buf(start + length) != '\r' || buf(start + length + 1) != '\n') fail("missing CRLF after bulk payload")
     else start + length + 2
 
-  // index of the next CRLF's '\r', or -1 if the input ends first
   private def findCrlf(from: Int): Int = {
     var i     = from
     val limit = writePos - 1

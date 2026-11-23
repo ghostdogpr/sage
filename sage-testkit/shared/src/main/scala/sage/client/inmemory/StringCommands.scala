@@ -9,7 +9,6 @@ import sage.protocol.Frame
   */
 private[inmemory] object Expiry {
 
-  // converts the `EX`, `PX`, `EXAT` and `PXAT` options to an absolute expiry time, rejecting an amount that is not positive
   private def absolute(call: Call, option: String, bytes: Bytes): Ttl = {
     val amount = Numbers.parseLong(bytes).getOrElse(throw new Reject(Errors.notInteger))
     if (amount <= 0) throw new Reject(Errors.invalidExpire(call.name))

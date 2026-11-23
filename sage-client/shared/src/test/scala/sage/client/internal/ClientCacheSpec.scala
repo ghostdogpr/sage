@@ -106,7 +106,7 @@ class ClientCacheSpec extends munit.FunSuite {
     val ticket     = fetching(cache.acquire(cmd, Vector(key("foo")), 0L, w1))
     cache.invalidate(key("foo"))                                     // arrives before the fetch completes
     cache.store(ticket, frame("bar"), 0L, 10000L)
-    assertEquals(get1(), Some(Success(frame("bar"))))                // waiter still gets the value
+    assertEquals(get1(), Some(Success(frame("bar"))))
     assertFetch(cache.acquire(cmd, Vector(key("foo")), 0L, _ => ())) // but it was not stored
   }
 
@@ -137,7 +137,7 @@ class ClientCacheSpec extends munit.FunSuite {
     val big   = frame("x" * 50)
     seed(cache, key("GET a"), key("a"), big, 0L, 10000L)
     seed(cache, key("GET b"), key("b"), big, 0L, 10000L)
-    assertFetch(cache.acquire(key("GET a"), Vector(key("a")), 0L, _ => ())) // evicted
+    assertFetch(cache.acquire(key("GET a"), Vector(key("a")), 0L, _ => ()))
     assertEquals(hitFrame(cache.acquire(key("GET b"), Vector(key("b")), 0L, _ => ())), big)
   }
 }

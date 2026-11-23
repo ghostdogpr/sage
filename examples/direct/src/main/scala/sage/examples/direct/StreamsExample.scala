@@ -17,7 +17,6 @@ object StreamsExample {
 
     val entries = client.xRange[String, String]("stream:orders")
 
-    // a Consumer Group reading from the start of the stream
     client.xGroupCreate("stream:orders", "workers", id = GroupStartId.At(StreamId.Zero))
     val batches = client.xReadGroup[String, String]("workers", "w1")(("stream:orders", GroupReadId.New))()
     val ids     = batches.flatMap(_._2).map(_.id)

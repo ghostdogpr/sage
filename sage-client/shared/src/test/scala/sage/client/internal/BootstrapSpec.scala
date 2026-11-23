@@ -55,7 +55,7 @@ class BootstrapSpec extends munit.FunSuite {
     assert(!closed(), "connection must stay open when only library identification fails")
   }
 
-  test("a step returns a server error reply without closing, so a server that denies tracking still connects (ADR-0045)") {
+  test("a step returns a server error reply without closing, so a server that denies tracking still connects") {
     val (conn, closed) = connection((_, _) => Seq(Frame.SimpleError("ERR This instance has cluster support disabled")))
     conn.start()
     val result         = conn.step(Connection.clientTrackingOnOptin, 1000)

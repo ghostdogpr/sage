@@ -153,7 +153,6 @@ private[inmemory] object ListCommands {
     }
   }
 
-  // BLPOP and BRPOP pop one element from the first non-empty list and reply with that list's key and the element
   private def blockingPop(call: Call, left: Boolean): Frame =
     firstPop(call.args.indices.init.iterator.map(call.key)) { key =>
       call.typed[Lst](key).map(list => Frame.Array(bulk(key.bytes) +: take(call, key, list.items, 1, left).map(bulk)))

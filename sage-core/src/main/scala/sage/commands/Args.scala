@@ -3,7 +3,6 @@ package sage.commands
 import sage.Bytes
 import sage.codec.{Doubles, KeyCodec, Primitives, ValueCodec}
 
-// argument keywords and option encoders shared by the command families
 private[commands] object Args {
 
   val Match: Bytes      = Bytes.utf8("MATCH")
@@ -26,7 +25,6 @@ private[commands] object Args {
 
   def double(value: Double): Bytes = Bytes.utf8(Doubles.format(value))
 
-  // the keyword of each case of a fieldless enum is its upper-cased name
   def keywords[E <: scala.reflect.Enum](values: Array[E]): E => Bytes = {
     val words = values.toVector.map(value => Bytes.utf8(value.toString.toUpperCase(java.util.Locale.ROOT)))
     value => words(value.ordinal)

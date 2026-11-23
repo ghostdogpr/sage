@@ -51,7 +51,7 @@ final private[client] class SocketTransport private (
       socket.connect(new InetSocketAddress(host, port), connectTimeoutMillis) // resolves the hostname here, fresh on every attempt
       socket.setSoTimeout(connectTimeoutMillis)                               // bound a TLS handshake's reads like the connect
       ioSocket = upgrade(socket)
-      socket.setSoTimeout(0)                                                  // steady state: blocking reads with no timeout
+      socket.setSoTimeout(0)
     }(_ => terminate())
     val launched = locked {
       if (closed.get()) false

@@ -67,8 +67,6 @@ class EventsSpec extends munit.FunSuite {
     (connection, transports)
   }
 
-  // --- the dispatcher --------------------------------------------------------------------------------------------------------------------
-
   test("no listeners yields the disabled, no-op sink") {
     assert(!Events(Vector.empty).enabled)
     assert(Events(Vector.empty) eq Events.disabled)
@@ -209,8 +207,6 @@ class EventsSpec extends munit.FunSuite {
     } finally bus.close()
   }
 
-  // --- command completion ----------------------------------------------------------------------------------------------------------------
-
   test("a submit interrupted on the caller's thread still completes the tracked command") {
     val rec         = new Recording
     var settled     = Option.empty[scala.util.Try[String]]
@@ -261,13 +257,11 @@ class EventsSpec extends munit.FunSuite {
     assert(tracer.log.contains(s"routed:${node.host}:${node.port}"), s"expected routedTo the selected node, got ${tracer.log.toVector}")
   }
 
-  // --- tracing ---------------------------------------------------------------------------------------------------------------------------
-
   test("a tracer-only bus is enabled but emits no events, and drives the span lifecycle through trackCommand") {
-    val tracer = new RecordingTracer
-    val bus    = Events(Vector.empty, Some(tracer))
+    val tracer  = new RecordingTracer
+    val bus     = Events(Vector.empty, Some(tracer))
     assert(bus.enabled)
-    assert(!bus.emitsEvents) // no listeners, so no CommandCompleted events are produced
+    assert(!bus.emitsEvents)
     val tracked = Events.trackCommand[String](bus, Connection.ping(None), _ => ())
     Events.attributeNode(tracked, Node("redis", 7000))
     tracked(Success("PONG"))
@@ -327,7 +321,7 @@ class EventsSpec extends munit.FunSuite {
     assertEquals(rec.events, Vector.empty)
 
     val cb: scala.util.Try[String] => Unit = _ => ()
-    assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb) // the disabled path returns the original callback
+    assert(Events.trackSpan[String](Events.disabled, Connection.ping(None), cb) eq cb)
   }
 
   test("abandonSpan settles the span without invoking the callback (the fail-fast path)") {
@@ -339,8 +333,6 @@ class EventsSpec extends munit.FunSuite {
     assert(!called, "abandonSpan must not invoke the wrapped callback")
     assert(tracer.log.last.startsWith("settled:Failed"))
   }
-
-  // --- connection lifecycle --------------------------------------------------------------------------------------------------------------
 
   test("emits Connected on connect and Disconnected on unexpected loss, tagged with the node") {
     val node            = Some(Node("shard-a", 6379))
@@ -441,8 +433,6 @@ class EventsSpec extends munit.FunSuite {
       rec.events
     )
   }
-
-  // --- cache -----------------------------------------------------------------------------------------------------------------------------
 
   test("a cached read misses then hits") {
     var writes          = 0

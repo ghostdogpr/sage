@@ -173,8 +173,6 @@ private[sage] object Streams {
   private val IdmpDuration = Bytes.utf8("IDMP-DURATION")
   private val IdmpMaxSize  = Bytes.utf8("IDMP-MAXSIZE")
 
-  // --- writes -------------------------------------------------------------
-
   def xAdd[K, F, V](key: K, id: XAddId = XAddId.Auto, trim: Option[Trimming] = None, policy: StreamDeletionPolicy = StreamDeletionPolicy.KeepRef)(
     first: (F, V),
     rest: (F, V)*
@@ -220,8 +218,6 @@ private[sage] object Streams {
       Decode.ok
     )
 
-  // --- range reads --------------------------------------------------------
-
   def xRange[K, F, V](key: K, start: StreamRangeId = StreamRangeId.Min, end: StreamRangeId = StreamRangeId.Max, count: Option[Long] = None)(
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F],
@@ -248,8 +244,6 @@ private[sage] object Streams {
       Decode.vector(streamEntry[F, V])
     )
 
-  // --- multi-stream reads -------------------------------------------------
-
   def xRead[K, F, V](first: (K, ReadId), rest: (K, ReadId)*)(count: Option[Long] = None, block: Option[BlockTimeout] = None)(
     using keyCodec: KeyCodec[K],
     fieldCodec: KeyCodec[F],
@@ -270,8 +264,6 @@ private[sage] object Streams {
     val (args, keys) = streamsArgs(first +: rest.toVector, leading, groupReadWire)
     Command("XREADGROUP", keys, args, readReply[K, F, V], execution = blockExecution(block))
   }
-
-  // --- consumer groups ----------------------------------------------------
 
   def xAck[K](key: K, group: String)(first: StreamId, rest: StreamId*)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command("XACK", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(group)) ++ (first +: rest.toVector).map(_.wire), Decode.long)
@@ -305,8 +297,6 @@ private[sage] object Streams {
 
   def xGroupDelConsumer[K](key: K, group: String, consumer: String)(using keyCodec: KeyCodec[K]): Command[Long] =
     Command("XGROUP DELCONSUMER", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(group), Bytes.utf8(consumer)), Decode.long)
-
-  // --- claiming -----------------------------------------------------------
 
   def xClaim[K, F, V](key: K, group: String, consumer: String, minIdle: FiniteDuration)(first: StreamId, rest: StreamId*)(
     idle: Option[ClaimIdle] = None,
@@ -358,8 +348,6 @@ private[sage] object Streams {
   ): Command[XAutoClaimJustIdResult] =
     Command("XAUTOCLAIM", Command.FirstKey, autoClaimArgs(key, group, consumer, minIdle, start, count) :+ JustId, autoClaimJustIdReply)
 
-  // --- pending ------------------------------------------------------------
-
   def xPending[K](key: K, group: String)(using keyCodec: KeyCodec[K]): Command[PendingSummary] =
     Command.readUncacheable("XPENDING", Command.FirstKey, Vector(keyCodec.encode(key), Bytes.utf8(group)), pendingSummaryReply)
 
@@ -408,8 +396,6 @@ private[sage] object Streams {
         Args.optLong(RetryCount, retryCount) ++ Args.flag(force, Force),
       Decode.long
     )
-
-  // --- arg builders -------------------------------------------------------
 
   private def addArgs[K, F, V](key: K, noMkStream: Boolean, id: XAddId, trim: Option[Trimming], policy: StreamDeletionPolicy, fields: Vector[(F, V)])(
     using keyCodec: KeyCodec[K],
@@ -483,8 +469,6 @@ private[sage] object Streams {
   private def blockArg(block: Option[BlockTimeout]): Vector[Bytes]   = Args.opt(Block, block)(BlockTimeout.millisWire)
   private def blockExecution(block: Option[BlockTimeout]): Execution = if (block.isDefined) Execution.Blocking else Execution.Ordinary
 
-  // --- token wire forms ---------------------------------------------------
-
   private def xAddIdWire(id: XAddId): Bytes =
     id match {
       case XAddId.Auto          => Star
@@ -518,8 +502,6 @@ private[sage] object Streams {
       case GroupStartId.Last    => Dollar
       case GroupStartId.At(sid) => sid.wire
     }
-
-  // --- decoders -----------------------------------------------------------
 
   private[commands] val streamId: Frame => Either[DecodeError, StreamId] = Decode.shape("stream id") {
     case Frame.BulkString(raw)   => parseId(raw.asUtf8String)
@@ -605,7 +587,6 @@ private[sage] object Streams {
     Decode.array4(Decode.long, optionalStreamId, optionalStreamId, consumers, "xpending summary")(PendingSummary(_, _, _, _))
   }
 
-  // XPENDING extended row: [id, consumer, idle-ms, delivery-count]
   private val pendingEntryElement: Frame => Either[DecodeError, PendingEntry] =
     Decode.array4(streamId, Decode.utf8String, Decode.millisDuration, Decode.long, "xpending entry [id, consumer, idle, count]")(
       PendingEntry(_, _, _, _)

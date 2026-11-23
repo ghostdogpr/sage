@@ -8,9 +8,6 @@ private[sage] enum RedirectKind {
   case Moved, Ask
 }
 
-/**
-  * A parsed `MOVED`/`ASK` reply.
-  */
 final private[sage] case class Redirect(kind: RedirectKind, private val announced: Node) {
 
   // an empty announced host means the node that sent the redirect (e.g. `MOVED 3999 :6381`)

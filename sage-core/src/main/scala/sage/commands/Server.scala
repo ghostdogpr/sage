@@ -298,8 +298,6 @@ private[sage] object Server {
   def clusterCountKeysInSlot(slot: Int): Command[Long] =
     Command("CLUSTER", Command.NoKeys, Vector(ClCountKeys, Args.long(slot)), Decode.long)
 
-  // --- decoders --------------------------------------------------------------------------------------------------------------------------
-
   private def filterByArgs(filterBy: Option[CommandFilterBy]): Vector[Bytes] =
     filterBy match {
       case None                                   => Vector.empty

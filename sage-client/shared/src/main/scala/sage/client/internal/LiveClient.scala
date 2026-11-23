@@ -68,7 +68,6 @@ private[internal] trait LiveClient(events: Events) extends Client[CIO, String] w
 
   protected def shutdown(): Unit
 
-  // a failed start, including an interrupted one, closes everything the client opened
   final private[client] def start(): Unit = onThrow(establish())(_ => shutdown())
 
   final def close: CIO[Unit] = CIO.blocking(shutdown())
@@ -135,7 +134,6 @@ abstract private[internal] class RoutedClient(
 
   protected def route[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease, mode: DispatchMode): Unit
 
-  // the replicas a lock write on this master waits for
   protected def replicaCount(master: Node): Int
 
   // the first topology discovery, from the seeds
@@ -175,11 +173,9 @@ abstract private[internal] class RoutedClient(
   final protected def readMode(command: Command[?]): DispatchMode =
     if (config.readFrom != ReadFrom.Master && ReadRouting.replicaEligible(command)) ReplicaRead else MasterOnly
 
-  // a pipeline goes to a replica only when every command is eligible
   final protected def pipelineMode(commands: Vector[Command[?]]): DispatchMode =
     if (config.readFrom != ReadFrom.Master && commands.forall(ReadRouting.replicaEligible)) ReplicaRead else MasterOnly
 
-  // Sends one attempt to node; onReply receives this attempt's result.
   final protected def submitOn[A](
     nc: MultiplexedConnection,
     node: Node,
@@ -191,7 +187,6 @@ abstract private[internal] class RoutedClient(
   ): Unit =
     mode match {
       case Cached(ttlMillis, trace) if !asking               => nc.cachedSubmit[A](command, ttlMillis, onReply, trace)
-      // an ASK attempt bypasses the cache
       case Cached(_, trace)                                  => nc.submit[A](command, trace.fetching(command, onReply), asking, lease)
       case Confirmed(deadlineMillis, replicaAcknowledgement) =>
         val replication =

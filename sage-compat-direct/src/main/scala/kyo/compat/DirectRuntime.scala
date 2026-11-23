@@ -7,7 +7,6 @@ import scala.concurrent.duration.FiniteDuration
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
-// The thread helpers behind the direct binding. The doc comment of `CIO` describes the execution model.
 private[compat] object DirectRuntime {
 
   // Creates every thread the binding starts for a computation. The factory is safe to share, and its threads inherit `CLocal` values.
@@ -122,7 +121,6 @@ private[compat] object DirectRuntime {
       body()
     } { fiber =>
       if (inherited eq null) {
-        // wake the loop once the chain has finished
         fiber.result.whenComplete((_, _) => inbox.put(() => ())): Unit
         while (!fiber.result.isDone) inbox.take().run()
       }

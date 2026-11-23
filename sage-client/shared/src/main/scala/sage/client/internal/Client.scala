@@ -1602,8 +1602,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     force: Boolean = false
   ): F[Long] = run(Streams.xNack(key, group, mode)(first, rest*)(retryCount, force))
 
-  // --- scripting -----------------------------------------------------------------------------------------------------------------------
-
   /**
     * Evaluates the Lua `script`, returning its reply as a raw [[sage.protocol.Frame]] for the caller to decode.
     */
@@ -1693,8 +1691,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     */
   final def scriptShow(sha: String): F[String] = run(Scripting.scriptShow(sha))
 
-  // --- functions -----------------------------------------------------------------------------------------------------------------------
-
   /**
     * Calls the named Function, returning its reply as a raw [[sage.protocol.Frame]] for the caller to decode (`FCALL`).
     */
@@ -1768,8 +1764,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     * Returns the running-script and per-engine statistics; see [[sage.commands.FunctionStats]].
     */
   final def functionStats: F[FunctionStats] = run(Functions.functionStats)
-
-  // --- server admin --------------------------------------------------------------------------------------------------------------------
 
   /**
     * Returns the values of the given configuration parameters (glob patterns allowed).
@@ -1934,8 +1928,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     */
   final def clusterCountKeysInSlot(slot: Int): F[Long] = run(Server.clusterCountKeysInSlot(slot))
 
-  // --- access control ------------------------------------------------------------------------------------------------------------------
-
   /**
     * Returns the username of the current connection.
     */
@@ -1966,8 +1958,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     */
   final def aclLog(count: Option[Long] = None): F[Vector[AclLogEntry]] = run(Acl.aclLog(count))
 
-  // --- connection ----------------------------------------------------------------------------------------------------------------------
-
   /**
     * Returns `message` unchanged.
     */
@@ -1997,8 +1987,6 @@ trait CommandRunner[F[_], K](using KeyCodec[K]) {
     * Returns the client ID this connection's tracking invalidations are redirected to, or 0 if none.
     */
   final def clientGetRedir: F[Long] = run(Connection.clientGetRedir)
-
-  // --- arrays --------------------------------------------------------------------------------------------------------------------------
 
   /**
     * Writes the given values into the Array at `key` from `index` onward, returning the new used count.
@@ -2159,7 +2147,6 @@ private[sage] trait ScanTarget {
   def run[A](command: Command[A]): CIO[A]
 }
 
-// tracks a cluster-wide SCAN while each target is scanned to its node-local zero cursor in turn.
 private[sage] enum ScanStep {
   case Begin
   case Visit(cursor: ScanCursor, target: ScanTarget, rest: Vector[ScanTarget])
@@ -2242,7 +2229,8 @@ trait Client[F[_], K] extends CommandRunner[F, K] {
 
   private[sage] def lockWith[LK, A](executor: LockExecutor[LK], key: LK, waitTimeout: FiniteDuration)(body: => F[A]): F[A]
 
-  // implementations validate the request, then execute the rate-limit script with EVALSHA and reload it after NOSCRIPT
+  // Implementations validate the request. LiveClient then runs the rate-limit script with EVALSHA and sends the script body once with EVAL
+  // after NOSCRIPT, and InMemoryClient computes the token bucket in memory.
   private[sage] def rateLimitAcquire[RK](executor: RateLimitExecutor[RK], subject: RK, cost: Long, peek: Boolean): F[Decision]
 
   /**
@@ -2395,7 +2383,6 @@ object Client {
         }
     }
 
-  // connect reports every ordinary start failure as a SageException
   private def start(build: => LiveClient): CIO[Client[CIO, String]] =
     CIO.blocking {
       val live = build
@@ -2529,12 +2516,10 @@ object Client {
     }
   }
 
-  // Convert a raw subscription to the shared effect-based interface used by each backend stream. build returns None to end the stream.
   private def messages[M](raw: SubscriptionConnection.RawSubscription)(
     build: SubscriptionConnection.Delivery => Option[M]
   ): Subscription[CIO, M] =
     new Subscription[CIO, M] {
-      // register an asynchronous callback that the reader thread completes when the next delivery arrives
       def next: CIO[Option[M]] = {
         // remove the callback if this request is interrupted; leaving it registered would make the next request fail the single-consumer check
         val registered = new AtomicReference[Option[SubscriptionConnection.Delivery] => Unit]()
@@ -2557,7 +2542,6 @@ object Client {
       def close: CIO[Unit]     = CIO.blocking(raw.close())
     }
 
-  // a channel/shard delivery is a Message
   private[internal] def channelMessages[V](raw: SubscriptionConnection.RawSubscription)(using ValueCodec[V]): Subscription[CIO, Message[V]] =
     messages(raw) {
       case Message(ch, payload) => Some(Message(ch, decodeOrThrow[V](payload)))

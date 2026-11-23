@@ -60,8 +60,6 @@ final private[client] class MasterReplicaLive(
     SubscriptionConnection.OnLoss.Reconnect(() => refreshThrottle(force = true), events, () => subscribedOn.node)
   )
 
-  // --- discovery -----------------------------------------------------------------------------------------------------------------------
-
   // When several endpoints are supplied, keep those addresses and use discovery only to determine their roles. With one seed, use the
   // addresses returned by ROLE.
   private val pinnedToSeeds = seeds.sizeIs > 1
@@ -72,7 +70,6 @@ final private[client] class MasterReplicaLive(
     if (pinnedToSeeds) resolvePinned()
     else resolveDiscovered(discoveredCandidates)
 
-  // request ROLE from every supplied endpoint. Omit endpoints that cannot be reached, but report their connection failures through events.
   private def resolvePinned(): Either[Throwable, MasterReplicaLive.ResolvedTopology] = {
     val probed = seeds.map(seed => seed -> probeRole(seed))
     val roles  = probed.collect { case (node, Success(role)) => node -> role }
@@ -84,7 +81,6 @@ final private[client] class MasterReplicaLive(
     }
   }
 
-  // contact candidates until one answers ROLE, then use its advertised master and replica addresses
   @tailrec private def resolveDiscovered(
     candidates: Vector[Node],
     lastError: Throwable = NotConnected()
@@ -159,9 +155,8 @@ final private[client] class MasterReplicaLive(
     subscribedOn.retain(node => node == topology.master || topology.replicas.contains(node))
   }
 
-  // --- routing -------------------------------------------------------------------------------------------------------------------------
-
-  // Submit to the master and add its node to the result. Start role discovery if the server is no longer the master.
+  // Send a replica read to the candidates that the read policy orders, and every other command to the master. A command on the master records
+  // the master's node in its events, and starts role discovery when the master is lost or is no longer the master.
   protected def route[A](command: Command[A], complete: Try[A] => Unit, lease: DedicatedPool.Lease, mode: DispatchMode): Unit =
     if (closed) complete(Failure(NotConnected()))
     else if (mode == DispatchMode.ReplicaRead) {
@@ -236,8 +231,6 @@ final private[client] class MasterReplicaLive(
     case fault         => fault.selfClearing
   }
 
-  // --- pipelines -----------------------------------------------------------------------------------------------------------------------
-
   protected def submitPipeline[R](p: Pipeline[R]): CIO[Vector[Either[SageException, Any]]] =
     CIO.async { complete =>
       val spans              = Events.startSpans(events, p.commands)
@@ -274,8 +267,6 @@ final private[client] class MasterReplicaLive(
         masterPool.withClient(master)(failUnsent())(nc => if (!nc.submitAll(p.commands, batch.callbacks(Some(master)))) failUnsent())
     }
 
-  // --- transactions (always on the master) ---------------------------------------------------------------------------------------------
-
   protected def openTransaction: CIO[LiveTransactionScope] =
     CIO.blocking {
       try {
@@ -291,8 +282,6 @@ final private[client] class MasterReplicaLive(
           throw ConnectionLost(mayHaveExecuted = false)
       }
     }
-
-  // --- pub/sub (on the master) ---------------------------------------------------------------------------------------------------------
 
   protected def pubsub: SubscriptionConnection.PubSub = subscriptions
 }

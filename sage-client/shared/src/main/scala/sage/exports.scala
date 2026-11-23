@@ -134,7 +134,5 @@ export sage.commands.{
 }
 export sage.commands.{as, asArray, asArrayOf, asLong, asString}
 export sage.commands.{Attempt, BroadcastReduce, Command, Commands, Execution}
-// raw-Frame escape hatch for eval/fcall replies
 export sage.protocol.Frame
-// built-in token-bucket rate limiter
 export sage.ratelimit.{Decision, RateLimit, RateLimiter}

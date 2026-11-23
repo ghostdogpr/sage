@@ -10,7 +10,7 @@ class CommandSpec extends munit.FunSuite {
   test("cacheable marks deterministic key-state reads, not writes, time-varying, or non-deterministic reads") {
     assert(Strings.get[String, String]("foo").cacheable)
     assert(Hashes.hGet[String, String, String]("h", "f").cacheable)
-    assert(!Strings.set("foo", "bar").cacheable)                                                                 // a write is never cacheable
+    assert(!Strings.set("foo", "bar").cacheable)
     assert(!Keys.ttl("foo").cacheable && Keys.ttl("foo").isReadOnly)                                             // read-only but time-varying
     assert(!Sets.sRandMember[String, String]("s").cacheable && Sets.sRandMember[String, String]("s").isReadOnly) // non-deterministic
   }
@@ -24,7 +24,7 @@ class CommandSpec extends munit.FunSuite {
       SortedSets.zScan[String, String]("z", ScanCursor.start)
     )
     scans.foreach(c => assert(c.cursorBound && c.isReadOnly && !c.cacheable, s"${c.name} should be a cursor-bound, non-cacheable read"))
-    assert(!Strings.get[String, String]("foo").cursorBound) // an ordinary read is not cursor-bound
+    assert(!Strings.get[String, String]("foo").cursorBound)
   }
 
   test("SORT_RO is cacheable only in its bare form; BY/GET dereference untracked keys") {

@@ -15,13 +15,7 @@ trait BenchClient extends AutoCloseable {
     */
   def setAll(work: Payloads.Workload, value: String): Unit
 
-  /**
-    * One MGET of all `Payloads.Keys`.
-    */
   def mget(): Unit
 
-  /**
-    * One HGETALL of `Payloads.HashKey`.
-    */
   def hgetall(): Unit
 }

@@ -201,7 +201,6 @@ object CIO {
     * Runs `a` and `b` in parallel. Returns the value or raises the error of the first fiber to complete, canceling the other. A canceled
     * fiber is never selected: if one side is canceled, the result of the other side is awaited.
     */
-  // `IO.race` returns `Either[A, B]`; `.merge` narrows since both legs share type A.
   inline def race[A](
     inline a: CIO[A],
     inline b: CIO[A]
@@ -295,7 +294,6 @@ object CIO {
   /**
     * Runs two computations in parallel and returns their results as a tuple.
     */
-  // Arity 2 uses `IO.both`; arities 3 to 7 use `parTupled` from `cats.syntax.parallel.*`.
   inline def zip[A1, A2](
     inline a1: CIO[A1],
     inline a2: CIO[A2]

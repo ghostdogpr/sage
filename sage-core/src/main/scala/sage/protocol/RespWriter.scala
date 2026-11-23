@@ -3,9 +3,6 @@ package sage.protocol
 import sage.Bytes
 import sage.codec.Primitives.{digitCount, writeDigits}
 
-/**
-  * Encodes commands as RESP bytes.
-  */
 private[sage] object RespWriter {
 
   def writeCommand(name: String, args: Vector[Bytes]): Bytes =

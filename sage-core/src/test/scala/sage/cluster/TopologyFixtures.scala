@@ -3,9 +3,6 @@ package sage.cluster
 import sage.Bytes
 import sage.commands.Command
 
-/**
-  * The synthetic commands and shards the routing specs share.
-  */
 object TopologyFixtures {
 
   def keyed(keys: String*): Command[Long] =

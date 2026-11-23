@@ -8,9 +8,11 @@ import kyo.compat.*
 
 import sage.Bytes
 import sage.SageException.InvalidArgument
+import sage.client.internal.{Paged, ScanTarget}
 import sage.cluster.Slot
-import sage.commands.Commands
+import sage.commands.{Commands, FlushMode, Keys, ScanCursor}
 import sage.integration.{Eventually, Images}
+import sage.protocol.Frames
 
 /**
   * Drives the keyless broadcast routing against a real multi-master cluster: three masters, no replicas, in one container. A node answers
@@ -75,6 +77,47 @@ abstract class ClusterMultiMasterSuite(image: String, serverBinary: String)
     inSequence(ports)(onNode(_)(_.run(admin("CONFIG", "RESETSTAT")))) >>
       client.memoryPurge >>
       inSequence(ports)(onNode(_)(_.info("commandstats")).map(commandCalls(_, "memory|purge")).is(1L))
+  }
+
+  clusterTest("scanAll sweeps every slot-owning master through node-pinned scan targets") { (_, client) =>
+    val keys                                          = (1 to 50).map(i => s"cscan:$i").toSet
+    def scanned(target: ScanTarget): CIO[Set[String]] =
+      drain(Paged.Pages(Option(ScanCursor.start), Paged.byCursor(cursor => target.run(Keys.scan[String](cursor, Some("cscan:*"), Some(10L))))))
+
+    CIO.foreachDiscard(keys)(key => client.set(key, "v")) >>
+      slotOwner.flatMap { owner =>
+        val perMaster = keys.groupBy(owner)
+        assertEquals(perMaster.keySet, ports.toSet)
+        client.runner.scanTargets
+          .flatMap { targets =>
+            assertEquals(targets.size, ports.size)
+            targets.foldLeft(CIO.value(Set.empty[Set[String]]))((found, target) => found.flatMap(sets => scanned(target).map(sets + _)))
+          }
+          .is(perMaster.values.toSet)
+      } >>
+      drain(Paged.scanAll[String](client.runner, Some("cscan:*"), Some(10L), None)).is(keys)
+  }
+
+  clusterTest("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve on every master") { (_, client) =>
+    val library =
+      """#!lua name=clib
+        |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)
+        |""".stripMargin
+    val keys    = Vector("orders", "delta", "epsilon").map(tag => s"bcast:{$tag}")
+
+    for {
+      _   <- slotOwner.map(owner => keys.map(owner).toSet).is(ports.toSet)
+      sha <- client.scriptLoad("return redis.call('get', KEYS[1])")
+      _   <- inSequence(ports)(onNode(_)(_.scriptExists(sha)).is(Vector(true)))
+      _   <- client.functionFlush(Some(FlushMode.Sync))
+      _   <- client.functionLoad(library).is("clib")
+      _   <- inSequence(ports)(onNode(_)(_.functionList(Some("clib"))).map(_.map(_.libraryName)).is(Vector("clib")))
+      _   <- inSequence(keys) { key =>
+               client.set(key, key) >>
+                 client.evalSha(sha, Seq(key)).is(Frames.bulk(key)) >>
+                 client.fCall("clib_get", Seq(key)).is(Frames.bulk(key))
+             }
+    } yield assertEquals(sha.length, 40)
   }
 
   clusterTest("a Pipeline rejects PUBSUB introspection, since a broadcast cannot be batched onto one node") { (_, client) =>

@@ -256,7 +256,14 @@ lazy val testkitConformance = (projectMatrix in file("sage-testkit/.conformance"
     Test / unmanagedSources ++= {
       val base     = (ThisBuild / baseDirectory).value / "integration-tests" / "shared" / "src" / "test" / "scala" / "sage" / "integration"
       val commands = Seq("Strings", "Keys", "Hashes", "Lists", "Sets", "SortedSets", "Caching")
-      val others   = Seq("Ttls.scala", "Eventually.scala", "locking/LockSuite.scala", "ratelimit/RateLimiterSuite.scala", "RoundTripSuite.scala")
+      val others   = Seq(
+        "ClientAssertions.scala",
+        "Ttls.scala",
+        "Eventually.scala",
+        "locking/LockSuite.scala",
+        "ratelimit/RateLimiterSuite.scala",
+        "RoundTripSuite.scala"
+      )
       others.map(base / _) ++ commands.map(name => base / "commands" / s"${name}Suite.scala")
     }
   )

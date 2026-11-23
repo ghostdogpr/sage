@@ -68,7 +68,6 @@ extension [K](client: Client[IO[SageException, *], K])(using @unused ev: KeyCode
   ): ZStream[Any, SageException, (V, Double)] =
     paged(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
-  // convert pages from the shared Paged helper into individual ZStream elements
   private def paged[S, A](pages: Paged.Pages[S, A]): ZStream[Any, SageException, A] =
     CStream.unfold[S, Vector[A]](pages.init)(pages.step).flatMap(items => CStream.init(items)).lower.refineToOrDie[SageException]
 

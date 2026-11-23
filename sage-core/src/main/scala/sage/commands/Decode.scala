@@ -12,7 +12,6 @@ import sage.protocol.Frame
 
 private[commands] object Decode {
 
-  // a decoder for the frames `accept` handles; any other frame fails with a mismatch against `expected`
   def shape[A](expected: String)(accept: PartialFunction[Frame, Either[DecodeError, A]]): Frame => Either[DecodeError, A] = {
     val mismatch: Frame => Either[DecodeError, A] = other => Left(DecodeError(expected, Frame.describe(other)))
     frame => accept.applyOrElse(frame, mismatch)
@@ -116,7 +115,6 @@ private[commands] object Decode {
       Doubles.parse(text).toRight(DecodeError("double", s"bulk string '$text'"))
   }
 
-  // GEODIST replies the distance as a double, or null when a member is absent
   val optionalDouble: Frame => Either[DecodeError, Option[Double]] = nullable(double)
 
   def nullable[A](decode: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Option[A]] = {
@@ -182,7 +180,6 @@ private[commands] object Decode {
     Right(builder.result())
   }
 
-  // a fixed-arity RESP Array decoded position by position; `label` is the structural description reported on a shape mismatch
   def array2[A, B, R](a: Frame => Either[DecodeError, A], b: Frame => Either[DecodeError, B], label: String)(
     combine: (A, B) => R
   ): Frame => Either[DecodeError, R] = {
@@ -245,7 +242,6 @@ private[commands] object Decode {
     case array: Frame.Array => buildPairs(array, "map", Vector.newBuilder[(Frame, Frame)])((k, v) => Right(k -> v))
   }
 
-  // an introspection reply map keyed by name; non-string keys are dropped
   val fieldMap: Frame => Either[DecodeError, Map[String, Frame]] =
     frame => entries(frame).map(_.collect { case (Text(k), v) => k -> v }.toMap)
 
@@ -254,7 +250,6 @@ private[commands] object Decode {
   def fieldValues[A](value: Frame => Either[DecodeError, A]): Frame => Either[DecodeError, Map[String, A]] =
     frame => fieldMap(frame).flatMap(mapEntries(_) { case (name, field) => value(field).map(name -> _) })
 
-  // text framed as a bulk or simple string
   object Text {
     def unapply(frame: Frame): Option[String] =
       frame match {

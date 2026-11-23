@@ -56,8 +56,6 @@ final private[client] class ClusterSubscriptions(
   // one pass at a time; a request during a pass runs one more pass afterward
   private val shardReconcile = new RefreshThrottle(scheduler, 0L, () => reconcileShard())
 
-  // --- classic (channels / patterns) -------------------------------------------------------------------------------------------------------
-
   private val classicOn = new SubscriptionConnection.Following(nodeFactory, pickMaster)
 
   // Each attempt connects to the master picked at that time. After a loss, every reconnect attempt refreshes the topology first.
@@ -75,8 +73,6 @@ final private[client] class ClusterSubscriptions(
 
   // `redis-cli --cluster del-node` resets a removed node without stopping it, so PUBLISH stops reaching it while the connection stays open
   def retain(listed: Node => Boolean): Unit = classicOn.retain(listed)
-
-  // --- sharded (shard channels) ------------------------------------------------------------------------------------------------------------
 
   def subscribeShard(channels: Vector[String]): RawSubscription = {
     val sink = new Sink(channels, Kind.Shard, config.pubsub.bufferSize)
@@ -132,7 +128,6 @@ final private[client] class ClusterSubscriptions(
 
   def onTopologyChanged(): Unit = shardReconcile.request()
 
-  // Assign each subscription to the current owners of its channels, and retry incomplete work after transient failover errors.
   private def reconcileShard(): Unit = {
     val subs = locked(if (closed) Vector.empty else shardSubs.toVector)
     if (subs.nonEmpty) {
@@ -172,8 +167,6 @@ final private[client] class ClusterSubscriptions(
       if (conn.closeIfEmpty()) forget(node, conn)
     }
   }
-
-  // --- shared ------------------------------------------------------------------------------------------------------------------------------
 
   def close(): Unit = {
     val shard =

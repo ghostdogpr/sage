@@ -34,7 +34,6 @@ trait BothProtocols { this: munit.FunSuite =>
       case other                 => other
     }
 
-  // the shape a DecodeError names when `frame` fails to decode
   protected def expectedShape(command: Command[?], frame: Frame): Option[String] =
     Reply.decode(command, frame).failed.toOption.collect { case error: DecodeError => error.expected }
 }

@@ -19,11 +19,9 @@ private[client] object ReadRouting {
   final case class Picked(node: Node, client: MultiplexedConnection, remaining: Vector[Node])
 
   // Allow ordinary non-blocking reads. Exclude writes, blocking reads, and cursor-bound scans because their cursors are node-local. Cached
-  // reads apply their own routing rule before calling this method.
+  // reads do not use this rule, because they always run on the master.
   def replicaEligible(command: Command[?]): Boolean = command.isReadOnly && !command.isBlocking && !command.cursorBound
 
-  // Order replicas in round-robin order using `rr`, then add the master when the policy permits it. An empty result means ReadFrom.Replica has
-  // no available candidate.
   def candidates(readFrom: ReadFrom, master: Node, replicas: Vector[Node], rr: Int): Vector[Node] = {
     val rotated =
       if (replicas.isEmpty) Vector.empty
