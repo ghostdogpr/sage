@@ -14,7 +14,7 @@ import sage.commands.{Command, Connection, Pipeline, Reply}
 import sage.protocol.Frame
 
 /**
-  * The Pipeline/Transaction result-shaping shared by the standalone client and the cluster runtime, kept in one place so the
+  * The Pipeline/Transaction result-shaping shared by the standalone, master-replica and cluster runtimes, kept in one place so the
   * per-position model and the MULTI/EXEC interpretation cannot drift between them.
   */
 private[internal] object TxSupport {
@@ -30,8 +30,6 @@ private[internal] object TxSupport {
   // the replies to MULTI and to each queued command, then the reply to EXEC; a Failure is the server's error reply
   final case class ExecReplies(queued: Vector[Try[Frame]], exec: Try[Frame])
 
-  // Return None when EXEC reports that a watched key changed. Otherwise, return each command's decoded result. A queueing error fails the
-  // transaction before it executes.
   def interpretExec(commands: Vector[Command[?]], replies: ExecReplies): Either[SageException, Option[Vector[Either[SageException, Any]]]] =
     replies.queued.collectFirst { case Failure(error) => error } match {
       case Some(error) => Left(TransactionDiscarded(error.getMessage))
@@ -48,7 +46,6 @@ private[internal] object TxSupport {
         }
     }
 
-  // Return error replies from either the top-level transaction replies or the commands' results inside EXEC.
   def execErrors(replies: ExecReplies, interpreted: Either[SageException, Option[Vector[Either[SageException, Any]]]]): Iterator[ServerError] =
     (replies.queued.iterator ++ Iterator.single(replies.exec)).collect { case Failure(error: ServerError) => error } ++
       interpreted.toOption.flatten.iterator.flatten.collect { case Left(error: ServerError) => error }
@@ -59,8 +56,8 @@ private[internal] object TxSupport {
 
   /**
     * Collects results from independent callbacks by their original index. Each index is set once, either by its command reply or its final
-    * routing result. When all indices are set, the countdown invokes `complete` once. Standalone and cluster pipelines use this collector
-    * because they wait for every result. `RawBatch` uses separate logic because it completes after the first failure.
+    * routing result. When all indices are set, the countdown invokes `complete` once. Pipelines on every topology and cluster commands
+    * split across nodes use this collector, because they wait for every result.
     */
   final class IndexedCollector[A](n: Int, complete: Vector[A] => Unit) {
     private val slots     = new AtomicReferenceArray[A](n)
@@ -174,7 +171,6 @@ private[internal] trait LiveTransactionScope(events: Events, refresh: RefreshPol
       case Some(results) => p.finish(results).map(Some(_)).fold(CIO.fail(_), CIO.value(_))
     }
 
-  // return None when EXEC reports a WATCH abort and Some with one decoded result per command; a queueing error fails the effect before execution
   private def runExec[R](p: Pipeline[R]): CIO[Option[Vector[Either[SageException, Any]]]] =
     if (isReleased)
       CIO.fail(TxSupport.scopeReleasedError)

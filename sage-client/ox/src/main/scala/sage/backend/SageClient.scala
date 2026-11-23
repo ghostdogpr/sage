@@ -61,7 +61,6 @@ extension [K](client: Client[[A] =>> Ox ?=> A, K])(using @unused ev: KeyCodec[K]
   ): Ox ?=> Flow[(V, Double)] =
     paged(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
-  // convert pages from the shared Paged helper into individual Flow elements
   private def paged[S, A](pages: Paged.Pages[S, A]): Ox ?=> Flow[A] =
     CStream.unfold[S, Vector[A]](pages.init)(pages.step).flatMap(items => CStream.init(items)).lower
 

@@ -114,9 +114,6 @@ final private[client] class NodePool(
     }
   }
 
-  /**
-    * As [[getOrEstablish]], blocking to connect if need be, but `null` rather than throwing when the connect fails.
-    */
   def getOrEstablishOrNull(node: Node): MultiplexedConnection =
     try getOrEstablish(node)
     catch { case NonFatal(_) => null }
@@ -135,7 +132,6 @@ final private[client] class NodePool(
       }
   }
 
-  // remove and close clients for nodes rejected by keep. Also fail connection attempts for those nodes. Schedule closes outside the pool lock.
   def retain(keep: Node => Boolean): Unit = {
     val (gone, rejected) = locked {
       val absent          = established.keySet.asScala.toVector.filterNot(keep).flatMap(node => Option(established.remove(node)))

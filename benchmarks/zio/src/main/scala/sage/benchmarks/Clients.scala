@@ -12,9 +12,6 @@ import sage.*
 import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
-/**
-  * The ZIO cell's benchmark clients: sage (native) and zio-redis (native).
-  */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {
     case "sage-zio"  => new SageZioBench(Topology.Standalone(Endpoint(host, port)))

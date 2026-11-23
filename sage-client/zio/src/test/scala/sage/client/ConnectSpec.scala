@@ -5,6 +5,7 @@ import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 
 import kyo.compat.*
 
@@ -24,6 +25,14 @@ class ConnectSpec extends munit.FunSuite {
     else if (payload.asUtf8String.contains("PING")) Seq(pong)
     else Seq(ok) // CLIENT TRACKING/SETINFO and SELECT bootstrap commands all answer OK
 
+  private def connectToClosedPort(readFrom: ReadFrom): scala.concurrent.Future[Throwable] = {
+    val port = Using.resource(new java.net.ServerSocket(0))(_.getLocalPort)
+    Client
+      .connect(SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", port)), readFrom = readFrom, connectTimeout = 1.second))
+      .unsafeRun
+      .failed
+  }
+
   test("connect performs the HELLO 3 handshake and yields a working client") {
     val (factory, _) = ScriptedTransport(helloThenPong)
     Client.connectWith(factory).flatMap(client => client.ping()).unsafeRun.map { result =>
@@ -32,14 +41,7 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("a refused connection surfaces as a recoverable ConnectionFailed carrying the cause") {
-    val deadPort = {
-      val s = new java.net.ServerSocket(0)
-      val p = s.getLocalPort
-      s.close()
-      p
-    } // a port nothing listens on
-    val config   = SageConfig(topology = Topology.Standalone(Endpoint("127.0.0.1", deadPort)), connectTimeout = 1.second)
-    Client.connect(config).unsafeRun.failed.map { error =>
+    connectToClosedPort(ReadFrom.Master).map { error =>
       assert(error.isInstanceOf[ConnectionFailed], s"expected ConnectionFailed, got $error")
       assert(error.getCause != null, "the original network error should be preserved as the cause")
     }
@@ -106,16 +108,9 @@ class ConnectSpec extends munit.FunSuite {
   }
 
   test("readFrom = ReplicaPreferred on a Standalone topology passes validation (degrades to the one node)") {
-    // This can connect to a local server or fail when none is running. Validation must accept both outcomes.
-    Client
-      .connect(SageConfig(readFrom = ReadFrom.ReplicaPreferred, connectTimeout = 100.millis))
-      .flatMap(_.close)
-      .unsafeRun
-      .map(_ => assert(true))
-      .recover {
-        case _: InvalidArgument => fail("ReplicaPreferred on Standalone should pass validation")
-        case _                  => assert(true) // a connect failure (no server) is fine; only validation matters here
-      }
+    connectToClosedPort(ReadFrom.ReplicaPreferred).map { error =>
+      assert(error.isInstanceOf[ConnectionFailed], s"validation should pass and the connect then fail, got $error")
+    }
   }
 
   test("the ZIO artifact lowers to a native ZIO") {

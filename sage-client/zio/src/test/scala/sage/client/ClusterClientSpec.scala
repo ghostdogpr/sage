@@ -108,7 +108,6 @@ class ClusterClientSpec extends munit.FunSuite {
 
     def clusterSlotsCount(node: Node): Int = written(node).count(_.contains("CLUSTER"))
 
-    // the connection a node's SSUBSCRIBE was written to
     def shardConn(node: Node): Option[FakeTransport] = transportsOf(node).findLast(_.written.exists(_.asUtf8String.contains("SSUBSCRIBE")))
 
     def dropShardConn(node: Node): Unit = shardConn(node).foreach(_.close())
@@ -126,6 +125,11 @@ class ClusterClientSpec extends munit.FunSuite {
     val deadline = System.nanoTime() + 2000000000L
     while (!condition && System.nanoTime() < deadline) Thread.sleep(5)
     assert(condition, clue)
+  }
+
+  private def awaitRefreshes(fixture: Fixture, counting: CountingScheduler, count: Int, clue: String): Unit = {
+    await(s"$clue; CLUSTER calls: ${fixture.clusterSlotsCount(nodeA)}")(fixture.clusterSlotsCount(nodeA) >= count && counting.unfinished.get() == 0)
+    assertEquals(fixture.clusterSlotsCount(nodeA), count, clue)
   }
 
   private def awaitWritten(fixture: Fixture, node: Node, token: String): Unit =
@@ -1791,17 +1795,14 @@ class ClusterClientSpec extends munit.FunSuite {
       else if (text.contains("MULTI"))
         Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"MOVED $slot b:6379"), Frame.SimpleError("EXECABORT Transaction discarded"))
       else Seq(Frame.SimpleString("OK"))
-    val fixture   = new Fixture(behaviour, Vector(nodeA))
+    val counting  = new CountingScheduler
+    val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting)
 
     fixture.live
       .transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
       .unsafeRun
       .failed
-      .map { _ =>
-        Thread.sleep(200) // the refresh is offloaded; give it a moment to issue its CLUSTER SLOTS
-        val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
-        assert(clusterCalls >= 2, s"a MOVED in EXEC should trigger a topology refresh; CLUSTER calls seen: $clusterCalls")
-      }
+      .map(_ => awaitRefreshes(fixture, counting, 2, "a MOVED in EXEC should trigger a topology refresh"))
   }
 
   test("a transaction fault forces a refresh even inside the throttle window") {
@@ -1811,20 +1812,17 @@ class ClusterClientSpec extends munit.FunSuite {
       else if (text.contains("MULTI"))
         Seq(Frame.SimpleString("OK"), Frame.SimpleError(s"MOVED $slot b:6379"), Frame.SimpleError("EXECABORT discarded"))
       else Seq(Frame.SimpleString("OK"))
-    val fixture   = new Fixture(behaviour, Vector(nodeA)) // default minRefreshInterval (5s) far exceeds this test's duration
+    val counting  = new CountingScheduler
+    val fixture   = new Fixture(behaviour, Vector(nodeA), scheduler = counting) // default minRefreshInterval (5s) far exceeds this test's duration
 
     // Cause two faults within one throttle interval. A throttled refresh would run once and produce two CLUSTER calls in total. A forced
     // refresh runs after each fault.
     val tx = fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))
     for {
       _ <- tx.unsafeRun.failed
-      _  = Thread.sleep(150) // let the first forced refresh complete and record the start of the throttle interval
+      _  = awaitRefreshes(fixture, counting, 2, "the first tx fault must force a refresh")
       _ <- tx.unsafeRun.failed
-    } yield {
-      Thread.sleep(150)
-      val clusterCalls = fixture.written(nodeA).count(_.contains("CLUSTER"))
-      assert(clusterCalls >= 3, s"each tx fault must force a refresh despite the throttle; CLUSTER calls: $clusterCalls")
-    }
+    } yield awaitRefreshes(fixture, counting, 3, "each tx fault must force a refresh despite the throttle")
   }
 
   test("an ASK during a transaction refreshes only within the throttle window") {
@@ -1892,7 +1890,9 @@ class ClusterClientSpec extends munit.FunSuite {
         Seq(Frame.SimpleString("OK"), Frame.SimpleString("QUEUED"), Frame.Array(Vector(bulk("v"))))
       else Seq(Frame.SimpleString("OK"))
     // block the dedicated (second) transport of nodeA while the transaction opens its first connection
-    val fixture   = new Fixture(behaviour, Vector(nodeA), connectGate = (node, index) => if (node == nodeA && index == 1) gate.await())
+    val counting  = new CountingScheduler
+    val fixture   =
+      new Fixture(behaviour, Vector(nodeA), scheduler = counting, connectGate = (node, index) => if (node == nodeA && index == 1) gate.await())
 
     val started = System.nanoTime()
     CIO.timeout(500.millis)(fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1"))))).unsafeRun.flatMap { result =>
@@ -1900,7 +1900,7 @@ class ClusterClientSpec extends munit.FunSuite {
       assert(result.isEmpty, s"expected the timeout to win, got $result")
       assert(elapsedMs < 3000L, s"the finalizer stalled behind the parked acquire: ${elapsedMs}ms")
       gate.countDown()
-      Thread.sleep(300) // let the interrupted acquisition finish and return its unused connection to the pool
+      await("the interrupted acquisition never finished")(counting.unfinished.get() == 0)
       fixture.live.transaction(_.exec(Vector(Strings.get[String, String]("{a}1")))).unsafeRun.map { committed =>
         assertEquals(committed, Some(Vector(Some("v"))))
         val hellos = fixture.written(nodeA).count(_.contains("HELLO"))

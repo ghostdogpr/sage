@@ -89,19 +89,16 @@ class RespParserSpec extends munit.FunSuite {
   }
 
   test("attributes are transparent at every nesting level") {
-    // top level: the value the attribute prefixes is returned, the attribute discarded
     assertEquals(parseOne("|1\r\n+ttl\r\n:3600\r\n:7\r\n"), Frame.Integer(7))
     // nested: an attribute on an array element must not inflate the array's arity
     assertEquals(
       parseOne("*2\r\n|1\r\n+ttl\r\n:3600\r\n:1\r\n:2\r\n"),
       Frame.Array(Vector(Frame.Integer(1), Frame.Integer(2)))
     )
-    // nested in a map value position
     assertEquals(
       parseOne("%1\r\n+k\r\n|1\r\n+ttl\r\n:1\r\n:9\r\n"),
       Frame.Map(Vector(Frame.SimpleString("k") -> Frame.Integer(9)))
     )
-    // a chain of attributes collapses to the final value
     assertEquals(parseOne("|0\r\n|0\r\n:5\r\n"), Frame.Integer(5))
   }
 

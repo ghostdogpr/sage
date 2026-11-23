@@ -3,9 +3,6 @@ package sage.protocol
 import sage.Bytes
 import sage.SageException.ProtocolError
 
-/**
-  * Frame constructors the specs share.
-  */
 object Frames {
 
   def bulk(value: String): Frame = Frame.BulkString(Bytes.utf8(value))

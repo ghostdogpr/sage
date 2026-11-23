@@ -596,7 +596,9 @@ class DedicatedPoolSpec extends munit.FunSuite {
     @volatile var result: Option[Try[DedicatedConnection]] = None
     val waiter                                             = new Thread(() => result = Some(Try(pool.acquireForTransaction())))
     waiter.start()
-    Thread.sleep(100) // let the second acquisition wait in awaitNanos
+    val deadline                                           = System.nanoTime() + 2.seconds.toNanos
+    while (waiter.getState != Thread.State.TIMED_WAITING && waiter.isAlive && System.nanoTime() < deadline) Thread.sleep(1)
+    assertEquals(waiter.getState, Thread.State.TIMED_WAITING)
 
     transports.head.emit(Frame.SimpleString("stray"))
     assert(!connection.isLive)

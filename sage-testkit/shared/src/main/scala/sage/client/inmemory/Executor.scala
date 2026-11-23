@@ -29,11 +29,9 @@ final private[inmemory] class Call(val name: String, val args: Vector[Bytes], va
   inline def nonNegative(index: Int, inline error: Frame.SimpleError): Long =
     Numbers.parseLong(args(index)).filter(_ >= 0).getOrElse(throw new Reject(error))
 
-  // reads the optional last argument at `index`; an argument after it fails with `extra`
   inline def optional[A](index: Int, inline extra: Frame.SimpleError = Errors.syntax)(inline read: Int => A): Option[A] =
     if (args.length > index + 1) throw new Reject(extra) else if (args.length > index) Some(read(index)) else None
 
-  // true for `yes` and false for `no`; another word is a syntax error
   def choice(index: Int, yes: String, no: String): Boolean = {
     val word = keyword(index)
     if (word != yes && word != no) throw new Reject(Errors.syntax)

@@ -44,9 +44,6 @@ private[client] object Bootstrap {
   def rejectsHello(error: ServerError): Boolean =
     error.code == "NOPROTO" || error.getMessage.toLowerCase(java.util.Locale.ROOT).contains("unknown command")
 
-  /**
-    * Submits one command and blocks the calling thread for its reply, failing with `timedOut` when none arrives in time.
-    */
   def awaitReply[A](timeoutMillis: Long, timedOut: => Throwable)(submit: (Try[A] => Unit) => Unit): Try[A] = {
     val latch   = new CountDownLatch(1)
     val outcome = new AtomicReference[Try[A]]()

@@ -1,8 +1,9 @@
 package sage.integration
 
 /**
-  * The single source for server images: the coverage spec treats the running binary as the command spec, so every suite must test the
-  * exact same release. Bump both here and nowhere else.
+  * The server images of the integration tests. The coverage spec treats the running binary as the command spec, so every suite must test
+  * the exact same release. The benchmarks' `RedisFixture` and the image pre-pull step in `.github/workflows/ci.yml` repeat some of these
+  * images, so update them too when you bump one.
   */
 object Images {
 

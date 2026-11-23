@@ -153,7 +153,6 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
   def sSubscribe[V: ValueCodec](channel: String, rest: String*): Source[Message[V], Future[Done]] =
     subscriptionSource(client.subscribeShardChannels[V](channel, rest*))
 
-  // convert pages from the shared Paged helper into individual Source elements
   private def pagedSource[S, A](pages: Paged.Pages[S, A]): Source[A, NotUsed] =
     Source
       .unfoldAsync[S, Vector[A]](pages.init)(s =>
@@ -161,8 +160,6 @@ extension [K](client: Client[Future, K])(using @unused ev: KeyCodec[K]) {
       )
       .mapConcat(identity)
 
-  // Open on materialization and close on cancellation, completion, or failure. Complete Future[Done] after the subscription open call finishes;
-  // cluster confirmation follows the best-effort behavior described above.
   private def subscriptionSource[A](open: => Future[Subscription[Future, A]]): Source[A, Future[Done]] =
     Source
       .fromMaterializer { (_, _) =>

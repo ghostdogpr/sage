@@ -213,7 +213,7 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     val (connection, scheduler, transports) = make()
     val sub                                 = connection.subscribeChannels(Vector("news"))
 
-    transports.head.close() // simulate connection loss
+    transports.head.close()
     scheduler.advance(1.milli)
 
     assertEquals(transports.size, 2)
@@ -1149,8 +1149,6 @@ class SubscriptionConnectionSpec extends munit.FunSuite {
     assert(transports.exists(wrote(_, "SSUBSCRIBE")), "the retry never placed the channel")
     manager.close()
   }
-
-  // --- RESP2 ------------------------------------------------------------------------------------------------------------------------------
 
   // replies like a RESP2 server, which answers PING in subscribed mode with ["pong", ""]
   private def resp2Reply(command: List[String]): Seq[Frame] =

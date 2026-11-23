@@ -45,7 +45,6 @@ def inBackground[A](body: => A): CompletableFuture[A] = {
   result
 }
 
-// waits up to five seconds until `count` blocking commands or locks are waiting for a write on `server`
 def awaitWaiting(server: InMemoryServer, count: Int): Unit = {
   val deadline = System.nanoTime() + 5.seconds.toNanos
   while (server.executor.waiting != count) {

@@ -60,8 +60,6 @@ final private[client] class SubscriptionConnection(
   // must hold lock. A refused, dropped or emptied name is replaced by a new Name when subscribed again.
   private def registered(name: Name): Boolean = sinksFor(name.kind).get(name.name).exists(_ eq name)
 
-  // --- standalone conveniences: the connection owns the sink -------------------------------------------------------------------------------
-
   def subscribeChannels(channels: Vector[String]): RawSubscription = owned(channels, Kind.Channel, failIfUnconfirmed = true)
 
   def subscribePatterns(patterns: Vector[String]): RawSubscription = owned(patterns, Kind.Pattern, failIfUnconfirmed = true)
@@ -75,8 +73,6 @@ final private[client] class SubscriptionConnection(
     onThrow { attachInternal(sink, names, failIfUnconfirmed); sink.failure.foreach(throw _) }(_ => closeOwned(sink))
     new RawSubscription(sink, () => closeOwned(sink))
   }
-
-  // --- manager-driven attach/detach: the caller owns the sink (cluster) --------------------------------------------------------------------
 
   /**
     * Registers `sink` under `names` and subscribes names that are not already active. It waits up to the connection timeout for confirmation;
@@ -124,9 +120,6 @@ final private[client] class SubscriptionConnection(
     awaitActive(waitFor, failIfUnconfirmed)
   }
 
-  /**
-    * Deregisters `sink` from `names` and unsubscribes the names left with no subscriber.
-    */
   def detach(sink: Sink, names: Vector[String]): Unit =
     locked {
       val emptied = deregister(sink, names)
@@ -147,9 +140,6 @@ final private[client] class SubscriptionConnection(
       case _                => None
     }
 
-  // --- shared establish/dispatch machinery -------------------------------------------------------------------------------------------------
-
-  // Mark a new socket Live and subscribe it to every registered name.
   private def goLive(conn: Conn): Unit =
     // conn.close waits for the reader, and onConnClosed needs lock. Close conn after releasing lock.
     locked(state match {
@@ -198,8 +188,8 @@ final private[client] class SubscriptionConnection(
       }
     }()
 
-  // Wait up to the connection timeout until the live connection confirmed every name that is still registered. Owned subscriptions fail
-  // with NotConnected when confirmation does not arrive before the deadline.
+  // Wait up to the connection timeout until the live connection confirmed every name that is still registered. With
+  // failIfUnconfirmed, fail with NotConnected when confirmation does not arrive before the deadline.
   private def awaitActive(names: Vector[Name], failIfUnconfirmed: Boolean): Unit = {
     var active = false
     lock.lock()
@@ -464,7 +454,6 @@ final private[client] class SubscriptionConnection(
 
 private[client] object SubscriptionConnection {
 
-  // What a lost connection does: reconnect and restore its subscribers, or report the loss (cluster shard channels).
   enum OnLoss {
     // `node` names the node of the last attempt in reported failures. With `immediately`, the first attempt after a stable period does not wait.
     case Reconnect(beforeAttempt: () => Unit, events: Events, node: () => Option[Node] = () => None, immediately: Boolean = false)
@@ -565,7 +554,6 @@ private[client] object SubscriptionConnection {
             backlog.add(delivery)
             settled = true
           } else {
-            // Wait until the consumer makes room when the backlog is full.
             blocked = true
             notFull.await()
           }

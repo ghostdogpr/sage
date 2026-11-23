@@ -98,7 +98,6 @@ class PlacementSpec extends munit.FunSuite {
     placement.reconcile(Map(n1 -> Vector("a", "b")), pool)
     assertEquals(pool.byNode(n1).subscribed.toSet, Set("a", "b"))
 
-    // b migrates to n2
     placement.reconcile(Map(n1 -> Vector("a"), n2 -> Vector("b")), pool)
 
     assertEquals(pool.byNode(n1).subscribed.toSet, Set("a"), "b is detached from its old owner — no stale subscription")

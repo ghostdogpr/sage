@@ -16,9 +16,6 @@ private[client] trait Scheduler {
 
   def nowMillis: Long
 
-  /**
-    * A non-negative jitter sample in `[0, boundExclusive)`.
-    */
   def jitterMillis(boundExclusive: Long): Long
 
   def after(delay: FiniteDuration)(task: => Unit): Unit
@@ -27,7 +24,7 @@ private[client] trait Scheduler {
 
   final def offload(task: => Unit): Unit = after(Duration.Zero)(task)
 
-  // Reconnects and cluster-redirect retries share this formula: exponential backoff capped at maxDelay, then full jitter in [0, base].
+  // Reconnects, cluster-redirect and lock retries share this formula: exponential backoff capped at maxDelay, then full jitter in [0, base].
   final def backoffMillis(config: BackoffConfig, attempt: Int): Long = {
     val capped = config.maxDelay.toMillis
     val raw    = config.initialDelay.toMillis.toDouble * math.pow(config.multiplier, attempt.toDouble)

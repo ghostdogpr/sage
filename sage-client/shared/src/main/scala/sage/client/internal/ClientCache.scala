@@ -61,7 +61,6 @@ final private[client] class ClientCache(maxBytes: Long) {
     lock.lock()
     try {
       pending.remove(fetching.key)
-      // An entry larger than the cache limit cannot be stored, so return its reply without caching it.
       if (!fetching.dirty && size <= maxBytes) insert(fetching.key, new Entry(frame, size, now + ttlMillis, fetching.keys))
     } finally lock.unlock()
     fetching.waiters.foreach(_.apply(Success(frame)))

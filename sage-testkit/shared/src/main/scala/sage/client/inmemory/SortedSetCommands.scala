@@ -178,7 +178,6 @@ private[inmemory] object SortedSetCommands {
       case Some(n) => pairs(pop(call, call.key(0), Numbers.size(n), max))
     }
 
-  // BZPOPMIN and BZPOPMAX reply with the key, the member and its score
   private def blockingPop(call: Call, max: Boolean): Frame =
     ListCommands.firstPop(call.args.indices.init.iterator.map(call.key)) { key =>
       pop(call, key, 1, max).headOption.map((score, member) => Frame.Array(Vector(bulk(key.bytes), bulk(member.bytes), Frame.Double(score))))

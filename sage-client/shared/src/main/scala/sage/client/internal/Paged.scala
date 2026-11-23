@@ -11,17 +11,14 @@ import sage.codec.{KeyCodec, ValueCodec}
 import sage.commands.*
 
 /**
-  * Shared paging logic for streaming helpers such as `scanAll`, `xRangeAll`, and `xConsume`. Each builder accepts a `CIO` function that
-  * fetches one page and returns a step shaped as `S => CIO[Option[(page, nextState)]]`. ZIO, Cats Effect, and Ox use the step with
-  * `CStream.unfold`. Kyo uses its native `Stream.unfold` with `chunkSize = 1`, which lets unbounded streams emit each page immediately. The
-  * shared code handles cursor completion, deleted entries, and consumer recovery; each backend only constructs its stream and lifts the
-  * page fetch. `PagedSpec` tests the steps directly with scripted fetches.
+  * Shared paging logic for streaming helpers such as `scanAll`, `xRangeAll`, and `xConsume`. Each builder takes a `SharedRunner` and returns
+  * `Pages(init, step)`, where the step `S => CIO[Option[(page, nextState)]]` fetches one page. ZIO, Cats Effect, Ox, and Direct use the step
+  * with `CStream.unfold`, and Pekko uses it with `Source.unfoldAsync`. Kyo uses its native `Stream.unfold` with `chunkSize = 1`, which lets
+  * unbounded streams emit each page immediately. The shared code handles cursor completion, deleted entries, and consumer recovery; each
+  * backend only turns the pages into its own stream type. `PagedSpec` tests the steps directly with scripted fetches.
   */
 private[sage] object Paged {
 
-  /**
-    * A page step: from state `S`, fetch the next page of `A`s and the state to resume from, or `None` to end the stream.
-    */
   type Step[S, A] = S => CIO[Option[(Vector[A], S)]]
 
   // a finite poll lets xTail and xConsume check for cancellation between blocking reads.
@@ -33,7 +30,6 @@ private[sage] object Paged {
   def scanAll[K: KeyCodec](r: SharedRunner, pattern: Option[String], count: Option[Long], ofType: Option[RedisType]): Pages[ScanStep, K] =
     Pages(ScanStep.Begin, acrossTargets(r.scanTargets)(target => cursor => target.run(Keys.scan[K](cursor, pattern, count, ofType))))
 
-  // HSCAN, SSCAN, or ZSCAN of one key
   def scanKey[A](r: SharedRunner)(page: ScanCursor => Command[ScanPage[A]]): Pages[Option[ScanCursor], A] =
     Pages(Some(ScanCursor.start), byCursor(cursor => r.run(page(cursor))))
 
@@ -110,9 +106,6 @@ private[sage] object Paged {
     case ScanStep.End                         => CIO.value(None)
   }
 
-  /**
-    * XRANGE paging: advance past the last id each page; a short page (fewer than `batch`) or an empty page ends the stream.
-    */
   def byRange[F, V](batch: Long)(fetch: StreamRangeId => CIO[Vector[StreamEntry[F, V]]]): Step[Option[StreamRangeId], StreamEntry[F, V]] =
     resumable(from =>
       fetch(from).map(entries => (entries, if (entries.isEmpty || entries.length < batch) None else Some(StreamRangeId.Exclusive(entries.last.id))))

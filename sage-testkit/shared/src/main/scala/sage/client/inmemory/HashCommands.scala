@@ -81,9 +81,6 @@ private[inmemory] object HashCommands {
   }
 }
 
-/**
-  * Parses the cursor and options of `SCAN`, `HSCAN`, `SSCAN` and `ZSCAN`.
-  */
 private[inmemory] object Scanning {
 
   final case class Options(pattern: Option[Bytes], count: Long, noValues: Boolean, ofType: Option[String]) {

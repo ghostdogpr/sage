@@ -186,8 +186,6 @@ private[sage] object Arrays {
   def arInfoFull[K](key: K)(using k: KeyCodec[K]): Command[ArrayInfoFull] =
     Command.read("ARINFO", Command.FirstKey, Vector(k.encode(key), Full), decodeInfoFull)
 
-  // --- helpers ---------------------------------------------------------------------------------------------------------------------------
-
   private def arop[K, A](key: K, start: Long, end: Long, op: Bytes, decode: Frame => Either[DecodeError, A])(using k: KeyCodec[K]): Command[A] =
     Command.read("AROP", Command.FirstKey, Vector(k.encode(key), idx(start), idx(end), op), decode)
 

@@ -15,7 +15,6 @@ private[inmemory] object Glob {
     else
       p(pi).toChar match {
         case '*'                       =>
-          // consecutive stars behave like one
           var next = pi
           while (next < p.length && p(next) == '*') next += 1
           if (next == p.length) true

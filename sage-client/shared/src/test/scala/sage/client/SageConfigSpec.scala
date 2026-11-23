@@ -33,10 +33,10 @@ class SageConfigSpec extends munit.FunSuite {
   }
 
   test("credentials are percent-decoded, with + left literal and an encoded : not splitting") {
-    assertEquals(parsed("redis://:p%40ss@h").auth, Some(AuthConfig("p@ss", "default")))  // %40 -> @
-    assertEquals(parsed("redis://us%65r:a%3Ab@h").auth, Some(AuthConfig("a:b", "user"))) // %3A -> : inside the password
-    assertEquals(parsed("redis://:a+b@h").auth, Some(AuthConfig("a+b", "default")))      // '+' stays '+', not a space
-    assertEquals(parsed("redis://:%E2%82%AC@h").auth, Some(AuthConfig("€", "default")))  // multi-byte UTF-8 (€)
+    assertEquals(parsed("redis://:p%40ss@h").auth, Some(AuthConfig("p@ss", "default")))
+    assertEquals(parsed("redis://us%65r:a%3Ab@h").auth, Some(AuthConfig("a:b", "user")))
+    assertEquals(parsed("redis://:a+b@h").auth, Some(AuthConfig("a+b", "default"))) // '+' stays '+', not a space
+    assertEquals(parsed("redis://:%E2%82%AC@h").auth, Some(AuthConfig("€", "default")))
   }
 
   test("malformed percent-encoding in credentials fails with a Left") {
@@ -58,11 +58,11 @@ class SageConfigSpec extends munit.FunSuite {
   }
 
   test("a stray comma leaves an empty seed that is rejected, never silently dropped") {
-    assert(SageConfig.fromUri("redis://a,").isLeft)     // trailing comma would otherwise degrade to standalone a
-    assert(SageConfig.fromUri("redis://a,b,").isLeft)   // trailing comma would otherwise pass as a two-seed cluster
-    assert(SageConfig.fromUri("redis://a,,").isLeft)    // an interior gap
-    assert(SageConfig.fromUri("redis://,a").isLeft)     // a leading gap
-    assert(SageConfig.fromUri("redis://[::1],").isLeft) // trailing comma after an IPv6 literal
+    assert(SageConfig.fromUri("redis://a,").isLeft)   // trailing comma would otherwise degrade to standalone a
+    assert(SageConfig.fromUri("redis://a,b,").isLeft) // trailing comma would otherwise pass as a two-seed cluster
+    assert(SageConfig.fromUri("redis://a,,").isLeft)
+    assert(SageConfig.fromUri("redis://,a").isLeft)
+    assert(SageConfig.fromUri("redis://[::1],").isLeft)
     assertEquals(problem("redis://alice:hunter2@a,"), "invalid redis URI 'redis://alice:<redacted>@a,': empty host in ''")
   }
 
@@ -77,11 +77,11 @@ class SageConfigSpec extends munit.FunSuite {
   }
 
   test("an unbracketed IPv6 literal or an empty port fails rather than misparsing") {
-    assert(SageConfig.fromUri("redis://::1").isLeft)     // ambiguous with host:port, must be bracketed
-    assert(SageConfig.fromUri("redis://[::1").isLeft)    // unterminated bracket
-    assert(SageConfig.fromUri("redis://[::1]x").isLeft)  // junk after the literal
-    assert(SageConfig.fromUri("redis://h:").isLeft)      // colon with no port is not a default
-    assert(SageConfig.fromUri("redis://[]:6379").isLeft) // empty host
+    assert(SageConfig.fromUri("redis://::1").isLeft) // ambiguous with host:port, must be bracketed
+    assert(SageConfig.fromUri("redis://[::1").isLeft)
+    assert(SageConfig.fromUri("redis://[::1]x").isLeft)
+    assert(SageConfig.fromUri("redis://h:").isLeft)  // colon with no port is not a default
+    assert(SageConfig.fromUri("redis://[]:6379").isLeft)
   }
 
   test("a cluster URI can select a database when the server supports it") {
@@ -90,12 +90,12 @@ class SageConfigSpec extends munit.FunSuite {
   }
 
   test("malformed URIs fail with a Left, never throw") {
-    assert(SageConfig.fromUri("memcache://h").isLeft)       // unsupported scheme
-    assert(SageConfig.fromUri("localhost:6379").isLeft)     // missing scheme
-    assert(SageConfig.fromUri("redis://h:0").isLeft)        // port out of range
-    assert(SageConfig.fromUri("redis://h:abc").isLeft)      // non-numeric port
-    assert(SageConfig.fromUri("redis://h/x").isLeft)        // non-numeric database
-    assert(SageConfig.fromUri("redis://h?ssl=true").isLeft) // query params unsupported
+    assert(SageConfig.fromUri("memcache://h").isLeft)
+    assert(SageConfig.fromUri("localhost:6379").isLeft)
+    assert(SageConfig.fromUri("redis://h:0").isLeft)
+    assert(SageConfig.fromUri("redis://h:abc").isLeft)
+    assert(SageConfig.fromUri("redis://h/x").isLeft)
+    assert(SageConfig.fromUri("redis://h?ssl=true").isLeft)
   }
 
   test("a parse error never echoes the password back, even when the URI is the kind that fails to parse") {
@@ -103,8 +103,8 @@ class SageConfigSpec extends munit.FunSuite {
     assert(!problem("redis://:hunter2@h:0").contains("hunter2"))
     assert(!problem("redis://:p%40ss@h?x=1").contains("p%40ss"))
     assert(!problem("memcache://alice:hunter2@h").contains("hunter2")) // unsupported scheme still parses far enough to leak
-    assert(!problem("alice:hunter2@h").contains("hunter2"))            // missing scheme
-    assert(!problem("redis://alice:hun/ter2@h").contains("hun/ter2"))  // unencoded '/' in the password
+    assert(!problem("alice:hunter2@h").contains("hunter2"))
+    assert(!problem("redis://alice:hun/ter2@h").contains("hun/ter2"))
     assertEquals(problem("redis://alice:hunter2@h:0"), "invalid redis URI 'redis://alice:<redacted>@h:0': invalid port in 'h:0'")
   }
 }

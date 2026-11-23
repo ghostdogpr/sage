@@ -429,7 +429,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
 
     transports.head.emit(Frame.SimpleString("PONG")) // stray frame -> discarded -> Reconnecting
     assert(!connection.isLive)
-    scheduler.advance(1.milli)                       // reconnects -> Live
+    scheduler.advance(1.milli)
     assert(connection.isLive)
 
     val fresh = connection.pool.acquireForTransaction()
@@ -743,7 +743,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     var second: Option[Try[Option[String]]] = None
     connection.cachedSubmit(get, 60000L, r => second = Some(r), Events.untraced)
     assertEquals(second, Some(Success(Some("bar")))) // served locally
-    assertEquals(transports.head.sent.length, 2)     // no new round-trip
+    assertEquals(transports.head.sent.length, 2)
 
     transports.head.emit(invalidationOf("foo"))
     var third: Option[Try[Option[String]]] = None
@@ -782,7 +782,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     transports.head.emit(bulk("bar"))
     assertEquals(transports.head.sent.length, 2)
 
-    scheduler.advance(1001.millis)               // past the TTL
+    scheduler.advance(1001.millis)
     connection.cachedSubmit(get, 1000L, _ => (), Events.untraced)
     assertEquals(transports.head.sent.length, 3) // expired -> refetch
   }
@@ -814,7 +814,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     val (connection, _, transports) = cachedConnection(events)
     val get                         = Strings.get[String, String]("foo")
 
-    tracedRead(connection, events, get)(_ => ()) // miss -> fetch
+    tracedRead(connection, events, get)(_ => ())
     transports.head.emit(Frame.SimpleString("OK"))
     transports.head.emit(bulk("bar"))
     assertEquals(tracer.log.toVector, Vector("start:GET", "settled:Succeeded"))
@@ -835,7 +835,7 @@ class MultiplexedConnectionSpec extends munit.FunSuite {
     assert(tracer.log.last.startsWith("settled:Failed"))
   }
 
-  test("a server that rejects CLIENT TRACKING, or a connection that falls back to RESP2, serves cached reads uncached (ADR-0045)") {
+  test("a server that rejects CLIENT TRACKING, or a connection that falls back to RESP2, serves cached reads uncached") {
     Seq("TRACKING" -> "ERR unknown subcommand TRACKING", "HELLO" -> "NOPROTO unsupported protocol version").foreach { case (rejected, error) =>
       val scheduler                                       = new ManualScheduler
       val transports                                      = mutable.ArrayBuffer.empty[FakeTransport]

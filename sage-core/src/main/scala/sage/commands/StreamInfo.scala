@@ -187,7 +187,6 @@ private[sage] object StreamInfo {
       } yield FullConsumerInfo(name, seen, active, pel, pending)
     }
 
-  // A group-level FULL PEL row includes its owning consumer: [id, consumer, delivery-time-ms, delivery-count].
   private val groupPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
     Decode.array4(
       Streams.streamId,
@@ -199,7 +198,6 @@ private[sage] object StreamInfo {
       FullPendingEntry(id, Some(consumer), delivered, count)
     }
 
-  // a consumer-level FULL PEL row omits the (implied) consumer: [id, delivery-time-ms, delivery-count]
   private val consumerPendingReply: Frame => Either[DecodeError, FullPendingEntry] =
     Decode.array3(Streams.streamId, Decode.millisInstant, Decode.long, "consumer pending [id, delivery-time, delivery-count]") {
       (id, delivered, count) =>

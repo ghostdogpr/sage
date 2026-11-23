@@ -63,7 +63,6 @@ extension [K](client: Client[[A] =>> A, K])(using @unused ev: KeyCodec[K]) {
   ): Iterator[(V, Double)] =
     paged(Paged.scanKey(client.runner)(cursor => SortedSets.zScan[K, V](key, cursor, pattern, count)))
 
-  // convert pages from the shared Paged helper into individual iterator elements
   private def paged[S, A](pages: Paged.Pages[S, A]): Iterator[A] =
     CStream.unfold[S, Vector[A]](pages.init)(pages.step).flatMap(items => CStream.init(items)).lower
 
@@ -172,7 +171,6 @@ extension [K](client: Client[[A] =>> A, K])(using @unused ev: KeyCodec[K]) {
   def onShardMessage[V: ValueCodec](channel: String, rest: String*)(handle: Message[V] => Unit): AutoCloseable =
     deliver(sSubscribe[V](channel, rest*))(handle)
 
-  // Consumes `messages` on a virtual thread and calls `handle` for each message. Closing the returned handle closes `messages`.
   private def deliver[A](messages: Messages[A])(handle: A => Unit): AutoCloseable = {
     val worker = Thread
       .ofVirtual()

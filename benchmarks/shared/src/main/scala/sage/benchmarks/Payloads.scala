@@ -12,9 +12,6 @@ object Payloads {
     */
   final val KeyCount = 1000
 
-  /**
-    * Fields in the HGETALL hash.
-    */
   final val HashFields = 1000
 
   final val HashKey = "bench:hash"

@@ -11,7 +11,7 @@ import sage.backend.*
 import sage.client.{Endpoint, SageConfig, Topology}
 
 /**
-  * The Pekko benchmark includes only Sage because there is no comparable Pekko-based Redis client in this benchmark suite.
+  * The Pekko benchmark includes only Sage. Rediscala, the Pekko-based client of this suite, is measured in the Ox benchmark.
   */
 object Clients {
   def build(host: String, port: Int, name: String): BenchClient = name match {

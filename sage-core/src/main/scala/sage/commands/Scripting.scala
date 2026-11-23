@@ -83,7 +83,6 @@ private[sage] object Scripting {
     Command("SCRIPT", Command.NoKeys, Vector(Show, Bytes.utf8(sha)), Decode.utf8String)
 }
 
-// a Lua script that declares exactly one key, sent by digest (EVALSHA) or by body (EVAL)
 final private[sage] class SingleKeyScript(source: String) {
   private val body   = Bytes.utf8(source)
   val sha: String    = java.security.MessageDigest.getInstance("SHA-1").digest(body.toArray).iterator.map(b => f"${b & 0xff}%02x").mkString

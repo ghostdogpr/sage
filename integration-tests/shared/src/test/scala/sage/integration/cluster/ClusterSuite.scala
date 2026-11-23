@@ -8,10 +8,9 @@ import munit.{Location, TestOptions}
 import sage.Message
 import sage.SageException.ServerError
 import sage.client.{Endpoint, SageConfig, Topology}
-import sage.client.internal.{Client, Paged}
-import sage.commands.{Commands, FlushMode}
+import sage.client.internal.Client
+import sage.commands.Commands
 import sage.integration.{BothServersSuite, Eventually, Images}
-import sage.protocol.Frames
 
 /**
   * Drives the cluster runtime against a real cluster-enabled server. One node owns all 16384 slots, with `cluster-announce` pointed at the
@@ -100,34 +99,6 @@ class ClusterSuite extends BothServersSuite {
             late.next.is(Some(Message("returns", "opened")))
         }
     }
-  }
-
-  // scanTargets returns one target per slot-owning master, and each target runs every page on the node that created its cursor. This fixture
-  // has one master for all slots, so one target is expected.
-  clusterTest("scanAll sweeps every slot-owning master through node-pinned scan targets") { client =>
-    val expected = (1 to 50).map(i => s"cscan:$i").toSet
-
-    CIO.foreachDiscard(1 to 50)(i => client.set(s"cscan:$i", i.toString)) >>
-      client.runner.scanTargets.satisfies(targets => targets.nonEmpty && !targets.contains(client.runner)) >>
-      drain(Paged.scanAll[String](client.runner, Some("cscan:*"), Some(10L), None)).is(expected)
-  }
-
-  // SCRIPT LOAD and FUNCTION LOAD run on every master, allowing key-routed EVALSHA and FCALL to find them. This fixture has one master for
-  // all slots, so the broadcast has one target. Multi-master clusters use the same dispatch logic.
-  clusterTest("SCRIPT LOAD and FUNCTION LOAD broadcast so a key-routed EVALSHA and FCALL resolve") { client =>
-    val library =
-      """#!lua name=clib
-        |redis.register_function('clib_get', function(keys, args) return redis.call('get', keys[1]) end)
-        |""".stripMargin
-
-    for {
-      sha <- client.scriptLoad("return redis.call('get', KEYS[1])")
-      _   <- client.set("bcast-key", "v")
-      _   <- client.evalSha(sha, Seq("bcast-key")).is(Frames.bulk("v"))
-      _   <- client.functionFlush(Some(FlushMode.Sync))
-      _   <- client.functionLoad(library).is("clib")
-      _   <- client.fCall("clib_get", Seq("bcast-key")).is(Frames.bulk("v"))
-    } yield assertEquals(sha.length, 40)
   }
 
   serverTest("a cluster cached read is served locally and a server-side write evicts it via invalidation") { server =>

@@ -129,7 +129,6 @@ final private[client] class MultiplexedConnection(
     * failure as an unreachable node.
     */
   def start(): MultiplexedConnection = {
-    // the first connect propagates a handshake failure; only reconnects retry
     onThrow(install(establish()))(_ => close())
     this
   }
@@ -159,7 +158,7 @@ final private[client] class MultiplexedConnection(
     try {
       // A half-open peer can accept the socket without answering the setup, so the handshake limits each wait and lets the reconnect loop continue.
       conn.handshake(bootstrap, config.connectTimeout.toMillis)
-      // A server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached (ADR-0045). RESP2 cannot
+      // A server that denies tracking (an ACL restriction, a proxy) still connects and serves cached reads uncached. RESP2 cannot
       // push invalidations on the same connection, so a RESP2 connection never caches.
       conn.cache = Option
         .when(role.caches && config.clientCache.enabled && !conn.isResp2)(config.clientCache.maxBytes)

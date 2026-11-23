@@ -108,7 +108,15 @@ class StringsSuite extends BothServersSuite {
     }
   }
 
-  // DIGEST, DELEX, MSETEX and INCREX exist only on Redis.
+  clientTest("MSETEX sets multiple keys with a shared TTL and respects NX") { client =>
+    client.msetEx(expiry = SetExpiry.In(100.seconds))(("sx-ms-a", "1"), ("sx-ms-b", "2")).is(true) >>
+      client.get[String]("sx-ms-a").is(Some("1")) >>
+      client.ttl("sx-ms-a").satisfies(expiresWithin(_, 100.seconds)) >>
+      client.msetEx(condition = SetCondition.IfNotExists)(("sx-ms-a", "9")).is(false) >>
+      client.get[String]("sx-ms-a").is(Some("1"))
+  }
+
+  // DIGEST, DELEX and INCREX exist only on Redis.
   redisTest("DIGEST returns a stable hex digest, None for a missing key") { client =>
     for {
       _  <- client.set("sx-digest", "hello")
@@ -128,14 +136,6 @@ class StringsSuite extends BothServersSuite {
       _      <- client.delex("sx-delex", DelexCondition.IfEq("v1")).is(true)
       _      <- client.exists("sx-delex").is(0L)
     } yield ()
-  }
-
-  redisTest("MSETEX sets multiple keys with a shared TTL and respects NX") { client =>
-    client.msetEx(expiry = SetExpiry.In(100.seconds))(("sx-ms-a", "1"), ("sx-ms-b", "2")).is(true) >>
-      client.get[String]("sx-ms-a").is(Some("1")) >>
-      client.ttl("sx-ms-a").satisfies(expiresWithin(_, 100.seconds)) >>
-      client.msetEx(condition = SetCondition.IfNotExists)(("sx-ms-a", "9")).is(false) >>
-      client.get[String]("sx-ms-a").is(Some("1"))
   }
 
   redisTest("INCREX increments with expiry, saturating bounds, and rejects when out of range") { client =>
